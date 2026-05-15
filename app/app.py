@@ -76,16 +76,16 @@ def upload():
     wiki_future = executor.submit(wiki.ingest, save_path, session_id)
 
     try:
-        rag_result = rag_future.result(timeout=300)
+        rag_result = rag_future.result(timeout=1200)  # 20 minute timeout for large files
     except Exception as e:
-        logger.error("RAG ingest error: %s", e)
-        rag_result = {"error": str(e), "chunks_stored": 0}
+        logger.error("RAG ingest error (%s): %s", type(e).__name__, e)
+        rag_result = {"error": f"RAG Timeout or Error: {e}", "chunks_stored": 0}
 
     try:
-        wiki_result = wiki_future.result(timeout=300)
+        wiki_result = wiki_future.result(timeout=1200)
     except Exception as e:
-        logger.error("Wiki ingest error: %s", e)
-        wiki_result = {"error": str(e), "pages_updated": 0, "relations": 0}
+        logger.error("Wiki ingest error (%s): %s", type(e).__name__, e)
+        wiki_result = {"error": f"Wiki Timeout or Error: {e}", "pages_updated": 0, "relations": 0}
 
     return jsonify({
         "status": "ok",
@@ -132,6 +132,13 @@ def wiki_graph():
     if not session_id:
         return jsonify({"pages": {}, "relations": []})
     return jsonify(wiki.get_graph(session_id))
+
+
+@app.route("/progress")
+def progress():
+    """Return the current progress of an ongoing ingest."""
+    session_id = request.args.get("session_id", "")
+    return jsonify(config.PROGRESS_STORE.get(session_id, {"rag": {}, "wiki": {}}))
 
 
 # ---------------------------------------------------------------------------

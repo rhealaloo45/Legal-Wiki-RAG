@@ -162,22 +162,36 @@ def _merge_wiki(existing: dict, new_data: dict) -> tuple[dict, int, int]:
 # Ingest
 # ---------------------------------------------------------------------------
 INGEST_PROMPT_TEMPLATE = """\
-You are a knowledge base builder. Your job is to read a document and extract structured knowledge into wiki pages and relations.
+You are a knowledge base builder. Your job is to read a document and extract \
+structured knowledge into wiki pages and relations. The goal is to produce a \
+wiki so detailed that someone could answer specific questions about the \
+document WITHOUT needing the original text.
 
 RULES (follow exactly):
-- Extract only entities, concepts, events, people, laws, or doctrines that are EXPLICITLY named in the document.
+- Extract entities, concepts, clauses, provisions, parties, obligations, \
+  rights, penalties, and conditions that are EXPLICITLY stated in the document.
 - Do NOT invent, infer, or assume any information not present in the text.
-- Each page title must be a specific named thing (e.g. "Article 21", "Kesavananda Bharati Case", "Basic Structure Doctrine") — not generic headings like "Introduction" or "Overview".
-- Each summary must be 2-4 sentences. Be precise. Use the document's own language where possible.
-- Relations must only connect two page titles that BOTH exist in your pages output. Do not create relations to external concepts not in the document.
-- Relation labels must be short verb phrases (e.g. "established", "overruled", "expanded", "is part of", "challenged by", "derives from").
-- Extract 5-15 pages and 5-20 relations. Do not over-extract.
-- If the document is too short or vague to extract meaningful pages, return minimal output — do not pad.
+- Each page title must be a specific named thing (e.g. "Article 21", \
+  "Penalty Clause", "Ground Rent", "Security Deposit") — not generic \
+  headings like "Introduction" or "Overview".
+- Each summary must be 4-10 sentences. BE THOROUGH AND SPECIFIC:
+    * Include exact numbers, rates, percentages, time periods, and amounts.
+    * Include specific conditions, triggers, and consequences.
+    * Include obligations of each party.
+    * Include penalties, interest rates, and default provisions.
+    * Quote key phrases from the document where precision matters.
+- Relations must only connect two page titles that BOTH exist in your \
+  pages output.
+- Relation labels must be short verb phrases (e.g. "establishes", \
+  "requires payment of", "is secured by", "triggers", "overrides").
+- Extract 10-30 pages and 10-40 relations. Cover the document thoroughly.
+- If the document is too short to extract many pages, be thorough with \
+  fewer pages rather than creating shallow stubs.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
   "pages": {{
-    "Exact Page Title": "2-4 sentence summary grounded in the document.",
+    "Exact Page Title": "4-10 sentence detailed summary with specific provisions, numbers, and conditions.",
     ...
   }},
   "relations": [
@@ -190,36 +204,75 @@ DOCUMENT:
 {text}"""
 
 
+# Maximum chars to send per LLM call
+_INGEST_CHUNK_SIZE = 15000
+
+
 def ingest(file_path: str, session_id: str) -> dict:
-    """Read a source document, extract wiki pages via LLM, and merge into the session wiki."""
+    """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
+
+    For large documents, the text is split into overlapping segments and each
+    segment is processed in a separate LLM call.  Results are merged
+    incrementally so the wiki captures the full document, not just the first
+    few thousand characters.
+    """
     text = _read_file(file_path)
-    # Truncate to 4000 chars to fit prompt context
-    prompt = INGEST_PROMPT_TEMPLATE.format(text=text[:4000])
 
-    try:
-        raw = llm.ask(prompt, pipeline="wiki")
-    except RuntimeError as e:
-        logger.error("LLM call failed during wiki ingest: %s", e)
-        return {"pages_updated": 0, "relations": 0, "error": str(e)}
+    # Split into overlapping segments so the LLM sees the whole document
+    segments = []
+    start = 0
+    while start < len(text):
+        end = start + _INGEST_CHUNK_SIZE
+        segments.append(text[start:end])
+        start += _INGEST_CHUNK_SIZE - 500  # 500 char overlap between segments
+    if not segments:
+        segments = [text]
 
-    # Parse with repair fallback
-    parsed = _parse_json_safe(raw)
-    if parsed is None:
-        parsed = _repair_json(raw)
+    logger.info("Wiki ingest: %d segment(s) from %s (%d chars)",
+                len(segments), os.path.basename(file_path), len(text))
 
-    # Validate structure minimally
-    if "pages" not in parsed:
-        parsed["pages"] = {}
-    if "relations" not in parsed:
-        parsed["relations"] = []
+    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
+    progress["wiki"] = {"current": 0, "total": len(segments), "message": f"Processing {len(segments)} segments..."}
 
-    # Load existing wiki and merge
-    existing = _load_index(session_id)
-    merged, pages_updated, new_rels = _merge_wiki(existing, parsed)
+    total_pages = 0
+    total_rels = 0
 
-    _save_index(session_id, merged)
+    for i, segment in enumerate(segments):
+        msg = f"Processing segment {i + 1}/{len(segments)}"
+        logger.info("  %s", msg)
+        progress["wiki"]["current"] = i + 1
+        progress["wiki"]["message"] = msg
+        
+        prompt = INGEST_PROMPT_TEMPLATE.format(text=segment)
 
-    return {"pages_updated": pages_updated, "relations": new_rels}
+        try:
+            raw = llm.ask(prompt, pipeline="wiki")
+        except RuntimeError as e:
+            logger.error("LLM call failed during wiki ingest segment %d: %s", i + 1, e)
+            continue  # skip this segment, try the next
+
+        # Parse with repair fallback
+        parsed = _parse_json_safe(raw)
+        if parsed is None:
+            parsed = _repair_json(raw)
+
+        # Validate structure minimally
+        if "pages" not in parsed:
+            parsed["pages"] = {}
+        if "relations" not in parsed:
+            parsed["relations"] = []
+
+        # Load existing wiki and merge this segment's results
+        existing = _load_index(session_id)
+        merged, pages_updated, new_rels = _merge_wiki(existing, parsed)
+        _save_index(session_id, merged)
+
+        total_pages += pages_updated
+        total_rels += new_rels
+
+    logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
+    progress["wiki"]["message"] = f"Complete: {total_pages} pages extracted."
+    return {"pages_updated": total_pages, "relations": total_rels}
 
 
 # ---------------------------------------------------------------------------

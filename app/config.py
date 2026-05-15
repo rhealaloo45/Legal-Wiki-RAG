@@ -11,7 +11,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OPENROUTER_API_KEY_WIKI = os.getenv("OPENROUTER_API_KEY_WIKI", "")
 OPENROUTER_API_KEY_RAG = os.getenv("OPENROUTER_API_KEY_RAG", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
-EMBED_MODEL = "llama3"
+EMBED_MODEL = "nomic-embed-text"
 
 # Resolve all data paths to absolute so they stay stable regardless of CWD
 _APP_DIR = os.path.abspath(os.path.dirname(__file__))
@@ -26,3 +26,6 @@ for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH]:
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
 TOP_K = 3
+
+# Global progress store for UI feedback
+PROGRESS_STORE = {}

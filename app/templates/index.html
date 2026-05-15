@@ -81,7 +81,7 @@ body{background:var(--surface);min-height:100vh}
     </div>
     <div class="text-center mt-3 d-none" id="upload-spinner">
       <div class="spinner-border text-secondary" role="status"></div>
-      <p class="small text-secondary mt-2">Ingesting into both pipelines…</p>
+      <p class="small text-secondary mt-2" id="progress-text">Ingesting into both pipelines…</p>
     </div>
   </div>
 
@@ -195,6 +195,21 @@ $uploadBtn.addEventListener('click', async ()=>{
   $uploadBtn.disabled = true;
   $uploadSpinner.classList.remove('d-none');
   $statusBar.classList.add('d-none');
+  
+  const $progText = document.getElementById('progress-text');
+  $progText.innerHTML = 'Starting ingest...';
+
+  // Poll progress
+  const pollTimer = setInterval(async () => {
+    try {
+      const pRes = await fetch(`/progress?session_id=${SID}`);
+      const pData = await pRes.json();
+      let msg = '';
+      if (pData.rag && pData.rag.message) msg += `<strong>RAG:</strong> ${pData.rag.message}<br>`;
+      if (pData.wiki && pData.wiki.message) msg += `<strong>Wiki:</strong> ${pData.wiki.message}`;
+      if (msg) $progText.innerHTML = msg;
+    } catch(e){}
+  }, 1000);
 
   const fd = new FormData();
   fd.append('file', $file.files[0]);
@@ -213,7 +228,11 @@ $uploadBtn.addEventListener('click', async ()=>{
     $qInput.focus();
     loadGraph();
   } catch(e){ alert('Upload failed: '+e); }
-  finally{ $uploadSpinner.classList.add('d-none'); $uploadBtn.disabled = false; }
+  finally{ 
+    clearInterval(pollTimer);
+    $uploadSpinner.classList.add('d-none'); 
+    $uploadBtn.disabled = false; 
+  }
 });
 
 // ---------- Query ----------

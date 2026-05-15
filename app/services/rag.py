@@ -107,21 +107,34 @@ def ingest(file_path: str, session_id: str) -> dict:
             "chunk_index": ch["chunk_index"],
         })
 
-    # Embed chunks in parallel (4 workers) for speed
+    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
+    progress["rag"] = {"current": 0, "total": len(documents), "message": f"Embedding {len(documents)} chunks..."}
+
+    # Embed chunks in parallel
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
 
     embeddings = [None] * len(documents)
+    embedded_count = 0
+    lock = threading.Lock()
 
     def _embed_one(idx):
+        nonlocal embedded_count
         vec = embedder.embed(documents[idx])
-        logger.info("  Embedded chunk %d/%d", idx + 1, len(documents))
+        with lock:
+            embedded_count += 1
+            progress["rag"]["current"] = embedded_count
+            progress["rag"]["message"] = f"Embedded chunk {embedded_count}/{len(documents)}"
+            logger.info("  %s", progress["rag"]["message"])
         return idx, vec
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(_embed_one, i): i for i in range(len(documents))}
         for future in as_completed(futures):
             idx, vec = future.result()
             embeddings[idx] = vec
+
+    progress["rag"]["message"] = f"Complete: {len(chunks)} chunks stored."
 
     if ids:
         collection.upsert(
