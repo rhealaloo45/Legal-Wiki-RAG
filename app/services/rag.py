@@ -5,12 +5,14 @@ No LangChain. Simple sliding-window chunker.
 
 import os
 import re
+import logging
 import chromadb
 from pypdf import PdfReader
 
 import config
 from services import embedder, llm
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Persistent ChromaDB client — lazy singleton
@@ -89,22 +91,37 @@ def ingest(file_path: str, session_id: str) -> dict:
     text = _read_file(file_path)
     chunks = _chunk_text(text, source_name)
 
+    logger.info("RAG ingest: %d chunks from %s", len(chunks), source_name)
+
     collection = _get_collection(session_id)
 
     ids = []
     documents = []
-    embeddings = []
     metadatas = []
 
     for ch in chunks:
-        doc_id = f"{source_name}__chunk_{ch['chunk_index']}"
-        ids.append(doc_id)
+        ids.append(f"{source_name}__chunk_{ch['chunk_index']}")
         documents.append(ch["text"])
-        embeddings.append(embedder.embed(ch["text"]))
         metadatas.append({
             "source": ch["source"],
             "chunk_index": ch["chunk_index"],
         })
+
+    # Embed chunks in parallel (4 workers) for speed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    embeddings = [None] * len(documents)
+
+    def _embed_one(idx):
+        vec = embedder.embed(documents[idx])
+        logger.info("  Embedded chunk %d/%d", idx + 1, len(documents))
+        return idx, vec
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_embed_one, i): i for i in range(len(documents))}
+        for future in as_completed(futures):
+            idx, vec = future.result()
+            embeddings[idx] = vec
 
     if ids:
         collection.upsert(
@@ -114,6 +131,7 @@ def ingest(file_path: str, session_id: str) -> dict:
             metadatas=metadatas,
         )
 
+    logger.info("RAG ingest complete: %d chunks stored", len(chunks))
     return {"chunks_stored": len(chunks)}
 
 

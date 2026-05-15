@@ -23,6 +23,6 @@ UPLOAD_PATH = os.path.join(_APP_DIR, "data", "uploads")
 for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH]:
     os.makedirs(_d, exist_ok=True)
 
-CHUNK_SIZE = 500
-CHUNK_OVERLAP = 50
+CHUNK_SIZE = 2000
+CHUNK_OVERLAP = 200
 TOP_K = 3
