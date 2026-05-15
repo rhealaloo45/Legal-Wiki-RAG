@@ -86,7 +86,7 @@ def _repair_json(raw: str) -> dict:
         f"{raw}"
     )
     try:
-        fixed = llm.ask(repair_prompt, pipeline="wiki")
+        fixed, _ = llm.ask(repair_prompt, pipeline="wiki")
         result = _parse_json_safe(fixed)
         if result is not None:
             return result
@@ -246,7 +246,7 @@ def ingest(file_path: str, session_id: str) -> dict:
         prompt = INGEST_PROMPT_TEMPLATE.format(text=segment)
 
         try:
-            raw = llm.ask(prompt, pipeline="wiki")
+            raw, _ = llm.ask(prompt, pipeline="wiki")
         except RuntimeError as e:
             logger.error("LLM call failed during wiki ingest segment %d: %s", i + 1, e)
             continue  # skip this segment, try the next
@@ -280,18 +280,25 @@ def ingest(file_path: str, session_id: str) -> dict:
 # ---------------------------------------------------------------------------
 QUERY_PROMPT_TEMPLATE = """\
 You are answering a question using a pre-built knowledge wiki. This wiki was incrementally compiled \
-from source documents — synthesis, cross-referencing, and contradiction-flagging already happened \
-at ingest time. Do not re-derive knowledge from scratch. Use what is already compiled.
+from source documents. 
 
 RULES:
-- Answer only from the wiki content below. Do not use outside knowledge.
+- Answer primarily from the wiki content below.
 - Reference specific wiki pages inline using [Page Title] notation whenever you draw from them.
-- If you see a ⚠️ Contradiction flag in a page, acknowledge the conflict in your answer rather than picking one side silently.
-- If the wiki does not contain enough information to answer, say so explicitly — do not guess.
-- For factual questions: be direct, cite the relevant page.
-- For comparison questions: structure with clear A vs B sections, cite pages for each side.
-- For synthesis/evolution questions: trace progression chronologically, cite pages at each step.
-- Keep answer focused — 150-250 words. Synthesize; do not copy wiki text verbatim.
+- If the wiki does not contain enough information, synthesize a helpful answer.
+- IMPORTANT: If your answer introduces new concepts, synthesis, or insights not already explicit in the wiki pages, \
+extract them into new pages and relations so the wiki grows smarter.
+
+OUTPUT FORMAT — respond with valid JSON only, no markdown fences:
+{{
+  "answer": "Your detailed answer here...",
+  "new_pages": {{
+    "New Concept/Insight": "Detailed explanation derived from your answer..."
+  }},
+  "new_relations": [
+    {{"from": "Existing Page", "to": "New Concept", "label": "explains"}}
+  ]
+}}
 
 WIKI:
 {wiki_content}
@@ -322,8 +329,29 @@ def query(question: str, session_id: str) -> dict:
         wiki_content=wiki_content, question=question
     )
 
+    usage = {}
     try:
-        answer = llm.ask(prompt, pipeline="wiki")
+        raw_ans, usage = llm.ask(prompt, pipeline="wiki")
+        
+        # Parse JSON output
+        parsed = _parse_json_safe(raw_ans)
+        if not parsed:
+            parsed = _repair_json(raw_ans)
+            
+        answer = parsed.get("answer", raw_ans)
+        
+        # Merge new knowledge back into the wiki
+        new_pages = parsed.get("new_pages", {})
+        new_relations = parsed.get("new_relations", [])
+        
+        if new_pages or new_relations:
+            update_payload = {"pages": new_pages, "relations": new_relations}
+            merged_index, _, _ = _merge_wiki(index, update_payload)
+            _save_index(session_id, merged_index)
+            # Update local lists for the response
+            pages = merged_index.get("pages", {})
+            relations = merged_index.get("relations", [])
+            
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 
@@ -343,6 +371,7 @@ def query(question: str, session_id: str) -> dict:
         "answer": answer,
         "pages_used": pages_used_dedup,
         "relations": relations,
+        "usage": usage,
     }
 
 
