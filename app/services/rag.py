@@ -188,9 +188,10 @@ def query(question: str, session_id: str) -> dict:
         f"Question: {question}"
     )
 
+    usage = {}
     try:
-        answer = llm.ask(prompt, pipeline="rag")
+        answer, usage = llm.ask(prompt, pipeline="rag")
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 
-    return {"answer": answer, "chunks": chunk_details}
+    return {"answer": answer, "chunks": chunk_details, "usage": usage}
