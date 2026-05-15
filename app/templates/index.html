@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG vs LLM Wiki — Knowledge Comparison</title>
+<meta name="description" content="Compare Retrieval-Augmented Generation with LLM Wiki synthesis side by side">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+:root{--accent:#7c3aed;--accent2:#2dd4bf;--glass:rgba(255,255,255,.04);--glass-border:rgba(255,255,255,.08);--surface:#0f0f14;--surface2:#16161d}
+*{font-family:'Inter',sans-serif}
+body{background:var(--surface);min-height:100vh}
+.navbar{background:linear-gradient(135deg,#0f0f14 0%,#1a1a2e 100%);border-bottom:1px solid var(--glass-border);backdrop-filter:blur(12px)}
+.brand-text{font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.provider-badge{font-size:.7rem;padding:4px 10px;border-radius:20px;background:var(--glass);border:1px solid var(--glass-border);color:var(--accent2)}
+.glass-card{background:var(--glass);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(16px);transition:border-color .3s}
+.glass-card:hover{border-color:rgba(124,58,237,.25)}
+.upload-zone{border:2px dashed rgba(255,255,255,.12);border-radius:16px;padding:2.5rem;text-align:center;transition:all .3s;cursor:pointer}
+.upload-zone:hover,.upload-zone.dragover{border-color:var(--accent);background:rgba(124,58,237,.06)}
+.btn-accent{background:linear-gradient(135deg,var(--accent),#6d28d9);border:none;color:#fff;font-weight:600;border-radius:12px;padding:10px 28px;transition:all .3s}
+.btn-accent:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(124,58,237,.35);color:#fff}
+.btn-accent:disabled{opacity:.4;transform:none;box-shadow:none}
+.status-bar{font-size:.85rem;padding:12px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--glass-border)}
+.status-bar .rag-stat{color:var(--accent)}
+.status-bar .wiki-stat{color:var(--accent2)}
+.query-input{background:var(--surface2);border:1px solid var(--glass-border);border-radius:14px;color:#e2e8f0;padding:14px 20px;font-size:1rem}
+.query-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,.15);color:#e2e8f0;background:var(--surface2)}
+.answer-col{position:relative;overflow:hidden}
+.answer-col::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:3px 3px 0 0}
+.col-rag::before{background:linear-gradient(90deg,var(--accent),#a78bfa)}
+.col-wiki::before{background:linear-gradient(90deg,var(--accent2),#34d399)}
+.pipeline-badge{font-size:.65rem;padding:3px 10px;border-radius:20px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
+.badge-rag{background:rgba(124,58,237,.15);color:#a78bfa;border:1px solid rgba(124,58,237,.3)}
+.badge-wiki{background:rgba(45,212,191,.12);color:var(--accent2);border:1px solid rgba(45,212,191,.25)}
+.answer-text{font-size:.92rem;line-height:1.7;color:#cbd5e1;white-space:pre-wrap}
+.answer-text .page-ref{background:rgba(45,212,191,.12);color:var(--accent2);padding:2px 8px;border-radius:6px;cursor:pointer;font-size:.82rem;font-weight:500;transition:all .2s;border:1px solid rgba(45,212,191,.2)}
+.answer-text .page-ref:hover{background:rgba(45,212,191,.25)}
+.chunk-card{background:var(--surface);border-radius:10px;padding:12px 16px;margin-bottom:8px;border-left:3px solid var(--accent);font-size:.82rem;color:#94a3b8}
+.chunk-card .dist-badge{font-size:.7rem;background:rgba(124,58,237,.15);color:#a78bfa;padding:2px 8px;border-radius:10px}
+.chunk-source{font-weight:600;color:#e2e8f0;font-size:.78rem}
+#wiki-graph{width:100%;height:420px;border-radius:12px;background:var(--surface);border:1px solid var(--glass-border);overflow:hidden}
+#wiki-graph svg{width:100%;height:100%}
+.node-tooltip{position:absolute;background:#1e1e2e;border:1px solid var(--glass-border);border-radius:10px;padding:12px 16px;max-width:280px;font-size:.82rem;color:#cbd5e1;pointer-events:none;box-shadow:0 8px 32px rgba(0,0,0,.5);z-index:999;opacity:0;transition:opacity .2s}
+.compare-bar{text-align:center;padding:1.5rem;border-radius:14px;background:var(--glass);border:1px solid var(--glass-border)}
+.compare-bar .btn{border-radius:12px;padding:8px 20px;font-size:.85rem;font-weight:500;margin:0 6px}
+.spinner-overlay{display:flex;align-items:center;justify-content:center;min-height:120px}
+.fade-in{animation:fadeIn .5s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+@keyframes pulse-node{0%,100%{r:8}50%{r:16}}
+.deep-toggle{font-size:.82rem;color:#64748b;cursor:pointer;transition:color .2s;user-select:none}
+.deep-toggle:hover{color:var(--accent2)}
+</style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-expand-lg px-4 py-3">
+  <div class="container-fluid">
+    <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
+    <span class="provider-badge">{{ llm_provider }}</span>
+  </div>
+</nav>
+
+<div class="container-fluid px-4 py-4" style="max-width:1320px">
+
+  <!-- Upload Card -->
+  <div class="glass-card p-4 mb-4" id="upload-card">
+    <div class="upload-zone" id="upload-zone">
+      <input type="file" id="file-input" accept=".txt,.pdf" class="d-none">
+      <div class="mb-2" style="font-size:2rem">📄</div>
+      <p class="mb-1 text-light fw-500">Drop a <strong>.txt</strong> or <strong>.pdf</strong> file here</p>
+      <p class="text-secondary small mb-3">or click to browse</p>
+      <button class="btn btn-accent btn-sm" id="upload-btn" disabled>Upload &amp; Ingest</button>
+    </div>
+    <div class="status-bar mt-3 d-none" id="status-bar">
+      <span class="rag-stat" id="rag-status"></span>
+      <span class="mx-2 text-secondary">|</span>
+      <span class="wiki-stat" id="wiki-status"></span>
+    </div>
+    <div class="text-center mt-3 d-none" id="upload-spinner">
+      <div class="spinner-border text-secondary" role="status"></div>
+      <p class="small text-secondary mt-2">Ingesting into both pipelines…</p>
+    </div>
+  </div>
+
+  <!-- Query Bar -->
+  <div class="glass-card p-4 mb-4" id="query-card">
+    <div class="d-flex gap-3">
+      <input type="text" class="form-control query-input flex-grow-1" id="question-input"
+             placeholder="Ask a question about the uploaded document…" disabled>
+      <button class="btn btn-accent" id="ask-btn" disabled>Ask</button>
+    </div>
+  </div>
+
+  <!-- Answer Grid -->
+  <div class="row g-4 mb-4 d-none" id="answer-grid">
+    <!-- RAG Column -->
+    <div class="col-lg-6">
+      <div class="glass-card p-4 answer-col col-rag" id="rag-answer-card">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="pipeline-badge badge-rag">Retrieval</span>
+          <span class="text-secondary" style="font-size:.78rem">RAG Pipeline</span>
+        </div>
+        <div id="rag-answer-body">
+          <div class="spinner-overlay" id="rag-spinner"><div class="spinner-border text-secondary"></div></div>
+          <div class="answer-text d-none" id="rag-answer-text"></div>
+        </div>
+        <div class="mt-3">
+          <span class="deep-toggle" data-bs-toggle="collapse" data-bs-target="#rag-deep">▸ Deep Understanding</span>
+          <div class="collapse mt-2" id="rag-deep">
+            <div id="rag-chunks"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- Wiki Column -->
+    <div class="col-lg-6">
+      <div class="glass-card p-4 answer-col col-wiki" id="wiki-answer-card">
+        <div class="d-flex align-items-center gap-2 mb-3">
+          <span class="pipeline-badge badge-wiki">Synthesized</span>
+          <span class="text-secondary" style="font-size:.78rem">Wiki Pipeline</span>
+        </div>
+        <div id="wiki-answer-body">
+          <div class="spinner-overlay" id="wiki-spinner"><div class="spinner-border text-secondary"></div></div>
+          <div class="answer-text d-none" id="wiki-answer-text"></div>
+        </div>
+        <div class="mt-3">
+          <span class="deep-toggle" data-bs-toggle="collapse" data-bs-target="#wiki-deep">▸ Deep Understanding</span>
+          <div class="collapse mt-2" id="wiki-deep">
+            <div id="wiki-graph"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Compare Bar -->
+  <div class="compare-bar d-none mb-5" id="compare-bar">
+    <p class="text-secondary mb-2" style="font-size:.85rem">Which answer was more useful?</p>
+    <button class="btn btn-outline-light btn-sm" onclick="vote('rag')">👍 RAG</button>
+    <button class="btn btn-outline-light btn-sm" onclick="vote('wiki')">👍 Wiki</button>
+    <button class="btn btn-outline-light btn-sm" onclick="vote('both')">Both useful</button>
+    <p class="small text-secondary mt-2 d-none" id="vote-thanks">Thanks for your feedback!</p>
+  </div>
+</div>
+
+<!-- Node Tooltip -->
+<div class="node-tooltip" id="node-tooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ---------- State ----------
+const SID = crypto.randomUUID();
+let uploadDone = false;
+let wikiRelations = [];
+let wikiPages = {};
+let graphSim = null;
+
+// ---------- DOM refs ----------
+const $zone = document.getElementById('upload-zone');
+const $file = document.getElementById('file-input');
+const $uploadBtn = document.getElementById('upload-btn');
+const $uploadSpinner = document.getElementById('upload-spinner');
+const $statusBar = document.getElementById('status-bar');
+const $ragStatus = document.getElementById('rag-status');
+const $wikiStatus = document.getElementById('wiki-status');
+const $qInput = document.getElementById('question-input');
+const $askBtn = document.getElementById('ask-btn');
+const $answerGrid = document.getElementById('answer-grid');
+const $ragSpinner = document.getElementById('rag-spinner');
+const $wikiSpinner = document.getElementById('wiki-spinner');
+const $ragText = document.getElementById('rag-answer-text');
+const $wikiText = document.getElementById('wiki-answer-text');
+const $ragChunks = document.getElementById('rag-chunks');
+const $compareBar = document.getElementById('compare-bar');
+const $tooltip = document.getElementById('node-tooltip');
+
+// ---------- Upload ----------
+$zone.addEventListener('click', () => $file.click());
+$zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
+$zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
+$zone.addEventListener('drop', e => { e.preventDefault(); $zone.classList.remove('dragover'); if(e.dataTransfer.files.length){ $file.files = e.dataTransfer.files; onFileSelected(); }});
+$file.addEventListener('change', onFileSelected);
+
+function onFileSelected(){
+  if(!$file.files.length) return;
+  $uploadBtn.disabled = false;
+  $zone.querySelector('p').textContent = $file.files[0].name;
+}
+
+$uploadBtn.addEventListener('click', async ()=>{
+  if(!$file.files.length) return;
+  $uploadBtn.disabled = true;
+  $uploadSpinner.classList.remove('d-none');
+  $statusBar.classList.add('d-none');
+
+  const fd = new FormData();
+  fd.append('file', $file.files[0]);
+  fd.append('session_id', SID);
+
+  try{
+    const res = await fetch('/upload', {method:'POST', body:fd});
+    const d = await res.json();
+    if(d.error){ alert(d.error); return; }
+    $ragStatus.textContent = `RAG: ${d.rag.chunks_stored || 0} chunks stored`;
+    $wikiStatus.textContent = `Wiki: ${d.wiki.pages_updated || 0} pages, ${d.wiki.relations || 0} relations`;
+    $statusBar.classList.remove('d-none');
+    uploadDone = true;
+    $qInput.disabled = false;
+    $askBtn.disabled = false;
+    $qInput.focus();
+    loadGraph();
+  } catch(e){ alert('Upload failed: '+e); }
+  finally{ $uploadSpinner.classList.add('d-none'); $uploadBtn.disabled = false; }
+});
+
+// ---------- Query ----------
+$askBtn.addEventListener('click', doQuery);
+$qInput.addEventListener('keydown', e=>{ if(e.key==='Enter') doQuery(); });
+
+async function doQuery(){
+  const q = $qInput.value.trim();
+  if(!q || !uploadDone) return;
+  $askBtn.disabled = true;
+  $answerGrid.classList.remove('d-none');
+  $ragSpinner.classList.remove('d-none'); $ragText.classList.add('d-none');
+  $wikiSpinner.classList.remove('d-none'); $wikiText.classList.add('d-none');
+  $compareBar.classList.add('d-none');
+  $ragChunks.innerHTML = '';
+
+  try{
+    const res = await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,session_id:SID})});
+    const d = await res.json();
+
+    // RAG answer
+    $ragText.textContent = d.rag.answer;
+    $ragSpinner.classList.add('d-none'); $ragText.classList.remove('d-none'); $ragText.classList.add('fade-in');
+
+    // RAG chunks
+    if(d.rag.chunks){
+      const colors = ['#7c3aed','#2dd4bf','#f59e0b','#ef4444','#3b82f6'];
+      const srcMap = {};
+      let ci = 0;
+      d.rag.chunks.forEach(ch=>{
+        if(!(ch.source in srcMap)) srcMap[ch.source] = colors[ci++ % colors.length];
+        $ragChunks.innerHTML += `<div class="chunk-card" style="border-left-color:${srcMap[ch.source]}">
+          <div class="d-flex justify-content-between mb-1"><span class="chunk-source">${ch.source} — chunk ${ch.chunk_index}</span>
+          ${ch.distance!==null?`<span class="dist-badge">${ch.distance}</span>`:''}</div>
+          <div>${ch.text.substring(0,300)}${ch.text.length>300?'…':''}</div></div>`;
+      });
+    }
+
+    // Wiki answer — wrap [Page Title] in badges
+    let wAnswer = d.wiki.answer||'';
+    const usedPages = d.wiki.pages_used||[];
+    usedPages.forEach(p=>{
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+      wAnswer = wAnswer.replace(new RegExp('\\['+esc+'\\]','g'),`<span class="page-ref" onclick="highlightNode('${p.replace(/'/g,"\\'")}')">[${p}]</span>`);
+    });
+    $wikiText.innerHTML = wAnswer;
+    $wikiSpinner.classList.add('d-none'); $wikiText.classList.remove('d-none'); $wikiText.classList.add('fade-in');
+
+    wikiRelations = d.wiki.relations||[];
+    loadGraph();
+
+    $compareBar.classList.remove('d-none');
+  } catch(e){ $ragText.textContent='Error: '+e; $ragSpinner.classList.add('d-none'); $ragText.classList.remove('d-none'); $wikiText.textContent='Error: '+e; $wikiSpinner.classList.add('d-none'); $wikiText.classList.remove('d-none'); }
+  finally{ $askBtn.disabled = false; }
+}
+
+// ---------- Vote ----------
+function vote(choice){
+  const votes = JSON.parse(localStorage.getItem('rag_wiki_votes')||'[]');
+  votes.push({choice, ts:Date.now()});
+  localStorage.setItem('rag_wiki_votes',JSON.stringify(votes));
+  document.getElementById('vote-thanks').classList.remove('d-none');
+}
+
+// ---------- D3 Force Graph ----------
+async function loadGraph(){
+  try{
+    const res = await fetch(`/wiki/graph?session_id=${SID}`);
+    const data = await res.json();
+    wikiPages = data.pages||{};
+    wikiRelations = data.relations||[];
+    renderGraph();
+  }catch(e){console.error(e);}
+}
+
+function renderGraph(){
+  const container = document.getElementById('wiki-graph');
+  container.innerHTML='';
+  if(!Object.keys(wikiPages).length) return;
+
+  const w = container.clientWidth||600, h = 420;
+  const svg = d3.select(container).append('svg').attr('viewBox',`0 0 ${w} ${h}`);
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([.3,4]).on('zoom',e=>g.attr('transform',e.transform)));
+
+  const titles = Object.keys(wikiPages);
+  const nodes = titles.map(t=>({id:t, summary:wikiPages[t]}));
+  const nodeSet = new Set(titles);
+  const links = wikiRelations.filter(r=>nodeSet.has(r.from)&&nodeSet.has(r.to)).map(r=>({source:r.from,target:r.to,label:r.label}));
+
+  // degree
+  const deg={};
+  links.forEach(l=>{deg[l.source]=(deg[l.source]||0)+1;deg[l.target]=(deg[l.target]||0)+1;});
+  const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+  const sim = d3.forceSimulation(nodes)
+    .force('link',d3.forceLink(links).id(d=>d.id).distance(100))
+    .force('charge',d3.forceManyBody().strength(-250))
+    .force('center',d3.forceCenter(w/2,h/2))
+    .force('collision',d3.forceCollide(30));
+
+  const link = g.selectAll('.link').data(links).join('line').attr('class','link')
+    .attr('stroke','rgba(255,255,255,.1)').attr('stroke-width',1.5);
+
+  const linkLabel = g.selectAll('.link-label').data(links).join('text').attr('class','link-label')
+    .text(d=>d.label).attr('font-size',9).attr('fill','#475569').attr('text-anchor','middle').attr('opacity',0);
+
+  link.on('mouseover',function(e,d){d3.select(this).attr('stroke','rgba(255,255,255,.35)');
+    linkLabel.filter(l=>l===d).attr('opacity',1);})
+    .on('mouseout',function(){d3.select(this).attr('stroke','rgba(255,255,255,.1)');linkLabel.attr('opacity',0);});
+
+  const node = g.selectAll('.node').data(nodes).join('circle').attr('class','node')
+    .attr('r',d=>5+Math.min((deg[d.id]||0)*2,12))
+    .attr('fill',d=>color(d.id))
+    .attr('stroke','rgba(255,255,255,.15)').attr('stroke-width',1.5)
+    .style('cursor','pointer')
+    .call(d3.drag().on('start',(e,d)=>{if(!e.active)sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y;})
+      .on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;}).on('end',(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}));
+
+  const label = g.selectAll('.label').data(nodes).join('text').attr('class','label')
+    .text(d=>d.id.length>22?d.id.slice(0,20)+'…':d.id)
+    .attr('font-size',10).attr('fill','#94a3b8').attr('text-anchor','middle').attr('dy',d=>-(8+Math.min((deg[d.id]||0)*2,12)));
+
+  node.on('click',(e,d)=>{
+    $tooltip.innerHTML=`<strong>${d.id}</strong><hr style="border-color:#333;margin:6px 0"><div>${(d.summary||'').substring(0,200)}</div>`;
+    $tooltip.style.left=(e.pageX+12)+'px'; $tooltip.style.top=(e.pageY-20)+'px'; $tooltip.style.opacity=1;
+    setTimeout(()=>$tooltip.style.opacity=0,4000);
+  });
+
+  sim.on('tick',()=>{
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    linkLabel.attr('x',d=>(d.source.x+d.target.x)/2).attr('y',d=>(d.source.y+d.target.y)/2);
+    node.attr('cx',d=>d.x).attr('cy',d=>d.y);
+    label.attr('x',d=>d.x).attr('y',d=>d.y);
+  });
+  graphSim = {nodes, node, color, deg};
+}
+
+function highlightNode(title){
+  if(!graphSim) return;
+  const deepEl = document.getElementById('wiki-deep');
+  if(!deepEl.classList.contains('show')){ new bootstrap.Collapse(deepEl).show(); }
+  graphSim.node.transition().duration(200).attr('r',d=>5+Math.min((graphSim.deg[d.id]||0)*2,12)).attr('opacity',.4);
+  graphSim.node.filter(d=>d.id===title).transition().duration(300)
+    .attr('r',20).attr('opacity',1).attr('fill','#2dd4bf')
+    .transition().duration(1200).attr('r',d=>5+Math.min((graphSim.deg[d.id]||0)*2,12)).attr('fill',d=>graphSim.color(d.id));
+  graphSim.node.transition().delay(1500).duration(300).attr('opacity',1);
+  document.getElementById('wiki-graph').scrollIntoView({behavior:'smooth',block:'center'});
+}
+</script>
+</body>
+</html>
