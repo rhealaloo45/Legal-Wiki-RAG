@@ -10,8 +10,8 @@ import requests
 import config
 
 
-def ask(prompt: str, pipeline: str = "wiki") -> str:
-    """Send a prompt to the configured LLM provider and return the response text.
+def ask(prompt: str, pipeline: str = "wiki") -> tuple[str, dict]:
+    """Send a prompt to the configured LLM provider and return the response text and usage dict.
 
     Args:
         prompt:   The full prompt string.
@@ -22,7 +22,7 @@ def ask(prompt: str, pipeline: str = "wiki") -> str:
     return _ask_ollama(prompt)
 
 
-def _ask_ollama(prompt: str) -> str:
+def _ask_ollama(prompt: str) -> tuple[str, dict]:
     """Call Ollama's local generate endpoint."""
     url = f"{config.OLLAMA_BASE_URL}/api/generate"
     payload = {
@@ -33,12 +33,17 @@ def _ask_ollama(prompt: str) -> str:
     try:
         resp = requests.post(url, json=payload, timeout=120)
         resp.raise_for_status()
-        return resp.json().get("response", "")
+        data = resp.json()
+        usage = {
+            "prompt_tokens": data.get("prompt_eval_count", 0),
+            "completion_tokens": data.get("eval_count", 0)
+        }
+        return data.get("response", ""), usage
     except requests.RequestException as e:
         raise RuntimeError(f"Ollama unavailable: {e}") from e
 
 
-def _ask_openrouter(prompt: str, pipeline: str) -> str:
+def _ask_openrouter(prompt: str, pipeline: str) -> tuple[str, dict]:
     """Call OpenRouter chat completions endpoint with the pipeline-specific key."""
     api_key = (
         config.OPENROUTER_API_KEY_RAG if pipeline == "rag"
@@ -57,6 +62,7 @@ def _ask_openrouter(prompt: str, pipeline: str) -> str:
         resp = requests.post(url, json=payload, headers=headers, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        usage = data.get("usage") or {}
+        return data["choices"][0]["message"]["content"], usage
     except (requests.RequestException, KeyError, IndexError) as e:
         raise RuntimeError(f"OpenRouter unavailable ({pipeline}): {e}") from e

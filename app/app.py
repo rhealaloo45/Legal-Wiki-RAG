@@ -59,39 +59,47 @@ def upload():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
-    file = request.files["file"]
+    files = request.files.getlist("file")
     session_id = request.form.get("session_id", str(uuid.uuid4()))
 
-    if not file.filename or not _allowed_file(file.filename):
-        return jsonify({"error": "Only .txt and .pdf files are accepted"}), 400
+    if not files or not files[0].filename:
+        return jsonify({"error": "No file provided"}), 400
 
-    # Save uploaded file
-    safe_name = file.filename.replace(os.sep, "_")
-    save_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{safe_name}")
-    file.save(save_path)
-    logger.info("Saved upload: %s", save_path)
+    total_rag = {"chunks_stored": 0}
+    total_wiki = {"pages_updated": 0, "relations": 0}
 
-    # Run both pipelines in parallel
-    rag_future = executor.submit(rag.ingest, save_path, session_id)
-    wiki_future = executor.submit(wiki.ingest, save_path, session_id)
+    for file in files:
+        if not _allowed_file(file.filename):
+            continue
 
-    try:
-        rag_result = rag_future.result(timeout=1200)  # 20 minute timeout for large files
-    except Exception as e:
-        logger.error("RAG ingest error (%s): %s", type(e).__name__, e)
-        rag_result = {"error": f"RAG Timeout or Error: {e}", "chunks_stored": 0}
+        # Save uploaded file
+        safe_name = file.filename.replace(os.sep, "_")
+        save_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{safe_name}")
+        file.save(save_path)
+        logger.info("Saved upload: %s", save_path)
 
-    try:
-        wiki_result = wiki_future.result(timeout=1200)
-    except Exception as e:
-        logger.error("Wiki ingest error (%s): %s", type(e).__name__, e)
-        wiki_result = {"error": f"Wiki Timeout or Error: {e}", "pages_updated": 0, "relations": 0}
+        # Run both pipelines in parallel for this file
+        rag_future = executor.submit(rag.ingest, save_path, session_id)
+        wiki_future = executor.submit(wiki.ingest, save_path, session_id)
+
+        try:
+            rag_result = rag_future.result(timeout=1200)
+            total_rag["chunks_stored"] += rag_result.get("chunks_stored", 0)
+        except Exception as e:
+            logger.error("RAG ingest error (%s): %s", type(e).__name__, e)
+
+        try:
+            wiki_result = wiki_future.result(timeout=1200)
+            total_wiki["pages_updated"] += wiki_result.get("pages_updated", 0)
+            total_wiki["relations"] += wiki_result.get("relations", 0)
+        except Exception as e:
+            logger.error("Wiki ingest error (%s): %s", type(e).__name__, e)
 
     return jsonify({
         "status": "ok",
-        "filename": safe_name,
-        "rag": rag_result,
-        "wiki": wiki_result,
+        "files_processed": len(files),
+        "rag": total_rag,
+        "wiki": total_wiki,
     })
 
 
