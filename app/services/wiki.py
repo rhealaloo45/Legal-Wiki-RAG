@@ -335,8 +335,10 @@ def query(question: str, session_id: str) -> dict:
         
         # Parse JSON output
         parsed = _parse_json_safe(raw_ans)
-        if not parsed:
+        if not isinstance(parsed, dict):
             parsed = _repair_json(raw_ans)
+            if not isinstance(parsed, dict):
+                parsed = {}
             
         answer = parsed.get("answer", raw_ans)
         
