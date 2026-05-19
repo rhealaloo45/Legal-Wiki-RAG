@@ -42,7 +42,7 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
 for d in [config.CHROMA_PATH, config.WIKI_PATH, config.UPLOAD_PATH]:
     os.makedirs(d, exist_ok=True)
 
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=10)
 
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
@@ -91,6 +91,12 @@ def upload():
     total_rag = {"chunks_stored": 0}
     total_wiki = {"pages_updated": 0, "relations": 0}
 
+    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}, "docs": {"total": len(files), "chunked": 0, "completed": 0}})
+    progress["docs"] = {"total": len(files), "chunked": 0, "completed": 0}
+
+    rag_futures = []
+    wiki_futures = []
+
     for file in files:
         if not _allowed_file(file.filename):
             continue
@@ -102,21 +108,25 @@ def upload():
         logger.info("Saved upload: %s", save_path)
 
         # Run both pipelines in parallel for this file
-        rag_future = executor.submit(rag.ingest, save_path, session_id)
-        wiki_future = executor.submit(wiki.ingest, save_path, session_id)
+        rag_futures.append(executor.submit(rag.ingest, save_path, session_id))
+        wiki_futures.append(executor.submit(wiki.ingest, save_path, session_id))
 
+    for rag_future in rag_futures:
         try:
             rag_result = rag_future.result(timeout=1200)
             total_rag["chunks_stored"] += rag_result.get("chunks_stored", 0)
         except Exception as e:
             logger.error("RAG ingest error (%s): %s", type(e).__name__, e)
 
+    for wiki_future in wiki_futures:
         try:
             wiki_result = wiki_future.result(timeout=1200)
             total_wiki["pages_updated"] += wiki_result.get("pages_updated", 0)
             total_wiki["relations"] += wiki_result.get("relations", 0)
         except Exception as e:
             logger.error("Wiki ingest error (%s): %s", type(e).__name__, e)
+
+    progress["docs"]["completed"] = len(files)
 
     return jsonify({
         "status": "ok",
@@ -144,18 +154,20 @@ def query_route():
 
     rag_t0 = time.time()
     try:
-        rag_result = rag_future.result(timeout=120)
+        rag_result = rag_future.result(timeout=300)
     except Exception as e:
-        logger.error("RAG query error: %s", e)
-        rag_result = {"answer": f"⚠️ RAG error: {e}", "chunks": []}
+        logger.error("RAG query error (%s): %s", type(e).__name__, e)
+        err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        rag_result = {"answer": f"⚠️ RAG error: {err_msg}", "chunks": []}
     rag_result["elapsed_ms"] = round((time.time() - rag_t0) * 1000)
 
     wiki_t0 = time.time()
     try:
-        wiki_result = wiki_future.result(timeout=120)
+        wiki_result = wiki_future.result(timeout=300)
     except Exception as e:
-        logger.error("Wiki query error: %s", e)
-        wiki_result = {"answer": f"⚠️ Wiki error: {e}", "pages_used": [], "relations": []}
+        logger.error("Wiki query error (%s): %s", type(e).__name__, e)
+        err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        wiki_result = {"answer": f"⚠️ Wiki error: {err_msg}", "pages_used": [], "relations": []}
     wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
 
     logger.info("Query answered in %.2fs total", time.time() - t0)

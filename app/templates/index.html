@@ -139,8 +139,11 @@ body{background:var(--surface);min-height:100vh}
 
 <div class="container-fluid px-4 py-4" style="max-width:1320px">
 
-  <!-- Upload Card -->
-  <div class="glass-card p-4 mb-4" id="upload-card">
+  <!-- Top Row: Upload & Wiki Browser -->
+  <div class="row g-4 mb-4">
+    <div class="col-12" id="upload-col" style="transition: all 0.3s ease;">
+      <!-- Upload Card -->
+      <div class="glass-card p-4 h-100" id="upload-card">
     <div class="upload-zone" id="upload-zone">
       <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
       <div class="mb-2" style="font-size:2rem">📄</div>
@@ -151,6 +154,13 @@ body{background:var(--surface);min-height:100vh}
 
     <!-- Progress bars -->
     <div class="progress-wrap d-none" id="progress-wrap">
+      <div class="mb-2">
+        <div class="d-flex justify-content-between mb-1">
+          <span class="section-label" style="color:#e2e8f0">Documents Chunked</span>
+          <span class="section-label" id="docs-prog-label">0 / 0</span>
+        </div>
+        <div class="progress"><div class="progress-bar bg-primary" id="docs-prog-bar" style="width:0%"></div></div>
+      </div>
       <div class="mb-2">
         <div class="d-flex justify-content-between mb-1">
           <span class="section-label" style="color:#a78bfa">RAG</span>
@@ -176,13 +186,35 @@ body{background:var(--surface);min-height:100vh}
       <span class="wiki-stat" id="wiki-status"></span>
     </div>
   </div>
+    </div>
+    
+    <div class="col-lg-8 d-none" id="browser-col" style="transition: all 0.3s ease;">
+      <!-- Wiki Page Browser -->
+      <div class="glass-card p-4 h-100" id="page-browser-card">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <span class="section-label mb-0">📚 Wiki Page Browser</span>
+          <span class="text-secondary" style="font-size:.75rem" id="page-count-label"></span>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-4">
+            <input type="text" class="page-search mb-2" id="page-search" placeholder="Search pages…">
+            <div class="page-browser" id="page-list"></div>
+          </div>
+          <div class="col-md-8">
+            <div class="section-label" id="page-detail-title" style="color:var(--accent2)">Select a page to read its content</div>
+            <div class="page-detail-box d-none" id="page-detail-box"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Query Bar -->
   <div class="glass-card p-4 mb-4" id="query-card">
     <div class="d-flex gap-3">
       <input type="text" class="form-control query-input flex-grow-1" id="question-input"
-             placeholder="Ask a question about the uploaded document…" disabled>
-      <button class="btn btn-accent" id="ask-btn" disabled>Ask</button>
+             placeholder="Ask a question about the uploaded document…">
+      <button class="btn btn-accent" id="ask-btn">Ask</button>
     </div>
     <!-- Query history pills -->
     <div class="history-wrap d-none" id="history-wrap">
@@ -243,23 +275,7 @@ body{background:var(--surface);min-height:100vh}
     </div>
   </div>
 
-  <!-- Wiki Page Browser -->
-  <div class="glass-card p-4 mb-4 d-none" id="page-browser-card">
-    <div class="d-flex align-items-center justify-content-between mb-3">
-      <span class="section-label mb-0">📚 Wiki Page Browser</span>
-      <span class="text-secondary" style="font-size:.75rem" id="page-count-label"></span>
-    </div>
-    <div class="row g-3">
-      <div class="col-md-4">
-        <input type="text" class="page-search mb-2" id="page-search" placeholder="Search pages…">
-        <div class="page-browser" id="page-list"></div>
-      </div>
-      <div class="col-md-8">
-        <div class="section-label" id="page-detail-title" style="color:var(--accent2)">Select a page to read its content</div>
-        <div class="page-detail-box d-none" id="page-detail-box"></div>
-      </div>
-    </div>
-  </div>
+  <!-- Wiki Page Browser moved to top row -->
 
   <!-- Compare Bar -->
   <div class="compare-bar d-none mb-5" id="compare-bar">
@@ -411,12 +427,20 @@ $uploadBtn.addEventListener('click', async () => {
     try {
       const pRes = await fetch(`/progress?session_id=${SID}`);
       const pData = await pRes.json();
+      if (pData.docs && pData.docs.total) {
+        let dPct = Math.round((pData.docs.chunked / pData.docs.total) * 100);
+        if (dPct >= 100) dPct = 99;
+        document.getElementById('docs-prog-bar').style.width = dPct + '%';
+        document.getElementById('docs-prog-label').textContent = `${pData.docs.chunked} / ${pData.docs.total}`;
+      }
       if (pData.rag && pData.rag.total) {
-        const pct = Math.round((pData.rag.current / pData.rag.total) * 100);
+        let pct = Math.round((pData.rag.current / pData.rag.total) * 100);
+        if (pct >= 100) pct = 99;
         setProgress('rag', pct, pData.rag.message || '');
       }
       if (pData.wiki && pData.wiki.total) {
-        const pct = Math.round((pData.wiki.current / pData.wiki.total) * 100);
+        let pct = Math.round((pData.wiki.current / pData.wiki.total) * 100);
+        if (pct >= 100) pct = 99;
         setProgress('wiki', pct, pData.wiki.message || '');
       }
     } catch(e) {}
@@ -435,10 +459,17 @@ $uploadBtn.addEventListener('click', async () => {
 
     setProgress('rag', 100, 'Complete');
     setProgress('wiki', 100, 'Complete');
+    if (d.files_processed) {
+      document.getElementById('docs-prog-bar').style.width = '100%';
+      document.getElementById('docs-prog-label').textContent = `${d.files_processed} / ${d.files_processed}`;
+    }
 
     $ragStatus.textContent  = `RAG: ${d.rag.chunks_stored || 0} chunks stored`;
     $wikiStatus.textContent = `Wiki: ${d.wiki.pages_updated || 0} pages · ${d.wiki.relations || 0} relations`;
     $statusBar.classList.remove('d-none');
+    
+    document.getElementById('upload-col').className = 'col-lg-4';
+    document.getElementById('browser-col').classList.remove('d-none');
 
     uploadDone = true;
     $qInput.disabled = false;
@@ -483,7 +514,8 @@ $qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doQuery(); });
 
 async function doQuery() {
   const q = $qInput.value.trim();
-  if (!q || !uploadDone) return;
+  if (!q) return;
+  if (!uploadDone) { showToast('Please upload a document first.', 'warning'); return; }
   if (q.length < 3) { showToast('Please enter a longer question.', 'error'); return; }
 
   $askBtn.disabled = true;
