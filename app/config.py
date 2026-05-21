@@ -25,7 +25,7 @@ for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH]:
 
 CHUNK_SIZE = 2000
 CHUNK_OVERLAP = 200
-TOP_K = 3
+TOP_K = int(os.getenv("TOP_K", "8"))
 
 # Global progress store for UI feedback
 PROGRESS_STORE = {}
