@@ -37,7 +37,9 @@ def _ask_ollama(prompt: str) -> tuple[str, dict]:
         "stream": False,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=120)
+        # Increased timeout to 600s. Since wiki ingestion uses max_workers=5, 
+        # multiple requests might queue up in Ollama and exceed the standard 120s timeout.
+        resp = requests.post(url, json=payload, timeout=600)
         resp.raise_for_status()
         data = resp.json()
         usage = {
