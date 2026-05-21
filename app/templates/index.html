@@ -156,27 +156,21 @@ body{background:var(--surface);min-height:100vh}
     <div class="progress-wrap d-none" id="progress-wrap">
       <div class="mb-2">
         <div class="d-flex justify-content-between mb-1">
-          <span class="section-label" style="color:#e2e8f0">Documents Chunked</span>
-          <span class="section-label" id="docs-prog-label">0 / 0</span>
-        </div>
-        <div class="progress"><div class="progress-bar bg-primary" id="docs-prog-bar" style="width:0%"></div></div>
-      </div>
-      <div class="mb-2">
-        <div class="d-flex justify-content-between mb-1">
-          <span class="section-label" style="color:#a78bfa">RAG</span>
-          <span class="section-label" id="rag-prog-label">0%</span>
+          <span class="section-label" style="color:#a78bfa">RAG Pipeline</span>
+          <span class="section-label" id="rag-prog-label">0 / 0 docs</span>
         </div>
         <div class="progress"><div class="progress-bar progress-bar-rag" id="rag-prog-bar" style="width:0%"></div></div>
         <div class="text-secondary mt-1" style="font-size:.75rem" id="rag-prog-msg"></div>
       </div>
-      <div>
+      <div class="mb-2">
         <div class="d-flex justify-content-between mb-1">
-          <span class="section-label" style="color:var(--accent2)">Wiki</span>
-          <span class="section-label" id="wiki-prog-label">0%</span>
+          <span class="section-label" style="color:var(--accent2)">Wiki Pipeline</span>
+          <span class="section-label" id="wiki-prog-label">0 / 0 docs</span>
         </div>
         <div class="progress"><div class="progress-bar progress-bar-wiki" id="wiki-prog-bar" style="width:0%"></div></div>
         <div class="text-secondary mt-1" style="font-size:.75rem" id="wiki-prog-msg"></div>
       </div>
+      <div class="text-secondary" style="font-size:.75rem" id="eta-label"></div>
     </div>
 
     <!-- Status bar (post-ingest summary) -->
@@ -333,6 +327,8 @@ let queryHistory = [];          // [{q, ragAnswer, wikiAnswer}]
 let allPageTitles = [];         // for the page browser
 let lastRagAnswer = '';
 let lastWikiAnswer = '';
+let ingestStartTime = null;     // for ETA calculation
+let totalFilesQueued = 0;
 
 // ============================================================
 // DOM refs
@@ -417,34 +413,12 @@ $uploadBtn.addEventListener('click', async () => {
   $uploadBtn.disabled = true;
   $progressWrap.classList.remove('d-none');
   $statusBar.classList.add('d-none');
+  ingestStartTime = Date.now();
 
-  // Reset progress bars
-  setProgress('rag', 0, 'Starting…');
-  setProgress('wiki', 0, 'Starting…');
-
-  // Poll progress every second
-  const pollTimer = setInterval(async () => {
-    try {
-      const pRes = await fetch(`/progress?session_id=${SID}`);
-      const pData = await pRes.json();
-      if (pData.docs && pData.docs.total) {
-        let dPct = Math.round((pData.docs.chunked / pData.docs.total) * 100);
-        if (dPct >= 100) dPct = 99;
-        document.getElementById('docs-prog-bar').style.width = dPct + '%';
-        document.getElementById('docs-prog-label').textContent = `${pData.docs.chunked} / ${pData.docs.total}`;
-      }
-      if (pData.rag && pData.rag.total) {
-        let pct = Math.round((pData.rag.current / pData.rag.total) * 100);
-        if (pct >= 100) pct = 99;
-        setProgress('rag', pct, pData.rag.message || '');
-      }
-      if (pData.wiki && pData.wiki.total) {
-        let pct = Math.round((pData.wiki.current / pData.wiki.total) * 100);
-        if (pct >= 100) pct = 99;
-        setProgress('wiki', pct, pData.wiki.message || '');
-      }
-    } catch(e) {}
-  }, 1000);
+  // Reset progress
+  setDocProgress('rag', 0, 0, 'Starting…');
+  setDocProgress('wiki', 0, 0, 'Starting…');
+  document.getElementById('eta-label').textContent = '';
 
   const fd = new FormData();
   for (let i = 0; i < $file.files.length; i++) {
@@ -453,44 +427,77 @@ $uploadBtn.addEventListener('click', async () => {
   fd.append('session_id', SID);
 
   try {
+    // Upload returns immediately now (non-blocking)
     const res = await fetch('/upload', { method: 'POST', body: fd });
     const d = await res.json();
-    if (d.error) { showToast(d.error, 'error'); return; }
+    if (d.error) { showToast(d.error, 'error'); $uploadBtn.disabled = false; return; }
 
-    setProgress('rag', 100, 'Complete');
-    setProgress('wiki', 100, 'Complete');
-    if (d.files_processed) {
-      document.getElementById('docs-prog-bar').style.width = '100%';
-      document.getElementById('docs-prog-label').textContent = `${d.files_processed} / ${d.files_processed}`;
-    }
+    totalFilesQueued = d.files_queued || 0;
+    showToast(`${totalFilesQueued} files queued for processing…`, 'info');
 
-    $ragStatus.textContent  = `RAG: ${d.rag.chunks_stored || 0} chunks stored`;
-    $wikiStatus.textContent = `Wiki: ${d.wiki.pages_updated || 0} pages · ${d.wiki.relations || 0} relations`;
-    $statusBar.classList.remove('d-none');
-    
-    document.getElementById('upload-col').className = 'col-lg-4';
-    document.getElementById('browser-col').classList.remove('d-none');
+    // Poll progress until phase === 'complete'
+    const pollTimer = setInterval(async () => {
+      try {
+        const pRes = await fetch(`/progress?session_id=${SID}`);
+        const pData = await pRes.json();
+        const docs = pData.docs || {};
+        const total = docs.total || totalFilesQueued;
+        const ragDone = docs.rag_done || 0;
+        const wikiDone = docs.wiki_done || 0;
 
-    uploadDone = true;
-    $qInput.disabled = false;
-    $askBtn.disabled = false;
-    $resetBtn.style.display = '';
-    $qInput.focus();
+        // Update progress bars
+        setDocProgress('rag', ragDone, total, pData.rag?.message || `${ragDone} / ${total} docs`);
+        setDocProgress('wiki', wikiDone, total, pData.wiki?.message || `${wikiDone} / ${total} docs`);
 
-    loadGraph();
-    loadPageBrowser();
-    showToast('Document ingested successfully.', 'success');
+        // ETA based on the slower pipeline
+        const minDone = Math.min(ragDone, wikiDone);
+        if (minDone > 0 && minDone < total) {
+          const elapsed = (Date.now() - ingestStartTime) / 1000;
+          const rate = elapsed / minDone;
+          const remaining = Math.round(rate * (total - minDone));
+          const mins = Math.floor(remaining / 60);
+          const secs = remaining % 60;
+          document.getElementById('eta-label').textContent = `ETA: ~${mins > 0 ? mins + 'm ' : ''}${secs}s remaining`;
+        }
+
+        // Completion check
+        if (pData.phase === 'complete') {
+          clearInterval(pollTimer);
+          setDocProgress('rag', total, total, 'Complete');
+          setDocProgress('wiki', total, total, 'Complete');
+          document.getElementById('eta-label').textContent = '';
+
+          $ragStatus.textContent  = `RAG: ${total} docs embedded`;
+          $wikiStatus.textContent = `Wiki: processing complete`;
+          $statusBar.classList.remove('d-none');
+
+          document.getElementById('upload-col').className = 'col-lg-4';
+          document.getElementById('browser-col').classList.remove('d-none');
+
+          uploadDone = true;
+          $qInput.disabled = false;
+          $askBtn.disabled = false;
+          $resetBtn.style.display = '';
+          $uploadBtn.disabled = false;
+          $qInput.focus();
+
+          loadGraph();
+          loadPageBrowser();
+          showToast(`All ${total} documents ingested successfully.`, 'success');
+        }
+      } catch(e) { console.error('Progress poll error:', e); }
+    }, 1500);
+
   } catch(e) {
     showToast('Upload failed: ' + e, 'error');
-  } finally {
-    clearInterval(pollTimer);
     $uploadBtn.disabled = false;
   }
 });
 
-function setProgress(pipeline, pct, msg) {
+function setDocProgress(pipeline, done, total, msg) {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   document.getElementById(`${pipeline}-prog-bar`).style.width = pct + '%';
-  document.getElementById(`${pipeline}-prog-label`).textContent = pct + '%';
+  document.getElementById(`${pipeline}-prog-label`).textContent = `${done} / ${total} docs`;
   document.getElementById(`${pipeline}-prog-msg`).textContent = msg;
 }
 
