@@ -78,7 +78,7 @@ def health():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    """Upload a file → ingest into both RAG and Wiki pipelines in parallel."""
+    """Upload files → immediately accept, then ingest in background via executor."""
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
@@ -88,52 +88,75 @@ def upload():
     if not files or not files[0].filename:
         return jsonify({"error": "No file provided"}), 400
 
-    total_rag = {"chunks_stored": 0}
-    total_wiki = {"pages_updated": 0, "relations": 0}
-
-    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}, "docs": {"total": len(files), "chunked": 0, "completed": 0}})
-    progress["docs"] = {"total": len(files), "chunked": 0, "completed": 0}
-
-    rag_futures = []
-    wiki_futures = []
-
+    # Filter and save files to disk first (fast, synchronous)
+    saved_paths = []
     for file in files:
         if not _allowed_file(file.filename):
             continue
-
-        # Save uploaded file
         safe_name = file.filename.replace(os.sep, "_")
         save_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{safe_name}")
         file.save(save_path)
+        saved_paths.append(save_path)
         logger.info("Saved upload: %s", save_path)
 
-        # Run both pipelines in parallel for this file
-        rag_futures.append(executor.submit(rag.ingest, save_path, session_id))
-        wiki_futures.append(executor.submit(wiki.ingest, save_path, session_id))
+    if not saved_paths:
+        return jsonify({"error": "No valid files (.txt, .pdf) found"}), 400
 
-    for rag_future in rag_futures:
-        try:
-            rag_result = rag_future.result(timeout=1200)
-            total_rag["chunks_stored"] += rag_result.get("chunks_stored", 0)
-        except Exception as e:
-            logger.error("RAG ingest error (%s): %s", type(e).__name__, e)
+    # Initialize progress with document-level counters
+    progress = {
+        "phase": "processing",
+        "docs": {"total": len(saved_paths), "rag_done": 0, "wiki_done": 0},
+        "rag": {},
+        "wiki": {},
+    }
+    config.PROGRESS_STORE[session_id] = progress
 
-    for wiki_future in wiki_futures:
-        try:
-            wiki_result = wiki_future.result(timeout=1200)
-            total_wiki["pages_updated"] += wiki_result.get("pages_updated", 0)
-            total_wiki["relations"] += wiki_result.get("relations", 0)
-        except Exception as e:
-            logger.error("Wiki ingest error (%s): %s", type(e).__name__, e)
+    # Submit all tasks to executor (non-blocking)
+    for save_path in saved_paths:
+        executor.submit(_ingest_single_doc_rag, save_path, session_id)
+        executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
-    progress["docs"]["completed"] = len(files)
-
+    # Return immediately — frontend will poll /progress
     return jsonify({
-        "status": "ok",
-        "files_processed": len(files),
-        "rag": total_rag,
-        "wiki": total_wiki,
+        "status": "accepted",
+        "files_queued": len(saved_paths),
+        "session_id": session_id,
     })
+
+
+def _ingest_single_doc_rag(file_path: str, session_id: str):
+    """Background task: ingest one document through RAG pipeline."""
+    try:
+        rag.ingest(file_path, session_id)
+    except Exception as e:
+        logger.error("RAG ingest error for %s: %s", os.path.basename(file_path), e)
+    finally:
+        progress = config.PROGRESS_STORE.get(session_id, {})
+        docs = progress.get("docs", {})
+        docs["rag_done"] = docs.get("rag_done", 0) + 1
+        _check_completion(session_id)
+
+
+def _ingest_single_doc_wiki(file_path: str, session_id: str):
+    """Background task: ingest one document through Wiki pipeline."""
+    try:
+        wiki.ingest(file_path, session_id)
+    except Exception as e:
+        logger.error("Wiki ingest error for %s: %s", os.path.basename(file_path), e)
+    finally:
+        progress = config.PROGRESS_STORE.get(session_id, {})
+        docs = progress.get("docs", {})
+        docs["wiki_done"] = docs.get("wiki_done", 0) + 1
+        _check_completion(session_id)
+
+
+def _check_completion(session_id: str):
+    """Mark phase as complete when all documents finish both pipelines."""
+    progress = config.PROGRESS_STORE.get(session_id, {})
+    docs = progress.get("docs", {})
+    total = docs.get("total", 0)
+    if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
+        progress["phase"] = "complete"
 
 
 @app.route("/query", methods=["POST"])
@@ -266,4 +289,5 @@ def clear_session():
 # Entrypoint
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5001))
+    app.run(debug=True, host="0.0.0.0", port=port)

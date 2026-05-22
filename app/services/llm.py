@@ -7,8 +7,10 @@ to use, allowing each pipeline to have its own key/quota.
 """
 
 import requests
+import logging
 import config
 
+logger = logging.getLogger(__name__)
 
 def ask(prompt: str, pipeline: str = "wiki") -> tuple[str, dict]:
     """Send a prompt to the configured LLM provider and return the response text and usage dict.
@@ -18,7 +20,11 @@ def ask(prompt: str, pipeline: str = "wiki") -> tuple[str, dict]:
         pipeline: "rag" or "wiki" — determines which OpenRouter API key is used.
     """
     if config.LLM_PROVIDER == "openrouter":
-        return _ask_openrouter(prompt, pipeline)
+        try:
+            return _ask_openrouter(prompt, pipeline)
+        except RuntimeError as e:
+            logger.warning(f"OpenRouter failed: {e}. Falling back to Ollama.")
+            return _ask_ollama(prompt)
     return _ask_ollama(prompt)
 
 
@@ -31,7 +37,9 @@ def _ask_ollama(prompt: str) -> tuple[str, dict]:
         "stream": False,
     }
     try:
-        resp = requests.post(url, json=payload, timeout=120)
+        # Increased timeout to 600s. Since wiki ingestion uses max_workers=5, 
+        # multiple requests might queue up in Ollama and exceed the standard 120s timeout.
+        resp = requests.post(url, json=payload, timeout=600)
         resp.raise_for_status()
         data = resp.json()
         usage = {

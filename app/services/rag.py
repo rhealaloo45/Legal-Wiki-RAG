@@ -6,6 +6,7 @@ No LangChain. Simple sliding-window chunker.
 import os
 import re
 import logging
+import threading
 import chromadb
 from pypdf import PdfReader
 
@@ -15,17 +16,19 @@ from services import embedder, llm
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Persistent ChromaDB client — lazy singleton
+# Persistent ChromaDB client — lazy singleton (Thread-Safe)
 # ---------------------------------------------------------------------------
 _chroma_client = None
+_chroma_lock = threading.RLock()
 
 
 def _get_client():
     """Return a persistent ChromaDB client, creating it once on first call."""
     global _chroma_client
-    if _chroma_client is None:
-        _chroma_client = chromadb.PersistentClient(path=config.CHROMA_PATH)
-    return _chroma_client
+    with _chroma_lock:
+        if _chroma_client is None:
+            _chroma_client = chromadb.PersistentClient(path=config.CHROMA_PATH)
+        return _chroma_client
 
 
 def _get_collection(session_id: str):
@@ -36,10 +39,11 @@ def _get_collection(session_id: str):
     supply pre-computed embeddings from Ollama.
     """
     client = _get_client()
-    return client.get_or_create_collection(
-        name=f"rag_{session_id}",
-        metadata={"hnsw:space": "cosine"},
-    )
+    with _chroma_lock:
+        return client.get_or_create_collection(
+            name=f"rag_{session_id}",
+            metadata={"hnsw:space": "cosine"},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -93,9 +97,6 @@ def ingest(file_path: str, session_id: str) -> dict:
 
     logger.info("RAG ingest: %d chunks from %s", len(chunks), source_name)
 
-    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}, "docs": {"total": 0, "chunked": 0, "completed": 0}})
-    progress["docs"]["chunked"] += 1
-
     collection = _get_collection(session_id)
 
     ids = []
@@ -111,25 +112,22 @@ def ingest(file_path: str, session_id: str) -> dict:
         })
 
     progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
-    progress["rag"] = {"current": 0, "total": len(documents), "message": f"Embedding {len(documents)} chunks..."}
+    progress["rag"] = {"current": 0, "total": len(documents), "message": f"Embedding {len(documents)} chunks (batch)..."}
 
-    embeddings = []
-    for idx, doc in enumerate(documents):
-        vec = embedder.embed(doc)
-        embeddings.append(vec)
-        progress["rag"]["current"] = idx + 1
-        progress["rag"]["message"] = f"Embedded chunk {idx + 1}/{len(documents)}"
-        logger.info("  %s", progress["rag"]["message"])
+    # Batch embed all chunks in one call instead of one-at-a-time
+    embeddings = embedder.embed_batch(documents)
 
+    progress["rag"]["current"] = len(documents)
     progress["rag"]["message"] = f"Complete: {len(chunks)} chunks stored."
 
     if ids:
-        collection.upsert(
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
+        with _chroma_lock:
+            collection.upsert(
+                ids=ids,
+                documents=documents,
+                embeddings=embeddings,
+                metadatas=metadatas,
+            )
 
     logger.info("RAG ingest complete: %d chunks stored", len(chunks))
     return {"chunks_stored": len(chunks)}
@@ -143,10 +141,11 @@ def query(question: str, session_id: str) -> dict:
     collection = _get_collection(session_id)
 
     q_embedding = embedder.embed(question)
-    results = collection.query(
-        query_embeddings=[q_embedding],
-        n_results=config.TOP_K,
-    )
+    with _chroma_lock:
+        results = collection.query(
+            query_embeddings=[q_embedding],
+            n_results=config.TOP_K,
+        )
 
     # Build context from retrieved chunks
     chunk_details = []
@@ -165,10 +164,19 @@ def query(question: str, session_id: str) -> dict:
             })
             context_parts.append(f"[{source}, chunk {cidx}]:\n{doc}")
 
+    if not chunk_details:
+        return {
+            "answer": "I’m sorry, but I can’t provide an answer based on the excerpts you requested.",
+            "chunks": [],
+            "usage": {}
+        }
+
     context = "\n---\n".join(context_parts)
 
     prompt = (
         "Answer using only these excerpts. Cite [Source, chunk N] inline.\n"
+        "If the provided excerpts do not contain the answer to the question, you must respond exactly with: "
+        "\"I’m sorry, but I can’t provide an answer based on the excerpts you requested.\"\n"
         "---\n"
         f"{context}\n"
         "---\n"
