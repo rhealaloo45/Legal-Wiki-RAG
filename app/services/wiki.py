@@ -242,8 +242,7 @@ PRINCIPLES:
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
 
-PAGE TITLES: Use specific, descriptive titles (e.g., "Ratio Decidendi: Late Payment Penalties", \
-"Application of Section 3") — not generic ones like "Overview".
+PAGE TITLES: You MUST append the specific document name in parentheses to EVERY page title. For example: "Payment Terms ({doc_name})", "Confidentiality ({doc_name})". Do not use generic titles without the document name.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
@@ -283,8 +282,8 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
     "summary": "One-line summary of the document."
   }},
   "topics": [
-    "Topic or Provision Name 1",
-    "Topic or Provision Name 2"
+    "Topic or Provision Name 1 ({doc_name})",
+    "Topic or Provision Name 2 ({doc_name})"
   ]
 }}
 
@@ -308,6 +307,7 @@ RULES:
 - FACTUAL PRECISION: Extract exact dates, amounts, and figures verbatim. Do not invent dates.
 - LEGAL DEPTH: Focus on statutory interpretation, judicial reasoning, and precedents.
 - Reuse the KNOWN TOPIC names exactly as page titles when applicable.
+- For any NEW pages, you MUST append the specific document name in parentheses to EVERY page title, e.g. "Topic Name ({doc_name})".
 - Each page should be 4-10 sentences of detailed synthesis.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:

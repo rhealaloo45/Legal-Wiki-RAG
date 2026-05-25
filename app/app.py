@@ -21,6 +21,7 @@ import json
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from flask import Flask, render_template, request, jsonify
 
@@ -46,6 +47,23 @@ for d in [config.CHROMA_PATH, config.WIKI_PATH, config.UPLOAD_PATH]:
 executor = ThreadPoolExecutor(max_workers=10)
 
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
+
+def load_sessions():
+    if not os.path.exists(config.SESSIONS_PATH):
+        return {}
+    try:
+        with open(config.SESSIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error("Failed to load sessions: %s", e)
+        return {}
+
+def save_sessions(sessions):
+    try:
+        with open(config.SESSIONS_PATH, "w", encoding="utf-8") as f:
+            json.dump(sessions, f, indent=2)
+    except Exception as e:
+        logger.error("Failed to save sessions: %s", e)
 
 
 def _allowed_file(filename: str) -> bool:
@@ -144,6 +162,18 @@ def upload():
         executor.submit(_ingest_single_doc_rag, save_path, session_id, meta)
         executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
+    # Save session metadata
+    sessions = load_sessions()
+    sessions[session_id] = {
+        "id": session_id,
+        "name": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "files": len(saved_paths),
+        "history": []
+    }
+    save_sessions(sessions)
+
     # Return immediately — frontend will poll /progress
     return jsonify({
         "status": "accepted",
@@ -239,12 +269,62 @@ def query_route():
         hybrid_result = {"answer": f"⚠️ Hybrid error: {type(e).__name__}: {e}", "usage": {}}
     hybrid_result["elapsed_ms"] = round((time.time() - hybrid_t0) * 1000)
 
+    # Update session history
+    sessions = load_sessions()
+    if session_id in sessions:
+        # Avoid duplicate consecutive questions
+        if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
+            sessions[session_id].setdefault("history", []).insert(0, question)
+        sessions[session_id]["updated_at"] = time.time()
+        
+        # Rename session if it's the first question and still using the default name
+        if len(sessions[session_id]["history"]) == 1 and sessions[session_id]["name"].startswith("Session "):
+            new_name = question[:30] + ("..." if len(question) > 30 else "")
+            sessions[session_id]["name"] = new_name
+            
+        save_sessions(sessions)
+
     return jsonify({
         "rag": rag_result,
         "wiki": wiki_result,
         "hybrid": hybrid_result,
         "total_elapsed_ms": round((time.time() - t0) * 1000)
     })
+
+
+@app.route("/files")
+def file_structure():
+    """Return nested file tree of successfully embedded files."""
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({})
+        
+    try:
+        from services.rag import _get_collection
+        col = _get_collection(session_id)
+        docs = col.get(include=["metadatas"])
+        
+        paths = set()
+        for m in docs.get("metadatas", []):
+            if m:
+                path = m.get("relative_path", m.get("filename", "Unknown"))
+                path = path.replace("\\", "/")
+                paths.add(path)
+                
+        tree = {}
+        for p in paths:
+            parts = [x for x in p.split("/") if x]
+            curr = tree
+            for i, part in enumerate(parts):
+                if i == len(parts) - 1:
+                    curr[part] = "file"
+                else:
+                    curr = curr.setdefault(part, {})
+                    
+        return jsonify(tree)
+    except Exception as e:
+        logger.error("Failed to fetch file structure: %s", e)
+        return jsonify({})
 
 
 @app.route("/wiki/graph")
@@ -288,6 +368,41 @@ def progress():
     return jsonify(config.PROGRESS_STORE.get(session_id, {"rag": {}, "wiki": {}}))
 
 
+@app.route("/sessions", methods=["GET"])
+def get_sessions():
+    """Return all saved sessions sorted by recently updated."""
+    sessions = load_sessions()
+    session_list = sorted(sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True)
+    return jsonify({"sessions": session_list})
+
+
+@app.route("/session/<session_id>", methods=["GET"])
+def get_session(session_id):
+    """Return details for a specific session."""
+    sessions = load_sessions()
+    if session_id not in sessions:
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify(sessions[session_id])
+
+
+@app.route("/session/<session_id>", methods=["PUT"])
+def rename_session(session_id):
+    """Rename an existing session."""
+    data = request.get_json(silent=True) or {}
+    new_name = data.get("name", "").strip()
+    if not new_name:
+        return jsonify({"error": "Name is required"}), 400
+        
+    sessions = load_sessions()
+    if session_id not in sessions:
+        return jsonify({"error": "Session not found"}), 404
+        
+    sessions[session_id]["name"] = new_name
+    sessions[session_id]["updated_at"] = time.time()
+    save_sessions(sessions)
+    return jsonify({"status": "ok", "name": new_name})
+
+
 @app.route("/session", methods=["DELETE"])
 def clear_session():
     """Delete all data associated with a session (ChromaDB collection, wiki index, uploads)."""
@@ -329,6 +444,12 @@ def clear_session():
 
     # Clear progress store entry
     config.PROGRESS_STORE.pop(session_id, None)
+
+    # Remove from sessions metadata
+    sessions = load_sessions()
+    if session_id in sessions:
+        del sessions[session_id]
+        save_sessions(sessions)
 
     if errors:
         return jsonify({"status": "partial", "errors": errors})

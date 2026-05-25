@@ -29,6 +29,7 @@ _APP_DIR = os.path.abspath(os.path.dirname(__file__))
 CHROMA_PATH = os.path.join(_APP_DIR, "data", "chroma")
 WIKI_PATH = os.path.join(_APP_DIR, "data", "wiki")
 UPLOAD_PATH = os.path.join(_APP_DIR, "data", "uploads")
+SESSIONS_PATH = os.path.join(_APP_DIR, "data", "sessions.json")
 
 # Pre-create data directories at import time
 for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH]:
