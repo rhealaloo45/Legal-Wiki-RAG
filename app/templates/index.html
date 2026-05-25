@@ -108,15 +108,15 @@ body{background:var(--surface);min-height:100vh}
 .sim-bar{height:4px;border-radius:2px;background:rgba(255,255,255,.06)}
 .sim-fill{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--accent),#a78bfa);transition:width .6s ease}
 
-/* ── Wiki page browser ── */
-.page-browser{max-height:320px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent}
-.page-browser::-webkit-scrollbar{width:4px}
-.page-browser::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
-.page-item-btn{width:100%;text-align:left;background:transparent;border:none;color:#94a3b8;font-size:.82rem;padding:7px 12px;border-radius:8px;transition:all .2s;cursor:pointer}
-.page-item-btn:hover{background:rgba(45,212,191,.08);color:var(--accent2)}
-.page-search{background:var(--surface2);border:1px solid var(--glass-border);border-radius:10px;color:#e2e8f0;padding:8px 14px;font-size:.82rem;width:100%}
-.page-search:focus{outline:none;border-color:var(--accent2)}
-.page-detail-box{background:var(--surface);border-radius:10px;padding:14px;font-size:.82rem;color:#94a3b8;line-height:1.7;white-space:pre-wrap;max-height:260px;overflow-y:auto;border:1px solid var(--glass-border)}
+/* ── File Explorer ── */
+.file-tree { max-height:320px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.1) transparent; font-size:.82rem; color:#94a3b8; }
+.file-tree::-webkit-scrollbar { width:4px; }
+.file-tree::-webkit-scrollbar-thumb { background:rgba(255,255,255,.1); border-radius:2px; }
+.file-tree ul { list-style-type:none; padding-left:20px; margin-bottom:0; }
+.file-tree > ul { padding-left:0; }
+.file-tree li { margin:4px 0; }
+.folder-icon { color:#f6d365; margin-right:6px; }
+.file-icon { color:#a0aec0; margin-right:6px; }
 
 /* ── Graph ── */
 #wiki-graph{width:100%;height:420px;border-radius:12px;background:var(--surface);border:1px solid var(--glass-border);overflow:hidden}
@@ -134,6 +134,20 @@ body{background:var(--surface);min-height:100vh}
 .deep-toggle{font-size:.82rem;color:#64748b;cursor:pointer;transition:color .2s;user-select:none}
 .deep-toggle:hover{color:var(--accent2)}
 .section-label{font-size:.7rem;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#475569;margin-bottom:8px}
+
+/* ── Offcanvas Sidebar ── */
+.offcanvas{background:var(--surface);border-right:1px solid var(--glass-border)}
+.offcanvas-header{border-bottom:1px solid var(--glass-border)}
+.session-item{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;transition:all .2s;display:flex;justify-content:space-between;align-items:center}
+.session-item:hover{background:rgba(255,255,255,.03)}
+.session-item.active{background:rgba(124,58,237,.1);border-left:3px solid var(--accent)}
+.session-item-content{flex-grow:1;overflow:hidden;margin-right:10px}
+.session-title{font-size:.9rem;color:#e2e8f0;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.session-date{font-size:.75rem;color:#64748b;margin-top:4px}
+.session-actions{display:flex;gap:6px;opacity:0;transition:opacity .2s}
+.session-item:hover .session-actions{opacity:1}
+.btn-icon{background:transparent;border:none;color:#94a3b8;cursor:pointer;padding:4px;border-radius:4px}
+.btn-icon:hover{color:#e2e8f0;background:rgba(255,255,255,.1)}
 </style>
 </head>
 <body>
@@ -147,13 +161,33 @@ body{background:var(--surface);min-height:100vh}
 <!-- Navbar -->
 <nav class="navbar navbar-expand-lg px-4 py-3">
   <div class="container-fluid">
-    <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
+    <div class="d-flex align-items-center gap-3">
+      <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="offcanvas" data-bs-target="#historyOffcanvas" aria-controls="historyOffcanvas">
+        ☰ History
+      </button>
+      <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
+    </div>
     <div class="d-flex align-items-center gap-2">
       <span class="provider-badge">{{ llm_provider }}</span>
       <button class="btn-reset" id="reset-btn" style="display:none" title="Clear session and start fresh">↺ Reset Session</button>
     </div>
   </div>
 </nav>
+
+<!-- History Offcanvas -->
+<div class="offcanvas offcanvas-start" tabindex="-1" id="historyOffcanvas" aria-labelledby="historyOffcanvasLabel">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="historyOffcanvasLabel">Chat History</h5>
+    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="p-3 border-bottom border-secondary">
+    <button class="btn btn-accent w-100" onclick="newSession()">+ New Chat</button>
+  </div>
+  <div class="offcanvas-body p-0" id="session-list">
+    <!-- Sessions will be loaded here -->
+    <div class="p-4 text-center text-secondary small">Loading sessions...</div>
+  </div>
+</div>
 
 <div class="container-fluid px-4 py-4" style="max-width:1320px">
 
@@ -209,21 +243,15 @@ body{background:var(--surface);min-height:100vh}
     </div>
     
     <div class="col-lg-8 d-none" id="browser-col" style="transition: all 0.3s ease;">
-      <!-- Wiki Page Browser -->
-      <div class="glass-card p-4 h-100" id="page-browser-card">
+      <!-- File Explorer -->
+      <div class="glass-card p-4 h-100" id="file-explorer-card">
         <div class="d-flex align-items-center justify-content-between mb-3">
-          <span class="section-label mb-0">📚 Wiki Page Browser</span>
-          <span class="text-secondary" style="font-size:.75rem" id="page-count-label"></span>
+          <span class="section-label mb-0">📂 Embedded Files</span>
+          <span class="text-secondary" style="font-size:.75rem">Database Source of Truth</span>
         </div>
-        <div class="row g-3">
-          <div class="col-md-4">
-            <input type="text" class="page-search mb-2" id="page-search" placeholder="Search pages…">
-            <div class="page-browser" id="page-list"></div>
-          </div>
-          <div class="col-md-8">
-            <div class="section-label" id="page-detail-title" style="color:var(--accent2)">Select a page to read its content</div>
-            <div class="page-detail-box d-none" id="page-detail-box"></div>
-          </div>
+        <p class="text-secondary small mb-3">These are the exact files that successfully ingested into the RAG database.</p>
+        <div class="file-tree" id="file-tree">
+          <div class="text-center text-secondary py-3">Loading file structure...</div>
         </div>
       </div>
     </div>
@@ -318,8 +346,6 @@ body{background:var(--surface);min-height:100vh}
     </div>
   </div>
 
-  <!-- Wiki Page Browser moved to top row -->
-
   <!-- Compare Bar -->
   <div class="compare-bar d-none mb-5" id="compare-bar">
     <p class="text-secondary mb-2" style="font-size:.85rem">Which answer was more useful?</p>
@@ -368,13 +394,12 @@ body{background:var(--surface);min-height:100vh}
 // ============================================================
 // State
 // ============================================================
-const SID = crypto.randomUUID();
+let SID = crypto.randomUUID();
 let uploadDone = false;
 let wikiRelations = [];
 let wikiPages = {};
 let graphSim = null;
 let queryHistory = [];          // [{q, ragAnswer, wikiAnswer}]
-let allPageTitles = [];         // for the page browser
 let lastRagAnswer = '';
 let lastWikiAnswer = '';
 let ingestStartTime = null;     // for ETA calculation
@@ -416,12 +441,6 @@ const $hybridTiming= document.getElementById('hybrid-timing');
 const $ragCopyBtn  = document.getElementById('rag-copy-btn');
 const $wikiCopyBtn = document.getElementById('wiki-copy-btn');
 const $hybridCopyBtn = document.getElementById('hybrid-copy-btn');
-const $browserCard = document.getElementById('page-browser-card');
-const $pageList    = document.getElementById('page-list');
-const $pageSearch  = document.getElementById('page-search');
-const $pageCountLbl= document.getElementById('page-count-label');
-const $pageDetailTitle = document.getElementById('page-detail-title');
-const $pageDetailBox   = document.getElementById('page-detail-box');
 
 // ============================================================
 // Toast helper (replaces alert())
@@ -433,6 +452,141 @@ function showToast(msg, type = 'info') {
   document.getElementById('toast-container').appendChild(el);
   setTimeout(() => el.remove(), 4000);
 }
+
+// ============================================================
+// Session Management
+// ============================================================
+async function loadSessions() {
+  try {
+    const res = await fetch('/sessions');
+    const data = await res.json();
+    const sessions = data.sessions || [];
+    const $sessionList = document.getElementById('session-list');
+    
+    if (sessions.length === 0) {
+      $sessionList.innerHTML = '<div class="p-4 text-center text-secondary small">No past sessions found.</div>';
+      return;
+    }
+    
+    $sessionList.innerHTML = sessions.map(s => {
+      const date = new Date(s.created_at * 1000).toLocaleString();
+      const isActive = s.id === SID ? 'active' : '';
+      return `
+        <div class="session-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
+          <div class="session-item-content">
+            <div class="session-title" id="title-${s.id}">${s.name || 'Unnamed Session'}</div>
+            <div class="session-date">${date} • ${s.files} files</div>
+          </div>
+          <div class="session-actions">
+            <button class="btn-icon" onclick="event.stopPropagation(); editSessionName('${s.id}')" title="Rename">✎</button>
+            <button class="btn-icon" onclick="event.stopPropagation(); deleteSession('${s.id}')" title="Delete">🗑️</button>
+          </div>
+        </div>
+      `;
+    }).join('');
+  } catch(e) {
+    console.error('Failed to load sessions', e);
+  }
+}
+
+async function editSessionName(sessionId) {
+  const newName = prompt('Enter new session name:');
+  if (!newName || !newName.trim()) return;
+  
+  try {
+    const res = await fetch(`/session/${sessionId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName.trim() })
+    });
+    const d = await res.json();
+    if (d.status === 'ok') {
+      document.getElementById(`title-${sessionId}`).textContent = newName.trim();
+      showToast('Session renamed', 'success');
+    } else {
+      showToast(d.error || 'Failed to rename', 'error');
+    }
+  } catch(e) {
+    showToast('Failed to rename session', 'error');
+  }
+}
+
+async function resumeSession(sessionId) {
+  if (SID === sessionId) return; // Already active
+  
+  // Try loading session data
+  try {
+    const res = await fetch(`/session/${sessionId}`);
+    const data = await res.json();
+    
+    if (data.error) {
+      showToast(data.error, 'error');
+      return;
+    }
+    
+    SID = sessionId;
+    
+    // Close offcanvas
+    const offcanvasEl = document.getElementById('historyOffcanvas');
+    const offcanvas = bootstrap.Offcanvas.getInstance(offcanvasEl);
+    if (offcanvas) offcanvas.hide();
+    
+    // Setup UI for an active session
+    uploadDone = true;
+    
+    // Let's actually just show the browser card and hide the upload card entirely when resuming
+    document.getElementById('upload-col').classList.add('d-none');
+    document.getElementById('browser-col').className = 'col-lg-12';
+    document.getElementById('browser-col').classList.remove('d-none');
+    
+    // Re-enable inputs
+    $qInput.disabled = false;
+    $askBtn.disabled = false;
+    $resetBtn.style.display = '';
+    
+    // Hide answers if any are showing
+    $answerGrid.classList.add('d-none');
+    $compareBar.classList.add('d-none');
+    
+    // Restore history
+    queryHistory = data.history || [];
+    renderHistory();
+    
+    // Load wiki data
+    loadGraph();
+    loadFileTree();
+    showToast('Session resumed', 'info');
+    
+    // Refresh sidebar active state
+    loadSessions();
+    
+    showToast(`Resumed session: ${data.name}`, 'success');
+  } catch(e) {
+    showToast('Failed to resume session', 'error');
+  }
+}
+
+async function deleteSession(sessionId) {
+  if (!confirm('Are you sure you want to delete this session?')) return;
+  try {
+    await fetch(`/session?session_id=${sessionId}`, { method: 'DELETE' });
+    if (SID === sessionId) {
+       location.reload(); // Reload to get a fresh session if active was deleted
+    } else {
+       loadSessions();
+    }
+  } catch (e) {
+    showToast('Failed to delete session', 'error');
+  }
+}
+
+function newSession() {
+  // A fresh reload generates a new SID and completely clears the UI state
+  location.reload();
+}
+
+// Load sessions on startup
+document.addEventListener('DOMContentLoaded', loadSessions);
 
 // ============================================================
 // Upload — supports files + folders (including nested)
@@ -618,7 +772,7 @@ $uploadBtn.addEventListener('click', async () => {
           $qInput.focus();
 
           loadGraph();
-          loadPageBrowser();
+          loadFileTree();
           showToast(`All ${total} documents ingested successfully.`, 'success');
         }
       } catch(e) { console.error('Progress poll error:', e); }
@@ -870,42 +1024,47 @@ function vote(choice) {
 }
 
 // ============================================================
-// Wiki Page Browser
+// File Explorer
 // ============================================================
-async function loadPageBrowser() {
+async function loadFileTree() {
   try {
-    const res = await fetch(`/wiki/pages?session_id=${SID}`);
-    const d = await res.json();
-    allPageTitles = d.pages || [];
-    $pageCountLbl.textContent = `${allPageTitles.length} pages`;
-    $browserCard.classList.remove('d-none');
-    renderPageList(allPageTitles);
-  } catch(e) { console.error('Page browser load failed:', e); }
-}
-
-function renderPageList(titles) {
-  $pageList.innerHTML = titles.map(t =>
-    `<button class="page-item-btn" onclick="loadPageDetail('${t.replace(/'/g, "\\'")}')">${t}</button>`
-  ).join('');
-}
-
-$pageSearch.addEventListener('input', () => {
-  const q = $pageSearch.value.toLowerCase();
-  renderPageList(allPageTitles.filter(t => t.toLowerCase().includes(q)));
-});
-
-async function loadPageDetail(title) {
-  $pageDetailTitle.textContent = title;
-  $pageDetailBox.classList.remove('d-none');
-  $pageDetailBox.textContent = 'Loading…';
-  try {
-    const res = await fetch(`/wiki/page?session_id=${SID}&title=${encodeURIComponent(title)}`);
-    const d = await res.json();
-    if (d.error) { $pageDetailBox.textContent = d.error; return; }
-    $pageDetailBox.textContent = d.content;
-  } catch(e) {
-    $pageDetailBox.textContent = 'Failed to load page.';
+    const res = await fetch(`/files?session_id=${SID}`);
+    const tree = await res.json();
+    const container = document.getElementById('file-tree');
+    
+    if (Object.keys(tree).length === 0) {
+      container.innerHTML = '<div class="text-center text-secondary py-3">No files found.</div>';
+      return;
+    }
+    
+    container.innerHTML = buildTreeHtml(tree);
+  } catch(e) { 
+    console.error('File tree load failed:', e); 
+    document.getElementById('file-tree').innerHTML = '<div class="text-center text-danger py-3">Failed to load file structure.</div>';
   }
+}
+
+function buildTreeHtml(node) {
+  let html = '<ul>';
+  
+  // Sort folders first, then files
+  const keys = Object.keys(node).sort((a, b) => {
+    const aIsFolder = typeof node[a] === 'object';
+    const bIsFolder = typeof node[b] === 'object';
+    if (aIsFolder && !bIsFolder) return -1;
+    if (!aIsFolder && bIsFolder) return 1;
+    return a.localeCompare(b);
+  });
+
+  for (const key of keys) {
+    if (typeof node[key] === 'object') {
+      html += `<li><span class="folder-icon">📁</span>${key}${buildTreeHtml(node[key])}</li>`;
+    } else {
+      html += `<li><span class="file-icon">📄</span>${key}</li>`;
+    }
+  }
+  html += '</ul>';
+  return html;
 }
 
 // ============================================================
