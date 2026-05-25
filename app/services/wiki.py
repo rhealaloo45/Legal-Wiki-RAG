@@ -372,7 +372,12 @@ def ingest(file_path: str, session_id: str) -> dict:
 
         # Phase 2: Detailed segments concurrently
         completed_segments = 0
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        max_workers = (
+            config.WIKI_MAX_WORKERS_OPENROUTER
+            if config.LLM_PROVIDER == "openrouter"
+            else config.WIKI_MAX_WORKERS_OLLAMA
+        )
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_index = {
                 executor.submit(_ingest_detail_segment, seg, topics, doc_name): i
                 for i, seg in enumerate(segments)
@@ -539,22 +544,13 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
-def query(question: str, session_id: str) -> dict:
-    """Answer a question from the pre-built wiki using index-based retrieval.
-
-    Step 1: Send page titles + summaries to LLM, get back relevant page titles.
-    Step 2: Send only the selected pages' full content + question to LLM.
-    """
+def get_context(question: str, session_id: str) -> tuple[str, list]:
+    """Select relevant pages for a query and return them as a formatted string + list of titles."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
-    relations = index.get("relations", [])
 
     if not pages:
-        return {
-            "answer": "The wiki is empty — no documents have been ingested yet.",
-            "pages_used": [],
-            "relations": relations,
-        }
+        return "", []
 
     # --- Step 1: Select relevant pages via index ---
     # For small wikis (≤ 20 pages), skip selection and use all pages
@@ -572,38 +568,29 @@ def query(question: str, session_id: str) -> dict:
             wiki_parts.append(f"## {title}\n{content}\n")
     wiki_content = "\n".join(wiki_parts)
 
-    prompt = QUERY_PROMPT_TEMPLATE.format(
-        wiki_content=wiki_content, question=question
-    )
+    return wiki_content, selected_titles
+
+
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str) -> dict:
+    """Generate an answer using the provided wiki content."""
+    index = _load_index(session_id)
+    pages = index.get("pages", {})
+    relations = index.get("relations", [])
+
+    if not wiki_content:
+        return {
+            "answer": "The wiki is empty — no documents have been ingested yet.",
+            "pages_used": [],
+            "relations": relations,
+            "usage": {}
+        }
+
+    from services.prompts import ANSWER_PROMPT
+    prompt = ANSWER_PROMPT.format(context=wiki_content, question=question)
 
     usage = {}
     try:
-        raw_ans, usage = llm.ask(prompt, pipeline="wiki")
-
-        # Parse JSON output
-        parsed = _parse_json_safe(raw_ans)
-        if not isinstance(parsed, dict):
-            parsed = _repair_json(raw_ans)
-            if not isinstance(parsed, dict):
-                parsed = {}
-
-        answer = parsed.get("answer", raw_ans)
-
-        # Merge new knowledge back into the wiki
-        new_pages = parsed.get("new_pages", {})
-        new_relations = parsed.get("new_relations", [])
-
-        if new_pages or new_relations:
-            update_payload = {"pages": new_pages, "relations": new_relations}
-            lock = _get_session_lock(session_id)
-            with lock:
-                fresh_index = _load_index(session_id)
-                merged_index, _, _ = _merge_wiki(fresh_index, update_payload)
-                _save_index(session_id, merged_index)
-            # Update local lists for the response
-            pages = merged_index.get("pages", {})
-            relations = merged_index.get("relations", [])
-
+        answer, usage = llm.ask(prompt, pipeline="wiki")
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 

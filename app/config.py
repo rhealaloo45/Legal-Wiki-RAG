@@ -11,7 +11,18 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 OPENROUTER_API_KEY_WIKI = os.getenv("OPENROUTER_API_KEY_WIKI", "")
 OPENROUTER_API_KEY_RAG = os.getenv("OPENROUTER_API_KEY_RAG", "")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
+OPENROUTER_FALLBACK_MODELS = [
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen3-next-80b-a3b-instruct:free",
+    "deepseek/deepseek-v4-flash:free",
+    "google/gemma-4-31b-it:free",
+]
 EMBED_MODEL = "nomic-embed-text"
+
+# Concurrency settings per provider — free-tier OpenRouter rate-limits aggressively,
+# and Ollama on consumer hardware can't handle many parallel large prompts.
+WIKI_MAX_WORKERS_OPENROUTER = int(os.getenv("WIKI_MAX_WORKERS_OPENROUTER", "1"))
+WIKI_MAX_WORKERS_OLLAMA = int(os.getenv("WIKI_MAX_WORKERS_OLLAMA", "2"))
 
 # Resolve all data paths to absolute so they stay stable regardless of CWD
 _APP_DIR = os.path.abspath(os.path.dirname(__file__))

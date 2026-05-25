@@ -17,6 +17,7 @@ import os
 import sys
 import uuid
 import time
+import json
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -27,7 +28,7 @@ from flask import Flask, render_template, request, jsonify
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import rag, wiki
+from services import rag, wiki, hybrid
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -36,7 +37,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB upload limit
+app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024  # 256 MB total upload limit (folder uploads)
 
 # Ensure data directories exist
 for d in [config.CHROMA_PATH, config.WIKI_PATH, config.UPLOAD_PATH]:
@@ -78,7 +79,13 @@ def health():
 
 @app.route("/upload", methods=["POST"])
 def upload():
-    """Upload files → immediately accept, then ingest in background via executor."""
+    """Upload files or folders → immediately accept, then ingest in background via executor.
+
+    Supports nested folder uploads: the frontend sends a `relative_paths` JSON
+    array containing the original folder-relative path for each file (e.g.
+    "cases/2024/contract.pdf").  These are used to generate descriptive saved
+    filenames while keeping them flat on disk.
+    """
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
 
@@ -88,16 +95,37 @@ def upload():
     if not files or not files[0].filename:
         return jsonify({"error": "No file provided"}), 400
 
+    # Parse optional relative paths sent by the folder-upload frontend
+    relative_paths_raw = request.form.get("relative_paths", "")
+    try:
+        relative_paths = json.loads(relative_paths_raw) if relative_paths_raw else []
+    except (json.JSONDecodeError, TypeError):
+        relative_paths = []
+
     # Filter and save files to disk first (fast, synchronous)
     saved_paths = []
-    for file in files:
+    metadata_list = []
+    for i, file in enumerate(files):
         if not _allowed_file(file.filename):
             continue
-        safe_name = file.filename.replace(os.sep, "_")
+
+        rel_path = ""
+        # Use the relative path (if available) to build a descriptive flat name
+        if i < len(relative_paths) and relative_paths[i]:
+            rel_path = relative_paths[i]
+            # e.g. "cases/2024/contract.pdf" → "cases_2024_contract.pdf"
+            safe_name = rel_path.replace("/", "_").replace("\\", "_").replace(os.sep, "_")
+        else:
+            safe_name = file.filename.replace(os.sep, "_")
+
         save_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{safe_name}")
         file.save(save_path)
         saved_paths.append(save_path)
-        logger.info("Saved upload: %s", save_path)
+        metadata_list.append({
+            "relative_path": rel_path if rel_path else file.filename,
+            "filename": file.filename
+        })
+        logger.info("Saved upload: %s with relative path: %s", save_path, rel_path)
 
     if not saved_paths:
         return jsonify({"error": "No valid files (.txt, .pdf) found"}), 400
@@ -112,8 +140,8 @@ def upload():
     config.PROGRESS_STORE[session_id] = progress
 
     # Submit all tasks to executor (non-blocking)
-    for save_path in saved_paths:
-        executor.submit(_ingest_single_doc_rag, save_path, session_id)
+    for save_path, meta in zip(saved_paths, metadata_list):
+        executor.submit(_ingest_single_doc_rag, save_path, session_id, meta)
         executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
     # Return immediately — frontend will poll /progress
@@ -124,12 +152,15 @@ def upload():
     })
 
 
-def _ingest_single_doc_rag(file_path: str, session_id: str):
-    """Background task: ingest one document through RAG pipeline."""
+# ---------------------------------------------------------------------------
+# Background Pipelines
+# ---------------------------------------------------------------------------
+def _ingest_single_doc_rag(file_path: str, session_id: str, meta: dict = None):
+    """Worker for RAG embedding of a single doc."""
     try:
-        rag.ingest(file_path, session_id)
+        rag.ingest(file_path, session_id, meta)
     except Exception as e:
-        logger.error("RAG ingest error for %s: %s", os.path.basename(file_path), e)
+        logger.error("RAG ingest failed for %s: %s", file_path, e)
     finally:
         progress = config.PROGRESS_STORE.get(session_id, {})
         docs = progress.get("docs", {})
@@ -138,11 +169,11 @@ def _ingest_single_doc_rag(file_path: str, session_id: str):
 
 
 def _ingest_single_doc_wiki(file_path: str, session_id: str):
-    """Background task: ingest one document through Wiki pipeline."""
+    """Worker for Wiki building of a single doc."""
     try:
         wiki.ingest(file_path, session_id)
     except Exception as e:
-        logger.error("Wiki ingest error for %s: %s", os.path.basename(file_path), e)
+        logger.error("Wiki ingest failed for %s: %s", file_path, e)
     finally:
         progress = config.PROGRESS_STORE.get(session_id, {})
         docs = progress.get("docs", {})
@@ -161,7 +192,7 @@ def _check_completion(session_id: str):
 
 @app.route("/query", methods=["POST"])
 def query_route():
-    """Query both pipelines in parallel and return side-by-side answers with timing."""
+    """Query all pipelines (RAG, Wiki, Hybrid) in parallel and return side-by-side answers."""
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
     session_id = data.get("session_id", "")
@@ -171,30 +202,49 @@ def query_route():
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
 
+    # Step 1: Fetch contexts concurrently
     t0 = time.time()
-    rag_future = executor.submit(rag.query, question, session_id)
-    wiki_future = executor.submit(wiki.query, question, session_id)
+    rag_ctx_future = executor.submit(rag.get_context, question, session_id)
+    wiki_ctx_future = executor.submit(wiki.get_context, question, session_id)
+
+    rag_context, chunk_details = rag_ctx_future.result(timeout=60)
+    wiki_context, selected_titles = wiki_ctx_future.result(timeout=300) # Wiki context fetch does an LLM call if pages > 20
+
+    # Step 2: Generate answers concurrently
+    rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
+    wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id)
+    hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
 
     rag_t0 = time.time()
     try:
-        rag_result = rag_future.result(timeout=300)
+        rag_result = rag_ans_future.result(timeout=300)
     except Exception as e:
-        logger.error("RAG query error (%s): %s", type(e).__name__, e)
-        err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-        rag_result = {"answer": f"⚠️ RAG error: {err_msg}", "chunks": []}
+        logger.error("RAG generation error (%s): %s", type(e).__name__, e)
+        rag_result = {"answer": f"⚠️ RAG error: {type(e).__name__}: {e}", "chunks": []}
     rag_result["elapsed_ms"] = round((time.time() - rag_t0) * 1000)
 
     wiki_t0 = time.time()
     try:
-        wiki_result = wiki_future.result(timeout=300)
+        wiki_result = wiki_ans_future.result(timeout=300)
     except Exception as e:
-        logger.error("Wiki query error (%s): %s", type(e).__name__, e)
-        err_msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-        wiki_result = {"answer": f"⚠️ Wiki error: {err_msg}", "pages_used": [], "relations": []}
+        logger.error("Wiki generation error (%s): %s", type(e).__name__, e)
+        wiki_result = {"answer": f"⚠️ Wiki error: {type(e).__name__}: {e}", "pages_used": []}
     wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
 
-    logger.info("Query answered in %.2fs total", time.time() - t0)
-    return jsonify({"rag": rag_result, "wiki": wiki_result})
+    hybrid_t0 = time.time()
+    try:
+        hybrid_result = hybrid_ans_future.result(timeout=300)
+    except Exception as e:
+        logger.error("Hybrid generation error (%s): %s", type(e).__name__, e)
+        hybrid_result = {"answer": f"⚠️ Hybrid error: {type(e).__name__}: {e}", "usage": {}}
+    hybrid_result["elapsed_ms"] = round((time.time() - hybrid_t0) * 1000)
+
+    return jsonify({
+        "rag": rag_result,
+        "wiki": wiki_result,
+        "hybrid": hybrid_result,
+        "total_elapsed_ms": round((time.time() - t0) * 1000)
+    })
 
 
 @app.route("/wiki/graph")
