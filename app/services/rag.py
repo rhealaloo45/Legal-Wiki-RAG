@@ -2,9 +2,9 @@
 RAG pipeline — chunk → embed → store in ChromaDB → retrieve at query time.
 No LangChain. Simple sliding-window chunker.
 """
-
 import os
 import re
+import json
 import logging
 import threading
 import chromadb
@@ -68,8 +68,78 @@ def _read_file(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 # Chunking — simple sliding window
 # ---------------------------------------------------------------------------
+def _parse_json_safe(raw: str) -> dict | None:
+    """Try to parse JSON from LLM output by extracting the outermost brackets."""
+    start = raw.find('{')
+    end = raw.rfind('}')
+    
+    if start != -1 and end != -1 and end > start:
+        cleaned = raw[start:end+1]
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+            
+    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+
+def _extract_document_metadata(excerpt: str) -> dict:
+    """Extract document type, date, parties, and summary from the document excerpt using LLM."""
+    prompt = (
+        "You are a legal metadata extractor. Read the first page/excerpt of the document and extract key metadata.\n\n"
+        "Extract:\n"
+        "1. Document Type (e.g. Court Case Judgment, NDA, Service Agreement, Shareholder Agreement, Act, Ordinance, etc.)\n"
+        "2. Key Parties involved (e.g. Appellant, Respondent, Plaintiff, Defendant, Contracting Parties)\n"
+        "3. Important Date(s) (e.g. Judgment Date, Agreement Date, Effective Date)\n"
+        "4. A brief 1-2 sentence summary of the document's main subject.\n\n"
+        "DOCUMENT EXCERPT:\n"
+        f"{excerpt}\n\n"
+        "OUTPUT FORMAT — Respond with valid JSON only, no explanation, no markdown fences:\n"
+        "{\n"
+        "  \"document_type\": \"...\",\n"
+        "  \"parties\": \"...\",\n"
+        "  \"date\": \"...\",\n"
+        "  \"brief_summary\": \"...\"\n"
+        "}"
+    )
+    
+    try:
+        raw, _ = llm.ask(prompt, pipeline="rag")
+        parsed = _parse_json_safe(raw)
+        
+        # Simple fallback/repair logic using standard wiki repair utility if available
+        if parsed is None:
+            try:
+                import services.wiki as wiki_service
+                parsed = wiki_service._repair_json(raw)
+            except Exception:
+                pass
+        
+        if isinstance(parsed, dict):
+            return {
+                "document_type": parsed.get("document_type", "Unknown"),
+                "parties": parsed.get("parties", "Unknown"),
+                "date": parsed.get("date", "Unknown"),
+                "brief_summary": parsed.get("brief_summary", "Unknown")
+            }
+    except Exception as e:
+        logger.error("Failed to extract document metadata: %s", e)
+    
+    return {
+        "document_type": "Unknown",
+        "parties": "Unknown",
+        "date": "Unknown",
+        "brief_summary": "Unknown"
+    }
+
+
 def _chunk_text(text: str, source: str) -> list[dict]:
-    """Split text into overlapping chunks with metadata."""
+    """Split text into overlapping chunks with basic metadata."""
     chunks = []
     start = 0
     idx = 0
@@ -86,14 +156,76 @@ def _chunk_text(text: str, source: str) -> list[dict]:
     return chunks
 
 
+def _chunk_text_with_metadata(text: str, source: str, relative_path: str, filename: str, category: str, doc_metadata: dict) -> list[dict]:
+    """Split text into overlapping chunks and prepend metadata header to the text of each chunk."""
+    header = (
+        f"[Document Metadata]\n"
+        f"Filename: {filename}\n"
+        f"Relative Path: {relative_path}\n"
+        f"Category: {category}\n"
+        f"Document Type: {doc_metadata.get('document_type', 'Unknown')}\n"
+        f"Parties: {doc_metadata.get('parties', 'Unknown')}\n"
+        f"Date: {doc_metadata.get('date', 'Unknown')}\n"
+        f"Summary: {doc_metadata.get('brief_summary', 'Unknown')}\n"
+        f"---\n"
+    )
+    
+    chunks = []
+    start = 0
+    idx = 0
+    while start < len(text):
+        end = start + config.CHUNK_SIZE
+        chunk_body = text[start:end]
+        # Prepend the header to the chunk text so it is embedded and visible to the LLM
+        chunk_text = f"{header}{chunk_body}"
+        
+        chunks.append({
+            "source": source,
+            "chunk_index": idx,
+            "text": chunk_text,
+            "relative_path": relative_path,
+            "filename": filename,
+            "category": category,
+            "document_type": doc_metadata.get("document_type", "Unknown"),
+            "parties": doc_metadata.get("parties", "Unknown"),
+            "date": doc_metadata.get("date", "Unknown"),
+            "brief_summary": doc_metadata.get("brief_summary", "Unknown")
+        })
+        start += config.CHUNK_SIZE - config.CHUNK_OVERLAP
+        idx += 1
+    return chunks
+
+
 # ---------------------------------------------------------------------------
 # Ingest
 # ---------------------------------------------------------------------------
-def ingest(file_path: str, session_id: str) -> dict:
+def ingest(file_path: str, session_id: str, meta: dict = None) -> dict:
     """Read, chunk, embed, and store a file in ChromaDB."""
+    if meta is None:
+        meta = {}
+
     source_name = os.path.basename(file_path)
     text = _read_file(file_path)
-    chunks = _chunk_text(text, source_name)
+
+    # Extract path metadata
+    relative_path = meta.get("relative_path", source_name)
+    filename = meta.get("filename", source_name)
+    parts = [p for p in relative_path.replace("\\", "/").split("/") if p]
+    category = parts[-2] if len(parts) >= 2 else "General"
+
+    # Extract legal metadata via LLM using first 4000 characters
+    logger.info("Extracting document metadata for %s...", filename)
+    doc_metadata = _extract_document_metadata(text[:4000])
+    logger.info("Metadata extracted: %s", doc_metadata)
+
+    chunks = _chunk_text_with_metadata(
+        text=text, 
+        source=source_name,
+        relative_path=relative_path,
+        filename=filename,
+        category=category,
+        doc_metadata=doc_metadata
+    )
 
     logger.info("RAG ingest: %d chunks from %s", len(chunks), source_name)
 
@@ -109,13 +241,20 @@ def ingest(file_path: str, session_id: str) -> dict:
         metadatas.append({
             "source": ch["source"],
             "chunk_index": ch["chunk_index"],
+            "relative_path": ch["relative_path"],
+            "filename": ch["filename"],
+            "category": ch["category"],
+            "document_type": ch["document_type"],
+            "parties": ch["parties"],
+            "date": ch["date"],
+            "brief_summary": ch["brief_summary"],
         })
 
     progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
     progress["rag"] = {"current": 0, "total": len(documents), "message": f"Embedding {len(documents)} chunks (batch)..."}
 
-    # Batch embed all chunks in one call instead of one-at-a-time
-    embeddings = embedder.embed_batch(documents)
+    # Batch embed all chunks in one call instead of one-at-a-time (not a query)
+    embeddings = embedder.embed_batch(documents, is_query=False)
 
     progress["rag"]["current"] = len(documents)
     progress["rag"]["message"] = f"Complete: {len(chunks)} chunks stored."
@@ -136,11 +275,11 @@ def ingest(file_path: str, session_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
-def query(question: str, session_id: str) -> dict:
-    """Retrieve relevant chunks and answer via LLM."""
+def get_context(question: str, session_id: str) -> tuple[str, list]:
+    """Retrieve relevant chunks and format as a context string and chunk list."""
     collection = _get_collection(session_id)
 
-    q_embedding = embedder.embed(question)
+    q_embedding = embedder.embed(question, is_query=True)
     with _chroma_lock:
         results = collection.query(
             query_embeddings=[q_embedding],
@@ -161,27 +300,34 @@ def query(question: str, session_id: str) -> dict:
                 "chunk_index": cidx,
                 "text": doc,
                 "distance": round(dist, 4) if dist is not None else None,
+                "relative_path": meta.get("relative_path", ""),
+                "filename": meta.get("filename", ""),
+                "category": meta.get("category", ""),
+                "document_type": meta.get("document_type", ""),
+                "parties": meta.get("parties", ""),
+                "date": meta.get("date", ""),
+                "brief_summary": meta.get("brief_summary", ""),
             })
             context_parts.append(f"[{source}, chunk {cidx}]:\n{doc}")
 
     if not chunk_details:
+        return "", []
+
+    context = "\n---\n".join(context_parts)
+    return context, chunk_details
+
+
+def generate_answer(question: str, context: str, chunk_details: list) -> dict:
+    """Generate an answer using the provided RAG context."""
+    if not chunk_details:
         return {
-            "answer": "I’m sorry, but I can’t provide an answer based on the excerpts you requested.",
+            "answer": "I'm sorry, but I can't provide an answer based on the excerpts you requested.",
             "chunks": [],
             "usage": {}
         }
 
-    context = "\n---\n".join(context_parts)
-
-    prompt = (
-        "Answer using only these excerpts. Cite [Source, chunk N] inline.\n"
-        "If the provided excerpts do not contain the answer to the question, you must respond exactly with: "
-        "\"I’m sorry, but I can’t provide an answer based on the excerpts you requested.\"\n"
-        "---\n"
-        f"{context}\n"
-        "---\n"
-        f"Question: {question}"
-    )
+    from services.prompts import ANSWER_PROMPT
+    prompt = ANSWER_PROMPT.format(context=context, question=question)
 
     usage = {}
     try:
@@ -190,3 +336,9 @@ def query(question: str, session_id: str) -> dict:
         answer = f"⚠️ LLM error: {e}"
 
     return {"answer": answer, "chunks": chunk_details, "usage": usage}
+
+
+def query(question: str, session_id: str) -> dict:
+    """Convenience method combining retrieval and generation."""
+    context, chunk_details = get_context(question, session_id)
+    return generate_answer(question, context, chunk_details)

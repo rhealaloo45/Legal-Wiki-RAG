@@ -9,13 +9,15 @@ import ollama
 import config
 
 
-def embed(text: str) -> list[float]:
+def embed(text: str, is_query: bool = True) -> list[float]:
     """Generate an embedding vector for a single text."""
-    r = ollama.embeddings(model=config.EMBED_MODEL, prompt=text)
+    prefix = "search_query: " if is_query else "search_document: "
+    prefixed_text = text if text.startswith(prefix) else f"{prefix}{text}"
+    r = ollama.embeddings(model=config.EMBED_MODEL, prompt=prefixed_text)
     return r["embedding"]
 
 
-def embed_batch(texts: list[str]) -> list[list[float]]:
+def embed_batch(texts: list[str], is_query: bool = False) -> list[list[float]]:
     """Generate embedding vectors for multiple texts in one call.
 
     Falls back to sequential embedding if the batch API is unavailable
@@ -23,9 +25,11 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
     """
     if not texts:
         return []
+    prefix = "search_query: " if is_query else "search_document: "
+    prefixed_texts = [t if t.startswith(prefix) else f"{prefix}{t}" for t in texts]
     try:
-        r = ollama.embed(model=config.EMBED_MODEL, input=texts)
+        r = ollama.embed(model=config.EMBED_MODEL, input=prefixed_texts)
         return r["embeddings"]
     except (AttributeError, TypeError, KeyError):
         # Fallback: older ollama client without batch support
-        return [embed(t) for t in texts]
+        return [embed(t, is_query) for t in texts]

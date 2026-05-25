@@ -8,6 +8,7 @@
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 :root{
   --accent:#7c3aed;--accent2:#2dd4bf;
@@ -74,8 +75,25 @@ body{background:var(--surface);min-height:100vh}
 .pipeline-badge{font-size:.65rem;padding:3px 10px;border-radius:20px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
 .badge-rag{background:rgba(124,58,237,.15);color:#a78bfa;border:1px solid rgba(124,58,237,.3)}
 .badge-wiki{background:rgba(45,212,191,.12);color:var(--accent2);border:1px solid rgba(45,212,191,.25)}
-.answer-text{font-size:.92rem;line-height:1.7;color:#cbd5e1;white-space:pre-wrap}
+.answer-text{font-size:.92rem;line-height:1.7;color:#cbd5e1}
 .answer-text .page-ref{background:rgba(45,212,191,.12);color:var(--accent2);padding:2px 8px;border-radius:6px;cursor:pointer;font-size:.82rem;font-weight:500;transition:all .2s;border:1px solid rgba(45,212,191,.2)}
+/* Markdown rendered content */
+.answer-text h1,.answer-text h2,.answer-text h3,.answer-text h4{color:#e2e8f0;margin:1rem 0 .5rem;font-weight:600}
+.answer-text h1{font-size:1.3rem}.answer-text h2{font-size:1.15rem}.answer-text h3{font-size:1.05rem}
+.answer-text p{margin:0 0 .75rem}
+.answer-text ul,.answer-text ol{margin:.5rem 0;padding-left:1.5rem}
+.answer-text li{margin-bottom:.3rem}
+.answer-text strong{color:#e2e8f0}
+.answer-text em{color:#94a3b8}
+.answer-text table{width:100%;border-collapse:collapse;margin:.75rem 0;font-size:.85rem}
+.answer-text th{background:rgba(124,58,237,.15);color:#a78bfa;padding:8px 12px;text-align:left;border:1px solid var(--glass-border);font-weight:600}
+.answer-text td{padding:8px 12px;border:1px solid var(--glass-border);color:#cbd5e1}
+.answer-text tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+.answer-text blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;margin:.75rem 0;background:rgba(124,58,237,.06);border-radius:0 8px 8px 0;color:#94a3b8}
+.answer-text code{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:4px;font-size:.85em;color:#a78bfa}
+.answer-text pre{background:var(--surface);border:1px solid var(--glass-border);border-radius:8px;padding:12px;overflow-x:auto;margin:.75rem 0}
+.answer-text pre code{background:none;padding:0}
+.answer-text hr{border:none;border-top:1px solid var(--glass-border);margin:1rem 0}
 .answer-text .page-ref:hover{background:rgba(45,212,191,.25)}
 
 /* ── Timing badge ── */
@@ -146,10 +164,18 @@ body{background:var(--surface);min-height:100vh}
       <div class="glass-card p-4 h-100" id="upload-card">
     <div class="upload-zone" id="upload-zone">
       <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+      <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
       <div class="mb-2" style="font-size:2rem">📄</div>
-      <p class="mb-1 text-light fw-500">Drop <strong>.txt</strong> or <strong>.pdf</strong> files here</p>
-      <p class="text-secondary small mb-3">or click to upload multiple files</p>
-      <button class="btn btn-accent btn-sm" id="upload-btn" disabled>Upload &amp; Ingest</button>
+      <p class="mb-1 text-light fw-500" id="upload-label-main">Drop <strong>.txt</strong> / <strong>.pdf</strong> files or folders here</p>
+      <p class="text-secondary small mb-3" id="upload-sublabel">or choose below</p>
+      <div class="d-flex gap-2 justify-content-center flex-wrap">
+        <button class="btn btn-accent btn-sm" id="pick-files-btn" type="button">📄 Choose Files</button>
+        <button class="btn btn-accent btn-sm" id="pick-folder-btn" type="button" style="background:linear-gradient(135deg,var(--accent2),#14b8a6);color:#0f0f14">📁 Choose Folder</button>
+      </div>
+      <div class="mt-2 d-none" id="staged-info">
+        <span class="text-light small" id="staged-label"></span>
+      </div>
+      <button class="btn btn-accent btn-sm mt-2 d-none" id="upload-btn">Upload &amp; Ingest</button>
     </div>
 
     <!-- Progress bars -->
@@ -221,7 +247,7 @@ body{background:var(--surface);min-height:100vh}
   <div class="row g-4 mb-4 d-none" id="answer-grid">
 
     <!-- RAG Column -->
-    <div class="col-lg-6">
+    <div class="col-12">
       <div class="glass-card p-4 answer-col col-rag" id="rag-answer-card">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <div class="d-flex align-items-center gap-2">
@@ -245,7 +271,7 @@ body{background:var(--surface);min-height:100vh}
     </div>
 
     <!-- Wiki Column -->
-    <div class="col-lg-6">
+    <div class="col-12">
       <div class="glass-card p-4 answer-col col-wiki" id="wiki-answer-card">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <div class="d-flex align-items-center gap-2">
@@ -267,6 +293,29 @@ body{background:var(--surface);min-height:100vh}
         </div>
       </div>
     </div>
+
+    <!-- Hybrid Column -->
+    <div class="col-12">
+      <div class="glass-card p-4 answer-col col-hybrid" id="hybrid-answer-card">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <div class="d-flex align-items-center gap-2">
+            <span class="pipeline-badge" style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:#fff">Hybrid</span>
+            <span class="text-secondary" style="font-size:.78rem">RAG + Wiki</span>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <span class="timing-badge d-none" id="hybrid-timing"></span>
+            <button class="btn-copy d-none" id="hybrid-copy-btn" onclick="copyAnswer('hybrid')">Copy</button>
+          </div>
+        </div>
+        <div id="hybrid-answer-body">
+          <div class="spinner-overlay" id="hybrid-spinner"><div class="spinner-border text-secondary"></div></div>
+          <div class="answer-text d-none" id="hybrid-answer-text"></div>
+        </div>
+        <div class="mt-3 d-flex justify-content-end align-items-center">
+          <span class="text-secondary small d-none" id="hybrid-usage"></span>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Wiki Page Browser moved to top row -->
@@ -276,7 +325,8 @@ body{background:var(--surface);min-height:100vh}
     <p class="text-secondary mb-2" style="font-size:.85rem">Which answer was more useful?</p>
     <button class="btn btn-outline-light btn-sm" onclick="vote('rag')">👍 RAG</button>
     <button class="btn btn-outline-light btn-sm" onclick="vote('wiki')">👍 Wiki</button>
-    <button class="btn btn-outline-light btn-sm" onclick="vote('both')">Both useful</button>
+    <button class="btn btn-outline-light btn-sm" onclick="vote('hybrid')">👍 Hybrid</button>
+    <button class="btn btn-outline-light btn-sm" onclick="vote('all')">All useful</button>
     <p class="small text-secondary mt-2 d-none" id="vote-thanks">Thanks for your feedback!</p>
   </div>
 
@@ -335,8 +385,12 @@ let totalFilesQueued = 0;
 // ============================================================
 const $zone        = document.getElementById('upload-zone');
 const $file        = document.getElementById('file-input');
+const $folder      = document.getElementById('folder-input');
 const $uploadBtn   = document.getElementById('upload-btn');
-const $uploadLabel = document.getElementById('upload-label');
+const $pickFiles   = document.getElementById('pick-files-btn');
+const $pickFolder  = document.getElementById('pick-folder-btn');
+const $stagedInfo  = document.getElementById('staged-info');
+const $stagedLabel = document.getElementById('staged-label');
 const $progressWrap= document.getElementById('progress-wrap');
 const $statusBar   = document.getElementById('status-bar');
 const $ragStatus   = document.getElementById('rag-status');
@@ -346,8 +400,10 @@ const $askBtn      = document.getElementById('ask-btn');
 const $answerGrid  = document.getElementById('answer-grid');
 const $ragSpinner  = document.getElementById('rag-spinner');
 const $wikiSpinner = document.getElementById('wiki-spinner');
+const $hybridSpinner = document.getElementById('hybrid-spinner');
 const $ragText     = document.getElementById('rag-answer-text');
 const $wikiText    = document.getElementById('wiki-answer-text');
+const $hybridText  = document.getElementById('hybrid-answer-text');
 const $ragChunks   = document.getElementById('rag-chunks');
 const $compareBar  = document.getElementById('compare-bar');
 const $tooltip     = document.getElementById('node-tooltip');
@@ -356,8 +412,10 @@ const $historyWrap = document.getElementById('history-wrap');
 const $historyPills= document.getElementById('history-pills');
 const $ragTiming   = document.getElementById('rag-timing');
 const $wikiTiming  = document.getElementById('wiki-timing');
+const $hybridTiming= document.getElementById('hybrid-timing');
 const $ragCopyBtn  = document.getElementById('rag-copy-btn');
 const $wikiCopyBtn = document.getElementById('wiki-copy-btn');
+const $hybridCopyBtn = document.getElementById('hybrid-copy-btn');
 const $browserCard = document.getElementById('page-browser-card');
 const $pageList    = document.getElementById('page-list');
 const $pageSearch  = document.getElementById('page-search');
@@ -377,39 +435,115 @@ function showToast(msg, type = 'info') {
 }
 
 // ============================================================
-// Upload
+// Upload — supports files + folders (including nested)
 // ============================================================
-$zone.addEventListener('click', () => $file.click());
+let stagedFiles = [];  // [{file: File, relativePath: string}]
+
+// --- Picker buttons ---
+$pickFiles.addEventListener('click', (e) => { e.stopPropagation(); $file.click(); });
+$pickFolder.addEventListener('click', (e) => { e.stopPropagation(); $folder.click(); });
+
+// --- File input change ---
+$file.addEventListener('change', () => {
+  const valid = filterValidFiles(Array.from($file.files));
+  if (!valid.length) { showToast('No valid .txt or .pdf files found.', 'error'); return; }
+  stagedFiles = valid.map(f => ({ file: f, relativePath: f.name }));
+  updateStagedUI();
+});
+
+// --- Folder input change ---
+$folder.addEventListener('change', () => {
+  const allFiles = Array.from($folder.files);
+  const valid = filterValidFiles(allFiles);
+  if (!valid.length) { showToast('No .txt or .pdf files found in the folder.', 'error'); return; }
+  stagedFiles = valid.map(f => ({ file: f, relativePath: f.webkitRelativePath || f.name }));
+  updateStagedUI();
+});
+
+// --- Drag and drop (supports files AND folders) ---
 $zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
 $zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
-$zone.addEventListener('drop', e => {
+$zone.addEventListener('drop', async e => {
   e.preventDefault(); $zone.classList.remove('dragover');
-  if (e.dataTransfer.files.length) { $file.files = e.dataTransfer.files; onFileSelected(); }
-});
-$file.addEventListener('change', onFileSelected);
+  const items = e.dataTransfer.items;
+  if (!items || !items.length) return;
 
-function onFileSelected() {
-  if (!$file.files.length) return;
-  const f = $file.files[0];
-  const ext = f.name.split('.').pop().toLowerCase();
-  if (!['txt','pdf'].includes(ext)) {
-    showToast('Only .txt and .pdf files are supported.', 'error');
-    return;
+  const collected = [];
+  const promises = [];
+  for (const item of items) {
+    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+    if (entry) {
+      promises.push(walkEntry(entry, '', collected));
+    } else if (item.kind === 'file') {
+      const f = item.getAsFile();
+      if (f) collected.push({ file: f, relativePath: f.name });
+    }
   }
-  if (f.size > 16 * 1024 * 1024) {
-    showToast('File exceeds the 16 MB limit.', 'error');
-    return;
-  }
-  $uploadBtn.disabled = false;
-  if($file.files.length === 1) {
-    $zone.querySelector('p').textContent = $file.files[0].name;
-  } else {
-    $zone.querySelector('p').textContent = `${$file.files.length} files selected`;
-  }
+  await Promise.all(promises);
+
+  const valid = collected.filter(e => isAllowedExt(e.file.name));
+  if (!valid.length) { showToast('No valid .txt or .pdf files found.', 'error'); return; }
+  stagedFiles = valid;
+  updateStagedUI();
+});
+
+// --- Recursive directory entry walker ---
+function walkEntry(entry, basePath, collected) {
+  return new Promise(resolve => {
+    if (entry.isFile) {
+      entry.file(f => {
+        collected.push({ file: f, relativePath: basePath ? basePath + '/' + f.name : f.name });
+        resolve();
+      }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const dirPath = basePath ? basePath + '/' + entry.name : entry.name;
+      const readAll = (allEntries = []) => {
+        reader.readEntries(entries => {
+          if (entries.length === 0) {
+            Promise.all(allEntries.map(e => walkEntry(e, dirPath, collected))).then(resolve);
+          } else {
+            readAll(allEntries.concat(Array.from(entries)));
+          }
+        }, () => resolve());
+      };
+      readAll();
+    } else {
+      resolve();
+    }
+  });
 }
 
+// --- Helpers ---
+function isAllowedExt(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  return ['txt', 'pdf'].includes(ext);
+}
+
+function filterValidFiles(files) {
+  return files.filter(f => isAllowedExt(f.name) && f.size <= 16 * 1024 * 1024);
+}
+
+function updateStagedUI() {
+  if (!stagedFiles.length) {
+    $stagedInfo.classList.add('d-none');
+    $uploadBtn.classList.add('d-none');
+    return;
+  }
+  const folders = new Set(stagedFiles.map(e => {
+    const parts = e.relativePath.split('/');
+    return parts.length > 1 ? parts[0] : null;
+  }).filter(Boolean));
+  const folderInfo = folders.size ? ` from ${folders.size} folder${folders.size > 1 ? 's' : ''}` : '';
+  $stagedLabel.textContent = `${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''} selected${folderInfo}`;
+  $stagedInfo.classList.remove('d-none');
+  $uploadBtn.classList.remove('d-none');
+  $uploadBtn.disabled = false;
+}
+
+// --- Upload handler ---
 $uploadBtn.addEventListener('click', async () => {
-  if (!$file.files.length) return;
+  if (!stagedFiles.length) return;
   $uploadBtn.disabled = true;
   $progressWrap.classList.remove('d-none');
   $statusBar.classList.add('d-none');
@@ -421,13 +555,15 @@ $uploadBtn.addEventListener('click', async () => {
   document.getElementById('eta-label').textContent = '';
 
   const fd = new FormData();
-  for (let i = 0; i < $file.files.length; i++) {
-    fd.append('file', $file.files[i]);
+  const relativePaths = [];
+  for (const entry of stagedFiles) {
+    fd.append('file', entry.file, entry.file.name);
+    relativePaths.push(entry.relativePath);
   }
   fd.append('session_id', SID);
+  fd.append('relative_paths', JSON.stringify(relativePaths));
 
   try {
-    // Upload returns immediately now (non-blocking)
     const res = await fetch('/upload', { method: 'POST', body: fd });
     const d = await res.json();
     if (d.error) { showToast(d.error, 'error'); $uploadBtn.disabled = false; return; }
@@ -529,12 +665,15 @@ async function doQuery() {
   $answerGrid.classList.remove('d-none');
   $ragSpinner.classList.remove('d-none');  $ragText.classList.add('d-none');
   $wikiSpinner.classList.remove('d-none'); $wikiText.classList.add('d-none');
+  $hybridSpinner.classList.remove('d-none'); $hybridText.classList.add('d-none');
   $compareBar.classList.add('d-none');
   $ragChunks.innerHTML = '';
   $ragTiming.classList.add('d-none');
   $wikiTiming.classList.add('d-none');
+  $hybridTiming.classList.add('d-none');
   $ragCopyBtn.classList.add('d-none');
   $wikiCopyBtn.classList.add('d-none');
+  $hybridCopyBtn.classList.add('d-none');
 
   try {
     const res = await fetch('/query', {
@@ -547,7 +686,7 @@ async function doQuery() {
 
     // ── RAG answer ──
     lastRagAnswer = d.rag.answer || '';
-    $ragText.textContent = lastRagAnswer;
+    $ragText.innerHTML = renderMarkdown(lastRagAnswer);
     $ragSpinner.classList.add('d-none');
     $ragText.classList.remove('d-none');
     $ragText.classList.add('fade-in');
@@ -556,10 +695,6 @@ async function doQuery() {
       $ragTiming.classList.remove('d-none');
     }
     $ragCopyBtn.classList.remove('d-none');
-
-    // RAG answer
-    $ragText.textContent = d.rag.answer;
-    $ragSpinner.classList.add('d-none'); $ragText.classList.remove('d-none'); $ragText.classList.add('fade-in');
     
     // RAG usage
     const $ragUsage = document.getElementById('rag-usage');
@@ -597,7 +732,7 @@ async function doQuery() {
 
     // ── Wiki answer — wrap [Page Title] in clickable badges ──
     lastWikiAnswer = d.wiki.answer || '';
-    let wAnswer = lastWikiAnswer;
+    let wAnswer = renderMarkdown(lastWikiAnswer);
     const usedPages = d.wiki.pages_used || [];
     usedPages.forEach(p => {
       const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -623,6 +758,33 @@ async function doQuery() {
       $wikiUsage.classList.remove('d-none');
     }
 
+    // ── Hybrid answer ──
+    lastHybridAnswer = d.hybrid.answer || '';
+    let hAnswer = renderMarkdown(lastHybridAnswer);
+    usedPages.forEach(p => {
+      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      hAnswer = hAnswer.replace(
+        new RegExp('\\[' + esc + '\\]', 'g'),
+        `<span class="page-ref" onclick="highlightNode('${p.replace(/'/g, "\\'")}')">[${p}]</span>`
+      );
+    });
+    $hybridText.innerHTML = hAnswer;
+    $hybridSpinner.classList.add('d-none');
+    $hybridText.classList.remove('d-none');
+    $hybridText.classList.add('fade-in');
+    if (d.hybrid.elapsed_ms != null) {
+      $hybridTiming.textContent = formatMs(d.hybrid.elapsed_ms);
+      $hybridTiming.classList.remove('d-none');
+    }
+    $hybridCopyBtn.classList.remove('d-none');
+
+    // Hybrid usage
+    const $hybridUsage = document.getElementById('hybrid-usage');
+    if(d.hybrid.usage) {
+      $hybridUsage.textContent = `Tokens: ${d.hybrid.usage.prompt_tokens||0} in, ${d.hybrid.usage.completion_tokens||0} out`;
+      $hybridUsage.classList.remove('d-none');
+    }
+
     wikiRelations = d.wiki.relations||[];
     loadGraph();
 
@@ -636,6 +798,8 @@ async function doQuery() {
     $ragSpinner.classList.add('d-none'); $ragText.classList.remove('d-none');
     $wikiText.textContent = 'Error: ' + e;
     $wikiSpinner.classList.add('d-none'); $wikiText.classList.remove('d-none');
+    $hybridText.textContent = 'Error: ' + e;
+    $hybridSpinner.classList.add('d-none'); $hybridText.classList.remove('d-none');
   } finally {
     $askBtn.disabled = false;
   }
@@ -645,11 +809,23 @@ function formatMs(ms) {
   return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
 }
 
+function renderMarkdown(text) {
+  if (!text) return '';
+  try {
+    return marked.parse(text, { breaks: true, gfm: true });
+  } catch(e) {
+    // Fallback: escape HTML and convert newlines to <br>
+    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+  }
+}
+
 // ============================================================
 // Copy answer
 // ============================================================
 function copyAnswer(pipeline) {
-  const text = pipeline === 'rag' ? lastRagAnswer : lastWikiAnswer;
+  const text = pipeline === 'rag' ? lastRagAnswer : 
+               pipeline === 'wiki' ? lastWikiAnswer : 
+               lastHybridAnswer;
   if (!text) return;
   navigator.clipboard.writeText(text).then(() => {
     const btn = document.getElementById(`${pipeline}-copy-btn`);
