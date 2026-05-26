@@ -44,6 +44,11 @@ app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024  # 256 MB total upload limi
 for d in [config.CHROMA_PATH, config.WIKI_PATH, config.UPLOAD_PATH]:
     os.makedirs(d, exist_ok=True)
 
+# Configure Tesseract OCR path if set in .env (Windows users)
+if config.TESSERACT_CMD:
+    from services.reader import configure_tesseract
+    configure_tesseract(config.TESSERACT_CMD)
+
 executor = ThreadPoolExecutor(max_workers=10)
 
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}

@@ -8,10 +8,10 @@ import json
 import logging
 import threading
 import chromadb
-from pypdf import PdfReader
 
 import config
 from services import embedder, llm
+from services.reader import read_file as _read_file
 
 logger = logging.getLogger(__name__)
 
@@ -46,23 +46,6 @@ def _get_collection(session_id: str):
         )
 
 
-# ---------------------------------------------------------------------------
-# File reading
-# ---------------------------------------------------------------------------
-def _read_file(file_path: str) -> str:
-    """Read text from a .txt or .pdf file."""
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".pdf":
-        reader = PdfReader(file_path)
-        pages = [page.extract_text() or "" for page in reader.pages]
-        text = "\n".join(pages)
-    else:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    # Collapse excessive whitespace
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
 
 
 # ---------------------------------------------------------------------------

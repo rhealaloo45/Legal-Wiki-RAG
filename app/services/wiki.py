@@ -22,6 +22,7 @@ import concurrent.futures
 
 import config
 from services import llm
+from services.reader import read_file as _read_file
 
 logger = logging.getLogger(__name__)
 
@@ -84,20 +85,6 @@ def _save_index(session_id: str, index: dict):
         json.dump(index, f, indent=2, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------------------
-# File reading (mirrors rag.py but we need the full text, not chunks)
-# ---------------------------------------------------------------------------
-def _read_file(file_path: str) -> str:
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".pdf":
-        from pypdf import PdfReader
-        reader = PdfReader(file_path)
-        pages = [page.extract_text() or "" for page in reader.pages]
-        text = "\n".join(pages)
-    else:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -493,6 +480,80 @@ def _atomic_merge(session_id: str, new_data: dict) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# File-mention detection — prioritize pages from a specific source document
+# ---------------------------------------------------------------------------
+def _extract_doc_names(pages: dict) -> dict[str, str]:
+    """Extract unique document names from page titles.
+
+    Page titles follow the convention ``Topic Name (doc_name)``.  Returns a
+    mapping  {doc_name_from_title: doc_name_from_title}  so callers can look up
+    the canonical form used in titles.
+    """
+    doc_names: dict[str, str] = {}
+    for title in pages:
+        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
+        if match:
+            doc_names[match.group(1)] = match.group(1)
+    return doc_names
+
+
+def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
+    """Detect which source documents the user is asking about.
+
+    Builds several normalised variants of each doc name (with/without session
+    prefix, underscores replaced by spaces, etc.) and checks whether any of
+    them appear in the question text.  Returns the set of *canonical* doc names
+    (as they appear in page titles) that matched.
+    """
+    doc_names = _extract_doc_names(pages)
+    if not doc_names:
+        return set()
+
+    question_lower = question.lower()
+    matched: set[str] = set()
+
+    for canonical in doc_names:
+        # 1. Exact match on the full doc name
+        if canonical.lower() in question_lower:
+            matched.add(canonical)
+            continue
+
+        # 2. Strip a leading session-id prefix (UUID or hex followed by _)
+        stripped = re.sub(r'^[a-f0-9_-]+?_', '', canonical, count=1)
+        if stripped and stripped.lower() in question_lower:
+            matched.add(canonical)
+            continue
+
+        # 3. Replace underscores with spaces (user likely types spaces)
+        spacified = stripped.replace('_', ' ')
+        if spacified and spacified.lower() in question_lower:
+            matched.add(canonical)
+            continue
+
+        # 4. Also try the spacified version without the extension
+        no_ext = os.path.splitext(spacified)[0]
+        if no_ext and len(no_ext) >= 4 and no_ext.lower() in question_lower:
+            matched.add(canonical)
+            continue
+
+    if matched:
+        logger.info("Detected file mentions in query: %s", matched)
+
+    return matched
+
+
+def _pages_from_files(pages: dict, file_names: set[str]) -> list[str]:
+    """Return page titles that belong to any of the given source files."""
+    result = []
+    for title in pages:
+        for fname in file_names:
+            if fname in title:
+                result.append(title)
+                break
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Query — index-based retrieval for accuracy at scale
 # ---------------------------------------------------------------------------
 
@@ -545,21 +606,45 @@ QUESTION: {question}"""
 
 
 def get_context(question: str, session_id: str) -> tuple[str, list]:
-    """Select relevant pages for a query and return them as a formatted string + list of titles."""
+    """Select relevant pages for a query and return them as a formatted string + list of titles.
+
+    If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
+    all pages originating from that file are force-included so the answer stays
+    grounded in the correct document.
+    """
     index = _load_index(session_id)
     pages = index.get("pages", {})
 
     if not pages:
         return "", []
 
-    # --- Step 1: Select relevant pages via index ---
-    # For small wikis (≤ 20 pages), skip selection and use all pages
-    if len(pages) <= 20:
-        selected_titles = list(pages.keys())
-    else:
-        selected_titles = _select_relevant_pages(pages, question)
+    # --- Step 0: Detect file mentions in the question ---
+    mentioned_files = _detect_mentioned_files(question, pages)
+    file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
 
-    # --- Step 2: Answer from selected pages ---
+    # --- Step 1: Select relevant pages ---
+    if file_pages:
+        # File explicitly mentioned — force those pages in
+        if len(pages) <= 20:
+            # Small wiki: file pages first, then everything else
+            other = [t for t in pages if t not in file_pages]
+            selected_titles = file_pages + other
+        else:
+            # Large wiki: file pages + LLM-selected supplementary pages
+            llm_selected = _select_relevant_pages(pages, question)
+            seen = set(file_pages)
+            supplementary = [t for t in llm_selected if t not in seen]
+            selected_titles = file_pages + supplementary
+        logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
+                     len(file_pages), len(selected_titles))
+    else:
+        # No file mentioned — original behaviour
+        if len(pages) <= 20:
+            selected_titles = list(pages.keys())
+        else:
+            selected_titles = _select_relevant_pages(pages, question)
+
+    # --- Step 2: Build context string from selected pages ---
     wiki_parts = []
     for title in selected_titles:
         if title in pages:
