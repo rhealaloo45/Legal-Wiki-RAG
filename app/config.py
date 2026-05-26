@@ -41,3 +41,6 @@ TOP_K = int(os.getenv("TOP_K", "8"))
 
 # Global progress store for UI feedback
 PROGRESS_STORE = {}
+
+# OCR — path to Tesseract executable (set in .env if not on PATH)
+TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

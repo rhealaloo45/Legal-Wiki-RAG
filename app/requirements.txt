@@ -4,3 +4,6 @@ ollama
 pypdf
 requests
 python-dotenv
+pymupdf
+pytesseract
+Pillow

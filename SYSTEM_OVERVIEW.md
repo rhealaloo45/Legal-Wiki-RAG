@@ -1,12 +1,12 @@
-# System Overview: RAG vs LLM Wiki
+# System Overview: RAG, LLM Wiki, and Hybrid
 
-This application is a research tool designed to compare two distinct paradigms of working with large-scale document knowledge: **Retrieval-Augmented Generation (RAG)** and **LLM Wiki Synthesis**. It is optimized for batch ingestion of up to 50+ documents at once.
+This application is a research tool designed to compare distinct paradigms of working with large-scale document knowledge: **Retrieval-Augmented Generation (RAG)**, **LLM Wiki Synthesis**, and a **Hybrid** approach. It is optimized for batch ingestion of up to 50+ documents (including nested folders) at once.
 
 ## 1. High-Level Architecture
 
 The system is built as a **Single-Page Flask Application**:
-- **Backend**: Python/Flask utilizing a `ThreadPoolExecutor` (up to 10 workers) for parallel file ingestion and query processing. Uploads are **non-blocking** — the server accepts files and returns immediately while ingestion runs in background threads.
-- **Frontend**: Bootstrap 5 (Dark Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a responsive side-by-side layout, and a wiki page browser.
+- **Backend**: Python/Flask utilizing a `ThreadPoolExecutor` (up to 10 workers) for parallel file ingestion and query processing. Uploads are **non-blocking** — the server accepts files and returns immediately while ingestion runs in background threads. Features persistent session management with automatic naming.
+- **Frontend**: Bootstrap 5 (Dark Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a responsive side-by-side layout (comparing RAG, Wiki, and Hybrid), a wiki page browser, and a file tree viewer for nested uploads.
 - **LLM Engine**: Dual-provider support (Ollama for local embeddings, OpenRouter for cloud LLM reasoning).
 
 ### Concurrency & Routing Flow
@@ -26,8 +26,9 @@ graph TD
         Pool -- "Async Worker Thread" --> IngestWiki["_ingest_single_doc_wiki()"]
 
         QueryRoute -- "Submit parallel query tasks" --> QueryPool["ThreadPoolExecutor"]
-        QueryPool -- "Parallel Thread" --> RunRAGQuery["rag.query()"]
-        QueryPool -- "Parallel Thread" --> RunWikiQuery["wiki.query()"]
+        QueryPool -- "Parallel Thread" --> RunRAGContext["rag.get_context()"]
+        QueryPool -- "Parallel Thread" --> RunWikiContext["wiki.get_context()"]
+        RunRAGContext & RunWikiContext --> RunAnswers["Parallel Generation: RAG, Wiki, Hybrid"]
     end
 
     style BackendPool fill:#2d3748,stroke:#4a5568,stroke-width:2px,color:#fff
@@ -42,10 +43,11 @@ graph TD
 RAG treats documents as a **searchable database** of raw fragments.
 
 ### Ingest Phase
-1. **Extraction**: Reads `.pdf` (via `pypdf`) or `.txt` files.
-2. **Chunking**: Splits text into 2000-character windows with a 200-character overlap.
-3. **Batch Embedding**: Generates vector representations for all chunks in a single API call using local **Ollama** (`nomic-embed-text`) batch embedding.
-4. **Storage**: Persists vectors and metadata in **ChromaDB** collections (scoped per session). All writes are synchronized using a global re-entrant lock (`threading.RLock`) to ensure SQLite thread safety when multiple documents ingest concurrently.
+1. **Extraction**: Reads `.pdf` (via `pypdf`) or `.txt` files. Preserves relative paths for nested folder uploads.
+2. **Metadata Extraction**: Uses the LLM on the first 4000 characters to extract key metadata: `document_type`, `parties`, `date`, and `brief_summary`.
+3. **Chunking**: Splits text into 2000-character windows with a 200-character overlap. Crucially, the extracted metadata is **prepended as a header** to every single chunk so the LLM has global context for local text.
+4. **Batch Embedding**: Generates vector representations for all chunks in a single API call using local **Ollama** (`nomic-embed-text`) batch embedding.
+5. **Storage**: Persists vectors and rich metadata in **ChromaDB** collections (scoped per session). All writes are synchronized using a global re-entrant lock (`threading.RLock`) to ensure SQLite thread safety when multiple documents ingest concurrently.
 
 ### Query Phase
 1. **Retrieval**: Embeds the user's question and performs a vector similarity search (top-8 results by default, configurable via `TOP_K` in `.env`). Bypasses the LLM and immediately returns a standard fallback answer (`"I’m sorry, but I can’t provide an answer based on the excerpts you requested."`) if no chunks exist.
@@ -63,7 +65,8 @@ flowchart TD
 
     subgraph Ingestion
         StartI(["Upload Document"]) --> ExtractI["Extract & Normalize Text"]
-        ExtractI --> ChunkI["Sliding Window Chunker<br/>• Size: 2000 chars, Overlap: 200 chars"]
+        ExtractI --> MetaI["LLM Metadata Extraction<br/>(Doc Type, Parties, Date, Summary)"]
+        MetaI --> ChunkI["Sliding Window Chunker<br/>• Prepend metadata header to chunks"]
         ChunkI --> EmbedI["Batch Embed via Ollama<br/>• nomic-embed-text"]
         EmbedI --> DBWriteI{"ChromaDB Store<br/>Acquire sqlite lock"}
         DBWriteI -->|Thread-Safe Upsert| DBStoreI[("Persist Vectors in collection: rag_session_id")]
@@ -113,12 +116,15 @@ The system uses **adaptive segmentation** based on document length:
    - **Factual Precision**: Mandating exact verbatim figures and dates, forbidding hallucination.
    - **Legal Depth**: Instructing the extraction of precedents, statutory provisions, and judicial reasoning (ratio decidendi).
 
+**JSON Parsing & Repair:**
+- Employs robust JSON extraction (`_parse_json_safe`) and an automatic fallback repair mechanism (`_repair_json`) that asks the LLM to fix malformed JSON if parsing fails.
+
 **Merge & Persistence:**
-- **New Pages**: Added to the index with content and a one-line summary.
+- **New Pages**: Added to the index with content and a one-line summary (`{"title": {"content": "...", "summary": "..."}}`).
 - **Existing Pages**: Content is appended with a separator (`---`). Contradictions are flagged.
 - **Cross-Referencing**: Automatic pass to detect mentions of page titles within other pages.
 - **Thread Safety**: Per-session `threading.Lock` protects the load→merge→save cycle, preventing data loss during parallel multi-document ingestion.
-- **Storage**: The wiki is stored as a structured `index.json` per session, where each page contains both full `content` and a `summary` field.
+- **Storage**: The wiki is stored as a structured `index.json` per session.
 
 ### Query Phase — Index-Based Retrieval
 
@@ -189,36 +195,48 @@ flowchart TD
 
 ---
 
+## 4. Pipeline 3: Hybrid
 
-## 4. Upload & Progress System
+The Hybrid pipeline combines the strengths of both RAG (raw, exact text) and LLM Wiki (synthesized narrative). 
 
-The upload route is **non-blocking**:
-1. Files are saved to disk and ingestion tasks are submitted to the thread pool.
-2. The server returns immediately with `{"status": "accepted", "files_queued": N}`.
-3. The frontend polls `/progress` every 1.5 seconds, receiving document-level counters:
-   ```json
-   {"phase": "processing", "docs": {"total": 50, "rag_done": 12, "wiki_done": 8}}
-   ```
-4. Progress bars show `RAG: 12/50 docs | Wiki: 8/50 docs` with an ETA based on average per-document processing time.
-5. When all documents complete both pipelines, `phase` transitions to `"complete"` and the UI enables querying.
+1. **Parallel Context Fetching**: When a query is submitted, the system fetches RAG chunks and Wiki pages concurrently.
+2. **Context Merging**: The retrieved RAG excerpts and the full text of the selected Wiki pages are concatenated into a single large context block, separated by headers (`=== SYNTHESIZED WIKI PAGES ===` and `=== RAW EXCERPTS (RAG) ===`).
+3. **Unified Generation**: A single LLM call is made using this combined context. The LLM can draw upon the high-level synthesis of the Wiki while quoting exact clauses from the RAG chunks.
 
-
-## 5. Key Comparisons
-
-| Feature | RAG | LLM Wiki |
-| :--- | :--- | :--- |
-| **Data Unit** | Raw Chunks (Fixed Size) | Semantic Pages (Narrative Synthesis) |
-| **Logic** | Find similar text at query time | Build structured model at ingest time |
-| **Ingest Strategy** | Chunk → batch embed → thread-safe store | Adaptive: single-call (≤100K) or two-phase (overview → parallel detail 40K segments) |
-| **Query Strategy** | Vector similarity (top-8 chunks) | Index-based: select relevant pages by summary, then deep read |
-| **Visuals** | List of retrieved snippets with similarity scores | Interactive D3.js Knowledge Graph & Page Browser |
-| **Conflict Handling** | Standalone snippets; fallback if not found | Merges with `---` separators, flags contradictions |
-| **Strengths** | Faster ingest, exact retrieval, zero-hallucination fallback | Deep legal synthesis, relationship mapping, dynamic knowledge growth |
-| **Scale Behavior** | Handles 50+ docs via batch embedding and locked SQLite writes | Handles 50+ docs via index-based retrieval & parallel segment processing |
+### Shared Prompt Architecture
+To ensure a fair comparison, **all three pipelines (RAG, Wiki, Hybrid) use the exact same generation prompt** (`ANSWER_PROMPT` in `prompts.py`). The *only* variable is the context injected into the prompt.
 
 ---
 
-## 6. Technical Specifications
+## 5. Upload, Progress, and Session System
+
+**Uploads**:
+The upload route is **non-blocking** and supports nested folders:
+1. Files are saved to disk (preserving relative paths via frontend `relative_paths` array) and ingestion tasks are submitted to the thread pool.
+2. The server returns immediately with `{"status": "accepted", "files_queued": N}`.
+3. The frontend polls `/progress` every 1.5 seconds, receiving document-level counters.
+4. When all documents complete both pipelines, `phase` transitions to `"complete"` and the UI enables querying.
+
+**Sessions**:
+- The application supports multiple persistent sessions (`data/sessions.json`).
+- Sessions are automatically renamed based on the first question asked (first 30 characters).
+- Full session CRUD is supported, including clearing all ChromaDB and Wiki index data per session.
+
+
+## 6. Key Comparisons
+
+| Feature | RAG | LLM Wiki | Hybrid |
+| :--- | :--- | :--- |
+| **Data Unit** | Raw Chunks (Fixed Size) | Semantic Pages (Narrative Synthesis) | Both Chunks & Pages |
+| **Logic** | Find similar text at query time | Build structured model at ingest time | Parallel retrieval & merged context |
+| **Ingest Strategy** | Meta-extraction → Chunk → embed → store | Adaptive: single-call or two-phase | (Uses RAG and Wiki ingest pipelines) |
+| **Query Strategy** | Vector similarity (top-8 chunks) | Select relevant pages by summary, then read | Fetch both concurrently → combined prompt |
+| **Visuals** | List of snippets + Similarity | D3.js Knowledge Graph + Page Browser | Side-by-side comparison in UI |
+| **Strengths** | Exact retrieval, zero-hallucination fallback | Deep synthesis, relationship mapping | Best of both: exact quotes + deep synthesis |
+
+---
+
+## 7. Technical Specifications
 
 - **Embeddings**: `nomic-embed-text` (Local via Ollama, batch API)
 - **LLM**: `openai/gpt-oss-120b:free` (OpenRouter) or local Ollama fallback
