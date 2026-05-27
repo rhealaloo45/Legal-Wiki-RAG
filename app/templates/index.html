@@ -168,6 +168,7 @@ body{background:var(--surface);min-height:100vh}
       <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
     </div>
     <div class="d-flex align-items-center gap-2">
+      <button class="btn btn-outline-light btn-sm d-none" id="view-folder-btn" data-bs-toggle="modal" data-bs-target="#folderModal">📂 View Folder Structure</button>
       <span class="provider-badge">{{ llm_provider }}</span>
       <button class="btn-reset" id="reset-btn" style="display:none" title="Clear session and start fresh">↺ Reset Session</button>
     </div>
@@ -240,21 +241,6 @@ body{background:var(--surface);min-height:100vh}
       <span class="wiki-stat" id="wiki-status"></span>
     </div>
   </div>
-    </div>
-    
-    <div class="col-lg-8 d-none" id="browser-col" style="transition: all 0.3s ease;">
-      <!-- File Explorer -->
-      <div class="glass-card p-4 h-100" id="file-explorer-card">
-        <div class="d-flex align-items-center justify-content-between mb-3">
-          <span class="section-label mb-0">📂 Embedded Files</span>
-          <span class="text-secondary" style="font-size:.75rem">Database Source of Truth</span>
-        </div>
-        <p class="text-secondary small mb-3">These are the exact files that successfully ingested into the RAG database.</p>
-        <div class="file-tree" id="file-tree">
-          <div class="text-center text-secondary py-3">Loading file structure...</div>
-        </div>
-      </div>
-    </div>
   </div>
 
   <!-- Query Bar -->
@@ -275,7 +261,7 @@ body{background:var(--surface);min-height:100vh}
   <div class="row g-4 mb-4 d-none" id="answer-grid">
 
     <!-- RAG Column -->
-    <div class="col-12">
+    <div class="col-12 d-none">
       <div class="glass-card p-4 answer-col col-rag" id="rag-answer-card">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <div class="d-flex align-items-center gap-2">
@@ -305,6 +291,7 @@ body{background:var(--surface);min-height:100vh}
           <div class="d-flex align-items-center gap-2">
             <span class="pipeline-badge badge-wiki">Synthesized</span>
             <span class="text-secondary" style="font-size:.78rem">Wiki Pipeline</span>
+            <span class="pipeline-badge d-none" id="wiki-confidence-badge" style="font-size:.7rem; cursor:help;" title="">Confidence: --%</span>
           </div>
           <div class="d-flex align-items-center gap-2">
             <span class="timing-badge d-none" id="wiki-timing"></span>
@@ -314,6 +301,11 @@ body{background:var(--surface);min-height:100vh}
         <div id="wiki-answer-body">
           <div class="spinner-overlay" id="wiki-spinner"><div class="spinner-border text-secondary"></div></div>
           <div class="answer-text d-none" id="wiki-answer-text"></div>
+          <!-- Citations section -->
+          <div class="mt-3 pt-3 border-top border-secondary d-none" id="wiki-citations-section" style="border-top-style: dashed !important;">
+            <div class="section-label" style="font-size: .75rem; color: var(--accent2);">Citations</div>
+            <div class="d-flex flex-wrap gap-2" id="wiki-citations-list"></div>
+          </div>
         </div>
         <div class="mt-3 d-flex justify-content-between align-items-center">
           <button class="btn btn-link p-0 text-decoration-none deep-toggle" data-bs-toggle="modal" data-bs-target="#wikiModal" onclick="setTimeout(renderGraph, 200)">▸ Deep Understanding</button>
@@ -323,7 +315,7 @@ body{background:var(--surface);min-height:100vh}
     </div>
 
     <!-- Hybrid Column -->
-    <div class="col-12">
+    <div class="col-12 d-none">
       <div class="glass-card p-4 answer-col col-hybrid" id="hybrid-answer-card">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <div class="d-flex align-items-center gap-2">
@@ -383,6 +375,24 @@ body{background:var(--surface);min-height:100vh}
       </div>
       <div class="modal-body p-0">
         <div id="wiki-graph"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Folder Structure Modal -->
+<div class="modal fade" id="folderModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content text-bg-dark">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">📂 Embedded Files</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-secondary small mb-3">These are the exact files that successfully ingested into the RAG database.</p>
+        <div class="file-tree" id="file-tree">
+          <div class="text-center text-secondary py-3">Loading file structure...</div>
+        </div>
       </div>
     </div>
   </div>
@@ -534,10 +544,9 @@ async function resumeSession(sessionId) {
     // Setup UI for an active session
     uploadDone = true;
     
-    // Let's actually just show the browser card and hide the upload card entirely when resuming
+    // Let's actually hide the upload card entirely when resuming
     document.getElementById('upload-col').classList.add('d-none');
-    document.getElementById('browser-col').className = 'col-lg-12';
-    document.getElementById('browser-col').classList.remove('d-none');
+    document.getElementById('view-folder-btn').classList.remove('d-none');
     
     // Re-enable inputs
     $qInput.disabled = false;
@@ -675,7 +684,23 @@ function isAllowedExt(name) {
 }
 
 function filterValidFiles(files) {
-  return files.filter(f => isAllowedExt(f.name) && f.size <= 16 * 1024 * 1024);
+  const maxSize = 100 * 1024 * 1024; // 100 MB
+  const valid = [];
+  const skipped = [];
+  for (const f of files) {
+    if (!isAllowedExt(f.name)) {
+      skipped.push(`${f.name} (unsupported type)`);
+    } else if (f.size > maxSize) {
+      skipped.push(`${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB — exceeds 100 MB limit)`);
+    } else {
+      valid.push(f);
+    }
+  }
+  if (skipped.length > 0) {
+    showToast(`Skipped ${skipped.length} file(s): ${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? '...' : ''}`, 'error');
+    console.warn('Skipped files:', skipped);
+  }
+  return valid;
 }
 
 function updateStagedUI() {
@@ -761,8 +786,7 @@ $uploadBtn.addEventListener('click', async () => {
           $wikiStatus.textContent = `Wiki: processing complete`;
           $statusBar.classList.remove('d-none');
 
-          document.getElementById('upload-col').className = 'col-lg-4';
-          document.getElementById('browser-col').classList.remove('d-none');
+          document.getElementById('view-folder-btn').classList.remove('d-none');
 
           uploadDone = true;
           $qInput.disabled = false;
@@ -828,6 +852,11 @@ async function doQuery() {
   $ragCopyBtn.classList.add('d-none');
   $wikiCopyBtn.classList.add('d-none');
   $hybridCopyBtn.classList.add('d-none');
+  
+  const $wikiConf = document.getElementById('wiki-confidence-badge');
+  if ($wikiConf) $wikiConf.classList.add('d-none');
+  const $citationsSection = document.getElementById('wiki-citations-section');
+  if ($citationsSection) $citationsSection.classList.add('d-none');
 
   try {
     const res = await fetch('/query', {
@@ -905,6 +934,65 @@ async function doQuery() {
     }
     $wikiCopyBtn.classList.remove('d-none');
 
+    // Confidence badge
+    const $wikiConf = document.getElementById('wiki-confidence-badge');
+    if (d.wiki.confidence_score != null) {
+      $wikiConf.textContent = `Confidence: ${d.wiki.confidence_score}%`;
+      $wikiConf.title = d.wiki.confidence_reason || '';
+      $wikiConf.classList.remove('d-none');
+      // Apply color dynamically
+      const score = d.wiki.confidence_score;
+      if (score >= 80) {
+        $wikiConf.style.backgroundColor = 'rgba(34, 197, 94, 0.15)';
+        $wikiConf.style.color = '#86efac';
+        $wikiConf.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+      } else if (score >= 50) {
+        $wikiConf.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
+        $wikiConf.style.color = '#fde047';
+        $wikiConf.style.border = '1px solid rgba(245, 158, 11, 0.3)';
+      } else {
+        $wikiConf.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
+        $wikiConf.style.color = '#fca5a5';
+        $wikiConf.style.border = '1px solid rgba(239, 68, 68, 0.3)';
+      }
+    } else {
+      $wikiConf.classList.add('d-none');
+    }
+
+    // Render Citations
+    const $citationsSection = document.getElementById('wiki-citations-section');
+    const $citationsList = document.getElementById('wiki-citations-list');
+    if ($citationsList) {
+      $citationsList.innerHTML = '';
+      const filesUsed = d.wiki.files_used || [];
+      const pagesUsed = d.wiki.pages_used || [];
+      
+      if (filesUsed.length > 0 || pagesUsed.length > 0) {
+        // 1. Files cited
+        filesUsed.forEach(f => {
+          $citationsList.innerHTML += `
+            <span class="pipeline-badge" style="background: rgba(255,255,255,0.06); border: 1px solid var(--glass-border); color: #e2e8f0;">
+              📄 ${f}
+            </span>
+          `;
+        });
+        
+        // 2. Wiki pages cited
+        pagesUsed.forEach(p => {
+          const cleanTitle = p.replace(/\s*\([^)]+\)\s*$/, '');
+          $citationsList.innerHTML += `
+            <span class="pipeline-badge badge-wiki" style="cursor: pointer;" onclick="highlightNode('${p.replace(/'/g, "\\'")}')" title="Click to view in knowledge graph">
+              🔗 ${cleanTitle}
+            </span>
+          `;
+        });
+        
+        $citationsSection.classList.remove('d-none');
+      } else {
+        $citationsSection.classList.add('d-none');
+      }
+    }
+
     // Wiki usage
     const $wikiUsage = document.getElementById('wiki-usage');
     if(d.wiki.usage) {
@@ -945,7 +1033,8 @@ async function doQuery() {
     // ── Save to history ──
     addToHistory(q);
 
-    $compareBar.classList.remove('d-none');
+    // Keep compare bar hidden since RAG and Hybrid outputs are hidden
+    // $compareBar.classList.remove('d-none');
   } catch(e) {
     showToast('Query failed: ' + e, 'error');
     $ragText.textContent = 'Error: ' + e;
@@ -1156,19 +1245,26 @@ function renderGraph() {
 }
 
 function highlightNode(title) {
-  if (!graphSim) return;
-  const deepEl = document.getElementById('wiki-deep');
-  if (!deepEl.classList.contains('show')) { new bootstrap.Collapse(deepEl).show(); }
-  graphSim.node.transition().duration(200)
-    .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-    .attr('opacity', .4);
-  graphSim.node.filter(d => d.id === title).transition().duration(300)
-    .attr('r', 20).attr('opacity', 1).attr('fill', '#2dd4bf')
-    .transition().duration(1200)
-    .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-    .attr('fill', d => graphSim.color(d.id));
-  graphSim.node.transition().delay(1500).duration(300).attr('opacity', 1);
-  document.getElementById('wiki-graph').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const modalEl = document.getElementById('wikiModal');
+  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  modal.show();
+  
+  if (!graphSim) {
+    renderGraph();
+  }
+  
+  setTimeout(() => {
+    if (!graphSim) return;
+    graphSim.node.transition().duration(200)
+      .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
+      .attr('opacity', .4);
+    graphSim.node.filter(d => d.id === title).transition().duration(300)
+      .attr('r', 20).attr('opacity', 1).attr('fill', '#2dd4bf')
+      .transition().duration(1200)
+      .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
+      .attr('fill', d => graphSim.color(d.id));
+    graphSim.node.transition().delay(1500).duration(300).attr('opacity', 1);
+  }, 300);
 }
 </script>
 </body>

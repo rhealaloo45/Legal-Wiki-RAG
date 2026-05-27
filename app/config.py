@@ -3,26 +3,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openrouter")      # "ollama" | "openrouter"
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 
-# Separate OpenRouter keys per pipeline
-OPENROUTER_API_KEY_WIKI = os.getenv("OPENROUTER_API_KEY_WIKI", "")
-OPENROUTER_API_KEY_RAG = os.getenv("OPENROUTER_API_KEY_RAG", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-oss-120b:free")
-OPENROUTER_FALLBACK_MODELS = [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen3-next-80b-a3b-instruct:free",
-    "deepseek/deepseek-v4-flash:free",
-    "google/gemma-4-31b-it:free",
-]
-EMBED_MODEL = "nomic-embed-text"
-
-# Concurrency settings per provider — free-tier OpenRouter rate-limits aggressively,
-# and Ollama on consumer hardware can't handle many parallel large prompts.
-WIKI_MAX_WORKERS_OPENROUTER = int(os.getenv("WIKI_MAX_WORKERS_OPENROUTER", "1"))
-WIKI_MAX_WORKERS_OLLAMA = int(os.getenv("WIKI_MAX_WORKERS_OLLAMA", "2"))
+# Concurrency settings for wiki pipeline
+WIKI_MAX_WORKERS = int(os.getenv("WIKI_MAX_WORKERS", "3"))
 
 # Resolve all data paths to absolute so they stay stable regardless of CWD
 _APP_DIR = os.path.abspath(os.path.dirname(__file__))

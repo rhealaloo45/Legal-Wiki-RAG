@@ -53,8 +53,11 @@ def configure_tesseract(cmd_path: str | None = None):
         configure_tesseract(r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
     """
     if cmd_path and _ocr_available:
-        import pytesseract as _pt
-        _pt.pytesseract.tesseract_cmd = cmd_path
+        # Set on both the top-level module and the submodule to ensure
+        # the path is found regardless of which attribute the library
+        # version checks internally.
+        pytesseract.tesseract_cmd = cmd_path
+        pytesseract.pytesseract.tesseract_cmd = cmd_path
         logger.info("Tesseract path set to: %s", cmd_path)
 
 
@@ -77,7 +80,26 @@ def read_file(file_path: str) -> str:
     # Collapse excessive whitespace (shared cleanup)
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
-    return text.strip()
+    text = text.strip()
+
+    # Warn if extraction yielded very little text (likely a scanned/image PDF
+    # where OCR failed or wasn't available)
+    fname = os.path.basename(file_path)
+    if len(text) < 100:
+        logger.warning(
+            "EXTRACTION WARNING: '%s' yielded only %d chars. "
+            "This file may be a scanned/image PDF that needs better OCR, "
+            "or the file may be empty/corrupted.",
+            fname, len(text),
+        )
+    elif len(text) < 500:
+        logger.warning(
+            "EXTRACTION WARNING: '%s' yielded only %d chars (low). "
+            "Some pages may not have been extracted correctly.",
+            fname, len(text),
+        )
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -145,22 +167,118 @@ def _read_pdf(file_path: str) -> str:
     return "\n".join(pypdf_texts)
 
 
+def _preprocess_for_ocr(img: "Image.Image") -> "Image.Image":
+    """Apply image preprocessing to improve OCR accuracy on scanned/redacted PDFs.
+
+    Steps:
+      1. Convert to grayscale
+      2. Increase contrast (optional, via histogram stretching)
+      3. Apply Otsu binarization for clean black/white text
+      4. Remove noise via median filter
+
+    Falls back to the original image if any step fails (e.g. if numpy is missing).
+    """
+    try:
+        from PIL import ImageFilter, ImageOps
+
+        # 1. Grayscale
+        gray = img.convert("L")
+
+        # 2. Auto-contrast — stretches histogram to use full 0-255 range
+        contrasted = ImageOps.autocontrast(gray, cutoff=1)
+
+        # 3. Otsu-like binarization via simple threshold
+        #    (Use Pillow's built-in point operation; no numpy needed)
+        threshold = _otsu_threshold(contrasted)
+        binary = contrasted.point(lambda px: 255 if px > threshold else 0, mode="1")
+
+        # 4. Light noise removal — median filter
+        cleaned = binary.convert("L").filter(ImageFilter.MedianFilter(size=3))
+
+        return cleaned
+    except Exception as e:
+        logger.debug("Image preprocessing failed, using raw image: %s", e)
+        return img
+
+
+def _otsu_threshold(gray_img: "Image.Image") -> int:
+    """Compute an Otsu-like threshold from a grayscale PIL Image.
+
+    This avoids a numpy dependency — builds a 256-bin histogram from Pillow,
+    then sweeps for the threshold that minimises intra-class variance.
+    """
+    hist = gray_img.histogram()  # 256 entries
+    total_pixels = sum(hist)
+    if total_pixels == 0:
+        return 128
+
+    sum_total = sum(i * hist[i] for i in range(256))
+    sum_bg = 0.0
+    weight_bg = 0
+    best_thresh = 128
+    best_var = 0.0
+
+    for t in range(256):
+        weight_bg += hist[t]
+        if weight_bg == 0:
+            continue
+        weight_fg = total_pixels - weight_bg
+        if weight_fg == 0:
+            break
+
+        sum_bg += t * hist[t]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_total - sum_bg) / weight_fg
+
+        var_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
+        if var_between > best_var:
+            best_var = var_between
+            best_thresh = t
+
+    return best_thresh
+
+
 def _ocr_page(page) -> str:
     """Render a single pymupdf page to an image and OCR it with Tesseract.
 
-    Uses 300 DPI for high accuracy on legal documents, and psm 6
-    (assume a single uniform block of text).
+    Uses 300 DPI for high accuracy on legal documents.  Tries multiple PSM
+    modes and picks the result with the most extracted text.
     """
     # Render at 300 DPI (default PDF is 72 DPI)
     mat = fitz.Matrix(300 / 72, 300 / 72)
     pix = page.get_pixmap(matrix=mat)
 
-    # Convert pymupdf pixmap → PIL Image → Tesseract
-    img = Image.open(io.BytesIO(pix.tobytes("png")))
+    # Convert pymupdf pixmap → PIL Image
+    raw_img = Image.open(io.BytesIO(pix.tobytes("png")))
 
-    text = pytesseract.image_to_string(
-        img,
-        lang="eng",
-        config="--psm 6",  # uniform block of text — best for full-page docs
-    )
-    return text
+    # Preprocess for better OCR
+    processed_img = _preprocess_for_ocr(raw_img)
+
+    # Try multiple PSM modes and keep the best result
+    best_text = ""
+    for psm in ("6", "3", "4"):  # 6=uniform block, 3=auto, 4=single column
+        try:
+            text = pytesseract.image_to_string(
+                processed_img,
+                lang="eng",
+                config=f"--psm {psm}",
+            )
+            if len(text.strip()) > len(best_text.strip()):
+                best_text = text
+        except Exception:
+            continue
+
+    # If preprocessed image gave poor results, try raw image as fallback
+    if len(best_text.strip()) < MIN_CHARS_PER_PAGE:
+        try:
+            raw_text = pytesseract.image_to_string(
+                raw_img,
+                lang="eng",
+                config="--psm 6",
+            )
+            if len(raw_text.strip()) > len(best_text.strip()):
+                best_text = raw_text
+        except Exception:
+            pass
+
+    return best_text

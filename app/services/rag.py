@@ -255,6 +255,44 @@ def ingest(file_path: str, session_id: str, meta: dict = None) -> dict:
     return {"chunks_stored": len(chunks)}
 
 
+def _detect_mentioned_sources(question: str, sources: set[str]) -> set[str]:
+    """Detect which source documents the user is asking about."""
+    if not sources:
+        return set()
+
+    question_lower = question.lower()
+    matched: set[str] = set()
+
+    for source in sources:
+        # 1. Exact match
+        if source.lower() in question_lower:
+            matched.add(source)
+            continue
+
+        # 2. Strip a leading session-id prefix
+        stripped = re.sub(r'^[a-f0-9_-]+?_', '', source, count=1)
+        if stripped and stripped.lower() in question_lower:
+            matched.add(source)
+            continue
+
+        # 3. Replace underscores with spaces
+        spacified = stripped.replace('_', ' ')
+        if spacified and spacified.lower() in question_lower:
+            matched.add(source)
+            continue
+
+        # 4. Also try the spacified version without the extension
+        no_ext = os.path.splitext(spacified)[0]
+        if no_ext and len(no_ext) >= 4 and no_ext.lower() in question_lower:
+            matched.add(source)
+            continue
+
+    if matched:
+        logger.info("RAG: Detected file mentions in query: %s", matched)
+
+    return matched
+
+
 # ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
@@ -262,11 +300,31 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
     """Retrieve relevant chunks and format as a context string and chunk list."""
     collection = _get_collection(session_id)
 
+
     q_embedding = embedder.embed(question, is_query=True)
+
+    with _chroma_lock:
+        all_docs = collection.get(include=["metadatas"])
+        
+    unique_sources = set()
+    if all_docs and all_docs.get("metadatas"):
+        for meta in all_docs["metadatas"]:
+            if meta and "source" in meta:
+                unique_sources.add(meta["source"])
+                
+    matched_sources = _detect_mentioned_sources(question, unique_sources)
+    where_filter = None
+    if matched_sources:
+        if len(matched_sources) == 1:
+            where_filter = {"source": list(matched_sources)[0]}
+        else:
+            where_filter = {"source": {"$in": list(matched_sources)}}
+
     with _chroma_lock:
         results = collection.query(
             query_embeddings=[q_embedding],
             n_results=config.TOP_K,
+            where=where_filter
         )
 
     # Build context from retrieved chunks
