@@ -23,6 +23,15 @@ to better understand the documents.
 - AVOID OVERCLAIMING AND ABSOLUTES (CRITICAL): Do not use words like "all", "every", or "always" unless explicitly supported by the context. If a clause appears in some documents but not others, specify exactly which documents it appears in instead of generalizing.
 - STICK TO THE TEXT (CRITICAL): Do not interpret roles, rights, or obligations beyond what is explicitly stated (e.g., do not treat lead-shareholder rights as general minority rights, and carefully distinguish between unilateral and mutual termination). Accurately capture who bears obligations versus receives benefits.
 - NO FOLLOW-UP OFFERS OR CONVERSATIONAL FILLER (CRITICAL): Do not include conversational pleasantries, filler, or offers of further assistance at the end of your response (such as "If you want, I can also...", "Let me know if you need...", "I can convert this...", etc.). Present the facts and end the answer immediately without any chatty wrap-ups.
+- NEGATIVE CONSTRAINTS (CRITICAL): If the context does not explicitly mention a topic, state 'Not covered in the provided documents.' Do NOT assume standard industry practices apply.
+- PROPER CITATIONS (CRITICAL): You MUST cite your sources to ensure the answer is grounded. Include inline citations (e.g., [Page Title] or [Source, chunk N]) throughout your answer, and compile a clear "References" list at the very bottom of your final answer containing all documents you relied on.
+- CHAIN OF THOUGHT VERIFICATION (CRITICAL): Before providing your final answer, you MUST write out your step-by-step reasoning inside <reasoning> tags. Explain what you found in the context, what is missing, and how it directly maps to the user's question.
+
+OUTPUT FORMAT:
+<reasoning>
+(Your step-by-step reasoning and verification against the context)
+</reasoning>
+(Your final, comprehensive markdown answer goes here)
 
 CONTEXT:
 {context}
