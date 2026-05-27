@@ -81,7 +81,7 @@ def _allowed_file(filename: str) -> bool:
 @app.route("/")
 def index():
     """Serve the single-page UI."""
-    return render_template("index.html", llm_provider=config.LLM_PROVIDER.upper())
+    return render_template("index.html", llm_provider="AZURE OPENAI")
 
 
 @app.route("/health")
@@ -89,8 +89,8 @@ def health():
     """Health check — confirms the app is running and data dirs are accessible."""
     checks = {
         "status": "ok",
-        "llm_provider": config.LLM_PROVIDER,
-        "model": config.OPENROUTER_MODEL if config.LLM_PROVIDER == "openrouter" else config.OLLAMA_MODEL,
+        "llm_provider": "azure",
+        "model": config.AZURE_OPENAI_DEPLOYMENT,
         "data_dirs": {
             "chroma": os.path.isdir(config.CHROMA_PATH),
             "wiki": os.path.isdir(config.WIKI_PATH),
@@ -164,7 +164,7 @@ def upload():
 
     # Submit all tasks to executor (non-blocking)
     for save_path, meta in zip(saved_paths, metadata_list):
-        executor.submit(_ingest_single_doc_rag, save_path, session_id, meta)
+        # executor.submit(_ingest_single_doc_rag, save_path, session_id, meta)
         executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
     # Save session metadata
@@ -221,7 +221,8 @@ def _check_completion(session_id: str):
     progress = config.PROGRESS_STORE.get(session_id, {})
     docs = progress.get("docs", {})
     total = docs.get("total", 0)
-    if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
+    # if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
+    if total > 0 and docs.get("wiki_done", 0) >= total:
         progress["phase"] = "complete"
 
 
@@ -239,23 +240,21 @@ def query_route():
 
     # Step 1: Fetch contexts concurrently
     t0 = time.time()
-    rag_ctx_future = executor.submit(rag.get_context, question, session_id)
+    # rag_ctx_future = executor.submit(rag.get_context, question, session_id)
     wiki_ctx_future = executor.submit(wiki.get_context, question, session_id)
 
-    rag_context, chunk_details = rag_ctx_future.result(timeout=60)
+    # rag_context, chunk_details = rag_ctx_future.result(timeout=60)
+    rag_context = ""
+    chunk_details = []
     wiki_context, selected_titles = wiki_ctx_future.result(timeout=300) # Wiki context fetch does an LLM call if pages > 20
 
     # Step 2: Generate answers concurrently
-    rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
+    # rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
     wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id)
-    hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
+    # hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
 
     rag_t0 = time.time()
-    try:
-        rag_result = rag_ans_future.result(timeout=300)
-    except Exception as e:
-        logger.error("RAG generation error (%s): %s", type(e).__name__, e)
-        rag_result = {"answer": f"⚠️ RAG error: {type(e).__name__}: {e}", "chunks": []}
+    rag_result = {"answer": "RAG is temporarily disabled.", "chunks": []}
     rag_result["elapsed_ms"] = round((time.time() - rag_t0) * 1000)
 
     wiki_t0 = time.time()
@@ -267,11 +266,7 @@ def query_route():
     wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
 
     hybrid_t0 = time.time()
-    try:
-        hybrid_result = hybrid_ans_future.result(timeout=300)
-    except Exception as e:
-        logger.error("Hybrid generation error (%s): %s", type(e).__name__, e)
-        hybrid_result = {"answer": f"⚠️ Hybrid error: {type(e).__name__}: {e}", "usage": {}}
+    hybrid_result = {"answer": "Hybrid is temporarily disabled.", "usage": {}}
     hybrid_result["elapsed_ms"] = round((time.time() - hybrid_t0) * 1000)
 
     # Update session history

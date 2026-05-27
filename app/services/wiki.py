@@ -225,6 +225,9 @@ PRINCIPLES:
 - LEGAL DEPTH: Create pages for key precedents, statutory provisions, and the \
   judicial reasoning (ratio decidendi). Explain HOW the law was applied to the \
   facts, not just what the law is. Explain the Holding/Conclusion.
+- ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
+- LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
+- TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
 - Each page should read like a well-written wiki article.
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
@@ -293,6 +296,9 @@ RULES:
 - SOURCE INTEGRITY: DO NOT hallucinate cases or citations. Only use what is in the text.
 - FACTUAL PRECISION: Extract exact dates, amounts, and figures verbatim. Do not invent dates.
 - LEGAL DEPTH: Focus on statutory interpretation, judicial reasoning, and precedents.
+- ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
+- LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
+- TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
 - Reuse the KNOWN TOPIC names exactly as page titles when applicable.
 - For any NEW pages, you MUST append the specific document name in parentheses to EVERY page title, e.g. "Topic Name ({doc_name})".
 - Each page should be 4-10 sentences of detailed synthesis.
@@ -359,12 +365,9 @@ def ingest(file_path: str, session_id: str) -> dict:
 
         # Phase 2: Detailed segments concurrently
         completed_segments = 0
-        max_workers = (
-            config.WIKI_MAX_WORKERS_OPENROUTER
-            if config.LLM_PROVIDER == "openrouter"
-            else config.WIKI_MAX_WORKERS_OLLAMA
-        )
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=config.WIKI_MAX_WORKERS
+        ) as executor:
             future_to_index = {
                 executor.submit(_ingest_detail_segment, seg, topics, doc_name): i
                 for i, seg in enumerate(segments)
@@ -562,8 +565,9 @@ PAGE_SELECT_PROMPT = """\
 You are selecting relevant wiki pages to answer a question. Below is an index \
 of all available pages with their one-line summaries.
 
-Pick the 10-15 MOST RELEVANT pages for answering this question. Return ONLY \
-a JSON array of page titles, no explanation:
+Pick the 10-15 MOST RELEVANT pages for answering this question. Pay close attention \
+to any document types, names, or categories mentioned in the question (e.g., "NDAs", "Joint Venture Agreements") \
+and ONLY select pages that match those constraints. Return ONLY a JSON array of page titles, no explanation:
 
 ["Page Title 1", "Page Title 2", ...]
 
@@ -656,6 +660,47 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
     return wiki_content, selected_titles
 
 
+def _evaluate_confidence(question: str, context: str, answer: str) -> dict:
+    """Evaluate LLM confidence score for the generated answer based on the context."""
+    prompt = f"""\
+You are an expert legal editor. Evaluate the confidence score of a generated answer to a user's question, based on the provided context.
+
+QUESTION:
+{question}
+
+CONTEXT:
+{context}
+
+ANSWER:
+{answer}
+
+Evaluate the alignment, completeness, and supportiveness of the context for the generated answer.
+Provide a confidence score between 0 and 100 representing how well the answer is supported by the context:
+- 90-100: Context fully and directly answers the question with specific details.
+- 70-80: Context mostly answers the question but some non-critical details might be missing or require minor inference.
+- 40-60: Context only partially answers the question; major gaps exist.
+- 0-30: Context does not support the answer or does not contain relevant information.
+
+Respond with ONLY a JSON object containing:
+- "confidence_score": an integer between 0 and 100
+- "reason": a short 1-sentence explanation of the score
+
+JSON:"""
+    try:
+        raw, _ = llm.ask(prompt, pipeline="wiki")
+        parsed = _parse_json_safe(raw)
+        if parsed and "confidence_score" in parsed:
+            score = int(parsed["confidence_score"])
+            reason = parsed.get("reason", "")
+            return {"score": score, "reason": reason}
+    except Exception as e:
+        logger.error("Failed to evaluate confidence: %s", e)
+    
+    # Fallback score based on context presence
+    score = 85 if context else 0
+    return {"score": score, "reason": "Confidence evaluated from context availability."}
+
+
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str) -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
@@ -666,8 +711,11 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         return {
             "answer": "The wiki is empty — no documents have been ingested yet.",
             "pages_used": [],
+            "files_used": [],
             "relations": relations,
-            "usage": {}
+            "usage": {},
+            "confidence_score": 0,
+            "confidence_reason": "No context available."
         }
 
     from services.prompts import ANSWER_PROMPT
@@ -691,11 +739,26 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             pages_used_dedup.append(t)
             seen.add(t)
 
+    # Extract source files from page titles
+    files_used = []
+    for title in pages_used_dedup:
+        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
+        if match:
+            doc_name = match.group(1)
+            if doc_name not in files_used:
+                files_used.append(doc_name)
+
+    # Evaluate confidence score
+    confidence = _evaluate_confidence(question, wiki_content, answer)
+
     return {
         "answer": answer,
         "pages_used": pages_used_dedup,
+        "files_used": files_used,
         "relations": relations,
         "usage": usage,
+        "confidence_score": confidence["score"],
+        "confidence_reason": confidence["reason"]
     }
 
 
