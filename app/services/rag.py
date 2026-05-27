@@ -373,6 +373,8 @@ def generate_answer(question: str, context: str, chunk_details: list) -> dict:
     usage = {}
     try:
         answer, usage = llm.ask(prompt, pipeline="rag")
+        import re
+        answer = re.sub(r'<reasoning>.*?</reasoning>', '', answer, flags=re.DOTALL).strip()
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 

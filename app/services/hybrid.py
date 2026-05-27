@@ -27,6 +27,8 @@ def generate_answer(question: str, rag_context: str, chunks: list, wiki_context:
     usage = {}
     try:
         answer, usage = llm.ask(prompt, pipeline="hybrid")
+        import re
+        answer = re.sub(r'<reasoning>.*?</reasoning>', '', answer, flags=re.DOTALL).strip()
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 

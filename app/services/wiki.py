@@ -724,6 +724,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     usage = {}
     try:
         answer, usage = llm.ask(prompt, pipeline="wiki")
+        import re
+        answer = re.sub(r'<reasoning>.*?</reasoning>', '', answer, flags=re.DOTALL).strip()
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 
