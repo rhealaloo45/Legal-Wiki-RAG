@@ -38,9 +38,9 @@ body{background:var(--surface);min-height:100vh}
 .btn-accent:disabled{opacity:.4;transform:none;box-shadow:none}
 .btn-reset{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);color:#fca5a5;font-size:.8rem;border-radius:10px;padding:6px 14px;transition:all .2s}
 .btn-reset:hover{background:rgba(239,68,68,.22);color:#fca5a5}
-.btn-copy{background:var(--glass);border:1px solid var(--glass-border);color:#94a3b8;font-size:.75rem;border-radius:8px;padding:4px 12px;transition:all .2s;cursor:pointer}
-.btn-copy:hover{border-color:var(--accent2);color:var(--accent2)}
-.btn-copy.copied{border-color:var(--success);color:var(--success)}
+.btn-copy{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#e2e8f0;font-size:.8rem;font-weight:500;border-radius:8px;padding:6px 14px;transition:all .2s;cursor:pointer}
+.btn-copy:hover{border-color:var(--accent2);color:var(--accent2);background:rgba(255,255,255,0.15)}
+.btn-copy.copied{border-color:var(--success);color:var(--success);background:rgba(34,197,94,0.15)}
 
 /* ── Status / progress ── */
 .status-bar{font-size:.85rem;padding:12px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--glass-border)}
@@ -168,7 +168,7 @@ body{background:var(--surface);min-height:100vh}
       <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
     </div>
     <div class="d-flex align-items-center gap-2">
-      <button class="btn btn-outline-light btn-sm d-none" id="view-folder-btn" data-bs-toggle="modal" data-bs-target="#folderModal">📂 View Folder Structure</button>
+      <button class="btn btn-outline-light btn-sm d-none" id="view-folder-btn" data-bs-toggle="modal" data-bs-target="#folderModal" onclick="loadFileTree()">📂 View Folder Structure</button>
       <span class="provider-badge">{{ llm_provider }}</span>
       <button class="btn-reset" id="reset-btn" style="display:none" title="Clear session and start fresh">↺ Reset Session</button>
     </div>
@@ -215,7 +215,7 @@ body{background:var(--surface);min-height:100vh}
 
     <!-- Progress bars -->
     <div class="progress-wrap d-none" id="progress-wrap">
-      <div class="mb-2">
+      <div class="mb-2 d-none">
         <div class="d-flex justify-content-between mb-1">
           <span class="section-label" style="color:#a78bfa">RAG Pipeline</span>
           <span class="section-label" id="rag-prog-label">0 / 0 docs</span>
@@ -236,8 +236,8 @@ body{background:var(--surface);min-height:100vh}
 
     <!-- Status bar (post-ingest summary) -->
     <div class="status-bar mt-3 d-none" id="status-bar">
-      <span class="rag-stat" id="rag-status"></span>
-      <span class="mx-2 text-secondary">|</span>
+      <span class="rag-stat d-none" id="rag-status"></span>
+      <span class="mx-2 text-secondary d-none">|</span>
       <span class="wiki-stat" id="wiki-status"></span>
     </div>
   </div>
@@ -308,7 +308,7 @@ body{background:var(--surface);min-height:100vh}
           </div>
         </div>
         <div class="mt-3 d-flex justify-content-between align-items-center">
-          <button class="btn btn-link p-0 text-decoration-none deep-toggle" data-bs-toggle="modal" data-bs-target="#wikiModal" onclick="setTimeout(renderGraph, 200)">▸ Deep Understanding</button>
+          <button class="btn btn-link p-0 text-decoration-none deep-toggle" data-bs-toggle="modal" data-bs-target="#wikiModal">▸ Deep Understanding</button>
           <span class="text-secondary small d-none" id="wiki-usage"></span>
         </div>
       </div>
@@ -1170,11 +1170,15 @@ async function loadGraph() {
 }
 
 function renderGraph() {
-  const container = document.getElementById('wiki-graph');
-  container.innerHTML = '';
-  if (!Object.keys(wikiPages).length) return;
+  try {
+    const container = document.getElementById('wiki-graph');
+    container.innerHTML = '<div class="text-center text-secondary py-5 mt-5">Loading graph data...</div>';
+    if (!wikiPages || !Object.keys(wikiPages).length) {
+      container.innerHTML = '<div class="text-center text-secondary py-5 mt-5">No knowledge graph data available yet. Please ask a query first or ensure documents are processed.</div>';
+      return;
+    }
 
-  const w = container.clientWidth || 600, h = 420;
+  const w = container.clientWidth || 800, h = container.clientHeight || 420;
   const svg = d3.select(container).append('svg').attr('viewBox', `0 0 ${w} ${h}`);
   const g = svg.append('g');
   svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
@@ -1242,29 +1246,59 @@ function renderGraph() {
   });
 
   graphSim = { nodes, node, color, deg };
+  
+  // Remove loading text once SVG is initialized
+  if (container.querySelector('div')) {
+    container.querySelector('div').remove();
+  }
+  
+  // Add a small stat overlay for debugging
+  d3.select(container).append('div')
+    .attr('style', 'position:absolute; bottom:10px; right:10px; font-size:11px; color:#64748b; background:rgba(255,255,255,0.8); padding:2px 6px; border-radius:4px; pointer-events:none;')
+    .text(`Nodes: ${nodes.length} | Links: ${links.length}`);
+
+  } catch(err) {
+    const container = document.getElementById('wiki-graph');
+    container.innerHTML = `<div class="text-danger p-4">Graph rendering failed: ${err.message}<br>${err.stack}</div>`;
+    console.error(err);
+  }
 }
 
 function highlightNode(title) {
   const modalEl = document.getElementById('wikiModal');
   const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+  
+  const onShown = () => {
+    modalEl.removeEventListener('shown.bs.modal', onShown);
+    
+    if (!graphSim) {
+      renderGraph();
+    }
+    
+    setTimeout(() => {
+      if (!graphSim) return;
+      graphSim.node.transition().duration(200)
+        .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
+        .attr('opacity', .4);
+      graphSim.node.filter(d => d.id === title).transition().duration(300)
+        .attr('r', 20).attr('opacity', 1).attr('fill', '#2dd4bf')
+        .transition().duration(1200)
+        .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
+        .attr('fill', d => graphSim.color(d.id));
+      graphSim.node.transition().delay(1500).duration(300).attr('opacity', 1);
+    }, 100);
+  };
+  
+  modalEl.addEventListener('shown.bs.modal', onShown);
   modal.show();
-  
-  if (!graphSim) {
+}
+
+// Bind renderGraph to modal shown event
+const wikiModalEl = document.getElementById('wikiModal');
+if (wikiModalEl) {
+  wikiModalEl.addEventListener('shown.bs.modal', () => {
     renderGraph();
-  }
-  
-  setTimeout(() => {
-    if (!graphSim) return;
-    graphSim.node.transition().duration(200)
-      .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-      .attr('opacity', .4);
-    graphSim.node.filter(d => d.id === title).transition().duration(300)
-      .attr('r', 20).attr('opacity', 1).attr('fill', '#2dd4bf')
-      .transition().duration(1200)
-      .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-      .attr('fill', d => graphSim.color(d.id));
-    graphSim.node.transition().delay(1500).duration(300).attr('opacity', 1);
-  }, 300);
+  });
 }
 </script>
 </body>

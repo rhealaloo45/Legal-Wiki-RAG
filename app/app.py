@@ -175,6 +175,7 @@ def upload():
         "created_at": time.time(),
         "updated_at": time.time(),
         "files": len(saved_paths),
+        "file_paths": [meta["relative_path"] for meta in metadata_list],
         "history": []
     }
     save_sessions(sessions)
@@ -294,23 +295,51 @@ def query_route():
 
 @app.route("/files")
 def file_structure():
-    """Return nested file tree of successfully embedded files."""
+    """Return nested file tree of successfully uploaded files."""
     session_id = request.args.get("session_id", "")
     if not session_id:
         return jsonify({})
         
     try:
-        from services.rag import _get_collection
-        col = _get_collection(session_id)
-        docs = col.get(include=["metadatas"])
-        
+        sessions = load_sessions()
         paths = set()
-        for m in docs.get("metadatas", []):
-            if m:
-                path = m.get("relative_path", m.get("filename", "Unknown"))
-                path = path.replace("\\", "/")
-                paths.add(path)
-                
+        
+        # 1. Try to read from session metadata first
+        if session_id in sessions and "file_paths" in sessions[session_id]:
+            for p in sessions[session_id]["file_paths"]:
+                paths.add(p.replace("\\", "/"))
+        else:
+            # 2. Fallback: Scan config.UPLOAD_PATH and reconstruct original paths
+            prefix = f"{session_id}_"
+            for fname in os.listdir(config.UPLOAD_PATH):
+                if fname.startswith(prefix):
+                    rel_name = fname[len(prefix):]
+                    
+                    # Reconstruction logic for existing folders
+                    reconstructed = False
+                    top_dir = "Legal AI Tool - Tata Group"
+                    subdirs = [
+                        "Court Case Documents",
+                        "Joint Venture Agreements",
+                        "Judgments",
+                        "Legal Opinions",
+                        "NDA",
+                        "Service Agreement",
+                        "Shareholder Agreements"
+                    ]
+                    
+                    if rel_name.startswith(f"{top_dir}_"):
+                        rest = rel_name[len(top_dir)+1:]
+                        for subdir in subdirs:
+                            if rest.startswith(f"{subdir}_"):
+                                file_part = rest[len(subdir)+1:]
+                                paths.add(f"{top_dir}/{subdir}/{file_part}")
+                                reconstructed = True
+                                break
+                    
+                    if not reconstructed:
+                        paths.add(rel_name.replace("\\", "/"))
+                        
         tree = {}
         for p in paths:
             parts = [x for x in p.split("/") if x]

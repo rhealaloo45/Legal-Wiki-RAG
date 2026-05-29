@@ -1,13 +1,13 @@
-# System Overview: RAG, LLM Wiki, and Hybrid
+# System Overview: Legal LLM Wiki
 
-This application is a research tool designed to compare distinct paradigms of working with large-scale document knowledge: **Retrieval-Augmented Generation (RAG)**, **LLM Wiki Synthesis**, and a **Hybrid** approach. It is optimized for batch ingestion of up to 50+ documents (including nested folders) at once.
+This application is a research and knowledge management tool designed to process large-scale legal documents using an **LLM Wiki Synthesis** approach. It is optimized for batch ingestion of up to 50+ documents (including nested folders) at once, extracting deep semantic relationships and generating a navigable knowledge graph.
 
 ## 1. High-Level Architecture
 
 The system is built as a **Single-Page Flask Application**:
-- **Backend**: Python/Flask utilizing a `ThreadPoolExecutor` (up to 10 workers) for parallel file ingestion and query processing. Uploads are **non-blocking** — the server accepts files and returns immediately while ingestion runs in background threads. Features persistent session management with automatic naming.
-- **Frontend**: Bootstrap 5 (Dark Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a responsive side-by-side layout (comparing RAG, Wiki, and Hybrid), a wiki page browser, and a file tree viewer for nested uploads.
-- **LLM Engine**: Dual-provider support (Ollama for local embeddings, OpenRouter for cloud LLM reasoning).
+- **Backend**: Python/Flask utilizing a `ThreadPoolExecutor` for parallel file ingestion and query processing. Uploads are **non-blocking** — the server accepts files and returns immediately while ingestion runs in background threads. Features persistent session management with automatic naming.
+- **Frontend**: Bootstrap 5 (Dark Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a centralized Wiki response view, a wiki page browser, and a file tree viewer for nested uploads.
+- **LLM Engine**: Azure OpenAI (or equivalent provider) handles narrative synthesis, legal extraction, and query answering.
 
 ### Concurrency & Routing Flow
 
@@ -20,85 +20,23 @@ graph TD
     subgraph BackendPool ["Backend Concurrency and Execution Pool"]
         UploadRoute -- "2a. Save files (Sync)" --> SavedDisk["data/uploads/{session_id}_{name}"]
         UploadRoute -- "2b. Initialize PROGRESS_STORE" --> StoreInit["PROGRESS_STORE[session_id]"]
-        UploadRoute -- "3. Submit tasks to ThreadPoolExecutor" --> Pool["ThreadPoolExecutor (max_workers=10)"]
+        UploadRoute -- "3. Submit tasks to ThreadPoolExecutor" --> Pool["ThreadPoolExecutor"]
 
-        Pool -- "Async Worker Thread" --> IngestRAG["_ingest_single_doc_rag()"]
-        Pool -- "Async Worker Thread" --> IngestWiki["_ingest_single_doc_wiki()"]
+        Pool -- "Async Worker Thread" --> IngestWiki["wiki._ingest_single_doc_wiki()"]
 
-        QueryRoute -- "Submit parallel query tasks" --> QueryPool["ThreadPoolExecutor"]
-        QueryPool -- "Parallel Thread" --> RunRAGContext["rag.get_context()"]
-        QueryPool -- "Parallel Thread" --> RunWikiContext["wiki.get_context()"]
-        RunRAGContext & RunWikiContext --> RunAnswers["Parallel Generation: RAG, Wiki, Hybrid"]
+        QueryRoute -- "Execute query tasks" --> RunWikiContext["wiki.get_context()"]
+        RunWikiContext --> RunAnswers["Generation: Wiki Answer"]
     end
 
     style BackendPool fill:#2d3748,stroke:#4a5568,stroke-width:2px,color:#fff
-    style IngestRAG fill:#2c5282,stroke:#3182ce,color:#fff
     style IngestWiki fill:#2c5282,stroke:#3182ce,color:#fff
 ```
 
 ---
 
-## 2. Pipeline 1: RAG (Retrieval-Augmented Generation)
+## 2. The Core Pipeline: LLM Wiki Synthesis
 
-RAG treats documents as a **searchable database** of raw fragments.
-
-### Ingest Phase
-1. **Extraction**: Reads `.pdf` (via `pypdf`) or `.txt` files. Preserves relative paths for nested folder uploads.
-2. **Metadata Extraction**: Uses the LLM on the first 4000 characters to extract key metadata: `document_type`, `parties`, `date`, and `brief_summary`.
-3. **Chunking**: Splits text into 2000-character windows with a 200-character overlap. Crucially, the extracted metadata is **prepended as a header** to every single chunk so the LLM has global context for local text.
-4. **Batch Embedding**: Generates vector representations for all chunks in a single API call using local **Ollama** (`nomic-embed-text`) batch embedding.
-5. **Storage**: Persists vectors and rich metadata in **ChromaDB** collections (scoped per session). All writes are synchronized using a global re-entrant lock (`threading.RLock`) to ensure SQLite thread safety when multiple documents ingest concurrently.
-
-### Query Phase
-1. **Retrieval**: Embeds the user's question and performs a vector similarity search (top-8 results by default, configurable via `TOP_K` in `.env`). Bypasses the LLM and immediately returns a standard fallback answer (`"I’m sorry, but I can’t provide an answer based on the excerpts you requested."`) if no chunks exist.
-2. **Augmentation**: Injects the raw text fragments into a specialized prompt.
-3. **Generation**: The LLM answers based *only* on the retrieved context, citing specific chunks. If the retrieved context does not contain the answer, the LLM is strictly instructed to return the fallback statement exactly: `"I’m sorry, but I can’t provide an answer based on the excerpts you requested."`
-
-### RAG Pipeline Flowchart
-
-```mermaid
-flowchart TD
-    classDef ingest fill:#1e3a8a,stroke:#3b82f6,color:#fff
-    classDef query fill:#065f46,stroke:#10b981,color:#fff
-    classDef process fill:#1f2937,stroke:#4b5563,color:#fff
-    classDef decision fill:#78350f,stroke:#d97706,color:#fff
-
-    subgraph Ingestion
-        StartI(["Upload Document"]) --> ExtractI["Extract & Normalize Text"]
-        ExtractI --> MetaI["LLM Metadata Extraction<br/>(Doc Type, Parties, Date, Summary)"]
-        MetaI --> ChunkI["Sliding Window Chunker<br/>• Prepend metadata header to chunks"]
-        ChunkI --> EmbedI["Batch Embed via Ollama<br/>• nomic-embed-text"]
-        EmbedI --> DBWriteI{"ChromaDB Store<br/>Acquire sqlite lock"}
-        DBWriteI -->|Thread-Safe Upsert| DBStoreI[("Persist Vectors in collection: rag_session_id")]
-    end
-
-    subgraph Querying
-        StartQ(["User Question Input"]) --> EmbedQ["Embed Query via nomic-embed-text"]
-        EmbedQ --> DBSearchQ["ChromaDB Vector Query<br/>• Fetch Top-8 nearest chunks"]
-        DBSearchQ --> CheckQ{"Chunks Retained?"}
-        
-        CheckQ -->|No Chunks Found| FallbackQ["Return standard fallback message:<br/>'I'm sorry, but I can't provide an answer...'"]
-        CheckQ -->|Yes| PromptQ["Compile RAG Prompt with chunks"]
-        
-        PromptQ --> LLMQ["Call LLM Engine"]
-        LLMQ --> AnsQ["Answer Generation & Citation parsing"]
-    end
-    
-    DBStoreI -.->|Vector Lookup| DBSearchQ
-
-    class StartI ingest
-    class StartQ query
-    class ExtractI,ChunkI,EmbedI,DBStoreI,EmbedQ,DBSearchQ,FallbackQ,PromptQ,LLMQ,AnsQ process
-    class DBWriteI,CheckQ decision
-```
-
-
----
-
-
-## 3. Pipeline 2: LLM Wiki Synthesis
-
-The Wiki pipeline treats documents as a **source for narrative synthesis**, not entity extraction. The goal is to build wiki pages that explain what provisions *mean* and how they *interact*, not just list facts.
+The Wiki pipeline treats documents as a **source for narrative synthesis**. The goal is to build wiki pages that explain what legal provisions *mean* and how they *interact*, rather than just retrieving raw text chunks.
 
 ### Ingest Phase (The "Compiler")
 
@@ -128,13 +66,12 @@ The system uses **adaptive segmentation** based on document length:
 
 ### Query Phase — Index-Based Retrieval
 
-To prevent hallucination at scale (50 documents can produce 300-1500 wiki pages), the query uses a **two-step retrieval** approach:
+To prevent hallucination at scale, the query uses a **two-step retrieval** approach:
 
 1. **Page Selection**: The LLM receives only the **list of page titles + one-line summaries** (compact — even 500 pages fits easily). It selects the 10-15 most relevant pages for the question.
 2. **Deep Answer**: Only the selected pages' full content is sent in the answer prompt, keeping the context focused and grounded.
-3. **Dynamic Learning**: If the answer introduces new concepts or insights, the LLM extracts them into new pages and relations, compounding the wiki's knowledge.
-4. **Citation**: Answers use `[Page Title]` notation which links directly to the visual graph.
-5. **Graph Rendering**: D3.js renders the `index.json` as a force-directed graph where nodes are entities and edges are relationships.
+3. **Chain of Thought & Grounding**: The LLM first generates a `<reasoning>` trace to verify facts against the context, and uses strict inline citations to ensure no hallucination. It also evaluates its own confidence score.
+4. **Graph Rendering**: D3.js renders the `index.json` as a force-directed graph where nodes are entities and edges are relationships. The UI displays cited pages dynamically.
 
 > For small wikis (≤ 20 pages), the selection step is skipped and all pages are sent directly.
 
@@ -177,76 +114,46 @@ flowchart TD
         
         AssembleWQ --> PromptWQ["Compile Wiki Answer Prompt"]
         PromptWQ --> LLMWQ["Call LLM Engine"]
-        LLMWQ --> ParseAnsWQ["Parse response JSON:<br/>• answer text<br/>• new_pages / new_relations"]
+        LLMWQ --> ParseAnsWQ["Parse response:<br/>• Strip CoT reasoning trace<br/>• Calculate Confidence Score"]
         
-        ParseAnsWQ --> LearnCheckWQ{"Any new knowledge generated?"}
-        LearnCheckWQ -->|Yes| DynamicMergeWQ["Acquire Lock & Merge new facts into index.json"]
-        LearnCheckWQ -->|No| CitationsWQ["Identify & link page citations e.g. Page Title"]
-        DynamicMergeWQ --> CitationsWQ
+        ParseAnsWQ --> CitationsWQ["Identify & link page citations e.g. [Page Title]"]
     end
     
     SaveWI -.->|Reads index.json| LoadWI
 
     class StartWI ingest
     class StartWQ query
-    class ExtractWI,IngestSingleWI,Phase1WI,Phase2WI,ParseWI,MergeLockWI,CombineWI,CrossRefWI,SaveWI,LoadWI,SelectWQ,SelectAllWQ,AssembleWQ,PromptWQ,LLMWQ,ParseAnsWQ,DynamicMergeWQ,CitationsWQ process
-    class LengthCheckWI,SizeCheckWQ,LearnCheckWQ decision
+    class ExtractWI,IngestSingleWI,Phase1WI,Phase2WI,ParseWI,MergeLockWI,CombineWI,CrossRefWI,SaveWI,LoadWI,SelectWQ,SelectAllWQ,AssembleWQ,PromptWQ,LLMWQ,ParseAnsWQ,CitationsWQ process
+    class LengthCheckWI,SizeCheckWQ decision
 ```
 
 ---
 
-## 4. Pipeline 3: Hybrid
-
-The Hybrid pipeline combines the strengths of both RAG (raw, exact text) and LLM Wiki (synthesized narrative). 
-
-1. **Parallel Context Fetching**: When a query is submitted, the system fetches RAG chunks and Wiki pages concurrently.
-2. **Context Merging**: The retrieved RAG excerpts and the full text of the selected Wiki pages are concatenated into a single large context block, separated by headers (`=== SYNTHESIZED WIKI PAGES ===` and `=== RAW EXCERPTS (RAG) ===`).
-3. **Unified Generation**: A single LLM call is made using this combined context. The LLM can draw upon the high-level synthesis of the Wiki while quoting exact clauses from the RAG chunks.
-
-### Shared Prompt Architecture
-To ensure a fair comparison, **all three pipelines (RAG, Wiki, Hybrid) use the exact same generation prompt** (`ANSWER_PROMPT` in `prompts.py`). The *only* variable is the context injected into the prompt.
-
----
-
-## 5. Upload, Progress, and Session System
+## 3. Upload, Progress, and Session System
 
 **Uploads**:
 The upload route is **non-blocking** and supports nested folders:
 1. Files are saved to disk (preserving relative paths via frontend `relative_paths` array) and ingestion tasks are submitted to the thread pool.
 2. The server returns immediately with `{"status": "accepted", "files_queued": N}`.
 3. The frontend polls `/progress` every 1.5 seconds, receiving document-level counters.
-4. When all documents complete both pipelines, `phase` transitions to `"complete"` and the UI enables querying.
+4. When all documents complete processing, `phase` transitions to `"complete"` and the UI enables querying.
 
 **Sessions**:
 - The application supports multiple persistent sessions (`data/sessions.json`).
 - Sessions are automatically renamed based on the first question asked (first 30 characters).
-- Full session CRUD is supported, including clearing all ChromaDB and Wiki index data per session.
-
-
-## 6. Key Comparisons
-
-| Feature | RAG | LLM Wiki | Hybrid |
-| :--- | :--- | :--- |
-| **Data Unit** | Raw Chunks (Fixed Size) | Semantic Pages (Narrative Synthesis) | Both Chunks & Pages |
-| **Logic** | Find similar text at query time | Build structured model at ingest time | Parallel retrieval & merged context |
-| **Ingest Strategy** | Meta-extraction → Chunk → embed → store | Adaptive: single-call or two-phase | (Uses RAG and Wiki ingest pipelines) |
-| **Query Strategy** | Vector similarity (top-8 chunks) | Select relevant pages by summary, then read | Fetch both concurrently → combined prompt |
-| **Visuals** | List of snippets + Similarity | D3.js Knowledge Graph + Page Browser | Side-by-side comparison in UI |
-| **Strengths** | Exact retrieval, zero-hallucination fallback | Deep synthesis, relationship mapping | Best of both: exact quotes + deep synthesis |
+- Full session CRUD is supported, including clearing all Wiki index data per session.
 
 ---
 
-## 7. Technical Specifications
+## 4. Technical Specifications
 
-- **Embeddings**: `nomic-embed-text` (Local via Ollama, batch API)
-- **LLM**: `openai/gpt-oss-120b:free` (OpenRouter) or local Ollama fallback
-- **Vector DB**: ChromaDB (Persistent at `app/data/chroma`, protected by a global `threading.RLock`)
+- **LLM**: Azure OpenAI integration configured via `config.py`
 - **Graphing**: D3.js Force Simulation
 - **Isolation**: `session_id` used for per-user database and wiki isolation
-- **Concurrency**: `ThreadPoolExecutor(10)` for parallel document ingestion + per-session `threading.Lock` for wiki index safety. In addition, uses nested `ThreadPoolExecutor(5)` for concurrent segment compilation inside `wiki.py` and a global re-entrant lock for thread-safe SQLite writes in `rag.py`.
-- **Security**: Split OpenRouter API keys for RAG and Wiki pipelines to monitor quota/usage independently
+- **Concurrency**: `ThreadPoolExecutor` for parallel document ingestion + per-session `threading.Lock` for wiki index safety. Uses nested `ThreadPoolExecutor(5)` for concurrent segment compilation inside `wiki.py`.
 - **Configurables** (via `.env`):
-  - `TOP_K` — number of chunks to retrieve for RAG queries (default: 8)
-  - `LLM_PROVIDER` — `openrouter` or `ollama`
-  - `OPENROUTER_MODEL` — model to use for LLM calls
+  - `AZURE_OPENAI_API_KEY` — Azure API key
+  - `AZURE_OPENAI_ENDPOINT` — Azure Endpoint
+  - `AZURE_OPENAI_API_VERSION` — Azure API version
+  - `AZURE_OPENAI_DEPLOYMENT` — Deployment name
   - `PORT` — server port (default: 5001)
