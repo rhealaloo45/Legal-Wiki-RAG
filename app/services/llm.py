@@ -22,20 +22,25 @@ def get_client() -> AzureOpenAI:
         )
     return _client
 
-def ask(prompt: str, pipeline: str = "wiki") -> tuple[str, dict]:
+def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None) -> tuple[str, dict]:
     """Send a prompt to Azure OpenAI and return the response text and usage dict.
 
     Args:
         prompt:   The full prompt string.
         pipeline: ignored in this Azure OpenAI version, but kept for compatibility.
+        max_tokens: Limit the maximum tokens in the completion response.
     """
     client = get_client()
     try:
-        response = client.chat.completions.create(
-            model=config.AZURE_OPENAI_DEPLOYMENT,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0
-        )
+        kwargs = {
+            "model": config.AZURE_OPENAI_DEPLOYMENT,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+            
+        response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,

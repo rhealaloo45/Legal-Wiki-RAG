@@ -42,6 +42,32 @@ def _get_session_lock(session_id: str) -> threading.Lock:
 
 
 # ---------------------------------------------------------------------------
+# Thread safety — per-session locks for log writes
+# ---------------------------------------------------------------------------
+_log_locks: dict[str, threading.Lock] = {}
+
+def _get_log_lock(session_id: str) -> threading.Lock:
+    """Get or create a lock for logging in the given session."""
+    with _locks_lock:
+        if session_id not in _log_locks:
+            _log_locks[session_id] = threading.Lock()
+        return _log_locks[session_id]
+
+def _log_event(session_id: str, event_type: str, detail: str):
+    """Append a timestamped event to the session log."""
+    from datetime import datetime
+    lock = _get_log_lock(session_id)
+    with lock:
+        log_path = os.path.join(config.LOGS_PATH, f"{session_id}_log.md")
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"## [{timestamp}] {event_type} | {detail}\n")
+        except Exception as e:
+            logger.error("Failed to write to session log: %s", e)
+
+
+# ---------------------------------------------------------------------------
 # Wiki I/O
 # ---------------------------------------------------------------------------
 def _wiki_dir(session_id: str) -> str:
@@ -132,11 +158,11 @@ def _repair_json(raw: str) -> dict:
 # ---------------------------------------------------------------------------
 # Merge logic — the heart of compounding wiki behaviour
 # ---------------------------------------------------------------------------
-def _merge_wiki(existing: dict, new_data: dict) -> tuple[dict, int, int]:
+def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tuple[dict, int, int, list]:
     """
     Merge new_data into existing wiki index.
 
-    Returns (merged_index, pages_updated_count, new_relations_count).
+    Returns (merged_index, pages_updated_count, new_relations_count, contradictions_found).
 
     Pages use the structure: {"content": "...", "summary": "..."}
     """
@@ -147,29 +173,76 @@ def _merge_wiki(existing: dict, new_data: dict) -> tuple[dict, int, int]:
     new_relations = new_data.get("relations", [])
 
     pages_updated = 0
+    contradictions_found = []
 
     # -- Merge pages --
     for title, new_value in new_pages.items():
-        # Normalize new_value to {content, summary} format
+        # Normalize new_value to {content, summary, quotes} format
         if isinstance(new_value, str):
             new_content = new_value
             new_summary = ""
+            new_quotes = []
         else:
             new_content = new_value.get("content", "")
             new_summary = new_value.get("summary", "")
+            new_quotes = new_value.get("quotes", [])
+
+        # Append quotes to the content
+        if new_quotes:
+            quote_text = "\n\n**Supporting Quotes:**\n" + "\n".join(f"> {q}" for q in new_quotes)
+            new_content += quote_text
 
         if title in pages:
             # Existing page — append content, keep better summary
             existing_page = pages[title]
             existing_content = existing_page.get("content", "")
             existing_summary = existing_page.get("summary", "")
+            
+            # Contradiction check pre-flight
+            if len(new_content) > 200 and len(existing_content) > 200:
+                prompt = (
+                    "Do these two texts contradict each other on any specific factual claim (dates, values, obligations, parties)?\n"
+                    "Reply JSON only:\n"
+                    "{\"contradicts\": bool, \"claim\": str|null, \"value_a\": str|null, \"value_b\": str|null}\n\n"
+                    f"Text A:\n{existing_content}\n\n"
+                    f"Text B:\n{new_content}"
+                )
+                try:
+                    raw, _ = llm.ask(prompt, max_tokens=100)
+                    parsed = _parse_json_safe(raw)
+                    if parsed and parsed.get("contradicts"):
+                        existing_page["contradiction_flagged"] = True
+                        from datetime import datetime
+                        if "variants" not in existing_page:
+                            existing_page["variants"] = [{"source": "Previous", "value": existing_content, "date_ingested": datetime.now().isoformat()}]
+                        existing_page["variants"].append({
+                            "source": doc_name,
+                            "value": new_content,
+                            "date_ingested": datetime.now().isoformat()
+                        })
+                        contradictions_found.append({
+                            "title": title,
+                            "claim": parsed.get("claim"),
+                            "val_a": parsed.get("value_a"),
+                            "val_b": parsed.get("value_b"),
+                            "doc": doc_name
+                        })
+                except Exception as e:
+                    logger.error("Contradiction check failed: %s", e)
+
             pages[title] = {
                 "content": existing_content + "\n\n---\n" + new_content,
                 "summary": new_summary if new_summary else existing_summary,
+                "source_doc": doc_name
             }
+            if "contradiction_flagged" in existing_page:
+                pages[title]["contradiction_flagged"] = existing_page["contradiction_flagged"]
+            if "variants" in existing_page:
+                pages[title]["variants"] = existing_page["variants"]
+
             pages_updated += 1
         else:
-            pages[title] = {"content": new_content, "summary": new_summary}
+            pages[title] = {"content": new_content, "summary": new_summary, "source_doc": doc_name}
             pages_updated += 1
 
     # -- Merge relations (deduplicate by exact (from, to, label) tuple) --
@@ -203,14 +276,13 @@ def _merge_wiki(existing: dict, new_data: dict) -> tuple[dict, int, int]:
                     new_rel_count += 1
 
     merged = {"pages": pages, "relations": relations}
-    return merged, pages_updated, new_rel_count
+    return merged, pages_updated, new_rel_count, contradictions_found
 
 
 # ---------------------------------------------------------------------------
 # Ingest — synthesis-oriented prompts, smarter segmentation
 # ---------------------------------------------------------------------------
 
-# Single-call prompt for documents that fit in one LLM call (≤ 100K chars)
 INGEST_PROMPT_TEMPLATE = """\
 You are a legal wiki knowledge synthesizer. Read this document and create wiki pages \
 that capture its legal meaning, statutory basis, precedents, and judicial reasoning.
@@ -218,10 +290,14 @@ that capture its legal meaning, statutory basis, precedents, and judicial reason
 PRINCIPLES:
 - SOURCE INTEGRITY: DO NOT hallucinate or invent citations. Only cite cases, statutes, \
   or document names explicitly present in the text. This information comes from the \
-  document '{doc_name}'. Explicitly mention the document name in your synthesis.
+  file '{doc_name}'.
+- DOCUMENT TYPE INFERENCE: You must determine the actual nature of the document from its contents \
+  (e.g., "Non-Disclosure Agreement", "Master Service Agreement", "Court Judgment", "Legal Opinion"). \
+  Do NOT just use the filename '{doc_name}'.
 - FACTUAL PRECISION: DO NOT hallucinate dates or facts. If a date is not explicitly \
   stated, do not include it. Extract EXACT verbatim quotes for critical dates, \
   figures, and holdings.
+- ANTI-HALLUCINATION: You MUST extract exact verbatim quotes to support your synthesis for EVERY page.
 - LEGAL DEPTH: Create pages for key precedents, statutory provisions, and the \
   judicial reasoning (ratio decidendi). Explain HOW the law was applied to the \
   facts, not just what the law is. Explain the Holding/Conclusion.
@@ -232,14 +308,16 @@ PRINCIPLES:
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
 
-PAGE TITLES: You MUST append the specific document name in parentheses to EVERY page title. For example: "Payment Terms ({doc_name})", "Confidentiality ({doc_name})". Do not use generic titles without the document name.
+PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. For example: "Payment Terms (Master Service Agreement)", "Confidentiality (NDA)".
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
+  "doc_type": "The inferred document type (e.g. 'NDA')",
   "pages": {{
-    "Descriptive Page Title": {{
+    "Descriptive Page Title (Inferred Doc Type)": {{
       "content": "4-10 sentence detailed synthesis with specific provisions, numbers, and conditions. Explain what it means and how it connects to other parts of the document.",
-      "summary": "One-line summary of what this page covers."
+      "summary": "One-line summary of what this page covers.",
+      "quotes": ["Exact verbatim quote 1 from the text", "Exact verbatim quote 2 from the text"]
     }}
   }},
   "relations": [
@@ -264,16 +342,19 @@ end of a larger document) and produce:
    should each get their own wiki page.
 
 SOURCE INTEGRITY: This excerpt is from '{doc_name}'. DO NOT hallucinate citations.
+DOCUMENT TYPE INFERENCE: You must determine the actual nature of the document from its contents \
+(e.g., "Non-Disclosure Agreement", "Master Service Agreement"). Do NOT just use the filename.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
+  "doc_type": "The inferred document type (e.g. 'NDA')",
   "overview_page": {{
     "content": "Detailed 6-12 sentence summary of the document's purpose, parties involved, scope, and key themes.",
     "summary": "One-line summary of the document."
   }},
   "topics": [
-    "Topic or Provision Name 1 ({doc_name})",
-    "Topic or Provision Name 2 ({doc_name})"
+    "Topic or Provision Name 1",
+    "Topic or Provision Name 2"
   ]
 }}
 
@@ -284,7 +365,8 @@ DOCUMENT EXCERPT:
 # Phase 2 prompt for large documents: detailed extraction with known topics
 DETAIL_PROMPT_TEMPLATE = """\
 You are a legal wiki knowledge synthesizer. You are processing a SEGMENT of a larger \
-document named '{doc_name}'. An overview pass has already identified these topics that need wiki pages:
+document named '{doc_name}'. The document type has been inferred as '{doc_type}'.
+An overview pass has already identified these topics that need wiki pages:
 
 KNOWN TOPICS: {topics}
 
@@ -295,20 +377,21 @@ discover.
 RULES:
 - SOURCE INTEGRITY: DO NOT hallucinate cases or citations. Only use what is in the text.
 - FACTUAL PRECISION: Extract exact dates, amounts, and figures verbatim. Do not invent dates.
+- ANTI-HALLUCINATION: You MUST extract exact verbatim quotes to support your synthesis for EVERY page.
 - LEGAL DEPTH: Focus on statutory interpretation, judicial reasoning, and precedents.
 - ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
 - LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
 - TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
-- Reuse the KNOWN TOPIC names exactly as page titles when applicable.
-- For any NEW pages, you MUST append the specific document name in parentheses to EVERY page title, e.g. "Topic Name ({doc_name})".
+- PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. For example: "Topic Name ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
   "pages": {{
-    "Page Title": {{
+    "Page Title (Inferred Doc Type)": {{
       "content": "Detailed synthesis...",
-      "summary": "One-line summary."
+      "summary": "One-line summary.",
+      "quotes": ["Exact verbatim quote 1", "Exact verbatim quote 2"]
     }}
   }},
   "relations": [
@@ -341,6 +424,8 @@ def ingest(file_path: str, session_id: str) -> dict:
 
     progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
 
+    total_contradictions = 0
+
     if len(text) <= _SINGLE_CALL_THRESHOLD:
         # --- Short document: single LLM call ---
         progress["wiki"] = {"current": 0, "total": 1, "message": f"Processing {doc_name}..."}
@@ -348,7 +433,7 @@ def ingest(file_path: str, session_id: str) -> dict:
         parsed = _ingest_single_call(text, doc_name)
         progress["wiki"]["current"] = 1
 
-        total_pages, total_rels = _atomic_merge(session_id, parsed)
+        total_pages, total_rels, total_contradictions = _atomic_merge(session_id, parsed, doc_name)
     else:
         # --- Long document: two-phase approach ---
         segments = _split_segments(text)
@@ -357,11 +442,12 @@ def ingest(file_path: str, session_id: str) -> dict:
 
         # Phase 1: Overview
         overview_text = text[:6000] + "\n\n[...]\n\n" + text[-3000:]
-        topics, overview_parsed = _ingest_overview(overview_text, doc_name)
+        doc_type, topics, overview_parsed = _ingest_overview(overview_text, doc_name)
         progress["wiki"]["current"] = 1
 
         # Merge overview page immediately
-        total_pages, total_rels = _atomic_merge(session_id, overview_parsed)
+        total_pages, total_rels, tc = _atomic_merge(session_id, overview_parsed, doc_name)
+        total_contradictions += tc
 
         # Phase 2: Detailed segments concurrently
         completed_segments = 0
@@ -369,7 +455,7 @@ def ingest(file_path: str, session_id: str) -> dict:
             max_workers=config.WIKI_MAX_WORKERS
         ) as executor:
             future_to_index = {
-                executor.submit(_ingest_detail_segment, seg, topics, doc_name): i
+                executor.submit(_ingest_detail_segment, seg, topics, doc_name, doc_type): i
                 for i, seg in enumerate(segments)
             }
             
@@ -383,13 +469,16 @@ def ingest(file_path: str, session_id: str) -> dict:
                 
                 try:
                     parsed = future.result()
-                    p, r = _atomic_merge(session_id, parsed)
+                    p, r, c = _atomic_merge(session_id, parsed, doc_name)
                     total_pages += p
                     total_rels += r
+                    total_contradictions += c
                 except Exception as exc:
                     logger.error("Segment %d for %s generated an exception: %s", i, doc_name, exc)
+                    _log_event(session_id, "ERROR", f"Doc: {doc_name} | Segment {i} failed: {exc}")
 
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
+    _log_event(session_id, "INGEST", f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
     progress["wiki"]["message"] = f"Complete: {total_pages} pages extracted."
     return {"pages_updated": total_pages, "relations": total_rels}
 
@@ -415,34 +504,36 @@ def _ingest_single_call(text: str, doc_name: str) -> dict:
     return parsed
 
 
-def _ingest_overview(text: str, doc_name: str) -> tuple[list[str], dict]:
+def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
     """Phase 1: extract overview + topic list from document excerpt."""
     prompt = OVERVIEW_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
     try:
         raw, _ = llm.ask(prompt, pipeline="wiki")
     except RuntimeError as e:
         logger.error("LLM overview call failed: %s", e)
-        return [], {"pages": {}, "relations": []}
+        return "Unknown Document", [], {"pages": {}, "relations": []}
 
     parsed = _parse_json_safe(raw)
     if parsed is None:
         parsed = _repair_json(raw)
 
+    doc_type = parsed.get("doc_type", doc_name)
     topics = parsed.get("topics", [])
     overview_page = parsed.get("overview_page", {})
 
     # Convert to standard merge format
     doc_pages = {}
     if overview_page:
-        doc_pages["Document Overview"] = overview_page
+        # Append inferred doc type to the overview page title
+        doc_pages[f"Document Overview ({doc_type})"] = overview_page
 
     return topics, {"pages": doc_pages, "relations": []}
 
 
-def _ingest_detail_segment(text: str, topics: list[str], doc_name: str) -> dict:
+def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str) -> dict:
     """Phase 2: extract detailed pages from a segment with known topic context."""
     topics_str = ", ".join(topics) if topics else "None identified yet"
-    prompt = DETAIL_PROMPT_TEMPLATE.format(text=text, topics=topics_str, doc_name=doc_name)
+    prompt = DETAIL_PROMPT_TEMPLATE.format(text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type)
     try:
         raw, _ = llm.ask(prompt, pipeline="wiki")
     except RuntimeError as e:
@@ -472,14 +563,22 @@ def _split_segments(text: str) -> list[str]:
     return segments if segments else [text]
 
 
-def _atomic_merge(session_id: str, new_data: dict) -> tuple[int, int]:
+def _atomic_merge(session_id: str, new_data: dict, doc_name: str = "Unknown") -> tuple[int, int, int]:
     """Thread-safe: load index, merge new data, save — all under lock."""
     lock = _get_session_lock(session_id)
     with lock:
         existing = _load_index(session_id)
-        merged, pages_updated, new_rels = _merge_wiki(existing, new_data)
+        merged, pages_updated, new_rels, contradictions = _merge_wiki(existing, new_data, doc_name)
         _save_index(session_id, merged)
-    return pages_updated, new_rels
+        
+        for c in contradictions:
+            _log_event(
+                session_id, 
+                "CONTRADICTION", 
+                f"Page: {c['title']} | Claim: {c['claim']} | Source A: {c.get('val_a')} | Source B: {c.get('val_b')}"
+            )
+            
+    return pages_updated, new_rels, len(contradictions)
 
 
 # ---------------------------------------------------------------------------
@@ -620,11 +719,30 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
     pages = index.get("pages", {})
 
     if not pages:
-        return "", []
+        return {"context": "", "selected_titles": [], "bm25_count": 0}
 
     # --- Step 0: Detect file mentions in the question ---
     mentioned_files = _detect_mentioned_files(question, pages)
     file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
+
+    bm25_count = 0
+    pages_for_llm = pages
+
+    if len(pages) > 20:
+        try:
+            from rank_bm25 import BM25Okapi
+            corpus = []
+            keys = list(pages.keys())
+            for k in keys:
+                summary = pages[k].get("summary", "") if isinstance(pages[k], dict) else ""
+                corpus.append(f"{k} {summary}".lower().split())
+            bm25 = BM25Okapi(corpus)
+            tokenized_query = question.lower().split()
+            top_40_keys = bm25.get_top_n(tokenized_query, keys, n=40)
+            pages_for_llm = {k: pages[k] for k in top_40_keys}
+            bm25_count = len(pages_for_llm)
+        except ImportError:
+            pass
 
     # --- Step 1: Select relevant pages ---
     if file_pages:
@@ -635,7 +753,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
             selected_titles = file_pages + other
         else:
             # Large wiki: file pages + LLM-selected supplementary pages
-            llm_selected = _select_relevant_pages(pages, question)
+            llm_selected = _select_relevant_pages(pages_for_llm, question)
             seen = set(file_pages)
             supplementary = [t for t in llm_selected if t not in seen]
             selected_titles = file_pages + supplementary
@@ -646,7 +764,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
         if len(pages) <= 20:
             selected_titles = list(pages.keys())
         else:
-            selected_titles = _select_relevant_pages(pages, question)
+            selected_titles = _select_relevant_pages(pages_for_llm, question)
 
     # --- Step 2: Build context string from selected pages ---
     wiki_parts = []
@@ -654,10 +772,18 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
         if title in pages:
             page = pages[title]
             content = page.get("content", "") if isinstance(page, dict) else page
+            
+            if isinstance(page, dict) and page.get("contradiction_flagged"):
+                content = "[WARNING: This page contains conflicting claims. Surface the conflict explicitly in your answer. Do not resolve it.]\n" + content
+                
             wiki_parts.append(f"## {title}\n{content}\n")
     wiki_content = "\n".join(wiki_parts)
 
-    return wiki_content, selected_titles
+    return {
+        "context": wiki_content,
+        "selected_titles": selected_titles,
+        "bm25_count": bm25_count
+    }
 
 
 def _evaluate_confidence(question: str, context: str, answer: str) -> dict:
@@ -701,7 +827,7 @@ JSON:"""
     return {"score": score, "reason": "Confidence evaluated from context availability."}
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str) -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0) -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -752,6 +878,37 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Evaluate confidence score
     confidence = _evaluate_confidence(question, wiki_content, answer)
+
+    # Log query
+    _log_event(session_id, "QUERY", f"Q: {question[:60]}... | BM25 Shortlist: {bm25_count} | Pages selected: {len(selected_titles)} | Confidence: {confidence['score']}")
+
+    # Answer filing back to wiki
+    if confidence["score"] >= 80:
+        q_title_prefix = f"Q: {question[:50]}"
+        existing_titles = [t for t in pages if t.startswith("Q: ")]
+        
+        target_title = None
+        for t in existing_titles:
+            if q_title_prefix in t:
+                target_title = t
+                break
+                
+        if not target_title:
+            target_title = f"{q_title_prefix}..."
+            
+        new_page_payload = {
+            "pages": {
+                target_title: {
+                    "content": answer,
+                    "summary": answer[:100].replace("\n", " ") + "...",
+                    "quotes": []
+                }
+            },
+            "relations": []
+        }
+        # We must re-fetch lock via _atomic_merge
+        _atomic_merge(session_id, new_page_payload, doc_name="Query Answer")
+        _log_event(session_id, "QUERY_FILED", f"Page: {target_title}")
 
     return {
         "answer": answer,
