@@ -221,4 +221,20 @@ __marimo__/
 
 # Local project data
 app/data/
-app/.env
+app/.env
+app/sessions.json
+app/build_ui.py
+
+# Node Modules (puppeteer test)
+node_modules/
+package.json
+package-lock.json
+
+# Scratch & Test Files
+check_errors.js
+test_*.py
+debug.log
+lexwiki_ui_v2.html
+
+# macOS
+.DS_Store

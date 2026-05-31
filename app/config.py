@@ -19,9 +19,10 @@ CHROMA_PATH = os.path.join(_APP_DIR, "data", "chroma")
 WIKI_PATH = os.path.join(_APP_DIR, "data", "wiki")
 UPLOAD_PATH = os.path.join(_APP_DIR, "data", "uploads")
 SESSIONS_PATH = os.path.join(_APP_DIR, "data", "sessions.json")
+LOGS_PATH = os.path.join(_APP_DIR, "data", "logs")
 
 # Pre-create data directories at import time
-for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH]:
+for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH, LOGS_PATH]:
     os.makedirs(_d, exist_ok=True)
 
 CHUNK_SIZE = 2000

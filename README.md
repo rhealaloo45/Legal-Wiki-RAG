@@ -7,7 +7,11 @@ Legal Wiki RAG is a research tool built as a Single-Page Flask Application to co
 - **⚖️ Side-by-Side Comparison**: Upload `.txt` or `.pdf` files to ingest data into both pipelines and run parallel queries.
 - **🔍 RAG Pipeline**: Vector-based semantic search using local embeddings via Ollama and ChromaDB.
 - **🧠 Wiki Pipeline**: LLM-driven structured knowledge extraction that compounds over time into a persistent index, complete with automatic cross-referencing and interactive D3.js graphs.
+- **📊 Review Mode**: Concurrently extract structured cells across multiple documents into a confidence-coded Excel export.
+- **🔄 Compare Mode**: Automatically identify comparison aspects across existing wiki docs + new uploaded docs, flag outliers, and generate narratives.
 - **📈 Deep Understanding**: Granular progress tracking, deep insight views into retrieved chunks (RAG), and interactive knowledge graphs + wiki page browsing.
+- **🔒 Session Isolation**: Every chat session maintains its own completely independent wiki, isolating knowledge context and document uploads securely.
+- **🎨 Premium UI**: A custom-built, lightweight Light Mode Single-Page Application (SPA) designed without heavy frontend frameworks, offering a seamless and context-aware experience.
 - **☁️ Local & Cloud LLMs**: Configurable to use OpenRouter (cloud LLM) or local models via Ollama.
 
 ## 🏗️ Project Architecture

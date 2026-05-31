@@ -1,1305 +1,1045 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark">
+<html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RAG vs LLM Wiki — Knowledge Comparison</title>
-<meta name="description" content="Compare Retrieval-Augmented Generation with LLM Wiki synthesis side by side">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://d3js.org/d3.v7.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-<style>
-:root{
-  --accent:#7c3aed;--accent2:#2dd4bf;
-  --glass:rgba(255,255,255,.04);--glass-border:rgba(255,255,255,.08);
-  --surface:#0f0f14;--surface2:#16161d;
-  --success:#22c55e;--warning:#f59e0b;--danger:#ef4444;
+  <meta charset="UTF-8">
+  <title>LexWiki</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=DM+Sans:wght@400;500&display=swap');
+:root {
+  --font-serif: 'Lora', Georgia, serif;
+  --font-sans: 'DM Sans', sans-serif;
+  --bg-base: #F4F3EF;
+  --bg-surface: #ffffff;
+  --bg-hover: #FAFAF8;
+  --accent: #2B5CE6;
+  --accent-light: #EEF2FF;
+  --accent-border: #C7D2FE;
+  --green: #1D9E75;
+  --green-light: #E1F5EE;
+  --green-border: #9FE1CB;
+  --green-text: #0F6E56;
+  --amber: #BA7517;
+  --amber-light: #FAEEDA;
+  --amber-border: #FAC775;
+  --red: #A32D2D;
+  --red-light: #FCEBEB;
+  --red-border: #F7C1C1;
+  --border: rgba(0,0,0,0.08);
+  --text-primary: #1a1a2e;
+  --text-secondary: #6B7280;
+  --text-muted: #9CA3AF;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
 }
-*{font-family:'Inter',sans-serif}
-body{background:var(--surface);min-height:100vh}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg-base);padding:20px;height:100vh;overflow:hidden;font-family:var(--font-sans)}
+.app{font-family:var(--font-sans);background:var(--bg-base);height:100%;display:flex;flex-direction:column;border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;position:relative}
+.topbar{background:var(--bg-surface);border-bottom:0.5px solid var(--border);display:flex;align-items:center;padding:0 20px;height:50px;gap:14px;flex-shrink:0}
+.logo{font-family:var(--font-serif);font-size:15px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:7px}
+.logo-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.session-chip{font-size:11px;color:var(--text-secondary);background:var(--bg-base);padding:3px 10px;border-radius:20px;border:0.5px solid var(--border);display:flex;align-items:center;gap:5px}
+.topbar-right{margin-left:auto;display:flex;align-items:center;gap:8px}
+.icon-btn{width:30px;height:30px;border-radius:var(--radius-md);border:0.5px solid var(--border);background:var(--bg-surface);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--text-secondary);font-size:14px;transition:background .15s}
+.icon-btn:hover{background:var(--bg-hover)}
+.graph-btn{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--accent);background:var(--accent-light);border:0.5px solid var(--accent-border);border-radius:var(--radius-md);padding:5px 12px;cursor:pointer}
 
-/* ── Navbar ── */
-.navbar{background:linear-gradient(135deg,#0f0f14 0%,#1a1a2e 100%);border-bottom:1px solid var(--glass-border);backdrop-filter:blur(12px)}
-.brand-text{font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.provider-badge{font-size:.7rem;padding:4px 10px;border-radius:20px;background:var(--glass);border:1px solid var(--glass-border);color:var(--accent2)}
+.layout{display:flex;flex:1;overflow:hidden}
+.sidebar{width:210px;background:var(--bg-surface);border-right:0.5px solid var(--border);display:flex;flex-direction:column;padding:14px 10px;gap:4px;flex-shrink:0}
+.sidebar-label{font-size:10px;font-weight:500;color:var(--text-muted);letter-spacing:0.8px;text-transform:uppercase;padding:0 8px;margin:8px 0 4px}
+.new-btn{display:flex;align-items:center;gap:7px;padding:7px 10px;border-radius:var(--radius-md);font-size:12px;font-weight:500;color:var(--accent);background:var(--accent-light);cursor:pointer;border:none;width:100%;margin-bottom:2px}
+.s-item{padding:7px 10px;border-radius:var(--radius-md);cursor:pointer;display:flex;justify-content:space-between;align-items:center;}
+.s-item.active{background:var(--accent-light)}
+.s-item:hover{background:var(--bg-hover)}
+.s-title{font-size:12px;font-weight:500;color:var(--text-primary)}
+.s-item.active .s-title{color:var(--accent)}
+.s-meta{font-size:10px;color:var(--text-muted);margin-top:1px}
+.del-btn{background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:12px;}
 
-/* ── Cards ── */
-.glass-card{background:var(--glass);border:1px solid var(--glass-border);border-radius:16px;backdrop-filter:blur(16px);transition:border-color .3s}
-.glass-card:hover{border-color:rgba(124,58,237,.25)}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;position:relative;}
+.tabs{display:flex;background:var(--bg-surface);border-bottom:0.5px solid var(--border);padding:0 20px;gap:0;flex-shrink:0}
+.tab{padding:11px 16px;font-size:12px;font-weight:500;color:var(--text-secondary);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-0.5px;display:flex;align-items:center;gap:5px}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 
-/* ── Upload zone ── */
-.upload-zone{border:2px dashed rgba(255,255,255,.12);border-radius:16px;padding:2.5rem;text-align:center;transition:all .3s;cursor:pointer}
-.upload-zone:hover,.upload-zone.dragover{border-color:var(--accent);background:rgba(124,58,237,.06)}
+.panel{flex:1;overflow-y:auto;padding:20px}
+.d-none{display:none !important}
 
-/* ── Buttons ── */
-.btn-accent{background:linear-gradient(135deg,var(--accent),#6d28d9);border:none;color:#fff;font-weight:600;border-radius:12px;padding:10px 28px;transition:all .3s}
-.btn-accent:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(124,58,237,.35);color:#fff}
-.btn-accent:disabled{opacity:.4;transform:none;box-shadow:none}
-.btn-reset{background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.25);color:#fca5a5;font-size:.8rem;border-radius:10px;padding:6px 14px;transition:all .2s}
-.btn-reset:hover{background:rgba(239,68,68,.22);color:#fca5a5}
-.btn-copy{background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);color:#e2e8f0;font-size:.8rem;font-weight:500;border-radius:8px;padding:6px 14px;transition:all .2s;cursor:pointer}
-.btn-copy:hover{border-color:var(--accent2);color:var(--accent2);background:rgba(255,255,255,0.15)}
-.btn-copy.copied{border-color:var(--success);color:var(--success);background:rgba(34,197,94,0.15)}
+/* ASK PANEL */
+.ask-wrap{max-width:740px;margin:0 auto;width:100%}
+.ask-box{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:12px 14px;display:flex;align-items:flex-end;gap:10px;margin-bottom:20px}
+.ask-input{flex:1;border:none;outline:none;font-family:var(--font-sans);font-size:13px;color:var(--text-primary);background:transparent;resize:none;line-height:1.5}
+.ask-submit{background:var(--accent);color:#fff;border:none;border-radius:var(--radius-md);padding:7px 14px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
+.ask-submit:disabled{opacity:0.6;cursor:not-allowed}
 
-/* ── Status / progress ── */
-.status-bar{font-size:.85rem;padding:12px 16px;border-radius:12px;background:var(--surface2);border:1px solid var(--glass-border)}
-.status-bar .rag-stat{color:var(--accent)}
-.status-bar .wiki-stat{color:var(--accent2)}
-.progress-wrap{margin-top:10px}
-.progress{height:6px;border-radius:4px;background:rgba(255,255,255,.06)}
-.progress-bar-rag{background:linear-gradient(90deg,var(--accent),#a78bfa)}
-.progress-bar-wiki{background:linear-gradient(90deg,var(--accent2),#34d399)}
+.answer-card{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:20px}
+.answer-topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:0.5px solid var(--border)}
+.answer-tags{display:flex;align-items:center;gap:10px}
+.tag-synth{font-size:10px;font-weight:500;letter-spacing:0.7px;color:var(--green-text);background:var(--green-light);padding:3px 9px;border-radius:4px}
+.conf{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:500;color:var(--text-primary)}
+.conf-dot{width:8px;height:8px;border-radius:50%;background:var(--green)}
+.answer-actions{display:flex;align-items:center;gap:8px}
+.answer-time{font-size:11px;color:var(--text-muted)}
+.act-btn{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary);background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:4px 10px;cursor:pointer}
+.act-btn.copied{color:var(--green);border-color:var(--green)}
 
-/* ── Toast notifications ── */
-.toast-container{position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999}
-.toast-msg{background:#1e1e2e;border:1px solid var(--glass-border);border-radius:12px;padding:12px 18px;color:#e2e8f0;font-size:.85rem;box-shadow:0 8px 32px rgba(0,0,0,.5);animation:slideUp .3s ease;min-width:220px}
-.toast-msg.toast-error{border-color:rgba(239,68,68,.4);color:#fca5a5}
-.toast-msg.toast-success{border-color:rgba(34,197,94,.3);color:#86efac}
-@keyframes slideUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.answer-body{padding:20px 20px 16px}
+.exec-title{font-family:var(--font-serif);font-size:18px;font-weight:500;color:var(--text-primary);margin-bottom:12px}
+.exec-lead{font-size:13px;color:var(--text-secondary);line-height:1.75;margin-bottom:16px}
+.cite-link{color:var(--accent);font-weight:500;cursor:pointer;text-decoration:none}
+.cite-link:hover{text-decoration:underline}
+.finding{display:flex;gap:12px;margin-bottom:14px;padding:14px;background:var(--bg-base);border-radius:var(--radius-md);border-left:2px solid var(--accent)}
+.finding-num{width:22px;height:22px;border-radius:50%;background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:var(--accent);flex-shrink:0;margin-top:1px}
+.finding-content{flex:1;min-width:0}
+.finding-title{font-size:13px;font-weight:500;color:var(--text-primary);margin-bottom:4px}
+.finding-text{font-size:12px;color:var(--text-secondary);line-height:1.7}
+.inline-cite{font-family:var(--font-sans);font-size:10px;color:var(--accent);background:var(--accent-light);padding:1px 6px;border-radius:3px;cursor:pointer;margin:0 1px}
+.blockquote{border-left:2px solid var(--accent-border);padding:8px 12px;margin:10px 0;background:#F8F9FF;border-radius:0 var(--radius-md) var(--radius-md) 0}
+.blockquote-text{font-size:11px;font-style:italic;color:var(--text-secondary);line-height:1.6}
 
-/* ── Query input ── */
-.query-input{background:var(--surface2);border:1px solid var(--glass-border);border-radius:14px;color:#e2e8f0;padding:14px 20px;font-size:1rem}
-.query-input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,58,237,.15);color:#e2e8f0;background:var(--surface2)}
+.sources-bar{padding:12px 16px;border-top:0.5px solid var(--border);background:var(--bg-hover)}
+.sources-label{font-size:10px;font-weight:500;color:var(--text-muted);letter-spacing:0.7px;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:5px}
+.sources-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.source-chip{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:8px 10px;cursor:pointer;display:flex;align-items:flex-start;gap:7px}
+.source-chip:hover{border-color:var(--accent-border);background:#F8F9FF}
+.source-icon{color:var(--text-muted);font-size:14px;flex-shrink:0;margin-top:1px}
+.source-name{font-size:11px;font-weight:500;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.source-clause{font-size:10px;color:var(--text-muted);margin-top:1px}
 
-/* ── History pills ── */
-.history-wrap{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
-.history-pill{font-size:.75rem;padding:4px 12px;border-radius:20px;background:var(--glass);border:1px solid var(--glass-border);color:#94a3b8;cursor:pointer;transition:all .2s;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.history-pill:hover{border-color:var(--accent);color:#e2e8f0}
+/* FILES PANEL */
+.files-panel{padding:20px;overflow-y:auto;flex:1}
+.files-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.files-title{font-size:13px;font-weight:500;color:var(--text-primary)}
+.files-count{font-size:11px;color:var(--text-muted);background:var(--bg-base);padding:2px 8px;border-radius:20px}
+.ftree{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+.ftree-row{display:flex;align-items:center;padding:8px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;gap:8px}
+.ftree-row:last-child{border-bottom:none}
+.ftree-row:hover{background:var(--bg-hover)}
+.ftree-indent{display:inline-block}
+.ftree-icon{font-size:13px;flex-shrink:0}
+.ftree-name{font-size:12px;color:var(--text-primary);flex:1}
+.ftree-meta{font-size:10px;color:var(--text-muted)}
+.ftree-open{font-size:10px;color:var(--accent);background:var(--accent-light);padding:2px 8px;border-radius:20px;cursor:pointer;border:none;font-family:var(--font-sans)}
+.folder-row{background:var(--bg-hover)}
+.folder-name{font-size:12px;font-weight:500;color:var(--text-primary)}
 
-/* ── Answer columns ── */
-.answer-col{position:relative;overflow:hidden}
-.answer-col::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:3px 3px 0 0}
-.col-rag::before{background:linear-gradient(90deg,var(--accent),#a78bfa)}
-.col-wiki::before{background:linear-gradient(90deg,var(--accent2),#34d399)}
-.pipeline-badge{font-size:.65rem;padding:3px 10px;border-radius:20px;font-weight:600;letter-spacing:.5px;text-transform:uppercase}
-.badge-rag{background:rgba(124,58,237,.15);color:#a78bfa;border:1px solid rgba(124,58,237,.3)}
-.badge-wiki{background:rgba(45,212,191,.12);color:var(--accent2);border:1px solid rgba(45,212,191,.25)}
-.answer-text{font-size:.92rem;line-height:1.7;color:#cbd5e1}
-.answer-text .page-ref{background:rgba(45,212,191,.12);color:var(--accent2);padding:2px 8px;border-radius:6px;cursor:pointer;font-size:.82rem;font-weight:500;transition:all .2s;border:1px solid rgba(45,212,191,.2)}
-/* Markdown rendered content */
-.answer-text h1,.answer-text h2,.answer-text h3,.answer-text h4{color:#e2e8f0;margin:1rem 0 .5rem;font-weight:600}
-.answer-text h1{font-size:1.3rem}.answer-text h2{font-size:1.15rem}.answer-text h3{font-size:1.05rem}
-.answer-text p{margin:0 0 .75rem}
-.answer-text ul,.answer-text ol{margin:.5rem 0;padding-left:1.5rem}
-.answer-text li{margin-bottom:.3rem}
-.answer-text strong{color:#e2e8f0}
-.answer-text em{color:#94a3b8}
-.answer-text table{width:100%;border-collapse:collapse;margin:.75rem 0;font-size:.85rem}
-.answer-text th{background:rgba(124,58,237,.15);color:#a78bfa;padding:8px 12px;text-align:left;border:1px solid var(--glass-border);font-weight:600}
-.answer-text td{padding:8px 12px;border:1px solid var(--glass-border);color:#cbd5e1}
-.answer-text tr:nth-child(even) td{background:rgba(255,255,255,.02)}
-.answer-text blockquote{border-left:3px solid var(--accent);padding:.5rem 1rem;margin:.75rem 0;background:rgba(124,58,237,.06);border-radius:0 8px 8px 0;color:#94a3b8}
-.answer-text code{background:rgba(255,255,255,.08);padding:2px 6px;border-radius:4px;font-size:.85em;color:#a78bfa}
-.answer-text pre{background:var(--surface);border:1px solid var(--glass-border);border-radius:8px;padding:12px;overflow-x:auto;margin:.75rem 0}
-.answer-text pre code{background:none;padding:0}
-.answer-text hr{border:none;border-top:1px solid var(--glass-border);margin:1rem 0}
-.answer-text .page-ref:hover{background:rgba(45,212,191,.25)}
+/* DOC READER OVERLAY */
+.doc-reader{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg-surface);z-index:10;display:flex;flex-direction:column;}
+.doc-reader-top{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:0.5px solid var(--border);background:var(--bg-surface);flex-shrink:0}
+.doc-reader-title{font-size:13px;font-weight:500;color:var(--text-primary);flex:1}
+.close-btn{width:28px;height:28px;border-radius:var(--radius-md);border:0.5px solid var(--border);background:var(--bg-surface);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;color:var(--text-secondary)}
+.doc-reader-body{flex:1;overflow-y:auto;padding:28px 32px}
+.doc-reader-body h2{font-family:var(--font-serif);font-size:16px;font-weight:500;color:var(--text-primary);margin-bottom:12px}
+.doc-reader-body p{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-bottom:12px}
+.doc-reader-body .clause{font-size:12px;color:var(--text-primary);line-height:1.8;margin-bottom:10px;padding-left:14px;border-left:2px solid var(--border)}
 
-/* ── Timing badge ── */
-.timing-badge{font-size:.68rem;padding:2px 8px;border-radius:10px;background:rgba(255,255,255,.05);color:#64748b;border:1px solid var(--glass-border)}
+/* GRAPH OVERLAY */
+.graph-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(15,15,30,0.55);z-index:20;display:flex;align-items:center;justify-content:center;}
+.graph-modal{background:var(--bg-surface);border-radius:var(--radius-lg);border:0.5px solid var(--border);width:600px;max-width:95%;overflow:hidden}
+.graph-modal-top{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:0.5px solid var(--border)}
+.graph-modal-title{font-size:13px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:6px}
+.graph-body{padding:16px;background:var(--bg-hover);min-height:280px;display:flex;align-items:center;justify-content:center;position:relative}
+.tooltip { position:absolute; background:var(--bg-surface); border:0.5px solid var(--border); padding:8px 10px; border-radius:var(--radius-md); font-size:11px; color:var(--text-secondary); opacity:0; pointer-events:none; transition:opacity 0.2s; box-shadow:0 4px 6px -1px rgba(0,0,0,0.1); max-width:250px; }
 
-/* ── Chunk cards ── */
-.chunk-card{background:var(--surface);border-radius:10px;padding:12px 16px;margin-bottom:8px;border-left:3px solid var(--accent);font-size:.82rem;color:#94a3b8}
-.chunk-card .dist-badge{font-size:.7rem;background:rgba(124,58,237,.15);color:#a78bfa;padding:2px 8px;border-radius:10px}
-.chunk-source{font-weight:600;color:#e2e8f0;font-size:.78rem}
-.sim-bar-wrap{margin-top:6px}
-.sim-label{font-size:.7rem;color:#64748b;margin-bottom:3px}
-.sim-bar{height:4px;border-radius:2px;background:rgba(255,255,255,.06)}
-.sim-fill{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--accent),#a78bfa);transition:width .6s ease}
+/* REVIEW + COMPARE */
+.panel-split{display:flex;gap:14px;flex:1;overflow:hidden;padding:20px}
+.split-left{width:210px;flex-shrink:0;display:flex;flex-direction:column;gap:10px}
+.split-right{flex:1;overflow:auto;display:flex;flex-direction:column;}
+.ctrl-card{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:12px}
+.ctrl-title{font-size:10px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:8px}
+.doc-ck{display:flex;align-items:center;gap:7px;padding:4px 0;cursor:pointer}
+.doc-ck input{accent-color:var(--accent)}
+.doc-ck-lbl{font-size:11px;color:var(--text-primary)}
+.col-tag{display:flex;align-items:center;justify-content:space-between;background:var(--bg-base);border-radius:var(--radius-md);padding:4px 9px;margin-bottom:5px}
+.col-tag-t{font-size:11px;color:var(--text-primary)}
+.add-row{display:flex;gap:5px}
+.add-inp{flex:1;border:0.5px solid var(--border);border-radius:var(--radius-md);padding:5px 8px;font-size:11px;font-family:var(--font-sans);outline:none;min-width:0}
+.add-btn-sm{background:var(--accent);color:#fff;border:none;border-radius:var(--radius-md);padding:5px 9px;font-size:11px;cursor:pointer}
+.run-btn{width:100%;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-md);padding:8px;font-size:12px;font-weight:500;cursor:pointer}
+.run-btn:disabled{opacity:0.6;cursor:not-allowed}
+.tbl-wrap{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:auto}
+.tbl-bar{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:0.5px solid var(--border)}
+.tbl-bar-t{font-size:12px;font-weight:500;color:var(--text-primary)}
+.exp-btn{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--accent);background:var(--accent-light);border:none;border-radius:var(--radius-md);padding:5px 10px;cursor:pointer}
+table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
+.mtbl th{background:var(--bg-base);padding:8px 12px;text-align:left;font-weight:500;font-size:10px;color:var(--text-secondary);border-bottom:0.5px solid var(--border);white-space:nowrap}
+.mtbl td{padding:8px 12px;border-bottom:0.5px solid var(--border);vertical-align:middle;position:relative}
+.mtbl tr:last-child td{border-bottom:none}
+.mtbl tr:hover{background:var(--bg-hover)}
+.mtbl td:first-child{font-weight:500;font-size:11px;color:var(--text-primary)}
+.cg{background:var(--green-light);color:var(--green-text);border-radius:3px;padding:3px 7px;font-size:10px;display:inline-block}
+.cy{background:var(--amber-light);color:var(--amber);border-radius:3px;padding:3px 7px;font-size:10px;display:inline-block}
+.cr{background:var(--red-light);color:var(--red);border-radius:3px;padding:3px 7px;font-size:10px;display:inline-block}
+.flag-bar{display:flex;align-items:center;gap:7px;background:var(--red-light);border:0.5px solid var(--red-border);border-radius:var(--radius-md);padding:7px 11px;margin-bottom:10px;font-size:11px;color:var(--red)}
+.narr-box{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);padding:14px;margin-top:10px}
+.narr-lbl{font-size:10px;font-weight:500;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.6px;margin-bottom:7px}
+.narr-txt{font-size:12px;color:var(--text-secondary);line-height:1.75}
+.outlier-row{display:flex;align-items:flex-start;gap:7px;padding:7px 0;border-bottom:0.5px solid var(--border)}
+.outlier-row:last-child{border-bottom:none}
+.ob{background:var(--red-light);color:var(--red);font-size:10px;padding:2px 7px;border-radius:20px;white-space:nowrap;flex-shrink:0}
+.ot{font-size:11px;color:var(--text-secondary);line-height:1.6}
+.up-zone{border:0.5px dashed var(--border);border-radius:var(--radius-md);padding:10px;text-align:center;cursor:pointer;background:var(--bg-hover)}
+.up-zone-t{font-size:10px;color:var(--text-muted)}
+.up-badge{display:inline-flex;align-items:center;gap:3px;background:var(--amber-light);color:var(--amber);font-size:10px;padding:2px 7px;border-radius:20px;margin-top:6px}
 
-/* ── File Explorer ── */
-.file-tree { max-height:320px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:rgba(255,255,255,.1) transparent; font-size:.82rem; color:#94a3b8; }
-.file-tree::-webkit-scrollbar { width:4px; }
-.file-tree::-webkit-scrollbar-thumb { background:rgba(255,255,255,.1); border-radius:2px; }
-.file-tree ul { list-style-type:none; padding-left:20px; margin-bottom:0; }
-.file-tree > ul { padding-left:0; }
-.file-tree li { margin:4px 0; }
-.folder-icon { color:#f6d365; margin-right:6px; }
-.file-icon { color:#a0aec0; margin-right:6px; }
+/* PROGRESS BAR (Review) */
+.prog-container{background:var(--bg-base);border-radius:20px;height:6px;overflow:hidden;margin-bottom:4px}
+.prog-fill{background:var(--accent);height:100%;border-radius:20px;width:0%;transition:width 0.3s}
+.prog-lbls{display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted)}
 
-/* ── Graph ── */
-#wiki-graph{width:100%;height:420px;border-radius:12px;background:var(--surface);border:1px solid var(--glass-border);overflow:hidden}
-#wiki-graph svg{width:100%;height:100%}
-.node-tooltip{position:absolute;background:#1e1e2e;border:1px solid var(--glass-border);border-radius:10px;padding:12px 16px;max-width:280px;font-size:.82rem;color:#cbd5e1;pointer-events:none;box-shadow:0 8px 32px rgba(0,0,0,.5);z-index:999;opacity:0;transition:opacity .2s}
+/* UPLOAD SCREEN */
+.upload-screen{max-width:520px;margin:auto;display:flex;flex-direction:column;width:100%;}
+.upl-title{font-family:var(--font-serif);font-size:20px;font-weight:500;color:var(--text-primary);margin-bottom:6px;text-align:center}
+.upl-sub{font-size:13px;color:var(--text-secondary);margin-bottom:24px;text-align:center}
+.upl-zone{border:2px dashed var(--accent-border);border-radius:var(--radius-lg);padding:40px 24px;text-align:center;background:var(--accent-light);cursor:pointer;margin-bottom:16px}
+.upl-zone.dragover{border-color:var(--accent);background:#E8ECFF}
+.upl-icon{font-size:32px;color:var(--accent);margin-bottom:12px}
+.upl-text-p{font-size:14px;font-weight:500;color:var(--text-primary)}
+.upl-text-s{font-size:12px;color:var(--text-muted);margin-top:4px}
+.upl-btns{display:flex;gap:10px;justify-content:center}
+.upl-btn{border:0.5px solid var(--border);background:var(--bg-surface);color:var(--text-secondary);border-radius:var(--radius-md);padding:7px 16px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:5px}
+.upl-btn:hover{background:var(--bg-hover)}
 
-/* ── Compare bar ── */
-.compare-bar{text-align:center;padding:1.5rem;border-radius:14px;background:var(--glass);border:1px solid var(--glass-border)}
-.compare-bar .btn{border-radius:12px;padding:8px 20px;font-size:.85rem;font-weight:500;margin:0 6px}
+.main-prog-wrap{margin-top:20px;}
+.main-prog-lbl{font-size:12px;color:var(--text-primary);margin-bottom:4px;display:flex;justify-content:space-between}
 
-/* ── Misc ── */
-.spinner-overlay{display:flex;align-items:center;justify-content:center;min-height:120px}
-.fade-in{animation:fadeIn .5s ease}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.deep-toggle{font-size:.82rem;color:#64748b;cursor:pointer;transition:color .2s;user-select:none}
-.deep-toggle:hover{color:var(--accent2)}
-.section-label{font-size:.7rem;font-weight:600;letter-spacing:.8px;text-transform:uppercase;color:#475569;margin-bottom:8px}
-
-/* ── Offcanvas Sidebar ── */
-.offcanvas{background:var(--surface);border-right:1px solid var(--glass-border)}
-.offcanvas-header{border-bottom:1px solid var(--glass-border)}
-.session-item{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.05);cursor:pointer;transition:all .2s;display:flex;justify-content:space-between;align-items:center}
-.session-item:hover{background:rgba(255,255,255,.03)}
-.session-item.active{background:rgba(124,58,237,.1);border-left:3px solid var(--accent)}
-.session-item-content{flex-grow:1;overflow:hidden;margin-right:10px}
-.session-title{font-size:.9rem;color:#e2e8f0;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.session-date{font-size:.75rem;color:#64748b;margin-top:4px}
-.session-actions{display:flex;gap:6px;opacity:0;transition:opacity .2s}
-.session-item:hover .session-actions{opacity:1}
-.btn-icon{background:transparent;border:none;color:#94a3b8;cursor:pointer;padding:4px;border-radius:4px}
-.btn-icon:hover{color:#e2e8f0;background:rgba(255,255,255,.1)}
-</style>
+/* TOAST */
+.toast-container{position:fixed;bottom:20px;right:20px;z-index:100;display:flex;flex-direction:column;gap:8px}
+.toast-msg{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;min-width:220px;max-width:320px;display:flex;gap:8px;align-items:flex-start;animation:fadein 0.3s, fadeout 0.3s 3.7s;color:var(--text-primary)}
+.toast-success{border-left:3px solid var(--green)}
+.toast-error{border-left:3px solid var(--red)}
+.toast-info{border-left:3px solid var(--accent)}
+.toast-warning{border-left:3px solid var(--amber)}
+@keyframes fadein {from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fadeout {from{opacity:1}to{opacity:0}}
+  </style>
 </head>
 <body>
-
-<!-- Toast container -->
-<div class="toast-container" id="toast-container"></div>
-
-<!-- Node Tooltip -->
-<div class="node-tooltip" id="node-tooltip"></div>
-
-<!-- Navbar -->
-<nav class="navbar navbar-expand-lg px-4 py-3">
-  <div class="container-fluid">
-    <div class="d-flex align-items-center gap-3">
-      <button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="offcanvas" data-bs-target="#historyOffcanvas" aria-controls="historyOffcanvas">
-        ☰ History
-      </button>
-      <span class="brand-text fs-5">⚡ RAG vs Wiki</span>
-    </div>
-    <div class="d-flex align-items-center gap-2">
-      <button class="btn btn-outline-light btn-sm d-none" id="view-folder-btn" data-bs-toggle="modal" data-bs-target="#folderModal" onclick="loadFileTree()">📂 View Folder Structure</button>
-      <span class="provider-badge">{{ llm_provider }}</span>
-      <button class="btn-reset" id="reset-btn" style="display:none" title="Clear session and start fresh">↺ Reset Session</button>
-    </div>
-  </div>
-</nav>
-
-<!-- History Offcanvas -->
-<div class="offcanvas offcanvas-start" tabindex="-1" id="historyOffcanvas" aria-labelledby="historyOffcanvasLabel">
-  <div class="offcanvas-header">
-    <h5 class="offcanvas-title" id="historyOffcanvasLabel">Chat History</h5>
-    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" aria-label="Close"></button>
-  </div>
-  <div class="p-3 border-bottom border-secondary">
-    <button class="btn btn-accent w-100" onclick="newSession()">+ New Chat</button>
-  </div>
-  <div class="offcanvas-body p-0" id="session-list">
-    <!-- Sessions will be loaded here -->
-    <div class="p-4 text-center text-secondary small">Loading sessions...</div>
-  </div>
-</div>
-
-<div class="container-fluid px-4 py-4" style="max-width:1320px">
-
-  <!-- Top Row: Upload & Wiki Browser -->
-  <div class="row g-4 mb-4">
-    <div class="col-12" id="upload-col" style="transition: all 0.3s ease;">
-      <!-- Upload Card -->
-      <div class="glass-card p-4 h-100" id="upload-card">
-    <div class="upload-zone" id="upload-zone">
-      <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
-      <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
-      <div class="mb-2" style="font-size:2rem">📄</div>
-      <p class="mb-1 text-light fw-500" id="upload-label-main">Drop <strong>.txt</strong> / <strong>.pdf</strong> files or folders here</p>
-      <p class="text-secondary small mb-3" id="upload-sublabel">or choose below</p>
-      <div class="d-flex gap-2 justify-content-center flex-wrap">
-        <button class="btn btn-accent btn-sm" id="pick-files-btn" type="button">📄 Choose Files</button>
-        <button class="btn btn-accent btn-sm" id="pick-folder-btn" type="button" style="background:linear-gradient(135deg,var(--accent2),#14b8a6);color:#0f0f14">📁 Choose Folder</button>
-      </div>
-      <div class="mt-2 d-none" id="staged-info">
-        <span class="text-light small" id="staged-label"></span>
-      </div>
-      <button class="btn btn-accent btn-sm mt-2 d-none" id="upload-btn">Upload &amp; Ingest</button>
-    </div>
-
-    <!-- Progress bars -->
-    <div class="progress-wrap d-none" id="progress-wrap">
-      <div class="mb-2 d-none">
-        <div class="d-flex justify-content-between mb-1">
-          <span class="section-label" style="color:#a78bfa">RAG Pipeline</span>
-          <span class="section-label" id="rag-prog-label">0 / 0 docs</span>
-        </div>
-        <div class="progress"><div class="progress-bar progress-bar-rag" id="rag-prog-bar" style="width:0%"></div></div>
-        <div class="text-secondary mt-1" style="font-size:.75rem" id="rag-prog-msg"></div>
-      </div>
-      <div class="mb-2">
-        <div class="d-flex justify-content-between mb-1">
-          <span class="section-label" style="color:var(--accent2)">Wiki Pipeline</span>
-          <span class="section-label" id="wiki-prog-label">0 / 0 docs</span>
-        </div>
-        <div class="progress"><div class="progress-bar progress-bar-wiki" id="wiki-prog-bar" style="width:0%"></div></div>
-        <div class="text-secondary mt-1" style="font-size:.75rem" id="wiki-prog-msg"></div>
-      </div>
-      <div class="text-secondary" style="font-size:.75rem" id="eta-label"></div>
-    </div>
-
-    <!-- Status bar (post-ingest summary) -->
-    <div class="status-bar mt-3 d-none" id="status-bar">
-      <span class="rag-stat d-none" id="rag-status"></span>
-      <span class="mx-2 text-secondary d-none">|</span>
-      <span class="wiki-stat" id="wiki-status"></span>
-    </div>
-  </div>
-  </div>
-
-  <!-- Query Bar -->
-  <div class="glass-card p-4 mb-4" id="query-card">
-    <div class="d-flex gap-3">
-      <input type="text" class="form-control query-input flex-grow-1" id="question-input"
-             placeholder="Ask a question about the uploaded document…">
-      <button class="btn btn-accent" id="ask-btn">Ask</button>
-    </div>
-    <!-- Query history pills -->
-    <div class="history-wrap d-none" id="history-wrap">
-      <span class="section-label w-100 mb-0">Recent questions</span>
-      <div id="history-pills"></div>
-    </div>
-  </div>
-
-  <!-- Answer Grid -->
-  <div class="row g-4 mb-4 d-none" id="answer-grid">
-
-    <!-- RAG Column -->
-    <div class="col-12 d-none">
-      <div class="glass-card p-4 answer-col col-rag" id="rag-answer-card">
-        <div class="d-flex align-items-center justify-content-between mb-3">
-          <div class="d-flex align-items-center gap-2">
-            <span class="pipeline-badge badge-rag">Retrieval</span>
-            <span class="text-secondary" style="font-size:.78rem">RAG Pipeline</span>
-          </div>
-          <div class="d-flex align-items-center gap-2">
-            <span class="timing-badge d-none" id="rag-timing"></span>
-            <button class="btn-copy d-none" id="rag-copy-btn" onclick="copyAnswer('rag')">Copy</button>
-          </div>
-        </div>
-        <div id="rag-answer-body">
-          <div class="spinner-overlay" id="rag-spinner"><div class="spinner-border text-secondary"></div></div>
-          <div class="answer-text d-none" id="rag-answer-text"></div>
-        </div>
-        <div class="mt-3 d-flex justify-content-between align-items-center">
-          <button class="btn btn-link p-0 text-decoration-none deep-toggle" data-bs-toggle="modal" data-bs-target="#ragModal">▸ Deep Understanding</button>
-          <span class="text-secondary small d-none" id="rag-usage"></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Wiki Column -->
-    <div class="col-12">
-      <div class="glass-card p-4 answer-col col-wiki" id="wiki-answer-card">
-        <div class="d-flex align-items-center justify-content-between mb-3">
-          <div class="d-flex align-items-center gap-2">
-            <span class="pipeline-badge badge-wiki">Synthesized</span>
-            <span class="text-secondary" style="font-size:.78rem">Wiki Pipeline</span>
-            <span class="pipeline-badge d-none" id="wiki-confidence-badge" style="font-size:.7rem; cursor:help;" title="">Confidence: --%</span>
-          </div>
-          <div class="d-flex align-items-center gap-2">
-            <span class="timing-badge d-none" id="wiki-timing"></span>
-            <button class="btn-copy d-none" id="wiki-copy-btn" onclick="copyAnswer('wiki')">Copy</button>
-          </div>
-        </div>
-        <div id="wiki-answer-body">
-          <div class="spinner-overlay" id="wiki-spinner"><div class="spinner-border text-secondary"></div></div>
-          <div class="answer-text d-none" id="wiki-answer-text"></div>
-          <!-- Citations section -->
-          <div class="mt-3 pt-3 border-top border-secondary d-none" id="wiki-citations-section" style="border-top-style: dashed !important;">
-            <div class="section-label" style="font-size: .75rem; color: var(--accent2);">Citations</div>
-            <div class="d-flex flex-wrap gap-2" id="wiki-citations-list"></div>
-          </div>
-        </div>
-        <div class="mt-3 d-flex justify-content-between align-items-center">
-          <button class="btn btn-link p-0 text-decoration-none deep-toggle" data-bs-toggle="modal" data-bs-target="#wikiModal">▸ Deep Understanding</button>
-          <span class="text-secondary small d-none" id="wiki-usage"></span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Hybrid Column -->
-    <div class="col-12 d-none">
-      <div class="glass-card p-4 answer-col col-hybrid" id="hybrid-answer-card">
-        <div class="d-flex align-items-center justify-content-between mb-3">
-          <div class="d-flex align-items-center gap-2">
-            <span class="pipeline-badge" style="background:linear-gradient(135deg,#f59e0b,#ef4444);color:#fff">Hybrid</span>
-            <span class="text-secondary" style="font-size:.78rem">RAG + Wiki</span>
-          </div>
-          <div class="d-flex align-items-center gap-2">
-            <span class="timing-badge d-none" id="hybrid-timing"></span>
-            <button class="btn-copy d-none" id="hybrid-copy-btn" onclick="copyAnswer('hybrid')">Copy</button>
-          </div>
-        </div>
-        <div id="hybrid-answer-body">
-          <div class="spinner-overlay" id="hybrid-spinner"><div class="spinner-border text-secondary"></div></div>
-          <div class="answer-text d-none" id="hybrid-answer-text"></div>
-        </div>
-        <div class="mt-3 d-flex justify-content-end align-items-center">
-          <span class="text-secondary small d-none" id="hybrid-usage"></span>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Compare Bar -->
-  <div class="compare-bar d-none mb-5" id="compare-bar">
-    <p class="text-secondary mb-2" style="font-size:.85rem">Which answer was more useful?</p>
-    <button class="btn btn-outline-light btn-sm" onclick="vote('rag')">👍 RAG</button>
-    <button class="btn btn-outline-light btn-sm" onclick="vote('wiki')">👍 Wiki</button>
-    <button class="btn btn-outline-light btn-sm" onclick="vote('hybrid')">👍 Hybrid</button>
-    <button class="btn btn-outline-light btn-sm" onclick="vote('all')">All useful</button>
-    <p class="small text-secondary mt-2 d-none" id="vote-thanks">Thanks for your feedback!</p>
-  </div>
-
-</div>
-
-<!-- RAG Modal -->
-<div class="modal fade" id="ragModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
-    <div class="modal-content text-bg-dark">
-      <div class="modal-header border-secondary">
-        <h5 class="modal-title">RAG Deep Understanding (Retrieved Chunks)</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <div id="rag-chunks"></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Wiki Modal -->
-<div class="modal fade" id="wikiModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-xl modal-dialog-centered">
-    <div class="modal-content text-bg-dark">
-      <div class="modal-header border-secondary">
-        <h5 class="modal-title">Wiki Deep Understanding (Knowledge Graph)</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body p-0">
-        <div id="wiki-graph"></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Folder Structure Modal -->
-<div class="modal fade" id="folderModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-    <div class="modal-content text-bg-dark">
-      <div class="modal-header border-secondary">
-        <h5 class="modal-title">📂 Embedded Files</h5>
-        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <p class="text-secondary small mb-3">These are the exact files that successfully ingested into the RAG database.</p>
-        <div class="file-tree" id="file-tree">
-          <div class="text-center text-secondary py-3">Loading file structure...</div>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-
-<script>
-// ============================================================
-// State
-// ============================================================
-let SID = crypto.randomUUID();
-let uploadDone = false;
-let wikiRelations = [];
-let wikiPages = {};
-let graphSim = null;
-let queryHistory = [];          // [{q, ragAnswer, wikiAnswer}]
-let lastRagAnswer = '';
-let lastWikiAnswer = '';
-let ingestStartTime = null;     // for ETA calculation
-let totalFilesQueued = 0;
-
-// ============================================================
-// DOM refs
-// ============================================================
-const $zone        = document.getElementById('upload-zone');
-const $file        = document.getElementById('file-input');
-const $folder      = document.getElementById('folder-input');
-const $uploadBtn   = document.getElementById('upload-btn');
-const $pickFiles   = document.getElementById('pick-files-btn');
-const $pickFolder  = document.getElementById('pick-folder-btn');
-const $stagedInfo  = document.getElementById('staged-info');
-const $stagedLabel = document.getElementById('staged-label');
-const $progressWrap= document.getElementById('progress-wrap');
-const $statusBar   = document.getElementById('status-bar');
-const $ragStatus   = document.getElementById('rag-status');
-const $wikiStatus  = document.getElementById('wiki-status');
-const $qInput      = document.getElementById('question-input');
-const $askBtn      = document.getElementById('ask-btn');
-const $answerGrid  = document.getElementById('answer-grid');
-const $ragSpinner  = document.getElementById('rag-spinner');
-const $wikiSpinner = document.getElementById('wiki-spinner');
-const $hybridSpinner = document.getElementById('hybrid-spinner');
-const $ragText     = document.getElementById('rag-answer-text');
-const $wikiText    = document.getElementById('wiki-answer-text');
-const $hybridText  = document.getElementById('hybrid-answer-text');
-const $ragChunks   = document.getElementById('rag-chunks');
-const $compareBar  = document.getElementById('compare-bar');
-const $tooltip     = document.getElementById('node-tooltip');
-const $resetBtn    = document.getElementById('reset-btn');
-const $historyWrap = document.getElementById('history-wrap');
-const $historyPills= document.getElementById('history-pills');
-const $ragTiming   = document.getElementById('rag-timing');
-const $wikiTiming  = document.getElementById('wiki-timing');
-const $hybridTiming= document.getElementById('hybrid-timing');
-const $ragCopyBtn  = document.getElementById('rag-copy-btn');
-const $wikiCopyBtn = document.getElementById('wiki-copy-btn');
-const $hybridCopyBtn = document.getElementById('hybrid-copy-btn');
-
-// ============================================================
-// Toast helper (replaces alert())
-// ============================================================
-function showToast(msg, type = 'info') {
-  const el = document.createElement('div');
-  el.className = `toast-msg toast-${type}`;
-  el.textContent = msg;
-  document.getElementById('toast-container').appendChild(el);
-  setTimeout(() => el.remove(), 4000);
-}
-
-// ============================================================
-// Session Management
-// ============================================================
-async function loadSessions() {
-  try {
-    const res = await fetch('/sessions');
-    const data = await res.json();
-    const sessions = data.sessions || [];
-    const $sessionList = document.getElementById('session-list');
-    
-    if (sessions.length === 0) {
-      $sessionList.innerHTML = '<div class="p-4 text-center text-secondary small">No past sessions found.</div>';
-      return;
-    }
-    
-    $sessionList.innerHTML = sessions.map(s => {
-      const date = new Date(s.created_at * 1000).toLocaleString();
-      const isActive = s.id === SID ? 'active' : '';
-      return `
-        <div class="session-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
-          <div class="session-item-content">
-            <div class="session-title" id="title-${s.id}">${s.name || 'Unnamed Session'}</div>
-            <div class="session-date">${date} • ${s.files} files</div>
-          </div>
-          <div class="session-actions">
-            <button class="btn-icon" onclick="event.stopPropagation(); editSessionName('${s.id}')" title="Rename">✎</button>
-            <button class="btn-icon" onclick="event.stopPropagation(); deleteSession('${s.id}')" title="Delete">🗑️</button>
-          </div>
-        </div>
-      `;
-    }).join('');
-  } catch(e) {
-    console.error('Failed to load sessions', e);
-  }
-}
-
-async function editSessionName(sessionId) {
-  const newName = prompt('Enter new session name:');
-  if (!newName || !newName.trim()) return;
+  <div id="toast-container" class="toast-container"></div>
   
-  try {
-    const res = await fetch(`/session/${sessionId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: newName.trim() })
-    });
-    const d = await res.json();
-    if (d.status === 'ok') {
-      document.getElementById(`title-${sessionId}`).textContent = newName.trim();
-      showToast('Session renamed', 'success');
-    } else {
-      showToast(d.error || 'Failed to rename', 'error');
-    }
-  } catch(e) {
-    showToast('Failed to rename session', 'error');
-  }
-}
-
-async function resumeSession(sessionId) {
-  if (SID === sessionId) return; // Already active
+  <div class="app" id="app">
+    <div class="topbar">
+      <div class="logo"><span class="logo-dot"></span>Lex<span style="color:var(--accent)">Wiki</span></div>
+      <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New Session</span></div>
+      <div class="topbar-right">
+        <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:13px"></i>Knowledge graph</div>
+        <div class="icon-btn" aria-label="log"><i class="ti ti-file-description"></i></div>
+        <div class="icon-btn" aria-label="settings"><i class="ti ti-settings"></i></div>
+      </div>
+    </div>
   
-  // Try loading session data
-  try {
-    const res = await fetch(`/session/${sessionId}`);
-    const data = await res.json();
-    
-    if (data.error) {
-      showToast(data.error, 'error');
-      return;
-    }
-    
-    SID = sessionId;
-    
-    // Close offcanvas
-    const offcanvasEl = document.getElementById('historyOffcanvas');
-    const offcanvas = bootstrap.Offcanvas.getInstance(offcanvasEl);
-    if (offcanvas) offcanvas.hide();
-    
-    // Setup UI for an active session
-    uploadDone = true;
-    
-    // Let's actually hide the upload card entirely when resuming
-    document.getElementById('upload-col').classList.add('d-none');
-    document.getElementById('view-folder-btn').classList.remove('d-none');
-    
-    // Re-enable inputs
-    $qInput.disabled = false;
-    $askBtn.disabled = false;
-    $resetBtn.style.display = '';
-    
-    // Hide answers if any are showing
-    $answerGrid.classList.add('d-none');
-    $compareBar.classList.add('d-none');
-    
-    // Restore history
-    queryHistory = data.history || [];
-    renderHistory();
-    
-    // Load wiki data
-    loadGraph();
-    loadFileTree();
-    showToast('Session resumed', 'info');
-    
-    // Refresh sidebar active state
-    loadSessions();
-    
-    showToast(`Resumed session: ${data.name}`, 'success');
-  } catch(e) {
-    showToast('Failed to resume session', 'error');
-  }
-}
-
-async function deleteSession(sessionId) {
-  if (!confirm('Are you sure you want to delete this session?')) return;
-  try {
-    await fetch(`/session?session_id=${sessionId}`, { method: 'DELETE' });
-    if (SID === sessionId) {
-       location.reload(); // Reload to get a fresh session if active was deleted
-    } else {
-       loadSessions();
-    }
-  } catch (e) {
-    showToast('Failed to delete session', 'error');
-  }
-}
-
-function newSession() {
-  // A fresh reload generates a new SID and completely clears the UI state
-  location.reload();
-}
-
-// Load sessions on startup
-document.addEventListener('DOMContentLoaded', loadSessions);
-
-// ============================================================
-// Upload — supports files + folders (including nested)
-// ============================================================
-let stagedFiles = [];  // [{file: File, relativePath: string}]
-
-// --- Picker buttons ---
-$pickFiles.addEventListener('click', (e) => { e.stopPropagation(); $file.click(); });
-$pickFolder.addEventListener('click', (e) => { e.stopPropagation(); $folder.click(); });
-
-// --- File input change ---
-$file.addEventListener('change', () => {
-  const valid = filterValidFiles(Array.from($file.files));
-  if (!valid.length) { showToast('No valid .txt or .pdf files found.', 'error'); return; }
-  stagedFiles = valid.map(f => ({ file: f, relativePath: f.name }));
-  updateStagedUI();
-});
-
-// --- Folder input change ---
-$folder.addEventListener('change', () => {
-  const allFiles = Array.from($folder.files);
-  const valid = filterValidFiles(allFiles);
-  if (!valid.length) { showToast('No .txt or .pdf files found in the folder.', 'error'); return; }
-  stagedFiles = valid.map(f => ({ file: f, relativePath: f.webkitRelativePath || f.name }));
-  updateStagedUI();
-});
-
-// --- Drag and drop (supports files AND folders) ---
-$zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
-$zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
-$zone.addEventListener('drop', async e => {
-  e.preventDefault(); $zone.classList.remove('dragover');
-  const items = e.dataTransfer.items;
-  if (!items || !items.length) return;
-
-  const collected = [];
-  const promises = [];
-  for (const item of items) {
-    const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-    if (entry) {
-      promises.push(walkEntry(entry, '', collected));
-    } else if (item.kind === 'file') {
-      const f = item.getAsFile();
-      if (f) collected.push({ file: f, relativePath: f.name });
-    }
-  }
-  await Promise.all(promises);
-
-  const valid = collected.filter(e => isAllowedExt(e.file.name));
-  if (!valid.length) { showToast('No valid .txt or .pdf files found.', 'error'); return; }
-  stagedFiles = valid;
-  updateStagedUI();
-});
-
-// --- Recursive directory entry walker ---
-function walkEntry(entry, basePath, collected) {
-  return new Promise(resolve => {
-    if (entry.isFile) {
-      entry.file(f => {
-        collected.push({ file: f, relativePath: basePath ? basePath + '/' + f.name : f.name });
-        resolve();
-      }, () => resolve());
-    } else if (entry.isDirectory) {
-      const reader = entry.createReader();
-      const dirPath = basePath ? basePath + '/' + entry.name : entry.name;
-      const readAll = (allEntries = []) => {
-        reader.readEntries(entries => {
-          if (entries.length === 0) {
-            Promise.all(allEntries.map(e => walkEntry(e, dirPath, collected))).then(resolve);
-          } else {
-            readAll(allEntries.concat(Array.from(entries)));
-          }
-        }, () => resolve());
-      };
-      readAll();
-    } else {
-      resolve();
-    }
-  });
-}
-
-// --- Helpers ---
-function isAllowedExt(name) {
-  const ext = name.split('.').pop().toLowerCase();
-  return ['txt', 'pdf'].includes(ext);
-}
-
-function filterValidFiles(files) {
-  const maxSize = 100 * 1024 * 1024; // 100 MB
-  const valid = [];
-  const skipped = [];
-  for (const f of files) {
-    if (!isAllowedExt(f.name)) {
-      skipped.push(`${f.name} (unsupported type)`);
-    } else if (f.size > maxSize) {
-      skipped.push(`${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB — exceeds 100 MB limit)`);
-    } else {
-      valid.push(f);
-    }
-  }
-  if (skipped.length > 0) {
-    showToast(`Skipped ${skipped.length} file(s): ${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? '...' : ''}`, 'error');
-    console.warn('Skipped files:', skipped);
-  }
-  return valid;
-}
-
-function updateStagedUI() {
-  if (!stagedFiles.length) {
-    $stagedInfo.classList.add('d-none');
-    $uploadBtn.classList.add('d-none');
-    return;
-  }
-  const folders = new Set(stagedFiles.map(e => {
-    const parts = e.relativePath.split('/');
-    return parts.length > 1 ? parts[0] : null;
-  }).filter(Boolean));
-  const folderInfo = folders.size ? ` from ${folders.size} folder${folders.size > 1 ? 's' : ''}` : '';
-  $stagedLabel.textContent = `${stagedFiles.length} file${stagedFiles.length > 1 ? 's' : ''} selected${folderInfo}`;
-  $stagedInfo.classList.remove('d-none');
-  $uploadBtn.classList.remove('d-none');
-  $uploadBtn.disabled = false;
-}
-
-// --- Upload handler ---
-$uploadBtn.addEventListener('click', async () => {
-  if (!stagedFiles.length) return;
-  $uploadBtn.disabled = true;
-  $progressWrap.classList.remove('d-none');
-  $statusBar.classList.add('d-none');
-  ingestStartTime = Date.now();
-
-  // Reset progress
-  setDocProgress('rag', 0, 0, 'Starting…');
-  setDocProgress('wiki', 0, 0, 'Starting…');
-  document.getElementById('eta-label').textContent = '';
-
-  const fd = new FormData();
-  const relativePaths = [];
-  for (const entry of stagedFiles) {
-    fd.append('file', entry.file, entry.file.name);
-    relativePaths.push(entry.relativePath);
-  }
-  fd.append('session_id', SID);
-  fd.append('relative_paths', JSON.stringify(relativePaths));
-
-  try {
-    const res = await fetch('/upload', { method: 'POST', body: fd });
-    const d = await res.json();
-    if (d.error) { showToast(d.error, 'error'); $uploadBtn.disabled = false; return; }
-
-    totalFilesQueued = d.files_queued || 0;
-    showToast(`${totalFilesQueued} files queued for processing…`, 'info');
-
-    // Poll progress until phase === 'complete'
-    const pollTimer = setInterval(async () => {
-      try {
-        const pRes = await fetch(`/progress?session_id=${SID}`);
-        const pData = await pRes.json();
-        const docs = pData.docs || {};
-        const total = docs.total || totalFilesQueued;
-        const ragDone = docs.rag_done || 0;
-        const wikiDone = docs.wiki_done || 0;
-
-        // Update progress bars
-        setDocProgress('rag', ragDone, total, pData.rag?.message || `${ragDone} / ${total} docs`);
-        setDocProgress('wiki', wikiDone, total, pData.wiki?.message || `${wikiDone} / ${total} docs`);
-
-        // ETA based on the slower pipeline
-        const minDone = Math.min(ragDone, wikiDone);
-        if (minDone > 0 && minDone < total) {
-          const elapsed = (Date.now() - ingestStartTime) / 1000;
-          const rate = elapsed / minDone;
-          const remaining = Math.round(rate * (total - minDone));
-          const mins = Math.floor(remaining / 60);
-          const secs = remaining % 60;
-          document.getElementById('eta-label').textContent = `ETA: ~${mins > 0 ? mins + 'm ' : ''}${secs}s remaining`;
-        }
-
-        // Completion check
-        if (pData.phase === 'complete') {
-          clearInterval(pollTimer);
-          setDocProgress('rag', total, total, 'Complete');
-          setDocProgress('wiki', total, total, 'Complete');
-          document.getElementById('eta-label').textContent = '';
-
-          $ragStatus.textContent  = `RAG: ${total} docs embedded`;
-          $wikiStatus.textContent = `Wiki: processing complete`;
-          $statusBar.classList.remove('d-none');
-
-          document.getElementById('view-folder-btn').classList.remove('d-none');
-
-          uploadDone = true;
-          $qInput.disabled = false;
-          $askBtn.disabled = false;
-          $resetBtn.style.display = '';
-          $uploadBtn.disabled = false;
-          $qInput.focus();
-
-          loadGraph();
-          loadFileTree();
-          showToast(`All ${total} documents ingested successfully.`, 'success');
-        }
-      } catch(e) { console.error('Progress poll error:', e); }
-    }, 1500);
-
-  } catch(e) {
-    showToast('Upload failed: ' + e, 'error');
-    $uploadBtn.disabled = false;
-  }
-});
-
-function setDocProgress(pipeline, done, total, msg) {
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  document.getElementById(`${pipeline}-prog-bar`).style.width = pct + '%';
-  document.getElementById(`${pipeline}-prog-label`).textContent = `${done} / ${total} docs`;
-  document.getElementById(`${pipeline}-prog-msg`).textContent = msg;
-}
-
-// ============================================================
-// Reset session
-// ============================================================
-$resetBtn.addEventListener('click', async () => {
-  if (!confirm('This will clear all ingested data for this session. Continue?')) return;
-  try {
-    await fetch(`/session?session_id=${SID}`, { method: 'DELETE' });
-  } catch(e) {}
-  // Reload the page to get a fresh session ID
-  location.reload();
-});
-
-// ============================================================
-// Query
-// ============================================================
-$askBtn.addEventListener('click', doQuery);
-$qInput.addEventListener('keydown', e => { if (e.key === 'Enter') doQuery(); });
-
-async function doQuery() {
-  const q = $qInput.value.trim();
-  if (!q) return;
-  if (!uploadDone) { showToast('Please upload a document first.', 'warning'); return; }
-  if (q.length < 3) { showToast('Please enter a longer question.', 'error'); return; }
-
-  $askBtn.disabled = true;
-  $answerGrid.classList.remove('d-none');
-  $ragSpinner.classList.remove('d-none');  $ragText.classList.add('d-none');
-  $wikiSpinner.classList.remove('d-none'); $wikiText.classList.add('d-none');
-  $hybridSpinner.classList.remove('d-none'); $hybridText.classList.add('d-none');
-  $compareBar.classList.add('d-none');
-  $ragChunks.innerHTML = '';
-  $ragTiming.classList.add('d-none');
-  $wikiTiming.classList.add('d-none');
-  $hybridTiming.classList.add('d-none');
-  $ragCopyBtn.classList.add('d-none');
-  $wikiCopyBtn.classList.add('d-none');
-  $hybridCopyBtn.classList.add('d-none');
+    <div class="layout">
+      <div class="sidebar">
+        <button class="new-btn" onclick="newSession()"><i class="ti ti-plus" style="font-size:13px"></i>New matter</button>
+        <div class="sidebar-label">Sessions</div>
+        <div id="session-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
+          <!-- sessions injected here -->
+        </div>
+      </div>
   
-  const $wikiConf = document.getElementById('wiki-confidence-badge');
-  if ($wikiConf) $wikiConf.classList.add('d-none');
-  const $citationsSection = document.getElementById('wiki-citations-section');
-  if ($citationsSection) $citationsSection.classList.add('d-none');
-
-  try {
-    const res = await fetch('/query', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: q, session_id: SID })
-    });
-    const d = await res.json();
-    if (d.error) { showToast(d.error, 'error'); return; }
-
-    // ── RAG answer ──
-    lastRagAnswer = d.rag.answer || '';
-    $ragText.innerHTML = renderMarkdown(lastRagAnswer);
-    $ragSpinner.classList.add('d-none');
-    $ragText.classList.remove('d-none');
-    $ragText.classList.add('fade-in');
-    if (d.rag.elapsed_ms != null) {
-      $ragTiming.textContent = formatMs(d.rag.elapsed_ms);
-      $ragTiming.classList.remove('d-none');
-    }
-    $ragCopyBtn.classList.remove('d-none');
-    
-    // RAG usage
-    const $ragUsage = document.getElementById('rag-usage');
-    if(d.rag.usage) {
-      $ragUsage.textContent = `Tokens: ${d.rag.usage.prompt_tokens||0} in, ${d.rag.usage.completion_tokens||0} out`;
-      $ragUsage.classList.remove('d-none');
-    }
-
-    // RAG chunks
-    if(d.rag.chunks){
-      const colors = ['#7c3aed','#2dd4bf','#f59e0b','#ef4444','#3b82f6'];
-      const srcMap = {};
-      let ci = 0;
-      d.rag.chunks.forEach(ch => {
-        if (!(ch.source in srcMap)) srcMap[ch.source] = colors[ci++ % colors.length];
-        // cosine distance → similarity %: sim = (1 - dist) * 100
-        const simPct = ch.distance != null ? Math.max(0, Math.round((1 - ch.distance) * 100)) : null;
-        const simBar = simPct != null
-          ? `<div class="sim-bar-wrap">
-               <div class="sim-label">Similarity: <strong style="color:#e2e8f0">${simPct}%</strong></div>
-               <div class="sim-bar"><div class="sim-fill" style="width:${simPct}%"></div></div>
-             </div>`
-          : '';
-        $ragChunks.innerHTML +=
-          `<div class="chunk-card" style="border-left-color:${srcMap[ch.source]}">
-            <div class="d-flex justify-content-between mb-1">
-              <span class="chunk-source">${ch.source} — chunk ${ch.chunk_index}</span>
-              ${ch.distance != null ? `<span class="dist-badge">dist ${ch.distance}</span>` : ''}
+      <div class="main" id="main-area">
+        <div class="tabs d-none" id="modeTabs">
+          <div class="tab active" data-target="ask" onclick="switchTab('ask',this)"><i class="ti ti-message-circle" style="font-size:13px"></i>Ask</div>
+          <div class="tab" data-target="review" onclick="switchTab('review',this)"><i class="ti ti-table" style="font-size:13px"></i>Review</div>
+          <div class="tab" data-target="compare" onclick="switchTab('compare',this)"><i class="ti ti-columns" style="font-size:13px"></i>Compare</div>
+          <div class="tab" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open" style="font-size:13px"></i>Files</div>
+        </div>
+        
+        <!-- PRE-SESSION UPLOAD SCREEN -->
+        <div id="panel-upload" class="panel" style="display:flex;">
+          <div class="upload-screen" id="upload-screen">
+            <div class="upl-title">Upload your documents</div>
+            <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
+            
+            <div class="upl-zone" id="upload-zone">
+              <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+              <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
+              <i class="ti ti-upload upl-icon"></i>
+              <div class="upl-text-p">Drop .txt / .pdf files or folders here</div>
+              <div class="upl-text-s" id="staged-label">or choose below</div>
             </div>
-            ${simBar}
-            <div class="mt-2">${ch.text.substring(0, 300)}${ch.text.length > 300 ? '…' : ''}</div>
-          </div>`;
-      });
-    }
-
-    // ── Wiki answer — wrap [Page Title] in clickable badges ──
-    lastWikiAnswer = d.wiki.answer || '';
-    let wAnswer = renderMarkdown(lastWikiAnswer);
-    const usedPages = d.wiki.pages_used || [];
-    usedPages.forEach(p => {
-      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      wAnswer = wAnswer.replace(
-        new RegExp('\\[' + esc + '\\]', 'g'),
-        `<span class="page-ref" onclick="highlightNode('${p.replace(/'/g, "\\'")}')">[${p}]</span>`
-      );
+            
+            <div class="upl-btns" id="pick-btns-wrap">
+              <button class="upl-btn" id="pick-files-btn"><i class="ti ti-file"></i>Choose Files</button>
+              <button class="upl-btn" id="pick-folder-btn"><i class="ti ti-folder"></i>Choose Folder</button>
+              <button class="upl-btn d-none" id="upload-btn" style="background:var(--accent);color:#fff;border:none">Ingest Now</button>
+            </div>
+            
+            <div class="main-prog-wrap d-none" id="progress-wrap">
+              <div class="main-prog-lbl"><span style="color:var(--accent)">RAG Pipeline</span><span id="rag-prog-label">0/0</span></div>
+              <div class="prog-container"><div class="prog-fill" id="rag-prog-bar"></div></div>
+              <div class="prog-lbls"><span id="rag-prog-msg">Starting...</span><span></span></div>
+              
+              <div class="main-prog-lbl" style="margin-top:10px"><span style="color:var(--green)">Wiki Pipeline</span><span id="wiki-prog-label">0/0</span></div>
+              <div class="prog-container"><div class="prog-fill" id="wiki-prog-bar"></div></div>
+              <div class="prog-lbls"><span id="wiki-prog-msg">Starting...</span><span id="eta-label"></span></div>
+            </div>
+          </div>
+        </div>
+  
+        <!-- ASK -->
+        <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow-y:auto">
+          <div class="ask-wrap">
+            <div class="ask-box">
+              <textarea class="ask-input" id="question-input" rows="2" placeholder="Ask anything about your documents…"></textarea>
+              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Ask</button>
+            </div>
+            
+            <div id="answers-container"></div>
+          </div>
+        </div>
+  
+        <!-- REVIEW -->
+        <div id="panel-review" class="panel-split d-none" style="display:none">
+          <div class="split-left">
+            <div class="ctrl-card">
+              <div class="ctrl-title">Documents</div>
+              <div id="review-doc-list" style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
+            </div>
+            <div class="ctrl-card">
+              <div class="ctrl-title">Columns</div>
+              <div id="review-cols-list">
+                <div class="col-tag"><span class="col-tag-t">Governing Law</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>
+                <div class="col-tag"><span class="col-tag-t">Notice Period</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>
+              </div>
+              <div class="add-row" style="margin-top:6px"><input class="add-inp" id="rev-new-col" placeholder="Add column…"><button class="add-btn-sm" id="add-review-col-btn">+</button></div>
+            </div>
+            <button class="run-btn" id="run-review-btn">Run review</button>
+          </div>
+          <div class="split-right">
+            <div id="review-status-wrap" class="d-none" style="margin-bottom:10px">
+              <div class="prog-container"><div class="prog-fill" id="review-progress"></div></div>
+              <div class="prog-lbls"><span id="review-status-text">Starting...</span></div>
+            </div>
+            <div class="flag-bar d-none" id="review-flag-bar"><i class="ti ti-alert-triangle" style="font-size:13px"></i><span id="review-flag-text"></span></div>
+            
+            <div class="tbl-wrap d-none" id="review-table-wrap">
+              <div class="tbl-bar"><span class="tbl-bar-t" id="review-table-title">Extraction Results</span><button class="exp-btn d-none" id="review-export-btn"><i class="ti ti-download" style="font-size:12px"></i>Export</button></div>
+              <table class="mtbl" id="review-table">
+                <thead id="review-thead"></thead>
+                <tbody id="review-tbody"></tbody>
+              </table>
+            </div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:6px;padding-left:2px" id="review-footer" class="d-none">Hover any cell to view verbatim quote from source document</div>
+          </div>
+        </div>
+  
+        <!-- COMPARE -->
+        <div id="panel-compare" class="panel-split d-none" style="display:none">
+          <div class="split-left">
+            <div class="ctrl-card">
+              <div class="ctrl-title">Existing docs</div>
+              <div id="compare-doc-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
+            </div>
+            <div class="ctrl-card">
+              <div class="ctrl-title">Upload to compare</div>
+              <div class="up-zone" id="compare-upload-zone">
+                <input type="file" id="compare-file" accept=".txt,.pdf" class="d-none">
+                <i class="ti ti-upload" style="font-size:16px;color:var(--text-muted)"></i>
+                <div class="up-zone-t" style="margin-top:5px">Drop file or browse</div>
+                <div class="up-badge d-none" id="compare-staged-badge"><i class="ti ti-bolt" style="font-size:10px"></i><span id="compare-staged-label"></span></div>
+              </div>
+            </div>
+            <div class="ctrl-card">
+              <div class="ctrl-title">Comparison topic</div>
+              <input class="add-inp" style="width:100%" id="compare-q" placeholder="e.g. Indemnification clauses">
+            </div>
+            <button class="run-btn" id="run-compare-btn">Run compare</button>
+          </div>
+          <div class="split-right">
+            <div id="compare-status" style="font-size:12px;color:var(--text-muted);margin-bottom:10px"></div>
+            <div class="tbl-wrap d-none" id="compare-table-wrap" style="margin-bottom:10px">
+              <div class="tbl-bar"><span class="tbl-bar-t">Comparison Matrix</span><button class="exp-btn d-none" id="compare-export-btn"><i class="ti ti-download" style="font-size:12px"></i>Export</button></div>
+              <table class="mtbl" style="table-layout:fixed;width:100%" id="compare-table">
+                <thead id="compare-thead"></thead>
+                <tbody id="compare-tbody"></tbody>
+              </table>
+            </div>
+            <div class="narr-box d-none" id="compare-outliers-wrap" style="margin-bottom:10px">
+              <div class="narr-lbl">Outliers</div>
+              <div id="compare-outliers-list"></div>
+            </div>
+            <div class="narr-box d-none" id="compare-narrative-wrap">
+              <div class="narr-lbl">Narrative synthesis</div>
+              <div class="narr-txt" id="compare-narrative"></div>
+            </div>
+          </div>
+        </div>
+  
+        <!-- FILES -->
+        <div id="panel-files" class="files-panel d-none" style="display:none">
+          <div class="files-toolbar">
+            <div style="display:flex;align-items:center;gap:8px"><span class="files-title">Document library</span><span class="files-count" id="files-count-badge">0 files</span></div>
+          </div>
+          <div class="ftree" id="file-tree">
+            <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No files ingested yet.</div>
+          </div>
+        </div>
+  
+        <!-- DOC READER -->
+        <div id="doc-reader" class="doc-reader" style="display:none">
+          <div class="doc-reader-top">
+            <i class="ti ti-file-text" style="font-size:14px;color:var(--text-muted)"></i>
+            <span class="doc-reader-title" id="doc-reader-name"></span>
+            <div class="close-btn" onclick="closeDoc()"><i class="ti ti-x"></i></div>
+          </div>
+          <div class="doc-reader-body" id="doc-reader-body"></div>
+        </div>
+  
+        <!-- GRAPH OVERLAY -->
+        <div id="graph-overlay" class="graph-overlay" style="display:none" onclick="handleOverlayClick(event)">
+          <div class="graph-modal" onclick="event.stopPropagation()">
+            <div class="graph-modal-top">
+              <span class="graph-modal-title"><i class="ti ti-topology-star-ring" style="font-size:14px;color:var(--accent)"></i>Knowledge graph</span>
+              <div class="close-btn" onclick="toggleGraph()"><i class="ti ti-x"></i></div>
+            </div>
+            <div class="graph-body" id="wiki-graph">
+              <div style="font-size:12px;color:var(--text-muted)">No graph data available.</div>
+            </div>
+            <div id="node-tooltip" class="tooltip"></div>
+          </div>
+        </div>
+  
+      </div>
+    </div>
+  </div>
+  
+  <script>
+  // ============================================================
+  // State
+  // ============================================================
+  let SID = crypto.randomUUID();
+  let uploadDone = false;
+  let wikiRelations = [];
+  let wikiPages = {};
+  let graphSim = null;
+  let ingestStartTime = null;
+  let totalFilesQueued = 0;
+  let currentDocs = [];
+  
+  // ============================================================
+  // Toast Helper
+  // ============================================================
+  function showToast(msg, type = 'info') {
+    const el = document.createElement('div');
+    el.className = `toast-msg toast-${type}`;
+    let icon = 'info-circle';
+    if(type==='success') icon='check';
+    if(type==='error') icon='alert-triangle';
+    el.innerHTML = `<i class="ti ti-${icon}"></i> <span>${msg}</span>`;
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(() => el.remove(), 4000);
+  }
+  
+  // ============================================================
+  // UI Tabs & Overlays
+  // ============================================================
+  function switchTab(name, el) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+    document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
+    document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
+    document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
+    document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
+    document.getElementById('doc-reader').style.display = 'none';
+    
+    if(name==='ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
+    else if(name==='review') document.getElementById('panel-review').style.setProperty('display', 'flex', 'important');
+    else if(name==='compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
+    else if(name==='files') document.getElementById('panel-files').style.setProperty('display', 'flex', 'important');
+  }
+  
+  function toggleGraph() {
+    const o = document.getElementById('graph-overlay');
+    o.style.display = o.style.display === 'none' ? 'flex' : 'none';
+    if(o.style.display === 'flex') loadGraph();
+  }
+  function handleOverlayClick(e) { if(e.target === document.getElementById('graph-overlay')) toggleGraph(); }
+  
+  function openDoc(name) {
+    document.getElementById('doc-reader-name').textContent = name;
+    document.getElementById('doc-reader').style.display = 'flex';
+    document.getElementById('doc-reader-body').innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Loading document...</div>';
+    
+    // Fetch doc text
+    fetch(`/progress?session_id=${SID}`) // placeholder, we actually don't have a GET /document route in python yet, fallback to a note
+    .then(() => {
+      // In the real system we'd call GET /document. For now just show a note that doc reader requires a backend route.
+      document.getElementById('doc-reader-body').innerHTML = `<p>Document viewer opened for: ${name}.</p><p class="clause">Note: To load full text, a backend GET /document route must be implemented as specified in UI.md constraints.</p>`;
     });
-    $wikiText.innerHTML = wAnswer;
-    $wikiSpinner.classList.add('d-none');
-    $wikiText.classList.remove('d-none');
-    $wikiText.classList.add('fade-in');
-    if (d.wiki.elapsed_ms != null) {
-      $wikiTiming.textContent = formatMs(d.wiki.elapsed_ms);
-      $wikiTiming.classList.remove('d-none');
-    }
-    $wikiCopyBtn.classList.remove('d-none');
-
-    // Confidence badge
-    const $wikiConf = document.getElementById('wiki-confidence-badge');
-    if (d.wiki.confidence_score != null) {
-      $wikiConf.textContent = `Confidence: ${d.wiki.confidence_score}%`;
-      $wikiConf.title = d.wiki.confidence_reason || '';
-      $wikiConf.classList.remove('d-none');
-      // Apply color dynamically
-      const score = d.wiki.confidence_score;
-      if (score >= 80) {
-        $wikiConf.style.backgroundColor = 'rgba(34, 197, 94, 0.15)';
-        $wikiConf.style.color = '#86efac';
-        $wikiConf.style.border = '1px solid rgba(34, 197, 94, 0.3)';
-      } else if (score >= 50) {
-        $wikiConf.style.backgroundColor = 'rgba(245, 158, 11, 0.15)';
-        $wikiConf.style.color = '#fde047';
-        $wikiConf.style.border = '1px solid rgba(245, 158, 11, 0.3)';
-      } else {
-        $wikiConf.style.backgroundColor = 'rgba(239, 68, 68, 0.15)';
-        $wikiConf.style.color = '#fca5a5';
-        $wikiConf.style.border = '1px solid rgba(239, 68, 68, 0.3)';
-      }
-    } else {
-      $wikiConf.classList.add('d-none');
-    }
-
-    // Render Citations
-    const $citationsSection = document.getElementById('wiki-citations-section');
-    const $citationsList = document.getElementById('wiki-citations-list');
-    if ($citationsList) {
-      $citationsList.innerHTML = '';
-      const filesUsed = d.wiki.files_used || [];
-      const pagesUsed = d.wiki.pages_used || [];
+  }
+  function closeDoc() { document.getElementById('doc-reader').style.display = 'none'; }
+  
+  // ============================================================
+  // Sessions
+  // ============================================================
+  function newSession() { location.reload(); }
+  
+  async function loadSessions() {
+    try {
+      const res = await fetch('/sessions');
+      const data = await res.json();
+      const sessions = data.sessions || [];
+      const $list = document.getElementById('session-list');
       
-      if (filesUsed.length > 0 || pagesUsed.length > 0) {
-        // 1. Files cited
-        filesUsed.forEach(f => {
-          $citationsList.innerHTML += `
-            <span class="pipeline-badge" style="background: rgba(255,255,255,0.06); border: 1px solid var(--glass-border); color: #e2e8f0;">
-              📄 ${f}
-            </span>
-          `;
-        });
-        
-        // 2. Wiki pages cited
-        pagesUsed.forEach(p => {
-          const cleanTitle = p.replace(/\s*\([^)]+\)\s*$/, '');
-          $citationsList.innerHTML += `
-            <span class="pipeline-badge badge-wiki" style="cursor: pointer;" onclick="highlightNode('${p.replace(/'/g, "\\'")}')" title="Click to view in knowledge graph">
-              🔗 ${cleanTitle}
-            </span>
-          `;
-        });
-        
-        $citationsSection.classList.remove('d-none');
-      } else {
-        $citationsSection.classList.add('d-none');
+      if (sessions.length === 0) {
+        $list.innerHTML = '<div style="padding:10px;font-size:11px;color:var(--text-muted);text-align:center">No past sessions</div>';
+        return;
+      }
+      
+      $list.innerHTML = sessions.map(s => {
+        const date = new Date(s.created_at * 1000).toLocaleString();
+        const isActive = s.id === SID ? 'active' : '';
+        return `
+          <div class="s-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
+            <div>
+              <div class="s-title">${s.name || 'Unnamed Session'}</div>
+              <div class="s-meta">${s.files} docs · ${date}</div>
+            </div>
+            <button class="del-btn" onclick="deleteSession(event, '${s.id}')" title="Delete"><i class="ti ti-trash"></i></button>
+          </div>
+        `;
+      }).join('');
+    } catch(e) {}
+  }
+  
+  async function resumeSession(id) {
+    SID = id;
+    uploadDone = true;
+    document.getElementById('modeTabs').classList.remove('d-none');
+    document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+    switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
+    
+    document.getElementById('top-session-name').textContent = "Resumed Session";
+    loadSessions();
+    loadFileTree();
+    loadGraph();
+  }
+  
+  async function deleteSession(e, id) {
+    e.stopPropagation();
+    if (!confirm('Delete this session?')) return;
+    try {
+      await fetch(`/session?session_id=${id}`, { method: 'DELETE' });
+      if(id === SID) newSession();
+      else loadSessions();
+    } catch(err){}
+  }
+  
+  document.addEventListener('DOMContentLoaded', loadSessions);
+  
+  // ============================================================
+  // Upload Logic
+  // ============================================================
+  let stagedFiles = [];
+  const $file = document.getElementById('file-input');
+  const $folder = document.getElementById('folder-input');
+  
+  document.getElementById('pick-files-btn').addEventListener('click', () => $file.click());
+  document.getElementById('pick-folder-btn').addEventListener('click', () => $folder.click());
+  
+  const $zone = document.getElementById('upload-zone');
+  $zone.addEventListener('click', () => $file.click());
+  $zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
+  $zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
+  $zone.addEventListener('drop', async e => {
+    e.preventDefault(); $zone.classList.remove('dragover');
+    const items = e.dataTransfer.items;
+    if (!items || !items.length) return;
+    const collected = [];
+    const promises = [];
+    for (const item of items) {
+      const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+      if (entry) promises.push(walkEntry(entry, '', collected));
+      else if (item.kind === 'file') {
+        const f = item.getAsFile();
+        if (f) collected.push({ file: f, relativePath: f.name });
       }
     }
-
-    // Wiki usage
-    const $wikiUsage = document.getElementById('wiki-usage');
-    if(d.wiki.usage) {
-      $wikiUsage.textContent = `Tokens: ${d.wiki.usage.prompt_tokens||0} in, ${d.wiki.usage.completion_tokens||0} out`;
-      $wikiUsage.classList.remove('d-none');
-    }
-
-    // ── Hybrid answer ──
-    lastHybridAnswer = d.hybrid.answer || '';
-    let hAnswer = renderMarkdown(lastHybridAnswer);
-    usedPages.forEach(p => {
-      const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      hAnswer = hAnswer.replace(
-        new RegExp('\\[' + esc + '\\]', 'g'),
-        `<span class="page-ref" onclick="highlightNode('${p.replace(/'/g, "\\'")}')">[${p}]</span>`
-      );
+    await Promise.all(promises);
+    processValidFiles(collected);
+  });
+  
+  $file.addEventListener('change', () => processValidFiles(Array.from($file.files).map(f=>({file:f, relativePath:f.name}))));
+  $folder.addEventListener('change', () => processValidFiles(Array.from($folder.files).map(f=>({file:f, relativePath:f.webkitRelativePath||f.name}))));
+  
+  function walkEntry(entry, basePath, collected) {
+    return new Promise(resolve => {
+      if (entry.isFile) {
+        entry.file(f => { collected.push({ file: f, relativePath: basePath ? basePath + '/' + f.name : f.name }); resolve(); }, () => resolve());
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        const dirPath = basePath ? basePath + '/' + entry.name : entry.name;
+        const readAll = (allEntries = []) => {
+          reader.readEntries(entries => {
+            if (entries.length === 0) Promise.all(allEntries.map(e => walkEntry(e, dirPath, collected))).then(resolve);
+            else readAll(allEntries.concat(Array.from(entries)));
+          }, () => resolve());
+        };
+        readAll();
+      } else resolve();
     });
-    $hybridText.innerHTML = hAnswer;
-    $hybridSpinner.classList.add('d-none');
-    $hybridText.classList.remove('d-none');
-    $hybridText.classList.add('fade-in');
-    if (d.hybrid.elapsed_ms != null) {
-      $hybridTiming.textContent = formatMs(d.hybrid.elapsed_ms);
-      $hybridTiming.classList.remove('d-none');
-    }
-    $hybridCopyBtn.classList.remove('d-none');
-
-    // Hybrid usage
-    const $hybridUsage = document.getElementById('hybrid-usage');
-    if(d.hybrid.usage) {
-      $hybridUsage.textContent = `Tokens: ${d.hybrid.usage.prompt_tokens||0} in, ${d.hybrid.usage.completion_tokens||0} out`;
-      $hybridUsage.classList.remove('d-none');
-    }
-
-    wikiRelations = d.wiki.relations||[];
-    loadGraph();
-
-    // ── Save to history ──
-    addToHistory(q);
-
-    // Keep compare bar hidden since RAG and Hybrid outputs are hidden
-    // $compareBar.classList.remove('d-none');
-  } catch(e) {
-    showToast('Query failed: ' + e, 'error');
-    $ragText.textContent = 'Error: ' + e;
-    $ragSpinner.classList.add('d-none'); $ragText.classList.remove('d-none');
-    $wikiText.textContent = 'Error: ' + e;
-    $wikiSpinner.classList.add('d-none'); $wikiText.classList.remove('d-none');
-    $hybridText.textContent = 'Error: ' + e;
-    $hybridSpinner.classList.add('d-none'); $hybridText.classList.remove('d-none');
-  } finally {
-    $askBtn.disabled = false;
   }
-}
-
-function formatMs(ms) {
-  return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
-}
-
-function renderMarkdown(text) {
-  if (!text) return '';
-  try {
-    return marked.parse(text, { breaks: true, gfm: true });
-  } catch(e) {
-    // Fallback: escape HTML and convert newlines to <br>
-    return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
-  }
-}
-
-// ============================================================
-// Copy answer
-// ============================================================
-function copyAnswer(pipeline) {
-  const text = pipeline === 'rag' ? lastRagAnswer : 
-               pipeline === 'wiki' ? lastWikiAnswer : 
-               lastHybridAnswer;
-  if (!text) return;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.getElementById(`${pipeline}-copy-btn`);
-    btn.textContent = 'Copied!';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
-  }).catch(() => showToast('Copy failed — try manually selecting the text.', 'error'));
-}
-
-// ============================================================
-// Query history
-// ============================================================
-function addToHistory(q) {
-  // Avoid duplicates
-  queryHistory = queryHistory.filter(h => h !== q);
-  queryHistory.unshift(q);
-  if (queryHistory.length > 8) queryHistory.pop();
-  renderHistory();
-}
-
-function renderHistory() {
-  if (!queryHistory.length) { $historyWrap.classList.add('d-none'); return; }
-  $historyWrap.classList.remove('d-none');
-  $historyPills.innerHTML = queryHistory.map(q =>
-    `<span class="history-pill" title="${q}" onclick="reuseQuestion(this.title)">${q}</span>`
-  ).join('');
-}
-
-function reuseQuestion(q) {
-  $qInput.value = q;
-  $qInput.focus();
-}
-
-// ============================================================
-// Vote
-// ============================================================
-function vote(choice) {
-  const votes = JSON.parse(localStorage.getItem('rag_wiki_votes') || '[]');
-  votes.push({ choice, ts: Date.now() });
-  localStorage.setItem('rag_wiki_votes', JSON.stringify(votes));
-  document.getElementById('vote-thanks').classList.remove('d-none');
-}
-
-// ============================================================
-// File Explorer
-// ============================================================
-async function loadFileTree() {
-  try {
-    const res = await fetch(`/files?session_id=${SID}`);
-    const tree = await res.json();
-    const container = document.getElementById('file-tree');
-    
-    if (Object.keys(tree).length === 0) {
-      container.innerHTML = '<div class="text-center text-secondary py-3">No files found.</div>';
-      return;
-    }
-    
-    container.innerHTML = buildTreeHtml(tree);
-  } catch(e) { 
-    console.error('File tree load failed:', e); 
-    document.getElementById('file-tree').innerHTML = '<div class="text-center text-danger py-3">Failed to load file structure.</div>';
-  }
-}
-
-function buildTreeHtml(node) {
-  let html = '<ul>';
   
-  // Sort folders first, then files
-  const keys = Object.keys(node).sort((a, b) => {
-    const aIsFolder = typeof node[a] === 'object';
-    const bIsFolder = typeof node[b] === 'object';
-    if (aIsFolder && !bIsFolder) return -1;
-    if (!aIsFolder && bIsFolder) return 1;
-    return a.localeCompare(b);
+  function processValidFiles(collected) {
+    const valid = collected.filter(e => {
+      const ext = e.file.name.split('.').pop().toLowerCase();
+      return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100*1024*1024;
+    });
+    if(!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+    stagedFiles = valid;
+    
+    document.getElementById('staged-label').textContent = `${stagedFiles.length} file(s) ready`;
+    document.getElementById('upload-btn').classList.remove('d-none');
+    document.getElementById('pick-btns-wrap').style.gap = '10px';
+  }
+  
+  document.getElementById('upload-btn').addEventListener('click', async () => {
+    if (!stagedFiles.length) return;
+    document.getElementById('upload-btn').disabled = true;
+    document.getElementById('pick-btns-wrap').classList.add('d-none');
+    document.getElementById('progress-wrap').classList.remove('d-none');
+    ingestStartTime = Date.now();
+    
+    const fd = new FormData();
+    const relativePaths = [];
+    for (const entry of stagedFiles) {
+      fd.append('file', entry.file, entry.file.name);
+      relativePaths.push(entry.relativePath);
+    }
+    fd.append('session_id', SID);
+    fd.append('relative_paths', JSON.stringify(relativePaths));
+    
+    try {
+      const res = await fetch('/upload', { method: 'POST', body: fd });
+      const d = await res.json();
+      if (d.error) { showToast(d.error, 'error'); return; }
+      
+      totalFilesQueued = d.files_queued || 0;
+      
+      const pollTimer = setInterval(async () => {
+        try {
+          const pRes = await fetch(`/progress?session_id=${SID}`);
+          const pData = await pRes.json();
+          const docs = pData.docs || {};
+          const total = docs.total || totalFilesQueued;
+          
+          setDocProgress('rag', docs.rag_done||0, total, pData.rag?.message||'');
+          setDocProgress('wiki', docs.wiki_done||0, total, pData.wiki?.message||'');
+          
+          if (pData.phase === 'complete') {
+            clearInterval(pollTimer);
+            setDocProgress('rag', total, total, 'Complete');
+            setDocProgress('wiki', total, total, 'Complete');
+            uploadDone = true;
+            document.getElementById('modeTabs').classList.remove('d-none');
+            document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+            switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
+            showToast('Ingestion complete', 'success');
+            loadGraph();
+            loadFileTree();
+          }
+        } catch(e){}
+      }, 1500);
+    } catch(e){ showToast('Upload failed', 'error'); }
   });
-
-  for (const key of keys) {
-    if (typeof node[key] === 'object') {
-      html += `<li><span class="folder-icon">📁</span>${key}${buildTreeHtml(node[key])}</li>`;
-    } else {
-      html += `<li><span class="file-icon">📄</span>${key}</li>`;
+  
+  function setDocProgress(pipe, done, total, msg) {
+    const pct = total > 0 ? Math.round((done/total)*100) : 0;
+    document.getElementById(`${pipe}-prog-bar`).style.width = pct + '%';
+    document.getElementById(`${pipe}-prog-label`).textContent = `${done}/${total}`;
+    document.getElementById(`${pipe}-prog-msg`).textContent = msg || `${done} of ${total}`;
+  }
+  
+  // ============================================================
+  // Ask Mode
+  // ============================================================
+  const $qInput = document.getElementById('question-input');
+  const $askBtn = document.getElementById('ask-btn');
+  
+  $askBtn.addEventListener('click', doQuery);
+  $qInput.addEventListener('keydown', e => { if(e.key==='Enter') {e.preventDefault(); doQuery();} });
+  
+  function renderMarkdown(text) {
+    if (!text) return '';
+    try { return marked.parse(text, { breaks: true, gfm: true }); }
+    catch(e) { return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\n/g,'<br>'); }
+  }
+  
+  async function doQuery() {
+    const q = $qInput.value.trim();
+    if(!q || q.length < 3) return;
+    $askBtn.disabled = true;
+    
+    document.getElementById('answers-container').innerHTML = `<div style="font-size:13px;color:var(--text-secondary);text-align:center;padding:40px">Analyzing documents...</div>`;
+    
+    try {
+      const res = await fetch('/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, session_id: SID })
+      });
+      const d = await res.json();
+      if(d.error) { showToast(d.error, 'error'); return; }
+      
+      let html = '';
+      
+      // Render Wiki Answer 
+      if (d.wiki && d.wiki.answer) {
+        let confStyle = '';
+        const score = d.wiki.confidence_score || 0;
+        if(score >= 80) confStyle = 'color:var(--green-text); background:var(--green-light)';
+        else if(score >= 50) confStyle = 'color:var(--amber); background:var(--amber-light)';
+        else confStyle = 'color:var(--red); background:var(--red-light)';
+        
+        let md = renderMarkdown(d.wiki.answer);
+        (d.wiki.pages_used||[]).forEach(p => {
+          const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          md = md.replace(new RegExp('\\['+esc+'\\]','g'), `<span class="inline-cite" onclick="toggleGraph()">[${p}]</span>`);
+        });
+        
+        html += `
+        <div class="answer-card">
+          <div class="answer-topbar">
+            <div class="answer-tags">
+              <span class="tag-synth">WIKI SYNTHESIS</span>
+              <span class="conf" style="${confStyle}; padding:2px 6px; border-radius:4px">Confidence: ${score}%</span>
+            </div>
+            <div class="answer-actions">
+              <span class="answer-time">${d.wiki.elapsed_ms/1000}s</span>
+              <button class="act-btn" onclick="navigator.clipboard.writeText(\`${d.wiki.answer.replace(/`/g,'')}\`)"><i class="ti ti-copy"></i>Copy</button>
+            </div>
+          </div>
+          <div class="answer-body">
+            <div class="exec-lead">${md}</div>
+          </div>
+        </div>`;
+      }
+      
+      // Render RAG Answer
+      if (d.rag && d.rag.answer) {
+        html += `
+        <div class="answer-card">
+          <div class="answer-topbar">
+            <div class="answer-tags">
+              <span class="tag-synth" style="background:#EEF2FF;color:#2B5CE6">VECTOR RAG</span>
+            </div>
+            <div class="answer-actions">
+              <span class="answer-time">${d.rag.elapsed_ms/1000}s</span>
+            </div>
+          </div>
+          <div class="answer-body">
+            <div class="exec-lead">${renderMarkdown(d.rag.answer)}</div>
+          </div>
+        </div>`;
+      }
+      
+      document.getElementById('answers-container').innerHTML = html;
+      
+    } catch(e) {
+      document.getElementById('answers-container').innerHTML = `<div class="toast-error" style="padding:10px">Query failed: ${e}</div>`;
+    } finally {
+      $askBtn.disabled = false;
     }
   }
-  html += '</ul>';
-  return html;
-}
-
-// ============================================================
-// D3 Force Graph
-// ============================================================
-async function loadGraph() {
-  try {
-    const res = await fetch(`/wiki/graph?session_id=${SID}`);
+  
+  // ============================================================
+  // Review & Compare Doc Lists
+  // ============================================================
+  async function loadFileTree() {
+    try {
+      const res = await fetch(`/session/${SID}`);
+      const data = await res.json();
+      currentDocs = data.files_list || [];
+      
+      const rDiv = document.getElementById('review-doc-list');
+      const cDiv = document.getElementById('compare-doc-list');
+      
+      if(!currentDocs.length) {
+        rDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
+        cDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
+        return;
+      }
+      
+      const ckHtml = currentDocs.map(d => `
+        <label class="doc-ck">
+          <input type="checkbox" value="${d}" class="doc-checkbox" checked>
+          <span class="doc-ck-lbl">${d}</span>
+        </label>
+      `).join('');
+      
+      rDiv.innerHTML = ckHtml;
+      cDiv.innerHTML = ckHtml;
+      
+      // Populate actual files panel tree
+      const fRes = await fetch(`/files?session_id=${SID}`);
+      const tree = await fRes.json();
+      const treeDiv = document.getElementById('file-tree');
+      if(Object.keys(tree).length === 0) return;
+      treeDiv.innerHTML = Object.keys(tree).map(k => `
+        <div class="ftree-row folder-row">
+          <i class="ti ti-chevron-down ftree-icon" style="color:var(--accent)"></i>
+          <span class="folder-name" style="margin-left:4px">${k}</span>
+        </div>
+      `).join(''); // simplified for UI migration
+      
+    } catch(e){}
+  }
+  
+  // ============================================================
+  // Review Mode
+  // ============================================================
+  document.getElementById('review-cols-list').addEventListener('click', e => {
+    if(e.target.classList.contains('rem-col')) e.target.parentElement.remove();
+  });
+  document.getElementById('add-review-col-btn').addEventListener('click', () => {
+    const v = document.getElementById('rev-new-col').value.trim();
+    if(!v) return;
+    document.getElementById('review-cols-list').innerHTML += `<div class="col-tag"><span class="col-tag-t">${v}</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>`;
+    document.getElementById('rev-new-col').value = '';
+  });
+  
+  document.getElementById('run-review-btn').addEventListener('click', async () => {
+    const docs = Array.from(document.getElementById('review-doc-list').querySelectorAll('input:checked')).map(cb => cb.value);
+    const cols = Array.from(document.querySelectorAll('#review-cols-list .col-tag-t')).map(s => s.textContent);
+    if(!docs.length || !cols.length) { showToast('Select docs and columns', 'error'); return; }
+    
+    document.getElementById('run-review-btn').disabled = true;
+    document.getElementById('review-table-wrap').classList.add('d-none');
+    document.getElementById('review-flag-bar').classList.add('d-none');
+    const pwrap = document.getElementById('review-status-wrap');
+    pwrap.classList.remove('d-none');
+    document.getElementById('review-progress').style.width = '0%';
+    document.getElementById('review-status-text').textContent = 'Starting...';
+    
+    try {
+      const res = await fetch('/review/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: SID, doc_names: docs, columns: cols})
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      const jobId = data.job_id;
+      
+      const timer = setInterval(async () => {
+        const pRes = await fetch(`/review/progress?job_id=${jobId}`);
+        const pData = await pRes.json();
+        document.getElementById('review-progress').style.width = `${pData.percent}%`;
+        document.getElementById('review-status-text').textContent = `${pData.completed}/${pData.total} cells`;
+        
+        if (pData.status === 'complete' || pData.status === 'error') {
+          clearInterval(timer);
+          document.getElementById('run-review-btn').disabled = false;
+          if(pData.status === 'complete') renderReviewResult(jobId);
+        }
+      }, 1500);
+    } catch(e) {
+      showToast(e.message, 'error');
+      document.getElementById('run-review-btn').disabled = false;
+    }
+  });
+  
+  async function renderReviewResult(jobId) {
+    const res = await fetch(`/review/result?job_id=${jobId}`);
     const data = await res.json();
-    wikiPages = data.pages || {};
-    wikiRelations = data.relations || [];
-    renderGraph();
-  } catch(e) { console.error(e); }
-}
-
-function renderGraph() {
-  try {
+    
+    document.getElementById('review-table-title').textContent = `Extraction — ${Object.keys(data.rows).length} docs × ${data.columns.length} columns`;
+    document.getElementById('review-thead').innerHTML = `<tr><th>Document</th>${data.columns.map(c=>`<th>${c}</th>`).join('')}</tr>`;
+    
+    let html = '';
+    let flagged = 0;
+    for(const doc in data.rows) {
+      html += `<tr><td>${doc}</td>`;
+      for(const col of data.columns) {
+        const cell = data.rows[doc][col] || {};
+        const val = cell.value || '-';
+        let cls = 'cr';
+        if(cell.confidence >= 0.8) cls = 'cg';
+        else if(cell.confidence >= 0.5) cls = 'cy';
+        if(cls === 'cr') flagged++;
+        const quote = cell.quote ? `title="Quote: ${cell.quote.replace(/"/g,'&quot;')}"` : '';
+        html += `<td><span class="${cls}" ${quote}>${val}</span></td>`;
+      }
+      html += `</tr>`;
+    }
+    document.getElementById('review-tbody').innerHTML = html;
+    document.getElementById('review-status-wrap').classList.add('d-none');
+    document.getElementById('review-table-wrap').classList.remove('d-none');
+    document.getElementById('review-footer').classList.remove('d-none');
+    document.getElementById('review-export-btn').classList.remove('d-none');
+    
+    if(flagged > 0) {
+      document.getElementById('review-flag-text').textContent = `${flagged} cells flagged for human review`;
+      document.getElementById('review-flag-bar').classList.remove('d-none');
+    }
+    document.getElementById('review-export-btn').onclick = () => window.open(`/review/export?job_id=${jobId}`);
+  }
+  
+  // ============================================================
+  // Compare Mode
+  // ============================================================
+  let compareFile = null;
+  const $cFile = document.getElementById('compare-file');
+  document.getElementById('compare-upload-zone').addEventListener('click', () => $cFile.click());
+  $cFile.addEventListener('change', () => {
+    if($cFile.files.length) {
+      compareFile = $cFile.files[0];
+      document.getElementById('compare-staged-label').textContent = compareFile.name;
+      document.getElementById('compare-staged-badge').classList.remove('d-none');
+    }
+  });
+  
+  document.getElementById('run-compare-btn').addEventListener('click', async () => {
+    const docs = Array.from(document.getElementById('compare-doc-list').querySelectorAll('input:checked')).map(cb => cb.value);
+    const q = document.getElementById('compare-q').value.trim();
+    if(!q) return showToast('Enter a topic', 'error');
+    if(!docs.length && !compareFile) return showToast('Select or upload a doc', 'error');
+    
+    document.getElementById('run-compare-btn').disabled = true;
+    document.getElementById('compare-table-wrap').classList.add('d-none');
+    document.getElementById('compare-outliers-wrap').classList.add('d-none');
+    document.getElementById('compare-narrative-wrap').classList.add('d-none');
+    document.getElementById('compare-status').textContent = 'Starting job...';
+    
+    const fd = new FormData();
+    fd.append('session_id', SID);
+    fd.append('doc_names', JSON.stringify(docs));
+    fd.append('question', q);
+    if(compareFile) fd.append('uploaded_file', compareFile);
+    
+    try {
+      const res = await fetch('/compare/start', { method: 'POST', body: fd });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      const jobId = data.job_id;
+      
+      const timer = setInterval(async () => {
+        const pRes = await fetch(`/compare/progress?job_id=${jobId}`);
+        const pData = await pRes.json();
+        document.getElementById('compare-status').textContent = `Stage: ${pData.stage || pData.status}...`;
+        
+        if (pData.status === 'complete' || pData.status === 'error') {
+          clearInterval(timer);
+          document.getElementById('run-compare-btn').disabled = false;
+          if(pData.status === 'complete') {
+            document.getElementById('compare-status').textContent = '';
+            renderCompareResult(jobId);
+          }
+        }
+      }, 1500);
+    } catch(e) {
+      showToast(e.message, 'error');
+      document.getElementById('run-compare-btn').disabled = false;
+    }
+  });
+  
+  async function renderCompareResult(jobId) {
+    const res = await fetch(`/compare/result?job_id=${jobId}`);
+    const data = await res.json();
+    const sourceNames = data.sources.map(s => s.label || s.name);
+    
+    document.getElementById('compare-thead').innerHTML = `<tr><th style="width:28%">Aspect</th>${sourceNames.map(n => `<th>${n}</th>`).join('')}</tr>`;
+    
+    let html = '';
+    for(const aspect of data.aspects) {
+      html += `<tr><td>${aspect}</td>`;
+      for(const s of sourceNames) {
+        const cell = data.table[aspect][s] || {};
+        const val = cell.value || '-';
+        let cls = 'cr';
+        if(cell.confidence >= 0.8) cls = 'cg';
+        else if(cell.confidence >= 0.5) cls = 'cy';
+        const quote = cell.quote ? `title="Quote: ${cell.quote.replace(/"/g,'&quot;')}"` : '';
+        html += `<td><span class="${cls}" ${quote}>${val}</span></td>`;
+      }
+      html += `</tr>`;
+    }
+    document.getElementById('compare-tbody').innerHTML = html;
+    document.getElementById('compare-table-wrap').classList.remove('d-none');
+    document.getElementById('compare-export-btn').classList.remove('d-none');
+    document.getElementById('compare-export-btn').onclick = () => window.open(`/compare/export?job_id=${jobId}`);
+    
+    if (data.outliers && data.outliers.length > 0) {
+      document.getElementById('compare-outliers-list').innerHTML = data.outliers.map(o => `
+        <div class="outlier-row">
+          <span class="ob">${o.aspect}</span>
+          <span class="ot"><strong>${o.doc}:</strong> ${o.reason}</span>
+        </div>
+      `).join('');
+      document.getElementById('compare-outliers-wrap').classList.remove('d-none');
+    }
+    
+    if(data.narrative) {
+      document.getElementById('compare-narrative').textContent = data.narrative;
+      document.getElementById('compare-narrative-wrap').classList.remove('d-none');
+    }
+  }
+  
+  // ============================================================
+  // Graph rendering core logic ported
+  // ============================================================
+  async function loadGraph() {
+    try {
+      const res = await fetch(`/wiki/graph?session_id=${SID}`);
+      const data = await res.json();
+      wikiPages = data.pages || {};
+      wikiRelations = data.relations || [];
+      renderGraph();
+    } catch(e) {}
+  }
+  
+  function renderGraph() {
     const container = document.getElementById('wiki-graph');
-    container.innerHTML = '<div class="text-center text-secondary py-5 mt-5">Loading graph data...</div>';
     if (!wikiPages || !Object.keys(wikiPages).length) {
-      container.innerHTML = '<div class="text-center text-secondary py-5 mt-5">No knowledge graph data available yet. Please ask a query first or ensure documents are processed.</div>';
+      container.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No knowledge graph data available yet.</div>';
       return;
     }
-
-  const w = container.clientWidth || 800, h = container.clientHeight || 420;
-  const svg = d3.select(container).append('svg').attr('viewBox', `0 0 ${w} ${h}`);
-  const g = svg.append('g');
-  svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
-
-  const titles = Object.keys(wikiPages);
-  const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
-  const nodeSet = new Set(titles);
-  const links = wikiRelations
-    .filter(r => nodeSet.has(r.from) && nodeSet.has(r.to))
-    .map(r => ({ source: r.from, target: r.to, label: r.label }));
-
-  const deg = {};
-  links.forEach(l => { deg[l.source] = (deg[l.source] || 0) + 1; deg[l.target] = (deg[l.target] || 0) + 1; });
-  const color = d3.scaleOrdinal(d3.schemeTableau10);
-
-  const sim = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(100))
-    .force('charge', d3.forceManyBody().strength(-250))
-    .force('center', d3.forceCenter(w / 2, h / 2))
-    .force('collision', d3.forceCollide(30));
-
-  const link = g.selectAll('.link').data(links).join('line').attr('class', 'link')
-    .attr('stroke', 'rgba(255,255,255,.1)').attr('stroke-width', 1.5);
-
-  const linkLabel = g.selectAll('.link-label').data(links).join('text').attr('class', 'link-label')
-    .text(d => d.label).attr('font-size', 9).attr('fill', '#475569').attr('text-anchor', 'middle').attr('opacity', 0);
-
-  link.on('mouseover', function(e, d) {
-    d3.select(this).attr('stroke', 'rgba(255,255,255,.35)');
-    linkLabel.filter(l => l === d).attr('opacity', 1);
-  }).on('mouseout', function() {
-    d3.select(this).attr('stroke', 'rgba(255,255,255,.1)');
-    linkLabel.attr('opacity', 0);
-  });
-
-  const node = g.selectAll('.node').data(nodes).join('circle').attr('class', 'node')
-    .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
-    .attr('fill', d => color(d.id))
-    .attr('stroke', 'rgba(255,255,255,.15)').attr('stroke-width', 1.5)
-    .style('cursor', 'pointer')
-    .call(d3.drag()
-      .on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (e, d) => { d.fx = e.x; d.fy = e.y; })
-      .on('end',   (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-
-  const label = g.selectAll('.label').data(nodes).join('text').attr('class', 'label')
-    .text(d => d.id.length > 22 ? d.id.slice(0, 20) + '…' : d.id)
-    .attr('font-size', 10).attr('fill', '#94a3b8').attr('text-anchor', 'middle')
-    .attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));
-
-  node.on('click', (e, d) => {
-    $tooltip.innerHTML = `<strong>${d.id}</strong><hr style="border-color:#333;margin:6px 0"><div>${(d.summary || '').substring(0, 200)}</div>`;
-    $tooltip.style.left = (e.pageX + 12) + 'px';
-    $tooltip.style.top  = (e.pageY - 20) + 'px';
-    $tooltip.style.opacity = 1;
-    setTimeout(() => $tooltip.style.opacity = 0, 4000);
-  });
-
-  sim.on('tick', () => {
-    link.attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-        .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-    linkLabel.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2);
-    node.attr('cx', d => d.x).attr('cy', d => d.y);
-    label.attr('x', d => d.x).attr('y', d => d.y);
-  });
-
-  graphSim = { nodes, node, color, deg };
+    container.innerHTML = '';
+    const w = 600, h = 320;
+    const svg = d3.select(container).append('svg').attr('viewBox', `0 0 ${w} ${h}`);
+    const g = svg.append('g');
+    svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
   
-  // Remove loading text once SVG is initialized
-  if (container.querySelector('div')) {
-    container.querySelector('div').remove();
+    const titles = Object.keys(wikiPages);
+    const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
+    const nodeSet = new Set(titles);
+    const links = wikiRelations.filter(r => nodeSet.has(r.from) && nodeSet.has(r.to)).map(r => ({ source: r.from, target: r.to, label: r.label }));
+  
+    const deg = {};
+    links.forEach(l => { deg[l.source] = (deg[l.source]||0)+1; deg[l.target] = (deg[l.target]||0)+1; });
+    const color = d3.scaleOrdinal(d3.schemeTableau10);
+  
+    const sim = d3.forceSimulation(nodes)
+      .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+      .force('charge', d3.forceManyBody().strength(-200))
+      .force('center', d3.forceCenter(w/2, h/2))
+      .force('collision', d3.forceCollide(25));
+  
+    const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
+    const node = g.selectAll('.node').data(nodes).join('circle')
+      .attr('r', d => 5 + Math.min((deg[d.id]||0)*2, 12))
+      .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
+      .style('cursor', 'pointer').call(d3.drag().on('start', (e,d)=>{if(!e.active)sim.alphaTarget(.3).restart();d.fx=d.x;d.fy=d.y;}).on('drag',(e,d)=>{d.fx=e.x;d.fy=e.y;}).on('end',(e,d)=>{if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}));
+  
+    const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length>15?d.id.slice(0,13)+'…':d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8+Math.min((deg[d.id]||0)*2, 12)));
+  
+    node.on('click', (e,d) => {
+      const tt = document.getElementById('node-tooltip');
+      tt.innerHTML = `<strong>${d.id}</strong><hr style="margin:4px 0;border-color:var(--border)"><div>${(d.summary||'').substring(0, 150)}</div>`;
+      tt.style.left = (e.pageX+10)+'px'; tt.style.top = (e.pageY-10)+'px'; tt.style.opacity = 1;
+      setTimeout(()=>tt.style.opacity=0, 4000);
+    });
+  
+    sim.on('tick', () => {
+      link.attr('x1', d=>d.source.x).attr('y1', d=>d.source.y).attr('x2', d=>d.target.x).attr('y2', d=>d.target.y);
+      node.attr('cx', d=>d.x).attr('cy', d=>d.y);
+      label.attr('x', d=>d.x).attr('y', d=>d.y);
+    });
   }
-  
-  // Add a small stat overlay for debugging
-  d3.select(container).append('div')
-    .attr('style', 'position:absolute; bottom:10px; right:10px; font-size:11px; color:#64748b; background:rgba(255,255,255,0.8); padding:2px 6px; border-radius:4px; pointer-events:none;')
-    .text(`Nodes: ${nodes.length} | Links: ${links.length}`);
-
-  } catch(err) {
-    const container = document.getElementById('wiki-graph');
-    container.innerHTML = `<div class="text-danger p-4">Graph rendering failed: ${err.message}<br>${err.stack}</div>`;
-    console.error(err);
-  }
-}
-
-function highlightNode(title) {
-  const modalEl = document.getElementById('wikiModal');
-  const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
-  
-  const onShown = () => {
-    modalEl.removeEventListener('shown.bs.modal', onShown);
-    
-    if (!graphSim) {
-      renderGraph();
-    }
-    
-    setTimeout(() => {
-      if (!graphSim) return;
-      graphSim.node.transition().duration(200)
-        .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-        .attr('opacity', .4);
-      graphSim.node.filter(d => d.id === title).transition().duration(300)
-        .attr('r', 20).attr('opacity', 1).attr('fill', '#2dd4bf')
-        .transition().duration(1200)
-        .attr('r', d => 5 + Math.min((graphSim.deg[d.id] || 0) * 2, 12))
-        .attr('fill', d => graphSim.color(d.id));
-      graphSim.node.transition().delay(1500).duration(300).attr('opacity', 1);
-    }, 100);
-  };
-  
-  modalEl.addEventListener('shown.bs.modal', onShown);
-  modal.show();
-}
-
-// Bind renderGraph to modal shown event
-const wikiModalEl = document.getElementById('wikiModal');
-if (wikiModalEl) {
-  wikiModalEl.addEventListener('shown.bs.modal', () => {
-    renderGraph();
-  });
-}
-</script>
+  </script>
 </body>
 </html>
