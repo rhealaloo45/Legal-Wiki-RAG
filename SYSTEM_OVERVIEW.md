@@ -58,22 +58,42 @@ The system uses **adaptive segmentation** based on document length:
 - Employs robust JSON extraction (`_parse_json_safe`) and an automatic fallback repair mechanism (`_repair_json`) that asks the LLM to fix malformed JSON if parsing fails.
 
 **Merge & Persistence:**
-- **New Pages**: Added to the index with content and a one-line summary (`{"title": {"content": "...", "summary": "..."}}`).
-- **Existing Pages**: Content is appended with a separator (`---`). Contradictions are flagged.
+- **New Pages**: Added to the index with content and a one-line summary (`{"title": {"content": "...", "summary": "...", "source_doc": "..."}}`).
+- **Existing Pages**: Content is appended with a separator (`---`). 
+- **Contradiction Detection**: Pre-flight checks on long appending segments (`>200 chars`) trigger a micro-LLM pass (`max_tokens=100`). Found factual contradictions push the page into a `contradiction_flagged` state and populate a `variants` array to track the document lineage of the conflicting values.
 - **Cross-Referencing**: Automatic pass to detect mentions of page titles within other pages.
-- **Thread Safety**: Per-session `threading.Lock` protects the load→merge→save cycle, preventing data loss during parallel multi-document ingestion.
+- **Thread Safety**: Per-session `threading.Lock` protects the load→merge→save cycle, preventing data loss during parallel multi-document ingestion. A separate `_log_locks` dict safeguards concurrent writes to a timestamped `log.md` file.
 - **Storage**: The wiki is stored as a structured `index.json` per session.
 
 ### Query Phase — Index-Based Retrieval
 
 To prevent hallucination at scale, the query uses a **two-step retrieval** approach:
 
-1. **Page Selection**: The LLM receives only the **list of page titles + one-line summaries** (compact — even 500 pages fits easily). It selects the 10-15 most relevant pages for the question.
-2. **Deep Answer**: Only the selected pages' full content is sent in the answer prompt, keeping the context focused and grounded.
-3. **Chain of Thought & Grounding**: The LLM first generates a `<reasoning>` trace to verify facts against the context, and uses strict inline citations to ensure no hallucination. It also evaluates its own confidence score.
-4. **Graph Rendering**: D3.js renders the `index.json` as a force-directed graph where nodes are entities and edges are relationships. The UI displays cited pages dynamically.
+1. **BM25 Fallback/Filtering**: If the wiki grows beyond 20 pages, `rank_bm25` filters the entire wiki down to the top 40 candidate pages *before* invoking the LLM, dramatically reducing context window bloat.
+2. **Page Selection**: The LLM receives the filtered list of page titles + one-line summaries. It selects the 10-15 most relevant pages for the question.
+3. **Deep Answer**: Only the selected pages' full content is sent in the answer prompt, prepending a `[WARNING]` tag to any page flagged for contradictions.
+4. **Chain of Thought & Grounding**: The LLM first generates a `<reasoning>` trace to verify facts against the context, and uses strict inline citations to ensure no hallucination.
+5. **Answer Filing**: Highly confident answers (`>= 0.80`) are automatically filed back into the wiki as a `"Q: {question}"` page for future compound learning. An anti-duplication title check ensures similar questions append to existing pages rather than fragmenting the wiki.
+6. **Graph Rendering**: D3.js renders the `index.json` as a force-directed graph where nodes are entities and edges are relationships.
 
-> For small wikis (≤ 20 pages), the selection step is skipped and all pages are sent directly.
+---
+
+## 3. Advanced Modes (Review & Compare)
+
+To supplement standard querying, two advanced analytical modes operate independently of the ingest pipeline.
+
+### Review Mode
+Designed for bulk data extraction across documents.
+- **Workflow**: User selects multiple documents and defines arbitrary column headers.
+- **Concurrency**: A background `ThreadPoolExecutor` spins up 5 workers, concurrently querying every (document, column) combination using the raw document text.
+- **Export**: Generates a confidence-colored `.xlsx` matrix (green for high confidence, yellow for medium, red/flagged for low or null), built using `openpyxl`.
+
+### Compare Mode
+Designed for deep, aspect-oriented comparison between existing knowledge and new unstructured uploads.
+- **Retrieval**: Uses BM25 filtering to extract isolated wiki content specifically tagged with the requested `source_doc`. If a selected document predates the tagging patch, it automatically falls back to raw text extraction.
+- **Aspect Identification**: A single LLM pass generates 4-6 specific aspects to compare based on the user's topic.
+- **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
+
 
 ### LLM Wiki Pipeline Flowchart
 
@@ -129,7 +149,7 @@ flowchart TD
 
 ---
 
-## 3. Upload, Progress, and Session System
+## 4. Upload, Progress, and Session System
 
 **Uploads**:
 The upload route is **non-blocking** and supports nested folders:
@@ -138,14 +158,26 @@ The upload route is **non-blocking** and supports nested folders:
 3. The frontend polls `/progress` every 1.5 seconds, receiving document-level counters.
 4. When all documents complete processing, `phase` transitions to `"complete"` and the UI enables querying.
 
-**Sessions**:
+**Sessions & Isolation**:
 - The application supports multiple persistent sessions (`data/sessions.json`).
 - Sessions are automatically renamed based on the first question asked (first 30 characters).
+- **Strict Isolation**: Every chat session maintains its own completely independent `index.json` and `UPLOAD_PATH`. Knowledge is strictly sandboxed per session to prevent cross-contamination.
+- **Context-Aware UI**: Advanced UI modes (`[Ask]`, `[Compare]`, `[Review]`) dynamically appear only within an active session (after upload completion or when resuming an older session), ensuring a clean, context-focused workspace.
 - Full session CRUD is supported, including clearing all Wiki index data per session.
 
 ---
 
-## 4. Technical Specifications
+## 5. UI Architecture (Light-Mode SPA)
+
+The frontend is a custom-built, lightweight Single-Page Application (SPA) designed to feel like a premium analytical tool.
+- **Technology Stack**: HTML5, Vanilla JavaScript, and minimal Bootstrap 5 (only used for structural grids).
+- **Aesthetics**: Complete departure from dark-mode; utilizes a clean Light Theme defined by custom CSS variables (`--bg-surface`, `--accent`, etc.) and Google Fonts (`Lora` and `DM Sans`).
+- **Layout**: Three fixed zones (Topbar, Sidebar, Main Workspace) with no page reloads. Modals (Doc Reader, Knowledge Graph) are implemented as absolute-positioned overlays.
+- **Documentation**: For a complete breakdown of every interface component, refer to [UI.md](UI.md).
+
+---
+
+## 6. Technical Specifications
 
 - **LLM**: Azure OpenAI integration configured via `config.py`
 - **Graphing**: D3.js Force Simulation
@@ -157,3 +189,4 @@ The upload route is **non-blocking** and supports nested folders:
   - `AZURE_OPENAI_API_VERSION` — Azure API version
   - `AZURE_OPENAI_DEPLOYMENT` — Deployment name
   - `PORT` — server port (default: 5001)
+
