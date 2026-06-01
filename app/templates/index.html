@@ -983,8 +983,13 @@ b[title] {
     
     // Generate normalized highlight patterns to check against the document text
     const patterns = [];
-    for (const t of terms) {
+    for (let t of terms) {
       if (!t) continue;
+      
+      // Strip leading and trailing quotes (straight and smart)
+      t = t.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
+      if (!t) continue;
+      
       patterns.push(t);
       
       // If it contains a slash, like "Call Option Triggers / Put Option Triggers", let's split it and add individual parts!
@@ -1161,13 +1166,19 @@ b[title] {
       targetMark = marks[0];
     }
     
+    if (!targetMark) {
+      showToast('Target text not found in document.', 'warning');
+      return;
+    }
+    
     if (targetMark) {
       const container = document.getElementById('pdf-modal-text-content');
       const targetRect = targetMark.getBoundingClientRect();
       const containerRect = container.getBoundingClientRect();
       const relativeTop = targetRect.top - containerRect.top + container.scrollTop;
       
-      container.scrollTo({ top: relativeTop - 100, behavior: 'smooth' });
+      const targetTop = relativeTop - 100;
+      container.scrollTop = targetTop > 0 ? targetTop : 0;
       
       targetMark.style.transition = 'background-color 0.5s';
       targetMark.style.backgroundColor = '#f59e0b';
