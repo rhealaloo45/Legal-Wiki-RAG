@@ -95,6 +95,50 @@ Designed for deep, aspect-oriented comparison between existing knowledge and new
 - **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
 
 
+### Execution Flow of System Modes
+
+```mermaid
+flowchart TD
+    classDef ask fill:#1e3a8a,stroke:#3b82f6,color:#fff
+    classDef review fill:#065f46,stroke:#10b981,color:#fff
+    classDef compare fill:#78350f,stroke:#d97706,color:#fff
+
+    subgraph AskMode ["Ask Mode (Standard Query)"]
+        A[User Input: Question] --> B{Wiki Pages > 20?}
+        B -->|Yes| C[BM25 Filtering: Top 40 pages]
+        B -->|No| D[Use all Wiki pages]
+        C --> E[LLM Page Selection: Pick top 10-15]
+        D --> E
+        E --> F[Assemble selected page contents]
+        F --> G[LLM Answer Generation: CoT reasoning + inline citations]
+        G --> H{Confidence >= 80%?}
+        H -->|Yes| I[File back answer as 'Q: {question}' wiki page]
+        H -->|No| J[Return answer to UI only]
+    end
+
+    subgraph ReviewMode ["Review Mode (Bulk Extraction)"]
+        R1[User input: Docs + Column Headers] --> R2[Submit background job to ThreadPoolExecutor]
+        R2 --> R3[Concurrently extract cells: doc_text + column_name]
+        R3 --> R4[LLM extracts JSON: value, confidence, quote]
+        R4 --> R5[Assemble confidence-colored grid]
+        R5 --> R6[User option: Export as OpenPyXL .xlsx file]
+    end
+
+    subgraph CompareMode ["Compare Mode (Deep Comparison)"]
+        C1[User input: Docs + Uploaded File + Topic] --> C2[Retrieve target texts: Wiki pages via BM25 / raw fallback]
+        C2 --> C3[LLM Aspect Identification: Generate 4-6 comparison aspects]
+        C3 --> C4[Concurrently extract aspect values for each document]
+        C4 --> C5[Secondary LLM pass: Outlier & contradiction detection]
+        C5 --> C6[Tertiary LLM pass: 3-5 sentence narrative synthesis]
+        C6 --> C7[Assemble aspect matrix & outliers list]
+        C7 --> C8[User option: Export comparison as .xlsx file]
+    end
+
+    class A,B,C,D,E,F,G,H,I,J ask
+    class R1,R2,R3,R4,R5,R6 review
+    class C1,C2,C3,C4,C5,C6,C7,C8 compare
+```
+
 ### LLM Wiki Pipeline Flowchart
 
 ```mermaid

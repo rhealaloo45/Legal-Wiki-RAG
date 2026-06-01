@@ -683,10 +683,11 @@ compiled from source documents.
 
 RULES:
 - Answer primarily from the wiki content below.
-- Reference specific wiki pages inline using [Page Title] notation whenever you draw from them.
+- Do NOT write the source file name as normal text. Instead, whenever you state a claim, append the EXACT Source File Name(s) provided in the text block header wrapped in double brackets like this: [[Source File Name]].
 - If the wiki does not contain enough information, say so — do NOT make up facts.
 - IMPORTANT: If your answer introduces new concepts, synthesis, or insights not already explicit in the wiki pages, \
 extract them into new pages and relations so the wiki grows smarter.
+- DO NOT append a "References", "Sources", or "Citations" list at the end of your answer. All citations MUST be inline ONLY.
 
 OUTPUT FORMAT — respond with valid JSON only, no markdown fences:
 {{
@@ -855,26 +856,31 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
 
-    # Extract [Page Title] references from the answer
+    # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
-    valid_titles = set(pages.keys())
-    pages_used = [t for t in referenced if t in valid_titles]
-    # Deduplicate while preserving order
-    seen = set()
+    
+    # Get all canonical doc names from pages
+    canonical_files = set()
+    for title in pages.keys():
+        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
+        if match:
+            canonical_files.add(match.group(1))
+            
     pages_used_dedup = []
-    for t in pages_used:
+    files_used = []
+    seen = set()
+    
+    for t in referenced:
         if t not in seen:
             pages_used_dedup.append(t)
             seen.add(t)
-
-    # Extract source files from page titles
-    files_used = []
-    for title in pages_used_dedup:
-        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
-        if match:
-            doc_name = match.group(1)
-            if doc_name not in files_used:
-                files_used.append(doc_name)
+            # Try to figure out which file this refers to
+            for cfile in canonical_files:
+                # Strip UUID for comparison
+                stripped_cfile = re.sub(r'^[a-f0-9-]{36}_', '', cfile)
+                if stripped_cfile.lower() in t.lower() or cfile.lower() in t.lower():
+                    if cfile not in files_used:
+                        files_used.append(cfile)
 
     # Evaluate confidence score
     confidence = _evaluate_confidence(question, wiki_content, answer)
