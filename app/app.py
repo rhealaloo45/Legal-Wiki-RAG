@@ -411,6 +411,56 @@ def wiki_page_detail():
     return jsonify({"title": title, "content": content})
 
 
+def _find_upload(session_id, doc_name):
+    """Find an uploaded file by session ID and document name."""
+    basename = doc_name.replace("/", "_").replace("\\", "_")
+    prefix = f"{session_id}_"
+    for fname in os.listdir(config.UPLOAD_PATH):
+        if fname.startswith(prefix) and fname.endswith(basename):
+            return os.path.join(config.UPLOAD_PATH, fname)
+    return None
+
+
+@app.route("/document")
+def get_document():
+    """Return the raw text content of an uploaded document."""
+    session_id = request.args.get("session_id", "")
+    doc_name = request.args.get("name", "").strip()
+    if not session_id or not doc_name:
+        return jsonify({"error": "session_id and name are required"}), 400
+
+    from services.reader import read_file
+    target = _find_upload(session_id, doc_name)
+
+    if not target or not os.path.exists(target):
+        return jsonify({"error": "Document not found"}), 404
+
+    try:
+        text = read_file(target)
+        return jsonify({"name": doc_name, "text": text})
+    except Exception as e:
+        logger.error("Failed to read document %s: %s", doc_name, e)
+        return jsonify({"error": f"Failed to read document: {e}"}), 500
+
+
+@app.route("/document/raw")
+def get_document_raw():
+    """Serve the original uploaded file (PDF/txt) for browser-native rendering."""
+    from flask import send_file
+    session_id = request.args.get("session_id", "")
+    doc_name = request.args.get("name", "").strip()
+    if not session_id or not doc_name:
+        return "session_id and name are required", 400
+
+    target = _find_upload(session_id, doc_name)
+    if not target or not os.path.exists(target):
+        return "Document not found", 404
+
+    ext = os.path.splitext(target)[1].lower()
+    mime = "application/pdf" if ext == ".pdf" else "text/plain"
+    return send_file(target, mimetype=mime)
+
+
 @app.route("/log", methods=["GET"])
 def get_log():
     """Return the plaintext contents of the session log."""
@@ -549,6 +599,8 @@ def review_start():
         "columns": columns
     }
     
+    _get_review_lock(job_id)  # Initialize the lock for this job
+    logger.info(f"Starting review job {job_id} for {len(doc_names)} docs and {len(columns)} columns")
     executor.submit(advanced_modes._run_review_job, job_id, session_id, doc_names, columns, REVIEW_STORE, _review_locks)
     return jsonify({"job_id": job_id, "total_cells": len(doc_names) * len(columns)})
 
@@ -643,6 +695,8 @@ def compare_start():
             logger.error(f"Failed to read uploaded temp file: {e}")
             uploaded_text = ""
             
+    _get_compare_lock(job_id)  # Initialize the lock for this job
+    logger.info(f"Starting compare job {job_id} for {len(doc_names)} docs (upload={uploaded_name is not None})")
     executor.submit(advanced_modes._run_compare_job, job_id, session_id, doc_names, question, 
                     uploaded_text, uploaded_name, temp_path, COMPARE_STORE, _compare_locks)
     return jsonify({"job_id": job_id})
