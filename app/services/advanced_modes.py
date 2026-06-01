@@ -20,9 +20,19 @@ def get_raw_doc_text(session_id: str, doc_name: str) -> str:
     """Retrieve raw text from an uploaded document."""
     flat_name = doc_name.replace("/", "_").replace("\\", "_")
     file_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{flat_name}")
+    
     if not os.path.exists(file_path):
-        logger.error(f"Failed to find raw doc text at path: {file_path}")
-        return ""
+        # Resilient fallback: search across all uploads for any session matching flat_name
+        found = False
+        for fname in os.listdir(config.UPLOAD_PATH):
+            if fname.endswith(flat_name):
+                file_path = os.path.join(config.UPLOAD_PATH, fname)
+                found = True
+                break
+        if not found:
+            logger.error(f"Failed to find raw doc text at path: {file_path} or any fallback")
+            return ""
+            
     try:
         return reader.read_file(file_path)
     except Exception as e:
@@ -437,12 +447,13 @@ Write a well-structured legal synthesis based ONLY on the comparison table data 
 STRICT RULES:
 - Format your response using markdown with clear headings, bullet points, and bold text for readability.
 - Write fluid, cohesive summary paragraphs describing trends across the documents. DO NOT output repetitive nested lists detailing every single document's individual value. 
-- Group similar findings together into single sentences (e.g. "Most documents do not specify a notice period, except <b title="[DocName]">this one</b> which requires 30 days").
+- Group similar findings together into single sentences (e.g. "Most documents do not specify a notice period, except [1] which requires 30 days").
 - Do NOT redundantly enumerate "not specified" for every document. Synthesize it.
-- Do NOT write the document name as visible text in your answer. Instead, whenever you state a claim from a document, bold the relevant text and append the exact document name in an HTML title attribute like this: <b title="[DocumentName]">your bolded text</b>.
+- Cite your sources using standard IEEE format inline (e.g., [1], [2], [3]). Do NOT mention the exact document names anywhere in the paragraph text.
 - ONLY state facts that appear in the comparison table. DO NOT add information not present in the data.
 - Flag contradictions explicitly, citing both documents and their conflicting values verbatim.
-- DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows."""
+- DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
+- PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1"). If the exact clause/page is not in the table, just map it to the document name: "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
 
         narrative, _ = llm.ask(narrative_prompt, max_tokens=1500)
         
