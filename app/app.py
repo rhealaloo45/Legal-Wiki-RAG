@@ -414,10 +414,18 @@ def wiki_page_detail():
 def _find_upload(session_id, doc_name):
     """Find an uploaded file by session ID and document name."""
     basename = doc_name.replace("/", "_").replace("\\", "_")
+    
+    # 1. Try with the current session prefix
     prefix = f"{session_id}_"
     for fname in os.listdir(config.UPLOAD_PATH):
         if fname.startswith(prefix) and fname.endswith(basename):
             return os.path.join(config.UPLOAD_PATH, fname)
+            
+    # 2. Resilient fallback: search across all uploads for any session matching basename
+    for fname in os.listdir(config.UPLOAD_PATH):
+        if fname.endswith(basename):
+            return os.path.join(config.UPLOAD_PATH, fname)
+            
     return None
 
 
