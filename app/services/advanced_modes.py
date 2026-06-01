@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 
 def get_raw_doc_text(session_id: str, doc_name: str) -> str:
     """Retrieve raw text from an uploaded document."""
-    file_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{doc_name}")
+    flat_name = doc_name.replace("/", "_").replace("\\", "_")
+    file_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{flat_name}")
     if not os.path.exists(file_path):
         logger.error(f"Failed to find raw doc text at path: {file_path}")
         return ""
@@ -28,23 +29,64 @@ def get_raw_doc_text(session_id: str, doc_name: str) -> str:
         logger.error(f"Error reading file {file_path}: {e}")
         return ""
 
+def _get_wiki_text_for_doc(session_id: str, doc_name: str) -> str:
+    """Retrieve synthesized wiki content for a document.
+    
+    Looks up wiki pages tagged with this source_doc and concatenates their
+    content. This is much smaller and more focused than raw document text,
+    leading to faster and more accurate extraction.
+    Falls back to raw text if no wiki pages are found.
+    
+    The output preserves source attribution and supporting quotes embedded
+    during wiki ingest, so downstream LLM calls can cite them.
+    """
+    scoped = _get_scoped_wiki_pages(session_id, doc_name)
+    if scoped:
+        parts = [f"[Source Document: {doc_name}]"]
+        for title, page_data in scoped.items():
+            content = page_data.get("content", "") if isinstance(page_data, dict) else str(page_data)
+            summary = page_data.get("summary", "") if isinstance(page_data, dict) else ""
+            parts.append(f"## {title}\n{summary}\n{content}")
+        wiki_text = "\n\n".join(parts)
+        if len(wiki_text) > 200:  # Only use wiki if substantial content exists
+            return wiki_text
+    
+    # Fallback to raw text — prefix with source doc name for traceability
+    raw = get_raw_doc_text(session_id, doc_name)
+    if raw:
+        return f"[Source Document: {doc_name}]\n\n{raw}"
+    return ""
+
+# Max chars of context to send per cell extraction call.
+# Set to 6000 to ensure wiki quotes and multi-page content aren't truncated.
+_CELL_CONTEXT_LIMIT = 6000
+
 def extract_cell(doc_text: str, column_name: str) -> dict:
-    """Extract a specific piece of information from text."""
+    """Extract a specific piece of information from text using fast LLM path."""
     prompt = f"""\
-Extract one specific piece of information from legal text.
+Extract the specific piece of information requested from the legal text below.
 Return JSON only, no preamble:
 {{"value": str|null, "confidence": float 0-1, "quote": str|null}}
-Rules: Never infer. Never hallucinate. 
-If not found: value=null, confidence=0.0, quote=null.
-quote must be verbatim from text, max 100 chars.
+
+STRICT RULES:
+- The "value" field must be a concise, informative summary (1-3 sentences) explaining the extracted information clearly, not just a single keyword.
+- ONLY extract information that is EXPLICITLY stated in the text below.
+- If the requested information is NOT found in the text, you MUST return null for the "value" field. Do NOT write sentences explaining that it is missing.
+- DO NOT infer, assume, or hallucinate any values.
+- The "quote" field MUST be a verbatim excerpt copied exactly from the text (max 120 chars).
+  It serves as evidence for your extracted value.
+- If the text contains "Supporting Quotes" sections, prefer those as your quote source.
+- If the information is not found anywhere in the text: value=null, confidence=0.0, quote=null.
+- confidence should reflect how directly the text states the information:
+  1.0 = exact verbatim match, 0.8 = clearly stated, 0.5 = implied, 0.0 = not found.
 
 Text:
-{doc_text[:8000]}
+{doc_text[:_CELL_CONTEXT_LIMIT]}
 
 Extract: {column_name}"""
 
     try:
-        raw, _ = llm.ask(prompt, max_tokens=150)
+        raw, _ = llm.fast_ask(prompt, max_tokens=150)
         import re
         # remove potential reasoning block or markdown
         raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
@@ -152,6 +194,18 @@ def export_matrix_to_xlsx(store_data: dict, mode: str) -> bytes:
     elif mode == "compare":
         _build_compare_sheet(ws, store_data)
         
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+    
+    # Auto-adjust column widths and enable text wrapping for all cells
+    for col_idx in range(1, ws.max_column + 1):
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = 35 if col_idx == 1 else 55
+        
+    for row in ws.iter_rows():
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+        
     out = io.BytesIO()
     wb.save(out)
     return out.getvalue()
@@ -160,12 +214,23 @@ def export_matrix_to_xlsx(store_data: dict, mode: str) -> bytes:
 # Background Jobs
 # ---------------------------------------------------------------------------
 
+# Timeout for individual future results (seconds)
+_FUTURE_TIMEOUT = 90
+
 def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list, store_ref: dict, locks_ref: dict):
-    """Background job for review mode."""
+    """Background job for review mode.
+    
+    Optimisation: uses wiki-synthesized content instead of raw document text
+    where available, dramatically reducing prompt size and latency.
+    """
     lock = locks_ref[job_id]
     
     def _extract_worker(doc_name, col_name, doc_text):
-        res = extract_cell(doc_text, col_name)
+        try:
+            res = extract_cell(doc_text, col_name)
+        except Exception as e:
+            logger.error(f"Worker failed for {doc_name}/{col_name}: {e}")
+            res = {"value": None, "confidence": 0.0, "quote": None}
         with lock:
             store_ref[job_id]["rows"][doc_name][col_name] = res
             store_ref[job_id]["completed"] += 1
@@ -173,14 +238,26 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list
                 store_ref[job_id]["flagged"].append([doc_name, col_name])
 
     try:
+        # Pre-fetch all document texts (wiki-first, raw fallback)
+        doc_texts = {}
+        for doc_name in doc_names:
+            doc_texts[doc_name] = _get_wiki_text_for_doc(session_id, doc_name)
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
             for doc_name in doc_names:
-                doc_text = get_raw_doc_text(session_id, doc_name)
+                doc_text = doc_texts[doc_name]
                 for col_name in columns:
                     futures.append(executor.submit(_extract_worker, doc_name, col_name, doc_text))
             
-            concurrent.futures.wait(futures)
+            # Wait with timeout to prevent indefinite hanging
+            done, not_done = concurrent.futures.wait(futures, timeout=_FUTURE_TIMEOUT * len(futures) / 5 + 30)
+            
+            # Cancel any stragglers
+            for f in not_done:
+                f.cancel()
+                with lock:
+                    store_ref[job_id]["completed"] += 1
             
         with lock:
             store_ref[job_id]["status"] = "complete"
@@ -204,8 +281,15 @@ def _get_scoped_wiki_pages(session_id: str, doc_name: str) -> dict:
 def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str, 
                      uploaded_text: Optional[str], uploaded_name: Optional[str], temp_path: Optional[str],
                      store_ref: dict, locks_ref: dict):
-    """Background job for compare mode."""
+    """Background job for compare mode.
+    
+    Optimisations over the original implementation:
+    - Uses fast_ask for cell extraction calls
+    - Batches outlier detection into a single LLM call instead of per-aspect
+    - Uses wiki content with BM25 pre-filtering
+    """
     lock = locks_ref[job_id]
+    import re
     
     try:
         # STEP 1 - NORMALIZE SOURCES
@@ -218,7 +302,7 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
             if not scoped_pages:
                 structured_text = get_raw_doc_text(session_id, doc_name)
             else:
-                # BM25 Fallback/Logic
+                # BM25 retrieval from wiki pages
                 try:
                     from rank_bm25 import BM25Okapi
                     corpus = []
@@ -246,18 +330,21 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
         with lock:
             store_ref[job_id]["sources"] = [{"name": s["name"], "type": s["type"], "label": s.get("label", s["name"])} for s in sources]
             
-        # STEP 2 - ASPECT IDENTIFICATION
+        # STEP 2 - ASPECT IDENTIFICATION (single fast call)
         with lock:
             store_ref[job_id]["stage"] = "extracting"
             
         aspect_prompt = f"""\
-Question: {question}
+User Query: {question}
 Documents being compared: {[s['name'] for s in sources]}
-List 4-6 specific aspects to extract for this comparison.
+
+Based on the User Query, list the specific factual aspects that need to be extracted for comparison.
+If the query explicitly asks for certain points (e.g., "limits of liability, liability caps"), use those exact points as the aspects.
+If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
+Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts.
 Return JSON only: {{"aspects": [str]}}"""
 
-        raw, _ = llm.ask(aspect_prompt, max_tokens=150)
-        import re
+        raw, _ = llm.fast_ask(aspect_prompt, max_tokens=150)
         raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
         raw = re.sub(r'```json', '', raw)
         raw = re.sub(r'```', '', raw)
@@ -269,9 +356,13 @@ Return JSON only: {{"aspects": [str]}}"""
             for aspect in aspects:
                 store_ref[job_id]["table"][aspect] = {}
         
-        # STEP 3 - EXTRACT PER SOURCE PER ASPECT
+        # STEP 3 - EXTRACT PER SOURCE PER ASPECT (parallel with fast_ask)
         def _extract_compare_worker(source_dict, aspect):
-            res = extract_cell(source_dict["text"], aspect)
+            try:
+                res = extract_cell(source_dict["text"], aspect)
+            except Exception as e:
+                logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
+                res = {"value": None, "confidence": 0.0, "quote": None}
             doc_key = source_dict.get("label", source_dict["name"])
             with lock:
                 store_ref[job_id]["table"][aspect][doc_key] = res
@@ -281,52 +372,79 @@ Return JSON only: {{"aspects": [str]}}"""
             for s in sources:
                 for a in aspects:
                     futures.append(executor.submit(_extract_compare_worker, s, a))
-            concurrent.futures.wait(futures)
             
-        # STEP 4 - OUTLIER DETECTION
+            # Wait with timeout
+            total_cells = len(sources) * len(aspects)
+            timeout = max(60, total_cells * 15)  # ~15s per cell, minimum 60s
+            done, not_done = concurrent.futures.wait(futures, timeout=timeout)
+            
+            # Fill in failures for timed-out cells
+            for f in not_done:
+                f.cancel()
+            
+        # STEP 4 - OUTLIER DETECTION (batched into a single LLM call)
         with lock:
             store_ref[job_id]["stage"] = "analyzing"
             
-        outliers = []
+        # Build a compact summary of all values for batch outlier detection
+        all_values = {}
         for aspect in aspects:
-            vals = {}
+            aspect_vals = {}
             for s in sources:
                 doc_key = s.get("label", s["name"])
-                val = store_ref[job_id]["table"][aspect][doc_key].get("value")
+                cell_data = store_ref[job_id]["table"].get(aspect, {}).get(doc_key, {})
+                val = cell_data.get("value")
                 if val:
-                    vals[doc_key] = val
-                    
-            outlier_prompt = f"""\
-Values for {aspect}: {json.dumps(vals)}
-Identify any outliers or contradictions. 
-Return JSON only: 
-[{{"doc": str, "reason": str}}] or []"""
+                    aspect_vals[doc_key] = val
+            if aspect_vals:
+                all_values[aspect] = aspect_vals
 
-            raw, _ = llm.ask(outlier_prompt, max_tokens=100)
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
+        outliers = []
+        if all_values:
+            outlier_prompt = f"""\
+Compare the extracted values below across documents. Identify ONLY contradictions
+or significant differences that are DIRECTLY visible in the data provided.
+DO NOT infer, speculate, or flag differences that are not clearly present.
+Return JSON only — an array of objects:
+[{{"aspect": str, "doc": str, "reason": str}}] or []
+Return [] if no clear contradictions exist.
+
+Extracted values:
+{json.dumps(all_values, indent=1)}"""
+
             try:
+                raw, _ = llm.fast_ask(outlier_prompt, max_tokens=300)
+                raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
+                raw = re.sub(r'```json', '', raw)
+                raw = re.sub(r'```', '', raw)
                 parsed_outliers = json.loads(raw.strip())
                 if isinstance(parsed_outliers, list):
-                    for po in parsed_outliers:
-                        po["aspect"] = aspect
-                        outliers.append(po)
-            except:
-                pass
+                    outliers = parsed_outliers
+            except Exception as e:
+                logger.error(f"Outlier detection failed: {e}")
                 
         with lock:
             store_ref[job_id]["outliers"] = outliers
             
-        # STEP 5 - NARRATIVE GENERATION
+        # STEP 5 - NARRATIVE GENERATION (single call, using ask for quality)
         narrative_prompt = f"""\
 Question: {question}
 Comparison table: {json.dumps(store_ref[job_id]["table"])}
 Outliers: {json.dumps(outliers)}
-Write a 3-5 sentence legal synthesis. 
-Cite doc names inline. Flag contradictions explicitly."""
 
-        narrative, _ = llm.ask(narrative_prompt, max_tokens=400)
+Write a well-structured legal synthesis based ONLY on the comparison table data above.
+
+STRICT RULES:
+- Format your response using markdown with clear headings, bullet points, and bold text for readability.
+- Write fluid, cohesive summary paragraphs describing trends across the documents. DO NOT output repetitive nested lists detailing every single document's individual value. 
+- Group similar findings together into single sentences (e.g. "Most documents do not specify a notice period, except <b title="[DocName]">this one</b> which requires 30 days").
+- Do NOT redundantly enumerate "not specified" for every document. Synthesize it.
+- Do NOT write the document name as visible text in your answer. Instead, whenever you state a claim from a document, bold the relevant text and append the exact document name in an HTML title attribute like this: <b title="[DocumentName]">your bolded text</b>.
+- ONLY state facts that appear in the comparison table. DO NOT add information not present in the data.
+- Flag contradictions explicitly, citing both documents and their conflicting values verbatim.
+- DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows."""
+
+        narrative, _ = llm.ask(narrative_prompt, max_tokens=1500)
         
         # STEP 6 - STORE + COMPLETE
         with lock:

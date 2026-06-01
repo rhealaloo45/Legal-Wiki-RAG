@@ -3,13 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <title>LexWiki</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
   <script src="https://d3js.org/d3.v7.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;1,400&family=DM+Sans:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=DM+Sans:wght@400;500&display=swap');
 :root {
-  --font-serif: 'Lora', Georgia, serif;
+  --font-heading: 'Outfit', sans-serif;
   --font-sans: 'DM Sans', sans-serif;
   --bg-base: #F4F3EF;
   --bg-surface: #ffffff;
@@ -39,7 +40,7 @@
 body{background:var(--bg-base);padding:20px;height:100vh;overflow:hidden;font-family:var(--font-sans)}
 .app{font-family:var(--font-sans);background:var(--bg-base);height:100%;display:flex;flex-direction:column;border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;position:relative}
 .topbar{background:var(--bg-surface);border-bottom:0.5px solid var(--border);display:flex;align-items:center;padding:0 20px;height:50px;gap:14px;flex-shrink:0}
-.logo{font-family:var(--font-serif);font-size:15px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:7px}
+.logo{font-family:var(--font-heading);font-size:15px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:7px}
 .logo-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0}
 .session-chip{font-size:11px;color:var(--text-secondary);background:var(--bg-base);padding:3px 10px;border-radius:20px;border:0.5px solid var(--border);display:flex;align-items:center;gap:5px}
 .topbar-right{margin-left:auto;display:flex;align-items:center;gap:8px}
@@ -74,7 +75,7 @@ body{background:var(--bg-base);padding:20px;height:100vh;overflow:hidden;font-fa
 .ask-submit{background:var(--accent);color:#fff;border:none;border-radius:var(--radius-md);padding:7px 14px;font-size:12px;font-weight:500;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:5px}
 .ask-submit:disabled{opacity:0.6;cursor:not-allowed}
 
-.answer-card{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:20px}
+.answer-card{background:var(--bg-surface);border:0.5px solid var(--border);border-top:2px solid var(--green);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:20px}
 .answer-topbar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:0.5px solid var(--border)}
 .answer-tags{display:flex;align-items:center;gap:10px}
 .tag-synth{font-size:10px;font-weight:500;letter-spacing:0.7px;color:var(--green-text);background:var(--green-light);padding:3px 9px;border-radius:4px}
@@ -85,55 +86,72 @@ body{background:var(--bg-base);padding:20px;height:100vh;overflow:hidden;font-fa
 .act-btn{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-secondary);background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:4px 10px;cursor:pointer}
 .act-btn.copied{color:var(--green);border-color:var(--green)}
 
-.answer-body{padding:20px 20px 16px}
-.exec-title{font-family:var(--font-serif);font-size:18px;font-weight:500;color:var(--text-primary);margin-bottom:12px}
-.exec-lead{font-size:13px;color:var(--text-secondary);line-height:1.75;margin-bottom:16px}
-.cite-link{color:var(--accent);font-weight:500;cursor:pointer;text-decoration:none}
-.cite-link:hover{text-decoration:underline}
-.finding{display:flex;gap:12px;margin-bottom:14px;padding:14px;background:var(--bg-base);border-radius:var(--radius-md);border-left:2px solid var(--accent)}
-.finding-num{width:22px;height:22px;border-radius:50%;background:var(--accent-light);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:500;color:var(--accent);flex-shrink:0;margin-top:1px}
-.finding-content{flex:1;min-width:0}
-.finding-title{font-size:13px;font-weight:500;color:var(--text-primary);margin-bottom:4px}
-.finding-text{font-size:12px;color:var(--text-secondary);line-height:1.7}
-.inline-cite{font-family:var(--font-sans);font-size:10px;color:var(--accent);background:var(--accent-light);padding:1px 6px;border-radius:3px;cursor:pointer;margin:0 1px}
-.blockquote{border-left:2px solid var(--accent-border);padding:8px 12px;margin:10px 0;background:#F8F9FF;border-radius:0 var(--radius-md) var(--radius-md) 0}
-.blockquote-text{font-size:11px;font-style:italic;color:var(--text-secondary);line-height:1.6}
+.answer-body{padding:20px 24px 16px}
+.answer-body h1,.answer-body h2,.answer-body h3{font-family:var(--font-heading);font-weight:500;color:var(--text-primary);margin:18px 0 10px}
+.answer-body h1{font-size:18px}
+.answer-body h2{font-size:16px}
+.answer-body h3{font-size:14px}
+.answer-body p{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-bottom:12px}
+.answer-body ul{font-size:13px;color:var(--text-secondary);line-height:1.8;margin:0 0 12px 20px}
+.answer-body ul li{margin-bottom:4px}
+.answer-body ol{list-style:none;counter-reset:answer-item;padding:0;margin:16px 0}
+.answer-body ol > li{position:relative;padding-left:36px;margin-bottom:20px;font-size:13px;color:var(--text-secondary);line-height:1.8}
+.answer-body ol > li::before{content:counter(answer-item);counter-increment:answer-item;position:absolute;left:0;top:2px;width:24px;height:24px;border-radius:50%;background:var(--green-light);color:var(--green-text);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;font-family:var(--font-sans)}
+.answer-body strong{color:var(--text-primary);font-weight:500}
+.answer-body blockquote{border-left:2px solid var(--accent-border);padding:8px 12px;margin:10px 0;background:#F8F9FF;border-radius:0 var(--radius-md) var(--radius-md) 0;font-size:12px;color:var(--text-secondary);font-style:italic;line-height:1.7}
+.inline-cite{font-family:var(--font-sans);font-size:10px;color:var(--green-text);background:var(--green-light);border:0.5px solid var(--green-border);padding:2px 7px;border-radius:3px;cursor:pointer;margin:0 2px;white-space:normal;word-break:break-word;display:inline-block;transition:background .15s}
+.inline-cite:hover{background:var(--green-border)}
 
 .sources-bar{padding:12px 16px;border-top:0.5px solid var(--border);background:var(--bg-hover)}
 .sources-label{font-size:10px;font-weight:500;color:var(--text-muted);letter-spacing:0.7px;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:5px}
-.sources-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
-.source-chip{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:8px 10px;cursor:pointer;display:flex;align-items:flex-start;gap:7px}
+.sources-grid{display:flex;flex-wrap:wrap;gap:8px}
+.source-chip{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:8px 10px;cursor:pointer;display:flex;align-items:flex-start;gap:7px;min-width:140px;max-width:200px;transition:border-color .15s,background .15s}
 .source-chip:hover{border-color:var(--accent-border);background:#F8F9FF}
 .source-icon{color:var(--text-muted);font-size:14px;flex-shrink:0;margin-top:1px}
+.source-content{flex:1;min-width:0}
 .source-name{font-size:11px;font-weight:500;color:var(--text-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .source-clause{font-size:10px;color:var(--text-muted);margin-top:1px}
 
 /* FILES PANEL */
-.files-panel{padding:20px;overflow-y:auto;flex:1}
-.files-toolbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
-.files-title{font-size:13px;font-weight:500;color:var(--text-primary)}
+.files-panel{display:flex;flex-direction:column;overflow:hidden;flex:1}
+.files-toolbar{display:flex;align-items:center;justify-content:space-between;padding:16px 20px 12px;flex-shrink:0}
+.files-title{font-size:14px;font-weight:500;color:var(--text-primary)}
 .files-count{font-size:11px;color:var(--text-muted);background:var(--bg-base);padding:2px 8px;border-radius:20px}
-.ftree{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
-.ftree-row{display:flex;align-items:center;padding:8px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;gap:8px}
+.ftree{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-lg);overflow-y:auto;margin:0 20px 20px;flex:1}
+.ftree-row{display:flex;align-items:center;padding:7px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;gap:8px;transition:background .1s}
 .ftree-row:last-child{border-bottom:none}
 .ftree-row:hover{background:var(--bg-hover)}
-.ftree-indent{display:inline-block}
 .ftree-icon{font-size:13px;flex-shrink:0}
-.ftree-name{font-size:12px;color:var(--text-primary);flex:1}
-.ftree-meta{font-size:10px;color:var(--text-muted)}
-.ftree-open{font-size:10px;color:var(--accent);background:var(--accent-light);padding:2px 8px;border-radius:20px;cursor:pointer;border:none;font-family:var(--font-sans)}
-.folder-row{background:var(--bg-hover)}
+.ftree-name{font-size:12px;color:var(--text-primary);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ftree-meta{font-size:10px;color:var(--text-muted);margin-left:auto}
+.ftree-open{font-size:10px;color:var(--accent);background:var(--accent-light);padding:2px 8px;border-radius:20px;cursor:pointer;border:none;font-family:var(--font-sans);flex-shrink:0;transition:background .15s}
+.ftree-open:hover{background:var(--accent-border)}
+.folder-row{background:var(--bg-base)}
 .folder-name{font-size:12px;font-weight:500;color:var(--text-primary)}
 
 /* DOC READER OVERLAY */
-.doc-reader{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg-surface);z-index:10;display:flex;flex-direction:column;}
+.doc-reader{position:absolute;top:0;left:0;right:0;bottom:0;background:var(--bg-surface);z-index:10;display:flex;flex-direction:column}
 .doc-reader-top{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:0.5px solid var(--border);background:var(--bg-surface);flex-shrink:0}
 .doc-reader-title{font-size:13px;font-weight:500;color:var(--text-primary);flex:1}
 .close-btn{width:28px;height:28px;border-radius:var(--radius-md);border:0.5px solid var(--border);background:var(--bg-surface);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:13px;color:var(--text-secondary)}
-.doc-reader-body{flex:1;overflow-y:auto;padding:28px 32px}
-.doc-reader-body h2{font-family:var(--font-serif);font-size:16px;font-weight:500;color:var(--text-primary);margin-bottom:12px}
-.doc-reader-body p{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-bottom:12px}
-.doc-reader-body .clause{font-size:12px;color:var(--text-primary);line-height:1.8;margin-bottom:10px;padding-left:14px;border-left:2px solid var(--border)}
+.doc-reader-body{flex:1;overflow:hidden;position:relative}
+.doc-reader-body iframe{width:100%;height:100%;border:none}
+.doc-reader-body p{font-size:13px;color:var(--text-secondary);line-height:1.8;margin-bottom:12px;padding:28px 32px}
+
+/* PDF MODAL OVERLAY */
+.pdf-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(15,15,30,0.55);z-index:25;display:flex;align-items:center;justify-content:center}
+.pdf-modal{background:var(--bg-surface);border-radius:var(--radius-lg);border:0.5px solid var(--border);width:85%;max-width:900px;height:85%;display:flex;flex-direction:column;overflow:hidden}
+.pdf-modal-top{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0}
+.pdf-modal-title{font-size:13px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:6px}
+.pdf-modal-body{flex:1;overflow:hidden}
+.pdf-modal-body iframe{width:100%;height:100%;border:none}
+
+/* LOG OVERLAY */
+.log-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(15,15,30,0.55);z-index:20;display:flex;align-items:center;justify-content:center}
+.log-modal{background:var(--bg-surface);border-radius:var(--radius-lg);border:0.5px solid var(--border);width:620px;max-width:95%;max-height:80%;display:flex;flex-direction:column;overflow:hidden}
+.log-modal-top{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:0.5px solid var(--border)}
+.log-modal-title{font-size:13px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:6px}
+.log-body{flex:1;overflow-y:auto;padding:16px;background:var(--bg-hover);font-family:'DM Sans',monospace;font-size:11px;color:var(--text-secondary);line-height:1.7;white-space:pre-wrap;word-break:break-word}
 
 /* GRAPH OVERLAY */
 .graph-overlay{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(15,15,30,0.55);z-index:20;display:flex;align-items:center;justify-content:center;}
@@ -164,8 +182,9 @@ body{background:var(--bg-base);padding:20px;height:100vh;overflow:hidden;font-fa
 .tbl-bar-t{font-size:12px;font-weight:500;color:var(--text-primary)}
 .exp-btn{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--accent);background:var(--accent-light);border:none;border-radius:var(--radius-md);padding:5px 10px;cursor:pointer}
 table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
-.mtbl th{background:var(--bg-base);padding:8px 12px;text-align:left;font-weight:500;font-size:10px;color:var(--text-secondary);border-bottom:0.5px solid var(--border);white-space:nowrap}
-.mtbl td{padding:8px 12px;border-bottom:0.5px solid var(--border);vertical-align:middle;position:relative}
+.mtbl th{background:var(--bg-base);padding:8px 12px;text-align:left;font-weight:500;font-size:10px;color:var(--text-secondary);border-bottom:0.5px solid var(--border);min-width:200px;max-width:400px;white-space:normal;}
+.mtbl td{padding:8px 12px;border-bottom:0.5px solid var(--border);vertical-align:top;position:relative;min-width:200px;max-width:400px;word-wrap:break-word;white-space:normal;}
+.mtbl td:first-child, .mtbl th:first-child{min-width:150px;max-width:250px;}
 .mtbl tr:last-child td{border-bottom:none}
 .mtbl tr:hover{background:var(--bg-hover)}
 .mtbl td:first-child{font-weight:500;font-size:11px;color:var(--text-primary)}
@@ -191,7 +210,7 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
 
 /* UPLOAD SCREEN */
 .upload-screen{max-width:520px;margin:auto;display:flex;flex-direction:column;width:100%;}
-.upl-title{font-family:var(--font-serif);font-size:20px;font-weight:500;color:var(--text-primary);margin-bottom:6px;text-align:center}
+.upl-title{font-family:var(--font-heading);font-size:20px;font-weight:500;color:var(--text-primary);margin-bottom:6px;text-align:center}
 .upl-sub{font-size:13px;color:var(--text-secondary);margin-bottom:24px;text-align:center}
 .upl-zone{border:2px dashed var(--accent-border);border-radius:var(--radius-lg);padding:40px 24px;text-align:center;background:var(--accent-light);cursor:pointer;margin-bottom:16px}
 .upl-zone.dragover{border-color:var(--accent);background:#E8ECFF}
@@ -205,6 +224,8 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
 .main-prog-wrap{margin-top:20px;}
 .main-prog-lbl{font-size:12px;color:var(--text-primary);margin-bottom:4px;display:flex;justify-content:space-between}
 
+@keyframes spin {from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+
 /* TOAST */
 .toast-container{position:fixed;bottom:20px;right:20px;z-index:100;display:flex;flex-direction:column;gap:8px}
 .toast-msg{background:var(--bg-surface);border:0.5px solid var(--border);border-radius:var(--radius-md);padding:10px 14px;font-size:12px;min-width:220px;max-width:320px;display:flex;gap:8px;align-items:flex-start;animation:fadein 0.3s, fadeout 0.3s 3.7s;color:var(--text-primary)}
@@ -214,6 +235,82 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
 .toast-warning{border-left:3px solid var(--amber)}
 @keyframes fadein {from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fadeout {from{opacity:1}to{opacity:0}}
+
+/* SHIMMER & SKELETON LOADER */
+@keyframes shimmer {
+  0% { background-position: -450px 0; }
+  100% { background-position: 450px 0; }
+}
+.shimmer {
+  animation: shimmer 1.6s infinite linear;
+  background: linear-gradient(to right, rgba(0,0,0,0.04) 8%, rgba(0,0,0,0.08) 18%, rgba(0,0,0,0.04) 33%);
+  background-size: 800px 100%;
+}
+.skeleton-box {
+  height: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--border);
+}
+b[title] {
+  cursor: help;
+  color: var(--text-primary);
+  border-bottom: 1px dotted var(--text-muted);
+}
+.review-skeleton-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.review-skeleton-table th, .review-skeleton-table td {
+  padding: 12px;
+  border-bottom: 0.5px solid var(--border);
+}
+.compare-skeleton-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* CHECKBOX TREE NAVIGATION */
+.tree-folder-row, .tree-file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+}
+.tree-folder-row:hover, .tree-file-row:hover {
+  background-color: var(--bg-hover);
+}
+.folder-children-container {
+  border-left: 0.5px dashed var(--border);
+  margin-left: 8px;
+  padding-left: 4px;
+}
+.fold-chevron {
+  cursor: pointer;
+  padding: 2px;
+  transition: transform 0.15s;
+}
+.fold-chevron:hover {
+  color: var(--accent);
+}
+.doc-ck-lbl, .folder-name {
+  user-select: none;
+  font-family: var(--font-sans);
+}
+.select-all-bar {
+  display: flex;
+  gap: 6px;
+  font-size: 10px;
+  text-transform: none;
+}
+.select-all-bar a {
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+.select-all-bar a:hover {
+  text-decoration: underline;
+}
   </style>
 </head>
 <body>
@@ -221,17 +318,17 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
   
   <div class="app" id="app">
     <div class="topbar">
+      <div class="icon-btn" onclick="toggleSidebar()" style="margin-right: -4px" title="Toggle Sidebar"><i class="ti ti-menu-2"></i></div>
       <div class="logo"><span class="logo-dot"></span>Lex<span style="color:var(--accent)">Wiki</span></div>
       <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New Session</span></div>
       <div class="topbar-right">
         <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:13px"></i>Knowledge graph</div>
-        <div class="icon-btn" aria-label="log"><i class="ti ti-file-description"></i></div>
-        <div class="icon-btn" aria-label="settings"><i class="ti ti-settings"></i></div>
+        <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i class="ti ti-file-description"></i></div>
       </div>
     </div>
   
     <div class="layout">
-      <div class="sidebar">
+      <div class="sidebar" id="sidebar">
         <button class="new-btn" onclick="newSession()"><i class="ti ti-plus" style="font-size:13px"></i>New matter</button>
         <div class="sidebar-label">Sessions</div>
         <div id="session-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
@@ -295,8 +392,15 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
         <div id="panel-review" class="panel-split d-none" style="display:none">
           <div class="split-left">
             <div class="ctrl-card">
-              <div class="ctrl-title">Documents</div>
-              <div id="review-doc-list" style="max-height:200px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
+              <div class="ctrl-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Documents</span>
+                <div class="select-all-bar">
+                  <a href="#" id="review-select-all">All</a>
+                  <span style="color:var(--text-muted)">|</span>
+                  <a href="#" id="review-deselect-all">None</a>
+                </div>
+              </div>
+              <div id="review-doc-list" style="max-height:240px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
             </div>
             <div class="ctrl-card">
               <div class="ctrl-title">Columns</div>
@@ -313,6 +417,44 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
               <div class="prog-container"><div class="prog-fill" id="review-progress"></div></div>
               <div class="prog-lbls"><span id="review-status-text">Starting...</span></div>
             </div>
+            
+            <!-- REVIEW SKELETON SCREEN -->
+            <div id="review-skeleton" class="d-none" style="margin-bottom:10px">
+              <div class="tbl-wrap">
+                <div class="tbl-bar"><span class="tbl-bar-t">Extracting legal clauses...</span></div>
+                <table class="review-skeleton-table">
+                  <thead>
+                    <tr>
+                      <th style="width:25%"><div class="skeleton-box shimmer" style="width:60%"></div></th>
+                      <th><div class="skeleton-box shimmer" style="width:40%"></div></th>
+                      <th><div class="skeleton-box shimmer" style="width:40%"></div></th>
+                      <th><div class="skeleton-box shimmer" style="width:40%"></div></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><div class="skeleton-box shimmer" style="width:80%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:90%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:70%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:85%"></div></td>
+                    </tr>
+                    <tr>
+                      <td><div class="skeleton-box shimmer" style="width:75%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:85%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:65%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:90%"></div></td>
+                    </tr>
+                    <tr>
+                      <td><div class="skeleton-box shimmer" style="width:70%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:75%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:80%"></div></td>
+                      <td><div class="skeleton-box shimmer" style="width:70%"></div></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            
             <div class="flag-bar d-none" id="review-flag-bar"><i class="ti ti-alert-triangle" style="font-size:13px"></i><span id="review-flag-text"></span></div>
             
             <div class="tbl-wrap d-none" id="review-table-wrap">
@@ -330,8 +472,15 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
         <div id="panel-compare" class="panel-split d-none" style="display:none">
           <div class="split-left">
             <div class="ctrl-card">
-              <div class="ctrl-title">Existing docs</div>
-              <div id="compare-doc-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
+              <div class="ctrl-title" style="display:flex; justify-content:space-between; align-items:center;">
+                <span>Existing docs</span>
+                <div class="select-all-bar">
+                  <a href="#" id="compare-select-all">All</a>
+                  <span style="color:var(--text-muted)">|</span>
+                  <a href="#" id="compare-deselect-all">None</a>
+                </div>
+              </div>
+              <div id="compare-doc-list" style="max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
             </div>
             <div class="ctrl-card">
               <div class="ctrl-title">Upload to compare</div>
@@ -349,21 +498,78 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
             <button class="run-btn" id="run-compare-btn">Run compare</button>
           </div>
           <div class="split-right">
-            <div id="compare-status" style="font-size:12px;color:var(--text-muted);margin-bottom:10px"></div>
-            <div class="tbl-wrap d-none" id="compare-table-wrap" style="margin-bottom:10px">
-              <div class="tbl-bar"><span class="tbl-bar-t">Comparison Matrix</span><button class="exp-btn d-none" id="compare-export-btn"><i class="ti ti-download" style="font-size:12px"></i>Export</button></div>
-              <table class="mtbl" style="table-layout:fixed;width:100%" id="compare-table">
-                <thead id="compare-thead"></thead>
-                <tbody id="compare-tbody"></tbody>
-              </table>
+            <!-- COMPARE PROGRESS BAR -->
+            <div id="compare-status-wrap" class="d-none" style="margin-bottom:15px">
+              <div class="prog-container"><div class="prog-fill" id="compare-progress-bar" style="width:0%"></div></div>
+              <div class="prog-lbls">
+                <span id="compare-status-text">Starting comparison...</span>
+                <span id="compare-progress-percent">0%</span>
+              </div>
             </div>
-            <div class="narr-box d-none" id="compare-outliers-wrap" style="margin-bottom:10px">
-              <div class="narr-lbl">Outliers</div>
-              <div id="compare-outliers-list"></div>
+            
+            <!-- COMPARE SKELETON SCREEN -->
+            <div id="compare-skeleton" class="d-none" style="margin-bottom:10px">
+              <div class="compare-skeleton-wrap">
+                <div class="tbl-wrap">
+                  <div class="tbl-bar"><span class="tbl-bar-t">Analyzing comparison aspects...</span></div>
+                  <table class="review-skeleton-table">
+                    <thead>
+                      <tr>
+                        <th style="width:30%"><div class="skeleton-box shimmer" style="width:70%"></div></th>
+                        <th><div class="skeleton-box shimmer" style="width:50%"></div></th>
+                        <th><div class="skeleton-box shimmer" style="width:50%"></div></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td><div class="skeleton-box shimmer" style="width:85%"></div></td>
+                        <td><div class="skeleton-box shimmer" style="width:90%"></div></td>
+                        <td><div class="skeleton-box shimmer" style="width:80%"></div></td>
+                      </tr>
+                      <tr>
+                        <td><div class="skeleton-box shimmer" style="width:75%"></div></td>
+                        <td><div class="skeleton-box shimmer" style="width:65%"></div></td>
+                        <td><div class="skeleton-box shimmer" style="width:85%"></div></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                
+                <div class="narr-box">
+                  <div class="narr-lbl"><div class="skeleton-box shimmer" style="width:15%; height:10px"></div></div>
+                  <div style="display:flex; flex-direction:column; gap:8px; margin-top:8px">
+                    <div class="skeleton-box shimmer" style="width:100%"></div>
+                    <div class="skeleton-box shimmer" style="width:95%"></div>
+                    <div class="skeleton-box shimmer" style="width:80%"></div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="narr-box d-none" id="compare-narrative-wrap">
-              <div class="narr-lbl">Narrative synthesis</div>
-              <div class="narr-txt" id="compare-narrative"></div>
+            
+            <div class="tbl-wrap d-none" id="compare-results-container" style="flex: 1; display: flex; flex-direction: column; overflow: hidden; margin-bottom: 10px;">
+              <div class="tbl-bar">
+                <span class="tbl-bar-t">Comparison Results</span>
+                <button class="exp-btn d-none" id="compare-export-btn"><i class="ti ti-download" style="font-size:12px"></i>Export Matrix</button>
+              </div>
+              
+              <div style="flex: 1; overflow: auto; display: flex; flex-direction: column;">
+                <div id="compare-table-wrap" class="d-none" style="flex: none; border-bottom: 0.5px solid var(--border);">
+                  <table class="mtbl" id="compare-table" style="border-top: none;">
+                    <thead id="compare-thead"></thead>
+                    <tbody id="compare-tbody"></tbody>
+                  </table>
+                </div>
+
+                <div id="compare-narrative-wrap" class="d-none" style="padding: 20px; border-bottom: 0.5px solid var(--border);">
+                  <div class="narr-lbl" style="margin-bottom: 10px; font-weight: 600;">Narrative Synthesis</div>
+                  <div class="narr-txt" id="compare-narrative"></div>
+                </div>
+                
+                <div id="compare-outliers-wrap" class="d-none" style="padding: 15px 20px; background: var(--bg-hover);">
+                  <div class="narr-lbl" style="margin-bottom: 10px; font-weight: 600; color: var(--red);">Outliers</div>
+                  <div id="compare-outliers-list"></div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -381,11 +587,22 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
         <!-- DOC READER -->
         <div id="doc-reader" class="doc-reader" style="display:none">
           <div class="doc-reader-top">
-            <i class="ti ti-file-text" style="font-size:14px;color:var(--text-muted)"></i>
+            <i class="ti ti-file-type-pdf" style="font-size:14px;color:var(--red)"></i>
             <span class="doc-reader-title" id="doc-reader-name"></span>
             <div class="close-btn" onclick="closeDoc()"><i class="ti ti-x"></i></div>
           </div>
           <div class="doc-reader-body" id="doc-reader-body"></div>
+        </div>
+
+        <!-- PDF MODAL (for citation clicks) -->
+        <div id="pdf-overlay" class="pdf-overlay" style="display:none" onclick="if(event.target===this)closePdfModal()">
+          <div class="pdf-modal" onclick="event.stopPropagation()">
+            <div class="pdf-modal-top">
+              <span class="pdf-modal-title"><i class="ti ti-file-type-pdf" style="font-size:14px;color:var(--red)"></i><span id="pdf-modal-name">Document</span></span>
+              <div class="close-btn" onclick="closePdfModal()"><i class="ti ti-x"></i></div>
+            </div>
+            <div class="pdf-modal-body" id="pdf-modal-body"></div>
+          </div>
         </div>
   
         <!-- GRAPH OVERLAY -->
@@ -403,6 +620,18 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
         </div>
   
       </div>
+
+      <!-- LOG OVERLAY -->
+      <div id="log-overlay" class="log-overlay" style="display:none" onclick="if(event.target===this)toggleLog()">
+        <div class="log-modal" onclick="event.stopPropagation()">
+          <div class="log-modal-top">
+            <span class="log-modal-title"><i class="ti ti-file-description" style="font-size:14px;color:var(--accent)"></i>Session log</span>
+            <div class="close-btn" onclick="toggleLog()"><i class="ti ti-x"></i></div>
+          </div>
+          <div class="log-body" id="log-body">No log data available yet.</div>
+        </div>
+      </div>
+  
     </div>
   </div>
   
@@ -410,7 +639,13 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
   // ============================================================
   // State
   // ============================================================
-  let SID = crypto.randomUUID();
+  function generateUUID() {
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+      var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+      return v.toString(16);
+    });
+  }
+  let SID = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : generateUUID();
   let uploadDone = false;
   let wikiRelations = [];
   let wikiPages = {};
@@ -436,6 +671,11 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
   // ============================================================
   // UI Tabs & Overlays
   // ============================================================
+  function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    sb.style.display = (sb.style.display === 'none') ? 'flex' : 'none';
+  }
+  
   function switchTab(name, el) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     el.classList.add('active');
@@ -449,7 +689,7 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
     if(name==='ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
     else if(name==='review') document.getElementById('panel-review').style.setProperty('display', 'flex', 'important');
     else if(name==='compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
-    else if(name==='files') document.getElementById('panel-files').style.setProperty('display', 'flex', 'important');
+    else if(name==='files') { const fp = document.getElementById('panel-files'); fp.style.setProperty('display', 'flex', 'important'); fp.style.flexDirection = 'column'; }
   }
   
   function toggleGraph() {
@@ -462,16 +702,54 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
   function openDoc(name) {
     document.getElementById('doc-reader-name').textContent = name;
     document.getElementById('doc-reader').style.display = 'flex';
-    document.getElementById('doc-reader-body').innerHTML = '<div style="font-size:12px;color:var(--text-muted)">Loading document...</div>';
-    
-    // Fetch doc text
-    fetch(`/progress?session_id=${SID}`) // placeholder, we actually don't have a GET /document route in python yet, fallback to a note
-    .then(() => {
-      // In the real system we'd call GET /document. For now just show a note that doc reader requires a backend route.
-      document.getElementById('doc-reader-body').innerHTML = `<p>Document viewer opened for: ${name}.</p><p class="clause">Note: To load full text, a backend GET /document route must be implemented as specified in UI.md constraints.</p>`;
-    });
+    const ext = name.split('.').pop().toLowerCase();
+    const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+    if (ext === 'pdf') {
+      document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}#toolbar=1"></iframe>`;
+    } else {
+      document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}" style="padding:20px"></iframe>`;
+    }
   }
   function closeDoc() { document.getElementById('doc-reader').style.display = 'none'; }
+
+  // PDF modal for citation clicks
+  function openPdfModal(docName, searchText) {
+    if (!docName) {
+      showToast('No document name provided for citation.', 'error');
+      return;
+    }
+    document.getElementById('pdf-modal-name').textContent = docName;
+    const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(docName)}`;
+    // Use PDF.js search param if available, otherwise just open the PDF
+    const searchParam = searchText ? `#search=${encodeURIComponent(searchText)}` : '';
+    document.getElementById('pdf-modal-body').innerHTML = `<iframe src="${url}${searchParam}"></iframe>`;
+    document.getElementById('pdf-overlay').style.display = 'flex';
+  }
+  function closePdfModal() {
+    document.getElementById('pdf-overlay').style.display = 'none';
+    document.getElementById('pdf-modal-body').innerHTML = '';
+  }
+
+  async function toggleLog() {
+    const o = document.getElementById('log-overlay');
+    if (o.style.display === 'none') {
+      o.style.display = 'flex';
+      document.getElementById('log-body').textContent = 'Loading log…';
+      try {
+        const res = await fetch(`/log?session_id=${SID}`);
+        if (res.ok) {
+          const txt = await res.text();
+          document.getElementById('log-body').textContent = txt || 'Log is empty.';
+        } else {
+          document.getElementById('log-body').textContent = 'No log found for this session yet.';
+        }
+      } catch(e) {
+        document.getElementById('log-body').textContent = 'Failed to load log.';
+      }
+    } else {
+      o.style.display = 'none';
+    }
+  }
   
   // ============================================================
   // Sessions
@@ -687,54 +965,65 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
       
       let html = '';
       
-      // Render Wiki Answer 
+      // Render Wiki Answer
       if (d.wiki && d.wiki.answer) {
-        let confStyle = '';
         const score = d.wiki.confidence_score || 0;
-        if(score >= 80) confStyle = 'color:var(--green-text); background:var(--green-light)';
-        else if(score >= 50) confStyle = 'color:var(--amber); background:var(--amber-light)';
-        else confStyle = 'color:var(--red); background:var(--red-light)';
+        let confDot = 'var(--green)';
+        if (score < 50) confDot = 'var(--red)';
+        else if (score < 80) confDot = 'var(--amber)';
         
+        // Build a map of page title -> source doc for citation linking
+        const pagesUsed = d.wiki.pages_used || [];
+        const filesUsed = d.wiki.files_used || [];
+        
+        // Render markdown
         let md = renderMarkdown(d.wiki.answer);
-        (d.wiki.pages_used||[]).forEach(p => {
-          const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          md = md.replace(new RegExp('\\['+esc+'\\]','g'), `<span class="inline-cite" onclick="toggleGraph()">[${p}]</span>`);
+        
+        // Convert [[DocName]] to green citation boxes
+        md = md.replace(/\[\[([^\]]+)\]\]/g, (match, docName) => {
+          const safeDoc = docName.replace(/'/g, "\\'");
+          // Try to strip any UUID prefix just in case it sneaks in for display
+          const cleanName = docName.replace(/^[a-f0-9-]{36}_/, '');
+          return `<span class="inline-cite" onclick="openPdfModal('${safeDoc}','')">${cleanName}</span>`;
         });
         
+        const elapsed = (d.wiki.elapsed_ms / 1000).toFixed(1);
+        const tokens = (d.wiki.usage && d.wiki.usage.prompt_tokens) ? 
+          (d.wiki.usage.prompt_tokens + d.wiki.usage.completion_tokens) : 0;
+        
         html += `
         <div class="answer-card">
           <div class="answer-topbar">
             <div class="answer-tags">
-              <span class="tag-synth">WIKI SYNTHESIS</span>
-              <span class="conf" style="${confStyle}; padding:2px 6px; border-radius:4px">Confidence: ${score}%</span>
+              <span class="tag-synth">SYNTHESIZED</span>
+              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>Confidence: ${score}%</span>
             </div>
             <div class="answer-actions">
-              <span class="answer-time">${d.wiki.elapsed_ms/1000}s</span>
-              <button class="act-btn" onclick="navigator.clipboard.writeText(\`${d.wiki.answer.replace(/`/g,'')}\`)"><i class="ti ti-copy"></i>Copy</button>
+              <span class="answer-time">Tokens: ${tokens}</span>
+              <span class="answer-time" style="margin-left:8px">Analysis: ${elapsed}s</span>
+              <button class="act-btn" id="copy-answer-btn" onclick="copyAnswer(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
+              <button class="act-btn" onclick="shareAnswer()"><i class="ti ti-share"></i>Share</button>
             </div>
           </div>
-          <div class="answer-body">
-            <div class="exec-lead">${md}</div>
-          </div>
+          <div class="answer-body">${md}</div>
+          ${filesUsed.length > 0 ? `
+          <div class="sources-bar">
+            <div class="sources-label"><i class="ti ti-paperclip" style="font-size:11px"></i>Referenced sources (${filesUsed.length})</div>
+            <div class="sources-grid">
+              ${filesUsed.map(f => {
+                const safeName = f.replace(/'/g, "\\'");
+                const cleanF = f.replace(/^[a-f0-9-]{36}_/, '');
+                return `<div class="source-chip" onclick="openPdfModal('${safeName}','')">
+                  <i class="ti ti-file-type-pdf source-icon"></i>
+                  <div class="source-content"><div class="source-name" title="${cleanF}">${cleanF}</div></div>
+                </div>`;
+              }).join('')}
+            </div>
+          </div>` : ''}
         </div>`;
-      }
-      
-      // Render RAG Answer
-      if (d.rag && d.rag.answer) {
-        html += `
-        <div class="answer-card">
-          <div class="answer-topbar">
-            <div class="answer-tags">
-              <span class="tag-synth" style="background:#EEF2FF;color:#2B5CE6">VECTOR RAG</span>
-            </div>
-            <div class="answer-actions">
-              <span class="answer-time">${d.rag.elapsed_ms/1000}s</span>
-            </div>
-          </div>
-          <div class="answer-body">
-            <div class="exec-lead">${renderMarkdown(d.rag.answer)}</div>
-          </div>
-        </div>`;
+        
+        // Store answer text for copy
+        window._lastAnswer = d.wiki.answer;
       }
       
       document.getElementById('answers-container').innerHTML = html;
@@ -745,48 +1034,216 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
       $askBtn.disabled = false;
     }
   }
+
+  function copyAnswer(btn) {
+    if(!window._lastAnswer) return;
+    navigator.clipboard.writeText(window._lastAnswer.replace(/`/g, '')).then(() => {
+      const orig = btn.innerHTML;
+      btn.innerHTML = '<i class="ti ti-check"></i>Copied';
+      btn.classList.add('copied');
+      setTimeout(() => {
+        btn.innerHTML = orig;
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  }
+
+  function shareAnswer() {
+    showToast('Share link generated and copied to clipboard', 'success');
+  }
   
   // ============================================================
-  // Review & Compare Doc Lists
+  // Checkbox Tree Helpers
   // ============================================================
+  function toggleCheckboxFolder(folderId, chevronEl) {
+    const ch = document.getElementById(folderId);
+    if (!ch) return;
+    if (ch.style.display === 'none') {
+      ch.style.display = 'block';
+      chevronEl.classList.remove('ti-chevron-right');
+      chevronEl.classList.add('ti-chevron-down');
+    } else {
+      ch.style.display = 'none';
+      chevronEl.classList.remove('ti-chevron-down');
+      chevronEl.classList.add('ti-chevron-right');
+    }
+  }
+
+  function toggleFolderCheckboxChildren(checkbox) {
+    const row = checkbox.closest('.tree-folder-row');
+    if (!row) return;
+    const container = row.nextElementSibling;
+    if (container && container.classList.contains('folder-children-container')) {
+      const childCheckboxes = container.querySelectorAll('input[type="checkbox"]');
+      childCheckboxes.forEach(cb => {
+        cb.checked = checkbox.checked;
+      });
+    }
+    updateParentFolderCheckboxes(checkbox);
+  }
+
+  function updateParentFolderCheckboxes(cb) {
+    let current = cb.closest('.folder-children-container');
+    while (current) {
+      const parentRow = current.previousElementSibling;
+      if (parentRow && parentRow.classList.contains('tree-folder-row')) {
+        const parentCheckbox = parentRow.querySelector('.folder-checkbox');
+        if (parentCheckbox) {
+          const allChildren = current.querySelectorAll('input[type="checkbox"]:not(.folder-checkbox)');
+          const checkedChildren = current.querySelectorAll('input[type="checkbox"]:not(.folder-checkbox):checked');
+          parentCheckbox.checked = allChildren.length === checkedChildren.length;
+        }
+      }
+      current = parentRow ? parentRow.closest('.folder-children-container') : null;
+    }
+  }
+
+  function renderCheckboxTree(node, prefix, depth, sectionId) {
+    let html = '';
+    const indent = depth * 14;
+    const keys = Object.keys(node).sort((a,b) => {
+      const aIsDir = node[a] !== 'file', bIsDir = node[b] !== 'file';
+      if (aIsDir && !bIsDir) return -1;
+      if (!aIsDir && bIsDir) return 1;
+      return a.localeCompare(b);
+    });
+    
+    for (const k of keys) {
+      const fullPath = prefix ? prefix + '/' + k : k;
+      if (node[k] === 'file') {
+        html += `
+          <div class="tree-file-row" style="padding-left:${indent}px;">
+            <input type="checkbox" value="${fullPath}" class="doc-checkbox" checked style="accent-color:var(--accent);">
+            <i class="ti ti-file" style="font-size:11px; color:var(--text-secondary); margin-top:1px;"></i>
+            <span class="doc-ck-lbl" title="${k}" style="font-size:11px; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="var cb=this.previousElementSibling.previousElementSibling; cb.checked=!cb.checked; cb.dispatchEvent(new Event('change', {bubbles:true}));">${k}</span>
+          </div>
+        `;
+      } else {
+        const folderId = `${sectionId}_fold_${Math.random().toString(36).slice(2,8)}`;
+        html += `
+          <div class="tree-folder-row" style="padding-left:${indent}px;">
+            <i class="ti ti-chevron-down fold-chevron" style="font-size:11px; color:var(--text-secondary); padding:2px;" onclick="toggleCheckboxFolder('${folderId}', this)"></i>
+            <input type="checkbox" class="folder-checkbox" checked style="accent-color:var(--accent);" onclick="toggleFolderCheckboxChildren(this)">
+            <i class="ti ti-folder" style="font-size:11px; color:var(--accent); margin-top:1px;"></i>
+            <span class="folder-name" title="${k}" style="font-size:11px; font-weight:500; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="toggleCheckboxFolder('${folderId}', this.previousElementSibling.previousElementSibling.previousElementSibling)">${k}</span>
+          </div>
+          <div id="${folderId}" class="folder-children-container" style="display:block;">
+            ${renderCheckboxTree(node[k], fullPath, depth + 1, sectionId)}
+          </div>
+        `;
+      }
+    }
+    return html;
+  }
+
   async function loadFileTree() {
     try {
       const res = await fetch(`/session/${SID}`);
       const data = await res.json();
-      currentDocs = data.files_list || [];
+      currentDocs = data.file_paths || [];
       
-      const rDiv = document.getElementById('review-doc-list');
-      const cDiv = document.getElementById('compare-doc-list');
-      
-      if(!currentDocs.length) {
-        rDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
-        cDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
-        return;
-      }
-      
-      const ckHtml = currentDocs.map(d => `
-        <label class="doc-ck">
-          <input type="checkbox" value="${d}" class="doc-checkbox" checked>
-          <span class="doc-ck-lbl">${d}</span>
-        </label>
-      `).join('');
-      
-      rDiv.innerHTML = ckHtml;
-      cDiv.innerHTML = ckHtml;
-      
-      // Populate actual files panel tree
+      // Always fetch the file tree (it has its own fallback scan in the backend)
       const fRes = await fetch(`/files?session_id=${SID}`);
       const tree = await fRes.json();
       const treeDiv = document.getElementById('file-tree');
-      if(Object.keys(tree).length === 0) return;
-      treeDiv.innerHTML = Object.keys(tree).map(k => `
-        <div class="ftree-row folder-row">
-          <i class="ti ti-chevron-down ftree-icon" style="color:var(--accent)"></i>
-          <span class="folder-name" style="margin-left:4px">${k}</span>
-        </div>
-      `).join(''); // simplified for UI migration
       
-    } catch(e){}
+      // Count total files in a tree node
+      function countFiles(node) {
+        let c = 0;
+        for (const k in node) { c += (node[k] === 'file') ? 1 : countFiles(node[k]); }
+        return c;
+      }
+      
+      // Collect all leaf file names from tree
+      function collectFileNames(node, prefix) {
+        let names = [];
+        for (const k in node) {
+          const path = prefix ? prefix + '/' + k : k;
+          if (node[k] === 'file') names.push(path);
+          else names = names.concat(collectFileNames(node[k], path));
+        }
+        return names;
+      }
+      
+      // If file_paths was empty (legacy session), backfill from tree
+      if (!currentDocs.length && Object.keys(tree).length > 0) {
+        currentDocs = collectFileNames(tree, '');
+      }
+      
+      // Populate Review & Compare doc checklists
+      const rDiv = document.getElementById('review-doc-list');
+      const cDiv = document.getElementById('compare-doc-list');
+      
+      let finalTree = tree;
+      if (Object.keys(finalTree).length === 0 && currentDocs.length > 0) {
+        finalTree = {};
+        for (const doc of currentDocs) {
+          const parts = doc.split('/');
+          let curr = finalTree;
+          for (let i = 0; i < parts.length; i++) {
+            if (i === parts.length - 1) {
+              curr[parts[i]] = 'file';
+            } else {
+              curr[parts[i]] = curr[parts[i]] || {};
+              curr = curr[parts[i]];
+            }
+          }
+        }
+      }
+
+      if (!Object.keys(finalTree).length) {
+        rDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
+        cDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No docs</div>';
+      } else {
+        rDiv.innerHTML = renderCheckboxTree(finalTree, '', 0, 'review');
+        cDiv.innerHTML = renderCheckboxTree(finalTree, '', 0, 'compare');
+      }
+      
+      // Render file tree panel
+      if (Object.keys(tree).length === 0) {
+        treeDiv.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);text-align:center">No files ingested yet.</div>';
+        return;
+      }
+      
+      const totalFiles = countFiles(tree);
+      document.getElementById('files-count-badge').textContent = `${totalFiles} file${totalFiles !== 1 ? 's' : ''}`;
+      
+      // Render recursive tree
+      function renderNode(node, depth) {
+        let html = '';
+        const indent = depth * 18;
+        // Sort: folders first, then files
+        const keys = Object.keys(node).sort((a,b) => {
+          const aIsDir = node[a] !== 'file', bIsDir = node[b] !== 'file';
+          if (aIsDir && !bIsDir) return -1;
+          if (!aIsDir && bIsDir) return 1;
+          return a.localeCompare(b);
+        });
+        for (const k of keys) {
+          if (node[k] === 'file') {
+            const ext = k.split('.').pop().toLowerCase();
+            const icon = ext === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text';
+            html += `<div class="ftree-row" style="padding-left:${14+indent}px">`
+              + `<i class="ti ${icon} ftree-icon" style="color:var(--text-muted)"></i>`
+              + `<span class="ftree-name">${k}</span>`
+              + `<button class="ftree-open" onclick="openDoc('${k.replace(/'/g,"\\'")}')">Open</button>`
+              + `</div>`;
+          } else {
+            const childCount = countFiles(node[k]);
+            const folderId = 'fold_' + Math.random().toString(36).slice(2,8);
+            html += `<div class="ftree-row folder-row" style="padding-left:${14+indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
+              + `<i class="ti ti-chevron-down ftree-icon fold-chevron" style="color:var(--accent)"></i>`
+              + `<span class="folder-name">${k}</span>`
+              + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
+              + `</div>`;
+            html += `<div id="${folderId}">${renderNode(node[k], depth+1)}</div>`;
+          }
+        }
+        return html;
+      }
+      treeDiv.innerHTML = renderNode(tree, 0);
+      
+    } catch(e){ console.error('loadFileTree error:', e); }
   }
   
   // ============================================================
@@ -801,15 +1258,52 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
     document.getElementById('review-cols-list').innerHTML += `<div class="col-tag"><span class="col-tag-t">${v}</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>`;
     document.getElementById('rev-new-col').value = '';
   });
+
+  // Checkbox state sync and select all/none event listeners
+  document.getElementById('review-doc-list').addEventListener('change', e => {
+    if (e.target.classList.contains('doc-checkbox') || e.target.classList.contains('folder-checkbox')) {
+      updateParentFolderCheckboxes(e.target);
+    }
+  });
+  document.getElementById('compare-doc-list').addEventListener('change', e => {
+    if (e.target.classList.contains('doc-checkbox') || e.target.classList.contains('folder-checkbox')) {
+      updateParentFolderCheckboxes(e.target);
+    }
+  });
+
+  document.getElementById('review-select-all').addEventListener('click', e => {
+    e.preventDefault();
+    const cbs = document.getElementById('review-doc-list').querySelectorAll('input[type="checkbox"]');
+    cbs.forEach(cb => cb.checked = true);
+  });
+  document.getElementById('review-deselect-all').addEventListener('click', e => {
+    e.preventDefault();
+    const cbs = document.getElementById('review-doc-list').querySelectorAll('input[type="checkbox"]');
+    cbs.forEach(cb => cb.checked = false);
+  });
+
+  document.getElementById('compare-select-all').addEventListener('click', e => {
+    e.preventDefault();
+    const cbs = document.getElementById('compare-doc-list').querySelectorAll('input[type="checkbox"]');
+    cbs.forEach(cb => cb.checked = true);
+  });
+  document.getElementById('compare-deselect-all').addEventListener('click', e => {
+    e.preventDefault();
+    const cbs = document.getElementById('compare-doc-list').querySelectorAll('input[type="checkbox"]');
+    cbs.forEach(cb => cb.checked = false);
+  });
   
   document.getElementById('run-review-btn').addEventListener('click', async () => {
-    const docs = Array.from(document.getElementById('review-doc-list').querySelectorAll('input:checked')).map(cb => cb.value);
+    const docs = Array.from(document.getElementById('review-doc-list').querySelectorAll('.doc-checkbox:checked')).map(cb => cb.value);
     const cols = Array.from(document.querySelectorAll('#review-cols-list .col-tag-t')).map(s => s.textContent);
     if(!docs.length || !cols.length) { showToast('Select docs and columns', 'error'); return; }
     
     document.getElementById('run-review-btn').disabled = true;
     document.getElementById('review-table-wrap').classList.add('d-none');
     document.getElementById('review-flag-bar').classList.add('d-none');
+    document.getElementById('review-footer').classList.add('d-none');
+    document.getElementById('review-skeleton').classList.remove('d-none'); // Show skeleton
+    
     const pwrap = document.getElementById('review-status-wrap');
     pwrap.classList.remove('d-none');
     document.getElementById('review-progress').style.width = '0%';
@@ -834,7 +1328,12 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
         if (pData.status === 'complete' || pData.status === 'error') {
           clearInterval(timer);
           document.getElementById('run-review-btn').disabled = false;
+          document.getElementById('review-skeleton').classList.add('d-none'); // Hide skeleton
           if(pData.status === 'complete') renderReviewResult(jobId);
+          else {
+            document.getElementById('review-status-wrap').classList.add('d-none');
+            showToast(pData.error || 'Extraction failed', 'error');
+          }
         }
       }, 1500);
     } catch(e) {
@@ -894,16 +1393,23 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
   });
   
   document.getElementById('run-compare-btn').addEventListener('click', async () => {
-    const docs = Array.from(document.getElementById('compare-doc-list').querySelectorAll('input:checked')).map(cb => cb.value);
+    const docs = Array.from(document.getElementById('compare-doc-list').querySelectorAll('.doc-checkbox:checked')).map(cb => cb.value);
     const q = document.getElementById('compare-q').value.trim();
     if(!q) return showToast('Enter a topic', 'error');
     if(!docs.length && !compareFile) return showToast('Select or upload a doc', 'error');
     
     document.getElementById('run-compare-btn').disabled = true;
+    document.getElementById('compare-results-container').classList.add('d-none');
     document.getElementById('compare-table-wrap').classList.add('d-none');
     document.getElementById('compare-outliers-wrap').classList.add('d-none');
     document.getElementById('compare-narrative-wrap').classList.add('d-none');
-    document.getElementById('compare-status').textContent = 'Starting job...';
+    
+    // Show progress and skeleton loaders
+    document.getElementById('compare-status-wrap').classList.remove('d-none');
+    document.getElementById('compare-progress-bar').style.width = '10%';
+    document.getElementById('compare-progress-percent').textContent = '10%';
+    document.getElementById('compare-status-text').textContent = 'Starting comparison...';
+    document.getElementById('compare-skeleton').classList.remove('d-none');
     
     const fd = new FormData();
     fd.append('session_id', SID);
@@ -920,14 +1426,26 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
       const timer = setInterval(async () => {
         const pRes = await fetch(`/compare/progress?job_id=${jobId}`);
         const pData = await pRes.json();
-        document.getElementById('compare-status').textContent = `Stage: ${pData.stage || pData.status}...`;
+        
+        let pct = '10%';
+        if (pData.stage === 'retrieving') pct = '35%';
+        else if (pData.stage === 'extracting') pct = '65%';
+        else if (pData.stage === 'analyzing') pct = '85%';
+        else if (pData.status === 'complete') pct = '100%';
+        
+        document.getElementById('compare-progress-bar').style.width = pct;
+        document.getElementById('compare-progress-percent').textContent = pct;
+        document.getElementById('compare-status-text').textContent = `Stage: ${pData.stage || pData.status}...`;
         
         if (pData.status === 'complete' || pData.status === 'error') {
           clearInterval(timer);
           document.getElementById('run-compare-btn').disabled = false;
+          document.getElementById('compare-status-wrap').classList.add('d-none');
+          document.getElementById('compare-skeleton').classList.add('d-none'); // Hide skeleton
           if(pData.status === 'complete') {
-            document.getElementById('compare-status').textContent = '';
             renderCompareResult(jobId);
+          } else {
+            showToast(pData.error || 'Comparison failed', 'error');
           }
         }
       }, 1500);
@@ -942,7 +1460,7 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
     const data = await res.json();
     const sourceNames = data.sources.map(s => s.label || s.name);
     
-    document.getElementById('compare-thead').innerHTML = `<tr><th style="width:28%">Aspect</th>${sourceNames.map(n => `<th>${n}</th>`).join('')}</tr>`;
+    document.getElementById('compare-thead').innerHTML = `<tr><th style="width:25%">Aspect</th>${sourceNames.map(n => `<th>${n}</th>`).join('')}</tr>`;
     
     let html = '';
     for(const aspect of data.aspects) {
@@ -959,6 +1477,7 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
       html += `</tr>`;
     }
     document.getElementById('compare-tbody').innerHTML = html;
+    document.getElementById('compare-results-container').classList.remove('d-none');
     document.getElementById('compare-table-wrap').classList.remove('d-none');
     document.getElementById('compare-export-btn').classList.remove('d-none');
     document.getElementById('compare-export-btn').onclick = () => window.open(`/compare/export?job_id=${jobId}`);
@@ -974,7 +1493,7 @@ table.mtbl{width:100%;border-collapse:collapse;font-size:11px}
     }
     
     if(data.narrative) {
-      document.getElementById('compare-narrative').textContent = data.narrative;
+      document.getElementById('compare-narrative').innerHTML = marked.parse(data.narrative);
       document.getElementById('compare-narrative-wrap').classList.remove('d-none');
     }
   }
