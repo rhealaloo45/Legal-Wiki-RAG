@@ -96,7 +96,7 @@ Text:
 Extract: {column_name}"""
 
     try:
-        raw, _ = llm.fast_ask(prompt, max_tokens=150)
+        raw, _ = llm.fast_ask(prompt, max_tokens=300)
         import re
         # remove potential reasoning block or markdown
         raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
@@ -282,10 +282,15 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list
 
 
 def _get_scoped_wiki_pages(session_id: str, doc_name: str) -> dict:
-    """Filter wiki index to pages where source_doc == doc_name."""
+    """Filter wiki index to pages where source_doc matches doc_name."""
     index = wiki._load_index(session_id)
     pages = index.get("pages", {})
-    scoped = {k: v for k, v in pages.items() if isinstance(v, dict) and v.get("source_doc") == doc_name}
+    
+    # Normalize doc_name to match how wiki.py saves source_doc
+    flat_name = doc_name.replace("/", "_").replace("\\", "_")
+    expected_source_doc = f"{session_id}_{flat_name}"
+    
+    scoped = {k: v for k, v in pages.items() if isinstance(v, dict) and (v.get("source_doc") == expected_source_doc or v.get("source_doc") == doc_name or v.get("source_doc") == flat_name)}
     return scoped
 
 def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str, 
@@ -423,7 +428,7 @@ Extracted values:
 {json.dumps(all_values, indent=1)}"""
 
             try:
-                raw, _ = llm.fast_ask(outlier_prompt, max_tokens=300)
+                raw, _ = llm.fast_ask(outlier_prompt, max_tokens=1000)
                 raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
                 raw = re.sub(r'```json', '', raw)
                 raw = re.sub(r'```', '', raw)
