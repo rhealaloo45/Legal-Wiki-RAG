@@ -208,7 +208,7 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
                     f"Text B:\n{new_content}"
                 )
                 try:
-                    raw, _ = llm.ask(prompt, max_tokens=100)
+                    raw, _ = llm.ask(prompt, max_tokens=300)
                     parsed = _parse_json_safe(raw)
                     if parsed and parsed.get("contradicts"):
                         existing_page["contradiction_flagged"] = True
