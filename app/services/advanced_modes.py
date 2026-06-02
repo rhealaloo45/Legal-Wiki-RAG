@@ -227,11 +227,31 @@ def export_matrix_to_xlsx(store_data: dict, mode: str) -> bytes:
 # Timeout for individual future results (seconds)
 _FUTURE_TIMEOUT = 90
 
-def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list, store_ref: dict, locks_ref: dict):
-    """Background job for review mode.
+def _get_session_file_paths(session_id: str) -> list[str]:
+    import json
+    file_paths = []
+    if os.path.exists(config.SESSIONS_PATH):
+        try:
+            with open(config.SESSIONS_PATH, "r", encoding="utf-8") as f:
+                sessions = json.load(f)
+                file_paths = sessions.get(session_id, {}).get("file_paths", [])
+        except Exception as e:
+            logger.error(f"Failed to load sessions in advanced_modes: {e}")
+            
+    # Fallback to directory scan if empty
+    if not file_paths:
+        prefix = f"{session_id}_"
+        if os.path.exists(config.UPLOAD_PATH):
+            for fname in os.listdir(config.UPLOAD_PATH):
+                if fname.startswith(prefix):
+                    file_paths.append(fname[len(prefix):])
+    return file_paths
+
+def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
+    """Background job for review mode with NLP prompt.
     
-    Optimisation: uses wiki-synthesized content instead of raw document text
-    where available, dramatically reducing prompt size and latency.
+    Dynamically generates columns based on the prompt, then uses wiki-synthesized content
+    instead of raw document text where available, dramatically reducing prompt size and latency.
     """
     lock = locks_ref[job_id]
     
@@ -248,14 +268,72 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list
                 store_ref[job_id]["flagged"].append([doc_name, col_name])
 
     try:
-        # Pre-fetch all document texts (wiki-first, raw fallback)
+        # Step 0: Get available documents in the session
+        available_docs = _get_session_file_paths(session_id)
+        
+        # Step 1: Generate columns and infer target documents from the prompt
+        prompt = f"""\
+Available Documents in this session:
+{json.dumps(available_docs, indent=1)}
+
+User Query: {question}
+
+Based on the User Query and the list of Available Documents, perform two tasks:
+1. List the specific factual columns/aspects that need to be extracted from the document(s).
+   If the query asks for specific items (e.g., "deliverables, fees, payment terms"), list those exact items as columns.
+   If the query is open-ended (e.g., "Summarize this agreement"), list 4-6 key legal or commercial columns to extract.
+   Keep column names short (1-5 words).
+2. Infer which of the Available Documents the user wants to review.
+   - If the user explicitly mentions document names (or abbreviations/substrings) in their query, map them to the matching document(s) from the Available Documents list.
+   - If the user implies certain types of documents or uses keywords (e.g. "all NDA agreements", "the service contract"), select all matching documents from the Available Documents list.
+   - If the user does not specify any documents or implies reviewing everything (e.g. "Review these documents"), select ALL Available Documents.
+   - Return the inferred documents as a list of exact filenames from the Available Documents list.
+
+Return JSON only, no preamble or explanation:
+{{
+  "columns": ["col1", "col2", ...],
+  "inferred_documents": ["doc_file1", "doc_file2", ...]
+}}"""
+        
+        columns = []
+        inferred = []
+        try:
+            raw, _ = llm.fast_ask(prompt, max_tokens=450)
+            import re
+            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
+            raw = re.sub(r'```json', '', raw)
+            raw = re.sub(r'```', '', raw)
+            parsed = json.loads(raw.strip())
+            columns = parsed.get("columns", [])
+            inferred = parsed.get("inferred_documents", [])
+        except Exception as e:
+            logger.error(f"Failed to generate columns/inferred documents: {e}")
+            
+        if not columns:
+            columns = ["Extracted Information"]
+            
+        # Merge manual selections and inferred documents
+        all_selected_docs = list(dict.fromkeys(doc_names + inferred))
+        # Keep only docs that actually exist
+        all_selected_docs = [d for d in all_selected_docs if d in available_docs]
+        
+        if not all_selected_docs:
+            raise ValueError("No documents were selected or could be inferred from your query.")
+            
+        with lock:
+            # Re-initialize the rows and columns in the store
+            store_ref[job_id]["rows"] = {d: {} for d in all_selected_docs}
+            store_ref[job_id]["columns"] = columns
+            store_ref[job_id]["total"] = len(all_selected_docs) * len(columns)
+
+        # Step 2: Pre-fetch all document texts (wiki-first, raw fallback)
         doc_texts = {}
-        for doc_name in doc_names:
+        for doc_name in all_selected_docs:
             doc_texts[doc_name] = _get_wiki_text_for_doc(session_id, doc_name)
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             futures = []
-            for doc_name in doc_names:
+            for doc_name in all_selected_docs:
                 doc_text = doc_texts[doc_name]
                 for col_name in columns:
                     futures.append(executor.submit(_extract_worker, doc_name, col_name, doc_text))
@@ -272,7 +350,7 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list
         with lock:
             store_ref[job_id]["status"] = "complete"
             
-        wiki._log_event(session_id, "REVIEW", f"Job: {job_id} | Docs: {len(doc_names)} | Cols: {len(columns)} | Flagged: {len(store_ref[job_id]['flagged'])}")
+        wiki._log_event(session_id, "REVIEW", f"Job: {job_id} | Docs: {len(all_selected_docs)} | Cols: {len(columns)} | Flagged: {len(store_ref[job_id]['flagged'])}")
             
     except Exception as e:
         logger.error(f"Review job {job_id} failed: {e}")
@@ -352,12 +430,64 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
     import re
     
     try:
+        # STEP 0 - ASPECT IDENTIFICATION AND DOCUMENT INFERENCE
+        available_docs = _get_session_file_paths(session_id)
+        
+        aspect_prompt = f"""\
+Available Documents in this session:
+{json.dumps(available_docs, indent=1)}
+
+User Query: {question}
+
+Based on the User Query and the list of Available Documents, perform two tasks:
+1. List the specific factual aspects that need to be extracted for comparison.
+   If the query explicitly asks for certain points (e.g., "limits of liability, liability caps"), use those exact points as the aspects.
+   If the query is a complex multi-sentence narrative (e.g., "Identify which is most favourable to Tata. Check IP ownership, indemnities, and termination"), extract the core legal/commercial items needed to answer the overall question.
+   If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
+   Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts or full sentences.
+   Keep aspect names short (1-5 words).
+2. Infer which of the Available Documents the user wants to compare.
+   - If the user explicitly mentions document names (or abbreviations/substrings) in their query, map them to the matching document(s) from the Available Documents list.
+   - If the user implies certain types of documents or uses keywords (e.g. "all NDA agreements", "the service contract"), select all matching documents from the Available Documents list.
+   - If the user does not specify any documents or implies comparing everything (e.g. "Compare these documents"), select ALL Available Documents.
+   - Return the inferred documents as a list of exact filenames from the Available Documents list.
+
+Return JSON only, no preamble or explanation:
+{{
+  "aspects": ["Aspect 1", "Aspect 2", ...],
+  "inferred_documents": ["doc_file1", "doc_file2", ...]
+}}"""
+
+        aspects = []
+        inferred = []
+        try:
+            raw, _ = llm.fast_ask(aspect_prompt, max_tokens=450)
+            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
+            raw = re.sub(r'```json', '', raw)
+            raw = re.sub(r'```', '', raw)
+            parsed = json.loads(raw.strip())
+            aspects = parsed.get("aspects", [])
+            inferred = parsed.get("inferred_documents", [])
+        except Exception as e:
+            logger.error(f"Failed to generate aspects and inferred documents: {e}")
+            
+        if not aspects:
+            aspects = ["Comparison Details"]
+            
+        # Merge manually selected and inferred documents
+        all_selected_docs = list(dict.fromkeys(doc_names + inferred))
+        # Keep only docs that actually exist
+        all_selected_docs = [d for d in all_selected_docs if d in available_docs]
+        
+        if not all_selected_docs and not uploaded_name:
+            raise ValueError("No documents were selected or could be inferred from your query.")
+
         # STEP 1 - NORMALIZE SOURCES
         with lock:
             store_ref[job_id]["stage"] = "retrieving"
             
         sources = []
-        for doc_name in doc_names:
+        for doc_name in all_selected_docs:
             scoped_pages = _get_scoped_wiki_pages(session_id, doc_name)
             if not scoped_pages:
                 structured_text = get_raw_doc_text(session_id, doc_name)
@@ -395,28 +525,9 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
         with lock:
             store_ref[job_id]["sources"] = [{"name": s["name"], "type": s["type"], "label": s.get("label", s["name"])} for s in sources]
             
-        # STEP 2 - ASPECT IDENTIFICATION (single fast call)
+        # STEP 2 - INITIALIZE ASPECTS AND TABLE IN STORE
         with lock:
             store_ref[job_id]["stage"] = "extracting"
-            
-        aspect_prompt = f"""\
-User Query: {question}
-Documents being compared: {[s['name'] for s in sources]}
-
-Based on the User Query, list the specific factual aspects that need to be extracted for comparison.
-If the query explicitly asks for certain points (e.g., "limits of liability, liability caps"), use those exact points as the aspects.
-If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
-Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts.
-Return JSON only: {{"aspects": [str]}}"""
-
-        raw, _ = llm.fast_ask(aspect_prompt, max_tokens=150)
-        raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-        raw = re.sub(r'```json', '', raw)
-        raw = re.sub(r'```', '', raw)
-        parsed = json.loads(raw.strip())
-        aspects = parsed.get("aspects", [])
-        
-        with lock:
             store_ref[job_id]["aspects"] = aspects
             for aspect in aspects:
                 store_ref[job_id]["table"][aspect] = {}
@@ -463,7 +574,7 @@ Return JSON only: {{"aspects": [str]}}"""
                     aspect_vals[doc_key] = val
             if aspect_vals:
                 all_values[aspect] = aspect_vals
-
+ 
         outliers = []
         if all_values:
             outlier_prompt = f"""\
@@ -517,7 +628,7 @@ STRICT RULES:
             store_ref[job_id]["narrative"] = narrative
             store_ref[job_id]["status"] = "complete"
             
-        wiki._log_event(session_id, "COMPARE", f"Job: {job_id} | Docs: {len(doc_names) + (1 if uploaded_text else 0)} | Aspects: {len(aspects)} | Outliers: {len(outliers)}")
+        wiki._log_event(session_id, "COMPARE", f"Job: {job_id} | Docs: {len(all_selected_docs) + (1 if uploaded_text else 0)} | Aspects: {len(aspects)} | Outliers: {len(outliers)}")
         
     except Exception as e:
         logger.error(f"Compare job {job_id} failed: {e}")

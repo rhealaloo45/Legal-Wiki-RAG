@@ -95,87 +95,95 @@ Designed for deep, aspect-oriented comparison between existing knowledge and new
 - **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
 ### Detailed Flowchart: Review and Compare Modes
 
+#### Review Mode Flow
 ```mermaid
 flowchart TD
     classDef review fill:#065f46,stroke:#10b981,color:#fff
-    classDef compare fill:#78350f,stroke:#d97706,color:#fff
-    classDef process fill:#1f2937,stroke:#4b5563,color:#fff
-    classDef output fill:#4b5563,stroke:#9ca3af,color:#fff
 
-    subgraph Review ["Review Mode (Bulk Extraction)"]
-        R_Start(["User Input: Select Docs & Columns"]) --> R_Submit[Submit Background Job]
-        R_Submit --> R_ThreadPool["ThreadPoolExecutor (5 Workers)"]
-        
-        R_ThreadPool -->|For each Doc & Column| R_Extract[LLM Extraction Pass]
-        R_Extract --> R_FormatJSON[Parse: Value, Confidence, Quote]
-        
-        R_FormatJSON --> R_Aggregate[Aggregate into Data Matrix]
-        R_Aggregate --> R_UI[Render Matrix with Confidence Colors]
-        R_UI --> R_Export[Export to .xlsx]
-    end
-
-    subgraph Compare ["Compare Mode (Deep Analytics)"]
-        C_Start(["User Input: Docs + Topic (+ Uploads)"]) --> C_BM25[BM25 Tagged Retrieval / Raw Text Fallback]
-        C_BM25 --> C_Aspects[LLM Pass 1: Identify 4-6 Compare Aspects]
-        
-        C_Aspects --> C_ThreadPool[ThreadPoolExecutor]
-        C_ThreadPool -->|For each Doc & Aspect| C_Extract[LLM Pass 2: Extract Aspect Data]
-        
-        C_Extract --> C_Aggregate[Aggregate Aspect Matrix]
-        C_Aggregate --> C_Outliers[LLM Pass 3: Identify Outliers & Contradictions]
-        C_Outliers --> C_Synthesis[LLM Pass 4: Narrative Synthesis]
-        
-        C_Synthesis --> C_UI[Render Matrix, Narrative, Outliers]
-        C_UI --> C_Wipe[Wipe Temp Uploads]
-        C_Wipe --> C_Export[Export to .xlsx]
-    end
+    R_Start(["User Input: Select Docs & Columns"]) --> R_Submit["Submit Background Job"]
+    R_Submit --> R_ThreadPool["ThreadPoolExecutor (5 Workers)"]
+    
+    R_ThreadPool -->|For each Doc & Column| R_Extract["LLM Extraction Pass"]
+    R_Extract --> R_FormatJSON["Parse: Value, Confidence, Quote"]
+    
+    R_FormatJSON --> R_Aggregate["Aggregate into Data Matrix"]
+    R_Aggregate --> R_UI["Render Matrix with Confidence Colors"]
+    R_UI --> R_Export["Export to .xlsx"]
 
     class R_Start,R_Submit,R_ThreadPool,R_Extract,R_FormatJSON,R_Aggregate,R_UI,R_Export review
+```
+
+#### Compare Mode Flow
+```mermaid
+flowchart TD
+    classDef compare fill:#78350f,stroke:#d97706,color:#fff
+
+    C_Start(["User Input: Docs + Topic (+ Uploads)"]) --> C_BM25["BM25 Tagged Retrieval / Raw Text Fallback"]
+    C_BM25 --> C_Aspects["LLM Pass 1: Identify 4-6 Compare Aspects"]
+    
+    C_Aspects --> C_ThreadPool["ThreadPoolExecutor"]
+    C_ThreadPool -->|For each Doc & Aspect| C_Extract["LLM Pass 2: Extract Aspect Data"]
+    
+    C_Extract --> C_Aggregate["Aggregate Aspect Matrix"]
+    C_Aggregate --> C_Outliers["LLM Pass 3: Identify Outliers & Contradictions"]
+    C_Outliers --> C_Synthesis["LLM Pass 4: Narrative Synthesis"]
+    
+    C_Synthesis --> C_UI["Render Matrix, Narrative, Outliers"]
+    C_UI --> C_Wipe["Wipe Temp Uploads"]
+    C_Wipe --> C_Export["Export to .xlsx"]
+
     class C_Start,C_BM25,C_Aspects,C_ThreadPool,C_Extract,C_Aggregate,C_Outliers,C_Synthesis,C_UI,C_Wipe,C_Export compare
 ```
 
 
 ### Execution Flow of System Modes
 
+#### Ask Mode (Standard Query)
 ```mermaid
 flowchart TD
     classDef ask fill:#1e3a8a,stroke:#3b82f6,color:#fff
-    classDef review fill:#065f46,stroke:#10b981,color:#fff
-    classDef compare fill:#78350f,stroke:#d97706,color:#fff
 
-    subgraph AskMode ["Ask Mode (Standard Query)"]
-        A[User Input: Question] --> B{Wiki Pages > 20?}
-        B -->|Yes| C[BM25 Filtering: Top 40 pages]
-        B -->|No| D[Use all Wiki pages]
-        C --> E[LLM Page Selection: Pick top 10-15]
-        D --> E
-        E --> F[Assemble selected page contents]
-        F --> G[LLM Answer Generation: CoT reasoning + inline citations]
-        G --> H{Confidence >= 80%?}
-        H -->|Yes| I["File back answer as 'Q: {question}' wiki page"]
-        H -->|No| J[Return answer to UI only]
-    end
-
-    subgraph ReviewMode ["Review Mode (Bulk Extraction)"]
-        R1[User input: Docs + Column Headers] --> R2[Submit background job to ThreadPoolExecutor]
-        R2 --> R3[Concurrently extract cells: doc_text + column_name]
-        R3 --> R4[LLM extracts JSON: value, confidence, quote]
-        R4 --> R5[Assemble confidence-colored grid]
-        R5 --> R6[User option: Export as OpenPyXL .xlsx file]
-    end
-
-    subgraph CompareMode ["Compare Mode (Deep Comparison)"]
-        C1[User input: Docs + Uploaded File + Topic] --> C2[Retrieve target texts: Wiki pages via BM25 / raw fallback]
-        C2 --> C3[LLM Aspect Identification: Generate 4-6 comparison aspects]
-        C3 --> C4[Concurrently extract aspect values for each document]
-        C4 --> C5[Secondary LLM pass: Outlier & contradiction detection]
-        C5 --> C6[Tertiary LLM pass: 3-5 sentence narrative synthesis]
-        C6 --> C7[Assemble aspect matrix & outliers list]
-        C7 --> C8[User option: Export comparison as .xlsx file]
-    end
+    A["User Input: Question"] --> B{"Wiki Pages > 20?"}
+    B -->|Yes| C["BM25 Filtering: Top 40 pages"]
+    B -->|No| D["Use all Wiki pages"]
+    C --> E["LLM Page Selection: Pick top 10-15"]
+    D --> E
+    E --> F["Assemble selected page contents"]
+    F --> G["LLM Answer Generation: CoT reasoning + inline citations"]
+    G --> H{"Confidence >= 80%?"}
+    H -->|Yes| I["File back answer as 'Q: {question}' wiki page"]
+    H -->|No| J["Return answer to UI only"]
 
     class A,B,C,D,E,F,G,H,I,J ask
+```
+
+#### Review Mode (Bulk Extraction)
+```mermaid
+flowchart TD
+    classDef review fill:#065f46,stroke:#10b981,color:#fff
+
+    R1["User input: Docs + Column Headers"] --> R2["Submit background job to ThreadPoolExecutor"]
+    R2 --> R3["Concurrently extract cells: doc_text + column_name"]
+    R3 --> R4["LLM extracts JSON: value, confidence, quote"]
+    R4 --> R5["Assemble confidence-colored grid"]
+    R5 --> R6["User option: Export as OpenPyXL .xlsx file"]
+
     class R1,R2,R3,R4,R5,R6 review
+```
+
+#### Compare Mode (Deep Comparison)
+```mermaid
+flowchart TD
+    classDef compare fill:#78350f,stroke:#d97706,color:#fff
+
+    C1["User input: Docs + Uploaded File + Topic"] --> C2["Retrieve target texts: Wiki pages via BM25 / raw fallback"]
+    C2 --> C3["LLM Aspect Identification: Generate 4-6 comparison aspects"]
+    C3 --> C4["Concurrently extract aspect values for each document"]
+    C4 --> C5["Secondary LLM pass: Outlier & contradiction detection"]
+    C5 --> C6["Tertiary LLM pass: 3-5 sentence narrative synthesis"]
+    C6 --> C7["Assemble aspect matrix & outliers list"]
+    C7 --> C8["User option: Export comparison as .xlsx file"]
+
     class C1,C2,C3,C4,C5,C6,C7,C8 compare
 ```
 
@@ -188,7 +196,8 @@ flowchart TD
     classDef process fill:#1f2937,stroke:#4b5563,color:#fff
     classDef decision fill:#78350f,stroke:#d97706,color:#fff
 
-    subgraph Ingestion
+    subgraph Ingestion ["Ingestion Pipeline"]
+        direction TB
         StartWI(["Upload Document"]) --> ExtractWI["Extract & Normalize Text"]
         ExtractWI --> LengthCheckWI{"Text length > 100K chars?"}
         
@@ -206,7 +215,8 @@ flowchart TD
         CrossRefWI --> SaveWI["Write index.json & Release Lock"]
     end
 
-    subgraph Querying
+    subgraph Querying ["Querying & Retrieval"]
+        direction TB
         StartWQ(["User Question Input"]) --> LoadWI["Load index.json"]
         LoadWI --> SizeCheckWQ{"Wiki pages > 20?"}
         
