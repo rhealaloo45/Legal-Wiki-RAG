@@ -1140,53 +1140,139 @@ b[title] {
 
   function scrollToTextLocation(searchText) {
     if (!searchText) return;
+    const container = document.getElementById('pdf-modal-text-content');
+    if (!container) return;
+    
     const normalizeStr = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
     const cleanScrollText = normalizeStr(searchText);
     
-    // Generate match patterns for cleanScrollText
+    // Build multiple search patterns from the location string
     const cleanPatterns = [cleanScrollText];
+    
+    // Split on "/" for compound references like "Call Option / Put Option"
     if (searchText.includes('/')) {
-      searchText.split('/').forEach(part => cleanPatterns.push(normalizeStr(part)));
+      searchText.split('/').forEach(part => {
+        const p = normalizeStr(part);
+        if (p.length > 2) cleanPatterns.push(p);
+      });
     }
-    const stripped = searchText.replace(/^(?:clause|section|page|article|cl|sec|p|art)\.?\s*/i, '');
-    if (stripped) {
+    
+    // Strip common prefixes: "Clause 14.1" -> "14.1"
+    const stripped = searchText.replace(/^(?:clause|section|page|article|cl|sec|p|art)\.?\s*/i, '').trim();
+    if (stripped && normalizeStr(stripped) !== cleanScrollText) {
       cleanPatterns.push(normalizeStr(stripped));
     }
     
-    const marks = document.getElementById('pdf-modal-text-content').querySelectorAll('.pdf-highlight');
-    let targetMark = null;
+    // Extract bare numeric identifiers: "Clause 14.1" -> "14.1", "Section 3(a)" -> "3(a)"
+    const numMatch = searchText.match(/(\d+(?:\.\d+)*(?:\s*\([a-z]\))?)/i);
+    if (numMatch) {
+      cleanPatterns.push(normalizeStr(numMatch[1]));
+    }
+
+    // --- Strategy 1: Try matching existing .pdf-highlight marks ---
+    const marks = container.querySelectorAll('.pdf-highlight');
+    let targetEl = null;
     
     for (const mark of marks) {
       const markText = normalizeStr(mark.textContent);
       const matches = cleanPatterns.some(pat => markText.includes(pat) || pat.includes(markText));
       if (matches) {
-        targetMark = mark;
+        targetEl = mark;
         break;
       }
     }
     
-    if (!targetMark && marks.length > 0) {
-      targetMark = marks[0];
+    // --- Strategy 2: Direct text search across all text nodes ---
+    if (!targetEl) {
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+      let bestNode = null;
+      let bestOffset = -1;
+      
+      while (walker.nextNode()) {
+        const nodeText = normalizeStr(walker.currentNode.textContent);
+        for (const pat of cleanPatterns) {
+          if (pat.length < 2) continue;
+          const idx = nodeText.indexOf(pat);
+          if (idx !== -1) {
+            bestNode = walker.currentNode;
+            bestOffset = idx;
+            break;
+          }
+        }
+        if (bestNode) break;
+      }
+      
+      if (bestNode) {
+        // Wrap the matched text in a temporary highlight span
+        try {
+          const range = document.createRange();
+          // Map from normalized offset back to raw offset approximately
+          const rawText = bestNode.textContent;
+          const rawLower = rawText.toLowerCase();
+          let rawIdx = -1;
+          for (const pat of cleanPatterns) {
+            if (pat.length < 2) continue;
+            rawIdx = rawLower.indexOf(pat);
+            if (rawIdx !== -1) break;
+          }
+          if (rawIdx === -1) rawIdx = 0;
+          
+          const matchLen = Math.min(cleanPatterns[0].length + 20, rawText.length - rawIdx);
+          range.setStart(bestNode, rawIdx);
+          range.setEnd(bestNode, Math.min(rawIdx + matchLen, rawText.length));
+          
+          const tempMark = document.createElement('mark');
+          tempMark.className = 'pdf-highlight scroll-temp-highlight';
+          tempMark.style.backgroundColor = '#f59e0b';
+          range.surroundContents(tempMark);
+          targetEl = tempMark;
+          
+          // Fade the temporary highlight after a delay
+          setTimeout(() => {
+            tempMark.style.transition = 'background-color 1s';
+            tempMark.style.backgroundColor = '#fde047';
+          }, 1500);
+          setTimeout(() => {
+            // Unwrap the temp mark to avoid accumulating DOM nodes
+            if (tempMark.parentNode) {
+              const parent = tempMark.parentNode;
+              while (tempMark.firstChild) {
+                parent.insertBefore(tempMark.firstChild, tempMark);
+              }
+              parent.removeChild(tempMark);
+            }
+          }, 5000);
+        } catch(e) {
+          // Range manipulation can fail on complex DOM; fall back to scrolling to the text node's parent
+          targetEl = bestNode.parentElement;
+        }
+      }
     }
     
-    if (!targetMark) {
+    // --- Strategy 3: Fall back to first highlight if it exists ---
+    if (!targetEl && marks.length > 0) {
+      targetEl = marks[0];
+    }
+    
+    if (!targetEl) {
       showToast('Target text not found in document.', 'warning');
       return;
     }
     
-    if (targetMark) {
-      const container = document.getElementById('pdf-modal-text-content');
-      const targetRect = targetMark.getBoundingClientRect();
-      const containerRect = container.getBoundingClientRect();
-      const relativeTop = targetRect.top - containerRect.top + container.scrollTop;
-      
-      const targetTop = relativeTop - 100;
-      container.scrollTop = targetTop > 0 ? targetTop : 0;
-      
-      targetMark.style.transition = 'background-color 0.5s';
-      targetMark.style.backgroundColor = '#f59e0b';
+    // Scroll to the target element
+    const targetRect = targetEl.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const relativeTop = targetRect.top - containerRect.top + container.scrollTop;
+    
+    const targetTop = relativeTop - 100;
+    container.scrollTop = targetTop > 0 ? targetTop : 0;
+    
+    // Flash highlight effect on existing marks
+    if (targetEl.classList && targetEl.classList.contains('pdf-highlight') && !targetEl.classList.contains('scroll-temp-highlight')) {
+      targetEl.style.transition = 'background-color 0.5s';
+      targetEl.style.backgroundColor = '#f59e0b';
       setTimeout(() => {
-        targetMark.style.backgroundColor = '#fde047';
+        targetEl.style.backgroundColor = '#fde047';
       }, 1500);
     }
   }
