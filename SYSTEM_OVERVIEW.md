@@ -103,8 +103,8 @@ flowchart TD
     classDef output fill:#4b5563,stroke:#9ca3af,color:#fff
 
     subgraph Review ["Review Mode (Bulk Extraction)"]
-        R_Start([User Input: Select Docs & Columns]) --> R_Submit[Submit Background Job]
-        R_Submit --> R_ThreadPool[ThreadPoolExecutor (5 Workers)]
+        R_Start(["User Input: Select Docs & Columns"]) --> R_Submit[Submit Background Job]
+        R_Submit --> R_ThreadPool["ThreadPoolExecutor (5 Workers)"]
         
         R_ThreadPool -->|For each Doc & Column| R_Extract[LLM Extraction Pass]
         R_Extract --> R_FormatJSON[Parse: Value, Confidence, Quote]
@@ -115,7 +115,7 @@ flowchart TD
     end
 
     subgraph Compare ["Compare Mode (Deep Analytics)"]
-        C_Start([User Input: Docs + Topic (+ Uploads)]) --> C_BM25[BM25 Tagged Retrieval / Raw Text Fallback]
+        C_Start(["User Input: Docs + Topic (+ Uploads)"]) --> C_BM25[BM25 Tagged Retrieval / Raw Text Fallback]
         C_BM25 --> C_Aspects[LLM Pass 1: Identify 4-6 Compare Aspects]
         
         C_Aspects --> C_ThreadPool[ThreadPoolExecutor]
@@ -152,7 +152,7 @@ flowchart TD
         E --> F[Assemble selected page contents]
         F --> G[LLM Answer Generation: CoT reasoning + inline citations]
         G --> H{Confidence >= 80%?}
-        H -->|Yes| I[File back answer as 'Q: {question}' wiki page]
+        H -->|Yes| I["File back answer as 'Q: {question}' wiki page"]
         H -->|No| J[Return answer to UI only]
     end
 
