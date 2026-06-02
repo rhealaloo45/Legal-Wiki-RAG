@@ -990,6 +990,8 @@ b[title] {
       t = t.replace(/^["'“”‘’]+|["'“”‘’]+$/g, '').trim();
       if (!t) continue;
       
+      t = t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      
       patterns.push(t);
       
       // If it contains a slash, like "Call Option Triggers / Put Option Triggers", let's split it and add individual parts!
@@ -1138,23 +1140,24 @@ b[title] {
 
   function scrollToTextLocation(searchText) {
     if (!searchText) return;
-    const cleanScrollText = searchText.trim().toLowerCase();
+    const normalizeStr = (s) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+    const cleanScrollText = normalizeStr(searchText);
     
     // Generate match patterns for cleanScrollText
     const cleanPatterns = [cleanScrollText];
-    if (cleanScrollText.includes('/')) {
-      cleanScrollText.split('/').forEach(part => cleanPatterns.push(part.trim()));
+    if (searchText.includes('/')) {
+      searchText.split('/').forEach(part => cleanPatterns.push(normalizeStr(part)));
     }
-    const stripped = cleanScrollText.replace(/^(?:clause|section|page|article|cl|sec|p|art)\.?\s*/i, '').trim();
+    const stripped = searchText.replace(/^(?:clause|section|page|article|cl|sec|p|art)\.?\s*/i, '');
     if (stripped) {
-      cleanPatterns.push(stripped);
+      cleanPatterns.push(normalizeStr(stripped));
     }
     
     const marks = document.getElementById('pdf-modal-text-content').querySelectorAll('.pdf-highlight');
     let targetMark = null;
     
     for (const mark of marks) {
-      const markText = mark.textContent.toLowerCase().trim();
+      const markText = normalizeStr(mark.textContent);
       const matches = cleanPatterns.some(pat => markText.includes(pat) || pat.includes(markText));
       if (matches) {
         targetMark = mark;

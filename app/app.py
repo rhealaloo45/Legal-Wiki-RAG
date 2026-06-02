@@ -413,6 +413,8 @@ def wiki_page_detail():
 
 def _find_upload(session_id, doc_name):
     """Find an uploaded file by session ID and document name."""
+    # Strip the compare mode upload marker if present
+    doc_name = doc_name.replace(" ⚡", "").strip()
     basename = doc_name.replace("/", "_").replace("\\", "_")
     
     # 1. Try with the current session prefix

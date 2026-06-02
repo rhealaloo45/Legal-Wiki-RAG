@@ -93,6 +93,46 @@ Designed for deep, aspect-oriented comparison between existing knowledge and new
 - **Retrieval**: Uses BM25 filtering to extract isolated wiki content specifically tagged with the requested `source_doc`. If a selected document predates the tagging patch, it automatically falls back to raw text extraction.
 - **Aspect Identification**: A single LLM pass generates 4-6 specific aspects to compare based on the user's topic.
 - **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
+### Detailed Flowchart: Review and Compare Modes
+
+```mermaid
+flowchart TD
+    classDef review fill:#065f46,stroke:#10b981,color:#fff
+    classDef compare fill:#78350f,stroke:#d97706,color:#fff
+    classDef process fill:#1f2937,stroke:#4b5563,color:#fff
+    classDef output fill:#4b5563,stroke:#9ca3af,color:#fff
+
+    subgraph Review ["Review Mode (Bulk Extraction)"]
+        R_Start([User Input: Select Docs & Columns]) --> R_Submit[Submit Background Job]
+        R_Submit --> R_ThreadPool[ThreadPoolExecutor (5 Workers)]
+        
+        R_ThreadPool -->|For each Doc & Column| R_Extract[LLM Extraction Pass]
+        R_Extract --> R_FormatJSON[Parse: Value, Confidence, Quote]
+        
+        R_FormatJSON --> R_Aggregate[Aggregate into Data Matrix]
+        R_Aggregate --> R_UI[Render Matrix with Confidence Colors]
+        R_UI --> R_Export[Export to .xlsx]
+    end
+
+    subgraph Compare ["Compare Mode (Deep Analytics)"]
+        C_Start([User Input: Docs + Topic (+ Uploads)]) --> C_BM25[BM25 Tagged Retrieval / Raw Text Fallback]
+        C_BM25 --> C_Aspects[LLM Pass 1: Identify 4-6 Compare Aspects]
+        
+        C_Aspects --> C_ThreadPool[ThreadPoolExecutor]
+        C_ThreadPool -->|For each Doc & Aspect| C_Extract[LLM Pass 2: Extract Aspect Data]
+        
+        C_Extract --> C_Aggregate[Aggregate Aspect Matrix]
+        C_Aggregate --> C_Outliers[LLM Pass 3: Identify Outliers & Contradictions]
+        C_Outliers --> C_Synthesis[LLM Pass 4: Narrative Synthesis]
+        
+        C_Synthesis --> C_UI[Render Matrix, Narrative, Outliers]
+        C_UI --> C_Wipe[Wipe Temp Uploads]
+        C_Wipe --> C_Export[Export to .xlsx]
+    end
+
+    class R_Start,R_Submit,R_ThreadPool,R_Extract,R_FormatJSON,R_Aggregate,R_UI,R_Export review
+    class C_Start,C_BM25,C_Aspects,C_ThreadPool,C_Extract,C_Aggregate,C_Outliers,C_Synthesis,C_UI,C_Wipe,C_Export compare
+```
 
 
 ### Execution Flow of System Modes
