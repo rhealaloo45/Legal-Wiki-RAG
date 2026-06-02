@@ -282,15 +282,60 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, columns: list
 
 
 def _get_scoped_wiki_pages(session_id: str, doc_name: str) -> dict:
-    """Filter wiki index to pages where source_doc matches doc_name."""
+    """Filter wiki index to pages belonging to a specific source document.
+    
+    Pages are matched using two strategies:
+    1. Title-based: Wiki page titles follow the convention 'Topic (source_filename)'.
+       We check if the parenthesized suffix in the title matches the doc_name.
+    2. Field-based: Pages ingested after the source_doc field was added store it directly.
+    """
     index = wiki._load_index(session_id)
     pages = index.get("pages", {})
     
-    # Normalize doc_name to match how wiki.py saves source_doc
+    # Build all possible name variants for matching
     flat_name = doc_name.replace("/", "_").replace("\\", "_")
-    expected_source_doc = f"{session_id}_{flat_name}"
+    full_disk_name = f"{session_id}_{flat_name}"
     
-    scoped = {k: v for k, v in pages.items() if isinstance(v, dict) and (v.get("source_doc") == expected_source_doc or v.get("source_doc") == doc_name or v.get("source_doc") == flat_name)}
+    # Normalize for comparison (lowercase, no extension)
+    variants = set()
+    for name in [doc_name, flat_name, full_disk_name]:
+        variants.add(name.lower())
+        # Also add without file extension
+        base = name.rsplit(".", 1)[0] if "." in name else name
+        variants.add(base.lower())
+    
+    scoped = {}
+    for title, page_data in pages.items():
+        if not isinstance(page_data, dict):
+            continue
+        
+        matched = False
+        
+        # Strategy 1: Check source_doc field
+        src = page_data.get("source_doc", "")
+        if src and src.lower() in variants:
+            matched = True
+        
+        # Strategy 2: Check if the page title contains the doc name in parentheses
+        if not matched:
+            import re
+            paren_match = re.search(r'\(([^)]+)\)\s*$', title)
+            if paren_match:
+                title_doc = paren_match.group(1).strip()
+                title_doc_lower = title_doc.lower()
+                if title_doc_lower in variants:
+                    matched = True
+                # Also check if title_doc ends with any of the base filenames
+                if not matched:
+                    for v in variants:
+                        if title_doc_lower.endswith(v) or v.endswith(title_doc_lower):
+                            matched = True
+                            break
+        
+        if matched:
+            scoped[title] = page_data
+    
+    logger.info(f"Scoped wiki lookup for '{doc_name}': found {len(scoped)} pages (out of {len(pages)} total)")
     return scoped
 
 def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str, 
@@ -317,7 +362,7 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
             if not scoped_pages:
                 structured_text = get_raw_doc_text(session_id, doc_name)
             else:
-                # BM25 retrieval from wiki pages
+                # BM25 retrieval from wiki pages (optional optimisation)
                 try:
                     from rank_bm25 import BM25Okapi
                     corpus = []
@@ -334,8 +379,13 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
                         parts.append(scoped_pages[k].get("content", ""))
                     structured_text = "\n\n".join(parts)
                 except Exception as e:
-                    logger.error(f"BM25 failed during compare: {e}")
-                    structured_text = get_raw_doc_text(session_id, doc_name)
+                    logger.warning(f"BM25 unavailable, using all {len(scoped_pages)} scoped wiki pages: {e}")
+                    # Fall back to all scoped wiki pages — NOT raw text (which triggers OCR)
+                    parts = []
+                    for k, v in scoped_pages.items():
+                        content = v.get("content", "") if isinstance(v, dict) else str(v)
+                        parts.append(content)
+                    structured_text = "\n\n".join(parts)
             
             sources.append({"name": doc_name, "type": "wiki", "text": structured_text})
             
