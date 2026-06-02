@@ -494,9 +494,12 @@ b[title] {
         <div id="panel-review" class="panel-split d-none" style="display:none">
           <div class="split-left">
             <div class="ctrl-card">
-              <div class="ctrl-title" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>Documents</span>
-                <div class="select-all-bar">
+              <div class="ctrl-title" id="review-docs-header" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer">
+                <span style="display:flex; align-items:center; gap:4px">
+                  <i class="ti ti-chevron-down" id="review-docs-chevron" style="transition: transform 0.2s"></i>
+                  Documents
+                </span>
+                <div class="select-all-bar" id="review-select-bar">
                   <a href="#" id="review-select-all">All</a>
                   <span style="color:var(--text-muted)">|</span>
                   <a href="#" id="review-deselect-all">None</a>
@@ -505,12 +508,8 @@ b[title] {
               <div id="review-doc-list" style="max-height:240px;overflow-y:auto;display:flex;flex-direction:column;gap:4px"></div>
             </div>
             <div class="ctrl-card">
-              <div class="ctrl-title">Columns</div>
-              <div id="review-cols-list">
-                <div class="col-tag"><span class="col-tag-t">Governing Law</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>
-                <div class="col-tag"><span class="col-tag-t">Notice Period</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>
-              </div>
-              <div class="add-row" style="margin-top:6px"><input class="add-inp" id="rev-new-col" placeholder="Add column…"><button class="add-btn-sm" id="add-review-col-btn">+</button></div>
+              <div class="ctrl-title">Review prompt</div>
+              <textarea class="add-inp" style="width:100%; height:80px; resize:vertical; padding:8px" id="review-q" placeholder="e.g. Summarize this Services Agreement. Include scope of services, deliverables, fees..."></textarea>
             </div>
             <button class="run-btn" id="run-review-btn">Run review</button>
           </div>
@@ -574,9 +573,12 @@ b[title] {
         <div id="panel-compare" class="panel-split d-none" style="display:none">
           <div class="split-left">
             <div class="ctrl-card">
-              <div class="ctrl-title" style="display:flex; justify-content:space-between; align-items:center;">
-                <span>Existing docs</span>
-                <div class="select-all-bar">
+              <div class="ctrl-title" id="compare-docs-header" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer">
+                <span style="display:flex; align-items:center; gap:4px">
+                  <i class="ti ti-chevron-down" id="compare-docs-chevron" style="transition: transform 0.2s"></i>
+                  Existing docs
+                </span>
+                <div class="select-all-bar" id="compare-select-bar">
                   <a href="#" id="compare-select-all">All</a>
                   <span style="color:var(--text-muted)">|</span>
                   <a href="#" id="compare-deselect-all">None</a>
@@ -594,8 +596,8 @@ b[title] {
               </div>
             </div>
             <div class="ctrl-card">
-              <div class="ctrl-title">Comparison topic</div>
-              <input class="add-inp" style="width:100%" id="compare-q" placeholder="e.g. Indemnification clauses">
+              <div class="ctrl-title">Compare prompt</div>
+              <textarea class="add-inp" style="width:100%; height:80px; resize:vertical; padding:8px" id="compare-q" placeholder="e.g. Compare NDA 1 and 2. Create a table comparing purpose, mutuality..."></textarea>
             </div>
             <button class="run-btn" id="run-compare-btn">Run compare</button>
           </div>
@@ -1811,14 +1813,26 @@ b[title] {
   // ============================================================
   // Review Mode
   // ============================================================
-  document.getElementById('review-cols-list').addEventListener('click', e => {
-    if(e.target.classList.contains('rem-col')) e.target.parentElement.remove();
+
+  // Toggle collapsible document lists
+  document.getElementById('review-docs-header').addEventListener('click', (e) => {
+    if (e.target.closest('#review-select-bar')) return;
+    const list = document.getElementById('review-doc-list');
+    const selectBar = document.getElementById('review-select-bar');
+    const chevron = document.getElementById('review-docs-chevron');
+    const isCollapsed = list.classList.toggle('d-none');
+    selectBar.classList.toggle('d-none', isCollapsed);
+    chevron.style.transform = isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
   });
-  document.getElementById('add-review-col-btn').addEventListener('click', () => {
-    const v = document.getElementById('rev-new-col').value.trim();
-    if(!v) return;
-    document.getElementById('review-cols-list').innerHTML += `<div class="col-tag"><span class="col-tag-t">${v}</span><span class="rem-col" style="font-size:11px;color:var(--text-tertiary);cursor:pointer">✕</span></div>`;
-    document.getElementById('rev-new-col').value = '';
+
+  document.getElementById('compare-docs-header').addEventListener('click', (e) => {
+    if (e.target.closest('#compare-select-bar')) return;
+    const list = document.getElementById('compare-doc-list');
+    const selectBar = document.getElementById('compare-select-bar');
+    const chevron = document.getElementById('compare-docs-chevron');
+    const isCollapsed = list.classList.toggle('d-none');
+    selectBar.classList.toggle('d-none', isCollapsed);
+    chevron.style.transform = isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)';
   });
 
   // Checkbox state sync and select all/none event listeners
@@ -1857,8 +1871,8 @@ b[title] {
   
   document.getElementById('run-review-btn').addEventListener('click', async () => {
     const docs = Array.from(document.getElementById('review-doc-list').querySelectorAll('.doc-checkbox:checked')).map(cb => cb.value);
-    const cols = Array.from(document.querySelectorAll('#review-cols-list .col-tag-t')).map(s => s.textContent);
-    if(!docs.length || !cols.length) { showToast('Select docs and columns', 'error'); return; }
+    const q = document.getElementById('review-q').value.trim();
+    if(!q) { showToast('Enter a prompt', 'error'); return; }
     
     document.getElementById('run-review-btn').disabled = true;
     document.getElementById('review-table-wrap').classList.add('d-none');
@@ -1875,7 +1889,7 @@ b[title] {
       const res = await fetch('/review/start', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: SID, doc_names: docs, columns: cols})
+        body: JSON.stringify({session_id: SID, doc_names: docs, question: q})
       });
       const data = await res.json();
       if(data.error) throw new Error(data.error);
@@ -1958,7 +1972,6 @@ b[title] {
     const docs = Array.from(document.getElementById('compare-doc-list').querySelectorAll('.doc-checkbox:checked')).map(cb => cb.value);
     const q = document.getElementById('compare-q').value.trim();
     if(!q) return showToast('Enter a topic', 'error');
-    if(!docs.length && !compareFile) return showToast('Select or upload a doc', 'error');
     
     document.getElementById('run-compare-btn').disabled = true;
     document.getElementById('compare-results-container').classList.add('d-none');

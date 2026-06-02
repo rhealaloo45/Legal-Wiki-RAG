@@ -593,26 +593,26 @@ def review_start():
     data = request.get_json(silent=True) or {}
     session_id = data.get("session_id", "")
     doc_names = data.get("doc_names", [])
-    columns = data.get("columns", [])
+    question = data.get("question", "")
     
-    if not session_id or not doc_names or not columns:
-        return jsonify({"error": "session_id, doc_names, and columns are required"}), 400
+    if not session_id or not question:
+        return jsonify({"error": "session_id and question are required"}), 400
         
     job_id = str(uuid.uuid4())
     REVIEW_STORE[job_id] = {
         "status": "running",
-        "total": len(doc_names) * len(columns),
+        "total": 0,  # Will be updated by the background job once columns are generated
         "completed": 0,
         "rows": {d: {} for d in doc_names},
         "flagged": [],
         "error": None,
-        "columns": columns
+        "columns": [] # Will be updated by the background job
     }
     
     _get_review_lock(job_id)  # Initialize the lock for this job
-    logger.info(f"Starting review job {job_id} for {len(doc_names)} docs and {len(columns)} columns")
-    executor.submit(advanced_modes._run_review_job, job_id, session_id, doc_names, columns, REVIEW_STORE, _review_locks)
-    return jsonify({"job_id": job_id, "total_cells": len(doc_names) * len(columns)})
+    logger.info(f"Starting review job {job_id} for {len(doc_names)} docs with prompt: {question[:50]}...")
+    executor.submit(advanced_modes._run_review_job, job_id, session_id, doc_names, question, REVIEW_STORE, _review_locks)
+    return jsonify({"job_id": job_id})
 
 @app.route("/review/progress")
 def review_progress():
@@ -631,7 +631,7 @@ def review_progress():
         "completed": completed,
         "percent": percent,
         "flagged_count": len(store["flagged"])
-    })
+      })
 
 @app.route("/review/result")
 def review_result():
@@ -673,9 +673,6 @@ def compare_start():
         
     if not session_id or not question:
         return jsonify({"error": "session_id and question are required"}), 400
-        
-    if not doc_names and not uploaded_file:
-        return jsonify({"error": "Must select at least one document or upload a file"}), 400
         
     job_id = str(uuid.uuid4())
     COMPARE_STORE[job_id] = {
