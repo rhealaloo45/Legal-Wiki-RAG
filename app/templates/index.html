@@ -443,6 +443,7 @@ b[title] {
           <div class="tab active" data-target="ask" onclick="switchTab('ask',this)"><i class="ti ti-message-circle" style="font-size:13px"></i>Ask</div>
           <div class="tab" data-target="review" onclick="switchTab('review',this)"><i class="ti ti-table" style="font-size:13px"></i>Review</div>
           <div class="tab" data-target="compare" onclick="switchTab('compare',this)"><i class="ti ti-columns" style="font-size:13px"></i>Compare</div>
+          <div class="tab" data-target="draft" onclick="switchTab('draft',this)"><i class="ti ti-writing" style="font-size:13px"></i>Draft</div>
           <div class="tab" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open" style="font-size:13px"></i>Files</div>
         </div>
         
@@ -678,6 +679,83 @@ b[title] {
           </div>
         </div>
   
+        <!-- DRAFT -->
+        <div id="panel-draft" class="panel-split d-none" style="display:none">
+          <div class="split-left">
+            <div class="ctrl-card">
+              <div class="ctrl-title">Drafting prompt</div>
+              <textarea class="add-inp" style="width:100%; height:120px; resize:vertical; padding:8px" id="draft-q" placeholder="e.g. Draft a mutual NDA for Tata Motors..."></textarea>
+              <div style="margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px;">
+                <span class="source-chip" style="min-width:auto; max-width:100%; padding: 4px 8px; font-size: 10px;" onclick="document.getElementById('draft-q').value += ' Tata-friendly'">Tata-friendly</span>
+                <span class="source-chip" style="min-width:auto; max-width:100%; padding: 4px 8px; font-size: 10px;" onclick="document.getElementById('draft-q').value += ' Vendor-favorable'">Vendor-favorable</span>
+                <span class="source-chip" style="min-width:auto; max-width:100%; padding: 4px 8px; font-size: 10px;" onclick="document.getElementById('draft-q').value += ' Neutral'">Neutral</span>
+              </div>
+              <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary);">
+                <input type="checkbox" id="draft-use-wiki" checked style="accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer;">
+                <label for="draft-use-wiki" style="cursor: pointer;">Ground draft to Wiki knowledge</label>
+              </div>
+            </div>
+            <button class="run-btn" id="run-draft-btn">Generate Draft</button>
+
+            <div class="ctrl-card" id="draft-refine-card" style="display:none; margin-top:10px;">
+              <div class="ctrl-title">Refine current version</div>
+              <textarea class="add-inp" style="width:100%; height:80px; resize:vertical; padding:8px" id="draft-refine-q" placeholder="e.g. Change governing law to UK..."></textarea>
+              <button class="run-btn" id="run-refine-btn" style="margin-top:8px;">Refine</button>
+            </div>
+            
+            <div class="ctrl-card" id="draft-sources-card" style="display:none; margin-top:10px;">
+              <div class="ctrl-title" id="draft-sources-header" style="display:flex; justify-content:space-between; align-items:center; cursor:pointer" onclick="const b = document.getElementById('draft-sources-list'); b.style.display = b.style.display === 'none' ? 'flex' : 'none'; const c = document.getElementById('draft-sources-chevron'); c.style.transform = b.style.display === 'none' ? 'rotate(-90deg)' : 'rotate(0deg)';">
+                <span style="display:flex; align-items:center; gap:4px">
+                  <i class="ti ti-chevron-down" id="draft-sources-chevron" style="transition: transform 0.2s"></i>
+                  Knowledge Sources
+                </span>
+              </div>
+              <div id="draft-sources-list" style="max-height:150px;overflow-y:auto;display:flex;flex-direction:column;gap:4px; margin-top: 8px;">
+              </div>
+            </div>
+          </div>
+          <div class="split-right">
+            <!-- DRAFT PROGRESS -->
+            <div id="draft-status-wrap" class="d-none" style="margin-bottom:15px">
+              <div class="prog-container"><div class="prog-fill" id="draft-progress-bar" style="width:0%"></div></div>
+              <div class="prog-lbls">
+                <span id="draft-status-text">Starting drafting...</span>
+              </div>
+            </div>
+
+            <!-- DRAFT SKELETON -->
+            <div id="draft-skeleton" class="d-none" style="margin-bottom:10px">
+              <div class="narr-box">
+                <div class="skeleton-box shimmer" style="width:40%; height:20px; margin-bottom:16px;"></div>
+                <div style="display:flex; flex-direction:column; gap:12px; margin-top:8px">
+                  <div class="skeleton-box shimmer" style="width:100%"></div>
+                  <div class="skeleton-box shimmer" style="width:95%"></div>
+                  <div class="skeleton-box shimmer" style="width:100%"></div>
+                  <div class="skeleton-box shimmer" style="width:80%"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="tbl-wrap d-none" id="draft-results-container" style="flex: 1; display: flex; flex-direction: column; overflow: hidden; margin-bottom: 10px;">
+              <div class="tbl-bar">
+                <div style="display:flex; align-items:center; gap: 8px;">
+                    <span class="tbl-bar-t">Draft Workspace</span>
+                    <span id="draft-grounded-badge" class="cg d-none" style="padding:2px 6px; border-radius:4px; font-size:10px; border:1px solid var(--green); background:var(--green-light); color:var(--green);" title="Draft is using Wiki knowledge">Wiki Grounded</span>
+                    <span id="draft-standalone-badge" class="cy d-none" style="padding:2px 6px; border-radius:4px; font-size:10px; border:1px solid var(--border); background:var(--bg-hover); color:var(--text-muted);" title="No Wiki context available">Standalone Draft</span>
+                    <span id="draft-local-badge" class="cy d-none" title="Local edits will not be exported or refined">Edited locally</span>
+                </div>
+                <div style="display:flex; align-items:center; gap: 8px;">
+                    <select id="draft-version-select" class="add-inp" style="padding: 3px 6px;" onchange="switchDraftVersion(this.value)">
+                    </select>
+                    <button class="exp-btn" id="draft-export-btn"><i class="ti ti-download" style="font-size:12px"></i>Export DOCX</button>
+                </div>
+              </div>
+              <div id="draft-content-area" style="flex: 1; overflow: auto; padding: 24px 32px; white-space: pre-wrap; font-family: var(--font-sans); font-size: 13px; line-height: 1.8; color: var(--text-primary); outline: none;" contenteditable="true">
+              </div>
+            </div>
+
+          </div>
+        </div>
         <!-- FILES -->
         <div id="panel-files" class="files-panel d-none" style="display:none">
           <div class="files-toolbar">
@@ -806,12 +884,14 @@ b[title] {
     document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
     document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
     document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
+    document.getElementById('panel-draft').style.setProperty('display', 'none', 'important');
     document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
     document.getElementById('doc-reader').style.display = 'none';
     
     if(name==='ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
     else if(name==='review') document.getElementById('panel-review').style.setProperty('display', 'flex', 'important');
     else if(name==='compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
+    else if(name==='draft') document.getElementById('panel-draft').style.setProperty('display', 'flex', 'important');
     else if(name==='files') { const fp = document.getElementById('panel-files'); fp.style.setProperty('display', 'flex', 'important'); fp.style.flexDirection = 'column'; }
   }
   
@@ -882,7 +962,7 @@ b[title] {
     
     const lines = refsContent.split('\n');
     const refs = [];
-    const lineRegex = /\[(\d+)\]\s*([^,\n]+?)(?:,\s*([^\n]+))?$/;
+    const lineRegex = /\[(\d+)\]\s*([^,|]+?)(?:,\s*([^|]+))?(?:\s*\|\s*Quote:\s*(.+))?$/i;
     
     for (const line of lines) {
       const lineMatch = line.trim().match(lineRegex);
@@ -890,7 +970,8 @@ b[title] {
         const num = parseInt(lineMatch[1]);
         const docName = lineMatch[2].trim();
         const location = lineMatch[3] ? lineMatch[3].trim() : '';
-        refs.push({ num, docName, location });
+        const quote = lineMatch[4] ? lineMatch[4].trim() : '';
+        refs.push({ num, docName, location, quote });
       }
     }
     
@@ -928,13 +1009,17 @@ b[title] {
           canonicalName: canonicalName,
           originalName: ref.docName,
           locations: [],
-          nums: []
+          nums: [],
+          quotes: []
         };
       }
       if (ref.location && !groupedRefs[canonicalName].locations.includes(ref.location)) {
         groupedRefs[canonicalName].locations.push(ref.location);
       }
       groupedRefs[canonicalName].nums.push(ref.num);
+      if (ref.quote && !groupedRefs[canonicalName].quotes.some(q => q.text === ref.quote)) {
+        groupedRefs[canonicalName].quotes.push({ num: ref.num, location: ref.location, text: ref.quote });
+      }
     }
     
     const entries = Object.values(groupedRefs);
@@ -965,6 +1050,37 @@ b[title] {
       `;
     }).join('');
     
+    // Generate verbatim quotes block
+    let evidenceHtml = '';
+    const allQuotes = [];
+    for (const ref of refs) {
+      if (ref.quote) {
+        allQuotes.push(ref);
+      }
+    }
+    
+    if (allQuotes.length > 0) {
+      evidenceHtml = `
+        <div class="evidence-list" style="margin-top: 16px; border-top: 0.5px dashed var(--border); padding-top: 12px;">
+          <div style="font-family: var(--font-heading); font-size: 10px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: 8px;">
+            Verbatim Evidence
+          </div>
+          <div style="display: flex; flex-direction: column; gap: 8px;">
+            ${allQuotes.map(q => {
+              const cleanDocName = q.docName.replace(/^[a-f0-9-]{36}_/, '').split('/').pop();
+              return `
+                <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.5; background: var(--bg-surface); padding: 8px 12px; border-radius: var(--radius-sm); border: 0.5px solid var(--border);">
+                  <span class="inline-cite" onclick="clickInlineCitation(${q.num}, event)" style="margin-right: 6px;">[${q.num}]</span>
+                  <strong>${cleanDocName} (${q.location || 'Unspecified'}):</strong> 
+                  <span style="font-style: italic;">"${q.quote}"</span>
+                </div>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+    }
+    
     return `
       <div class="referenced-sources-section" style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 16px 24px;">
         <div class="referenced-sources-label" style="font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
@@ -974,6 +1090,7 @@ b[title] {
         <div class="referenced-sources-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;">
           ${cardsHtml}
         </div>
+        ${evidenceHtml}
       </div>
     `;
   }
@@ -1937,7 +2054,11 @@ b[title] {
         else if(cell.confidence >= 0.5) cls = 'cy';
         if(cls === 'cr') flagged++;
         const quote = cell.quote ? `title="Quote: ${cell.quote.replace(/"/g,'&quot;')}"` : '';
-        html += `<td><span class="${cls}" ${quote}>${val}</span></td>`;
+        let quoteHtml = '';
+        if (cell.quote) {
+          quoteHtml = `<div style="font-size:10px; color:var(--text-secondary); margin-top:5px; font-style:italic; border-left:2px solid var(--accent-border); padding-left:5px; line-height:1.4;">"${cell.quote}"</div>`;
+        }
+        html += `<td><span class="${cls}" ${quote}>${val}</span>${quoteHtml}</td>`;
       }
       html += `</tr>`;
     }
@@ -2047,7 +2168,11 @@ b[title] {
         if(cell.confidence >= 0.8) cls = 'cg';
         else if(cell.confidence >= 0.5) cls = 'cy';
         const quote = cell.quote ? `title="Quote: ${cell.quote.replace(/"/g,'&quot;')}"` : '';
-        html += `<td><span class="${cls}" ${quote}>${val}</span></td>`;
+        let quoteHtml = '';
+        if (cell.quote) {
+          quoteHtml = `<div style="font-size:10px; color:var(--text-secondary); margin-top:5px; font-style:italic; border-left:2px solid var(--accent-border); padding-left:5px; line-height:1.4;">"${cell.quote}"</div>`;
+        }
+        html += `<td><span class="${cls}" ${quote}>${val}</span>${quoteHtml}</td>`;
       }
       html += `</tr>`;
     }
@@ -2097,6 +2222,193 @@ b[title] {
     }
   }
   
+  // ============================================================
+  // Draft Mode
+  // ============================================================
+  let currentDraftJob = null;
+  let currentDraftData = null;
+  
+  function parseDraftMarkdown(text) {
+    let lines = text.split('\n');
+    let html = [];
+    let inTable = false;
+    let tableRows = [];
+
+    function flushTable() {
+      if (!tableRows.length) return;
+      let tableHtml = '<table class="mtbl" style="margin-bottom: 15px;"><tbody>';
+      tableRows.forEach((r, i) => {
+          let cols = r.split('|').map(c => c.trim()).filter((c, idx, arr) => c || (idx > 0 && idx < arr.length-1));
+          if (!cols.length) return;
+          if (r.trim().startsWith('|')) cols = cols.slice(1);
+          if (r.trim().endsWith('|')) cols = cols.slice(0, -1);
+          
+          let cellType = i === 0 && r.includes('---') ? null : (tableRows.length > 1 && tableRows[1].includes('---') && i === 0) ? 'th' : 'td';
+          if (cellType === null) return;
+          
+          tableHtml += '<tr>';
+          cols.forEach(c => { tableHtml += `<${cellType}>${parseInline(c)}</${cellType}>`; });
+          tableHtml += '</tr>';
+      });
+      tableHtml += '</tbody></table>';
+      html.push(tableHtml);
+      tableRows = [];
+    }
+
+    function parseInline(str) { return str.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>'); }
+
+    lines.forEach(line => {
+      let t = line.trim();
+      if (t.startsWith('|')) {
+        inTable = true;
+        tableRows.push(t);
+        return;
+      } else if (inTable) { flushTable(); inTable = false; }
+
+      if (t === '---') { html.push('<hr style="border:0; border-top:1px solid var(--border); margin: 15px 0;">'); }
+      else if (t.startsWith('# ')) { html.push(`<h1 style="font-family:var(--font-heading); font-size:18px; margin: 18px 0 10px;">${parseInline(t.substring(2))}</h1>`); }
+      else if (t.startsWith('## ')) { html.push(`<h2 style="font-family:var(--font-heading); font-size:16px; margin: 16px 0 10px;">${parseInline(t.substring(3))}</h2>`); }
+      else if (t.startsWith('### ')) { html.push(`<h3 style="font-family:var(--font-heading); font-size:14px; margin: 14px 0 10px;">${parseInline(t.substring(4))}</h3>`); }
+      else if (t.startsWith('- ') || t.startsWith('* ')) { html.push(`<li style="margin-left: 20px; margin-bottom: 4px;">${parseInline(t.substring(2))}</li>`); }
+      else if (t.startsWith('[DRAFTING NOTE')) { html.push(`<div style="border-left: 2px solid var(--amber); padding: 8px 12px; margin: 10px 0; background: var(--amber-light); border-radius: 0 6px 6px 0; font-size: 12px; color: var(--amber); font-style: italic;">${parseInline(t)}</div>`); }
+      else if (t) { html.push(`<p style="margin-bottom: 12px;">${parseInline(t)}</p>`); }
+      else { html.push('<br>'); }
+    });
+    if (inTable) flushTable();
+    return html.join('');
+  }
+
+  document.getElementById('draft-content-area').addEventListener('input', () => {
+    document.getElementById('draft-local-badge').classList.remove('d-none');
+  });
+
+  document.getElementById('run-draft-btn').addEventListener('click', async () => {
+    const q = document.getElementById('draft-q').value.trim();
+    if(!q) return showToast('Enter a drafting prompt', 'error');
+    
+    const useWiki = document.getElementById('draft-use-wiki').checked;
+    
+    document.getElementById('run-draft-btn').disabled = true;
+    document.getElementById('draft-results-container').classList.add('d-none');
+    document.getElementById('draft-status-wrap').classList.remove('d-none');
+    document.getElementById('draft-progress-bar').style.width = '10%';
+    document.getElementById('draft-status-text').textContent = 'Starting drafting...';
+    document.getElementById('draft-skeleton').classList.remove('d-none');
+    document.getElementById('draft-refine-card').style.display = 'none';
+    document.getElementById('draft-sources-card').style.display = 'none';
+    
+    try {
+      const res = await fetch('/draft/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: SID, prompt: q, use_wiki: useWiki})
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      currentDraftJob = data.job_id;
+      pollDraftJob(currentDraftJob);
+    } catch(e) {
+      showToast(e.message, 'error');
+      document.getElementById('run-draft-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('run-refine-btn').addEventListener('click', async () => {
+    const q = document.getElementById('draft-refine-q').value.trim();
+    if(!q || !currentDraftJob) return showToast('Enter refinement instructions', 'error');
+    
+    document.getElementById('run-refine-btn').disabled = true;
+    document.getElementById('draft-status-wrap').classList.remove('d-none');
+    document.getElementById('draft-progress-bar').style.width = '50%';
+    document.getElementById('draft-status-text').textContent = 'Refining...';
+    document.getElementById('draft-skeleton').classList.remove('d-none');
+    document.getElementById('draft-results-container').classList.add('d-none');
+    
+    try {
+      const res = await fetch('/draft/refine', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: SID, job_id: currentDraftJob, instruction: q})
+      });
+      const data = await res.json();
+      if(data.error) throw new Error(data.error);
+      pollDraftJob(currentDraftJob);
+    } catch(e) {
+      showToast(e.message, 'error');
+      document.getElementById('run-refine-btn').disabled = false;
+    }
+  });
+
+  document.getElementById('draft-export-btn').addEventListener('click', () => {
+    if(currentDraftJob) window.open(`/draft/export?job_id=${currentDraftJob}`);
+  });
+
+  window.switchDraftVersion = function(v) {
+    if(!currentDraftData || !currentDraftData.versions[v]) return;
+    document.getElementById('draft-content-area').innerHTML = parseDraftMarkdown(currentDraftData.versions[v].text);
+    document.getElementById('draft-local-badge').classList.add('d-none');
+  };
+
+  async function pollDraftJob(jobId) {
+    const timer = setInterval(async () => {
+      try {
+        const res = await fetch(`/draft/version?job_id=${jobId}`);
+        const data = await res.json();
+        
+        let pct = '10%';
+        if (data.status === 'classifying') pct = '20%';
+        else if (data.status === 'retrieving') pct = '40%';
+        else if (data.status === 'generating') pct = '70%';
+        else if (data.status === 'refining') pct = '80%';
+        else if (data.status === 'complete') pct = '100%';
+        
+        document.getElementById('draft-progress-bar').style.width = pct;
+        document.getElementById('draft-status-text').textContent = `Stage: ${data.status}...`;
+        
+        if (data.status === 'complete' || data.status === 'error') {
+          clearInterval(timer);
+          document.getElementById('run-draft-btn').disabled = false;
+          document.getElementById('run-refine-btn').disabled = false;
+          document.getElementById('draft-status-wrap').classList.add('d-none');
+          document.getElementById('draft-skeleton').classList.add('d-none');
+          
+          if(data.status === 'complete') {
+            currentDraftData = data;
+            const sel = document.getElementById('draft-version-select');
+            sel.innerHTML = Object.keys(data.versions).sort((a,b)=>b-a).map(v => `<option value="${v}">Version ${v}</option>`).join('');
+            sel.value = data.current_version;
+            switchDraftVersion(data.current_version);
+            document.getElementById('draft-results-container').classList.remove('d-none');
+            document.getElementById('draft-refine-card').style.display = 'block';
+            document.getElementById('draft-refine-q').value = '';
+            
+            const meta = data.metadata || {};
+            if(meta.has_wiki_context) {
+              document.getElementById('draft-grounded-badge').classList.remove('d-none');
+              document.getElementById('draft-standalone-badge').classList.add('d-none');
+              
+              if(meta.source_pages && meta.source_pages.length > 0) {
+                document.getElementById('draft-sources-card').style.display = 'block';
+                const slist = document.getElementById('draft-sources-list');
+                slist.innerHTML = meta.source_pages.map(sp => {
+                  return `<div style="font-size:11px; padding:4px 6px; border:1px solid var(--border); border-radius:4px; background:var(--bg-surface);"><div style="font-weight:600; color:var(--text-primary); margin-bottom:2px;">${sp.title}</div><div style="color:var(--text-muted); font-size:9px;">${sp.source || 'Wiki Page'}</div></div>`;
+                }).join('');
+              } else {
+                document.getElementById('draft-sources-card').style.display = 'none';
+              }
+            } else {
+              document.getElementById('draft-grounded-badge').classList.add('d-none');
+              document.getElementById('draft-standalone-badge').classList.remove('d-none');
+              document.getElementById('draft-sources-card').style.display = 'none';
+            }
+          } else {
+            showToast(data.error || 'Drafting failed', 'error');
+          }
+        }
+      } catch(e) { clearInterval(timer); }
+    }, 1500);
+  }
+
   // ============================================================
   // Graph rendering core logic ported
   // ============================================================

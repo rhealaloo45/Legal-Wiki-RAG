@@ -69,8 +69,8 @@ The system uses **adaptive segmentation** based on document length:
 
 To prevent hallucination at scale, the query uses a **two-step retrieval** approach:
 
-1. **BM25 Fallback/Filtering**: If the wiki grows beyond 20 pages, `rank_bm25` filters the entire wiki down to the top 40 candidate pages *before* invoking the LLM, dramatically reducing context window bloat.
-2. **Page Selection**: The LLM receives the filtered list of page titles + one-line summaries. It selects the 10-15 most relevant pages for the question.
+1. **Document Mention Check**: Scans the user query string for mentions of any document names. If file mentions are detected, all wiki pages containing those filenames are marked as forced selections.
+2. **Page Selection**: If the wiki grows beyond 20 pages, the LLM receives the list of page titles + one-line summaries. It selects the 15-25 most relevant pages for the question.
 3. **Deep Answer**: Only the selected pages' full content is sent in the answer prompt, prepending a `[WARNING]` tag to any page flagged for contradictions.
 4. **Chain of Thought & Grounding**: The LLM first generates a `<reasoning>` trace to verify facts against the context, and uses strict inline citations to ensure no hallucination.
 5. **Answer Filing**: Highly confident answers (`>= 0.80`) are automatically filed back into the wiki as a `"Q: {question}"` page for future compound learning. An anti-duplication title check ensures similar questions append to existing pages rather than fragmenting the wiki.
@@ -85,12 +85,12 @@ To supplement standard querying, two advanced analytical modes operate independe
 ### Review Mode
 Designed for bulk data extraction across documents.
 - **Workflow**: User selects multiple documents and defines arbitrary column headers.
-- **Concurrency**: A background `ThreadPoolExecutor` spins up 5 workers, concurrently querying every (document, column) combination using the raw document text.
+- **Concurrency**: A background `ThreadPoolExecutor` spins up 5 workers, concurrently querying every (document, column) combination using **wiki-synthesized content** (falling back to raw document text if the document has not been ingested).
 - **Export**: Generates a confidence-colored `.xlsx` matrix (green for high confidence, yellow for medium, red/flagged for low or null), built using `openpyxl`.
 
 ### Compare Mode
 Designed for deep, aspect-oriented comparison between existing knowledge and new unstructured uploads.
-- **Retrieval**: Uses BM25 filtering to extract isolated wiki content specifically tagged with the requested `source_doc`. If a selected document predates the tagging patch, it automatically falls back to raw text extraction.
+- **Retrieval**: Uses scoped lookup to retrieve wiki content specifically tagged with the requested `source_doc`. If a selected document has no wiki pages, it automatically falls back to raw text extraction.
 - **Aspect Identification**: A single LLM pass generates 4-6 specific aspects to compare based on the user's topic.
 - **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
 ### Detailed Flowchart: Review and Compare Modes
@@ -118,8 +118,8 @@ flowchart TD
 flowchart TD
     classDef compare fill:#78350f,stroke:#d97706,color:#fff
 
-    C_Start(["User Input: Docs + Topic (+ Uploads)"]) --> C_BM25["BM25 Tagged Retrieval / Raw Text Fallback"]
-    C_BM25 --> C_Aspects["LLM Pass 1: Identify 4-6 Compare Aspects"]
+    C_Start(["User Input: Docs + Topic (+ Uploads)"]) --> C_Retrieve["Scoped Wiki Retrieval / Raw Text Fallback"]
+    C_Retrieve --> C_Aspects["LLM Pass 1: Identify 4-6 Compare Aspects"]
     
     C_Aspects --> C_ThreadPool["ThreadPoolExecutor"]
     C_ThreadPool -->|For each Doc & Aspect| C_Extract["LLM Pass 2: Extract Aspect Data"]
@@ -132,7 +132,7 @@ flowchart TD
     C_UI --> C_Wipe["Wipe Temp Uploads"]
     C_Wipe --> C_Export["Export to .xlsx"]
 
-    class C_Start,C_BM25,C_Aspects,C_ThreadPool,C_Extract,C_Aggregate,C_Outliers,C_Synthesis,C_UI,C_Wipe,C_Export compare
+    class C_Start,C_Retrieve,C_Aspects,C_ThreadPool,C_Extract,C_Aggregate,C_Outliers,C_Synthesis,C_UI,C_Wipe,C_Export compare
 ```
 
 
@@ -143,18 +143,18 @@ flowchart TD
 flowchart TD
     classDef ask fill:#1e3a8a,stroke:#3b82f6,color:#fff
 
-    A["User Input: Question"] --> B{"Wiki Pages > 20?"}
-    B -->|Yes| C["BM25 Filtering: Top 40 pages"]
+    A["User Input: Question"] --> A1["Document Mention Check"]
+    A1 --> B{"Wiki Pages > 20?"}
+    B -->|Yes| E["LLM Page Selection: Pick top 15-25"]
     B -->|No| D["Use all Wiki pages"]
-    C --> E["LLM Page Selection: Pick top 10-15"]
-    D --> E
     E --> F["Assemble selected page contents"]
+    D --> F
     F --> G["LLM Answer Generation: CoT reasoning + inline citations"]
     G --> H{"Confidence >= 80%?"}
     H -->|Yes| I["File back answer as 'Q: {question}' wiki page"]
     H -->|No| J["Return answer to UI only"]
 
-    class A,B,C,D,E,F,G,H,I,J ask
+    class A,A1,B,D,E,F,G,H,I,J ask
 ```
 
 #### Review Mode (Bulk Extraction)
@@ -176,11 +176,11 @@ flowchart TD
 flowchart TD
     classDef compare fill:#78350f,stroke:#d97706,color:#fff
 
-    C1["User input: Docs + Uploaded File + Topic"] --> C2["Retrieve target texts: Wiki pages via BM25 / raw fallback"]
+    C1["User input: Docs + Uploaded File + Topic"] --> C2["Retrieve target texts: Scoped Wiki pages / raw fallback"]
     C2 --> C3["LLM Aspect Identification: Generate 4-6 comparison aspects"]
     C3 --> C4["Concurrently extract aspect values for each document"]
     C4 --> C5["Secondary LLM pass: Outlier & contradiction detection"]
-    C5 --> C6["Tertiary LLM pass: 3-5 sentence narrative synthesis"]
+    C5 --> C6["Tertiary LLM pass: Narrative synthesis"]
     C6 --> C7["Assemble aspect matrix & outliers list"]
     C7 --> C8["User option: Export comparison as .xlsx file"]
 
