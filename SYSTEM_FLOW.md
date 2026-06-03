@@ -325,3 +325,40 @@ Compare Mode aligns multiple documents side-by-side against a topic, automatical
   - *Key prompt instructions*: Group similar findings. Do not print repetitive lists. Use inline IEEE citations and generate a `References` list at the end.
 - **LLM Output**: Markdown synthesis highlighting trends, variances, and contradictions.
 - **Cleanup**: The temporary uploaded file is deleted from the server disk.
+
+---
+
+## 5. Draft Mode (Context-Aware Legal Drafting)
+
+Draft Mode generates ephemeral legal clauses, documents, or communications based on the user's prompt, automatically adapting its drafting stance and drawing on wiki context if requested.
+
+### Step 5.1: Start Job & Classification
+- **Endpoint**: `POST /draft/generate` in `app.py` -> launches `_run_draft_job` in a background thread.
+- **Inputs**: `session_id`, `prompt`, and `use_wiki` boolean.
+- **NLP Inference**:
+  - `classify_draft`: Sends a quick LLM request to classify the prompt into one of five types: `clause`, `full_document`, `communication`, `letter`, or `tracker`.
+  - `detect_stance`: Uses keyword matching on the prompt (e.g., "tata-friendly", "vendor-favorable") to select a stance template (`tata_favorable`, `counterparty_favorable`, or `neutral`).
+
+### Step 5.2: Wiki Context Retrieval (Optional)
+If `use_wiki` is true, the system grounds the draft in existing knowledge via `get_draft_context`:
+- It checks for explicitly mentioned files in the prompt.
+- It retrieves up to 8 of the most relevant wiki pages to use as precedent.
+- It truncates the context string to prevent token limits (roughly 8000 chars) and flags any contradictions found in the source pages.
+
+### Step 5.3: Generation
+- **What is Sent to the LLM**: 
+  - The type-specific template (e.g., `CLAUSE_TEMPLATE`).
+  - The stance instructions (e.g., "Draft from Tata's perspective...").
+  - The retrieved wiki context (if applicable).
+  - The user's prompt.
+- **Output**: The generated markdown draft is saved into an ephemeral in-memory `DRAFT_STORE` under `version 1`.
+
+### Step 5.4: Iterative Refinement
+- **Endpoint**: `POST /draft/refine` in `app.py` -> launches `_run_refine_job`.
+- **Inputs**: `job_id`, `instruction`.
+- **What is Sent to the LLM**: The full text of the current draft version and the user's refinement instruction. The prompt explicitly instructs the LLM to "Preserve existing structure, numbering, unaffected clauses, and drafting notes. Apply ONLY the requested modifications."
+- **Output**: The new draft is saved as `version 2` (or N+1) in the `DRAFT_STORE`.
+
+### Step 5.5: Export
+- The UI renders the markdown draft.
+- **Exporting**: `export_draft_to_docx` uses `python-docx` to parse the markdown (including basic headings, bold text, lists, and tables) and generates a downloadable `.docx` binary blob.
