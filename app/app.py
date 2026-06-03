@@ -29,7 +29,7 @@ from flask import Flask, render_template, request, jsonify
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import rag, wiki, hybrid, advanced_modes
+from services import rag, wiki, hybrid, advanced_modes, draft
 import threading
 
 # ---------------------------------------------------------------------------
@@ -741,6 +741,80 @@ def compare_export():
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
         download_name=f"Compare_Export_{job_id[:8]}.xlsx"
+    )
+
+# ---------------------------------------------------------------------------
+# Draft Mode Routes
+# ---------------------------------------------------------------------------
+@app.route("/draft/start", methods=["POST"])
+def draft_start():
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    prompt = data.get("prompt", "")
+    use_wiki = data.get("use_wiki", True)
+    
+    if not session_id or not prompt:
+        return jsonify({"error": "session_id and prompt are required"}), 400
+        
+    job_id = str(uuid.uuid4())
+    draft.DRAFT_STORE[job_id] = {
+        "status": "starting",
+        "current_version": 0,
+        "versions": {},
+        "error": None
+    }
+    
+    draft._get_draft_lock(job_id)
+    executor.submit(draft._run_draft_job, job_id, session_id, prompt, use_wiki)
+    return jsonify({"job_id": job_id})
+
+@app.route("/draft/refine", methods=["POST"])
+def draft_refine():
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    job_id = data.get("job_id", "")
+    instruction = data.get("instruction", "")
+    
+    if not job_id or not instruction:
+        return jsonify({"error": "job_id and instruction are required"}), 400
+        
+    if job_id not in draft.DRAFT_STORE:
+        return jsonify({"error": "draft job not found"}), 404
+        
+    executor.submit(draft._run_refine_job, job_id, session_id, instruction)
+    return jsonify({"status": "refining"})
+
+@app.route("/draft/version", methods=["GET"])
+def draft_version():
+    job_id = request.args.get("job_id", "")
+    if job_id not in draft.DRAFT_STORE:
+        return jsonify({"error": "job not found"}), 404
+        
+    return jsonify(draft.DRAFT_STORE[job_id])
+
+@app.route("/draft/export", methods=["GET"])
+def draft_export():
+    import io
+    from flask import send_file
+    
+    job_id = request.args.get("job_id", "")
+    if job_id not in draft.DRAFT_STORE:
+        return "job not found", 404
+        
+    store = draft.DRAFT_STORE[job_id]
+    current_v = store.get("current_version", 0)
+    
+    if not current_v or current_v not in store.get("versions", {}):
+        return "No complete draft available", 404
+        
+    draft_text = store["versions"][current_v]["text"]
+    docx_bytes = draft.export_draft_to_docx(draft_text)
+    
+    return send_file(
+        io.BytesIO(docx_bytes),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        as_attachment=True,
+        download_name=f"Draft_Export_{job_id[:8]}.docx"
     )
 
 # ---------------------------------------------------------------------------

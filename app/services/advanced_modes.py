@@ -492,30 +492,12 @@ Return JSON only, no preamble or explanation:
             if not scoped_pages:
                 structured_text = get_raw_doc_text(session_id, doc_name)
             else:
-                # BM25 retrieval from wiki pages (optional optimisation)
-                try:
-                    from rank_bm25 import BM25Okapi
-                    corpus = []
-                    keys = list(scoped_pages.keys())
-                    for k in keys:
-                        summary = scoped_pages[k].get("summary", "") if isinstance(scoped_pages[k], dict) else ""
-                        corpus.append(f"{k} {summary}".lower().split())
-                    bm25 = BM25Okapi(corpus)
-                    tokenized_query = question.lower().split()
-                    top_keys = bm25.get_top_n(tokenized_query, keys, n=5)
-                    
-                    parts = []
-                    for k in top_keys:
-                        parts.append(scoped_pages[k].get("content", ""))
-                    structured_text = "\n\n".join(parts)
-                except Exception as e:
-                    logger.warning(f"BM25 unavailable, using all {len(scoped_pages)} scoped wiki pages: {e}")
-                    # Fall back to all scoped wiki pages — NOT raw text (which triggers OCR)
-                    parts = []
-                    for k, v in scoped_pages.items():
-                        content = v.get("content", "") if isinstance(v, dict) else str(v)
-                        parts.append(content)
-                    structured_text = "\n\n".join(parts)
+                # Use all scoped wiki pages
+                parts = []
+                for k, v in scoped_pages.items():
+                    content = v.get("content", "") if isinstance(v, dict) else str(v)
+                    parts.append(content)
+                structured_text = "\n\n".join(parts)
             
             sources.append({"name": doc_name, "type": "wiki", "text": structured_text})
             
@@ -619,7 +601,7 @@ STRICT RULES:
 - ONLY state facts that appear in the comparison table. DO NOT add information not present in the data.
 - Flag contradictions explicitly, citing both documents and their conflicting values verbatim.
 - DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
-- PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1"). If the exact clause/page is not in the table, just map it to the document name: "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
+- PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1 | Quote: The Supplier shall deliver..."). If the exact clause/page or quote is not in the table, just map it as: "[1] Service Agreement 1_redacted.pdf | Quote: <verbatim quote>" or "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
 
         narrative, _ = llm.ask(narrative_prompt, max_tokens=1500)
         
