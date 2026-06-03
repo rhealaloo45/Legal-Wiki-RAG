@@ -78,9 +78,9 @@ To prevent hallucination at scale, the query uses a **two-step retrieval** appro
 
 ---
 
-## 3. Advanced Modes (Review & Compare)
+## 3. Advanced Modes (Review, Compare, & Draft)
 
-To supplement standard querying, two advanced analytical modes operate independently of the ingest pipeline.
+To supplement standard querying, three advanced analytical modes operate independently of the ingest pipeline.
 
 ### Review Mode
 Designed for bulk data extraction across documents.
@@ -93,6 +93,13 @@ Designed for deep, aspect-oriented comparison between existing knowledge and new
 - **Retrieval**: Uses scoped lookup to retrieve wiki content specifically tagged with the requested `source_doc`. If a selected document has no wiki pages, it automatically falls back to raw text extraction.
 - **Aspect Identification**: A single LLM pass generates 4-6 specific aspects to compare based on the user's topic.
 - **Extraction & Outliers**: Extracts the values concurrently across documents, then runs a secondary LLM pass to explicitly identify contradictions and generate a narrative synthesis. Temporary uploaded files are strictly wiped after the job completes to preserve storage.
+
+### Draft Mode
+Designed for ephemeral, context-aware legal drafting with automatic stance detection.
+- **Stance & Classification**: Analyzes the user's prompt to detect the desired negotiating stance (e.g., `tata_favorable`, `counterparty_favorable`, `neutral`) and classifies the request type (e.g., `clause`, `full_document`, `letter`).
+- **Wiki Grounding**: Optionally retrieves up to 8 relevant wiki pages as drafting precedent (`get_draft_context`) or operates in a standalone mode.
+- **Generation & Refinement**: Generates the initial draft and allows the user to submit refinement instructions (e.g., "make this more aggressive") which iterates on the draft while preserving existing structure.
+- **Export**: Converts the markdown draft, including tables and formatting, into a downloadable `.docx` file using `python-docx`.
 ### Detailed Flowchart: Review and Compare Modes
 
 #### Review Mode Flow
@@ -133,6 +140,29 @@ flowchart TD
     C_Wipe --> C_Export["Export to .xlsx"]
 
     class C_Start,C_Retrieve,C_Aspects,C_ThreadPool,C_Extract,C_Aggregate,C_Outliers,C_Synthesis,C_UI,C_Wipe,C_Export compare
+```
+
+#### Draft Mode Flow
+```mermaid
+flowchart TD
+    classDef draft fill:#4c1d95,stroke:#8b5cf6,color:#fff
+
+    D_Start(["User Input: Prompt + Stance Keywords"]) --> D_Classify["LLM: Classify Type & Detect Stance"]
+    D_Classify --> D_Context{"Ground to Wiki?"}
+    
+    D_Context -->|Yes| D_Retrieve["Retrieve Top ~8 Relevant Pages"]
+    D_Context -->|No| D_Generate["LLM: Generate Draft"]
+    D_Retrieve --> D_Generate
+    
+    D_Generate --> D_UI["Render Editable Markdown"]
+    
+    D_UI --> D_Refine["User Input: Refinement"]
+    D_Refine --> D_LLMRefine["LLM: Iterate & Preserve Structure"]
+    D_LLMRefine --> D_UI
+    
+    D_UI --> D_Export["Export to .docx"]
+
+    class D_Start,D_Classify,D_Context,D_Retrieve,D_Generate,D_UI,D_Refine,D_LLMRefine,D_Export draft
 ```
 
 
@@ -185,6 +215,21 @@ flowchart TD
     C7 --> C8["User option: Export comparison as .xlsx file"]
 
     class C1,C2,C3,C4,C5,C6,C7,C8 compare
+```
+
+#### Draft Mode (Context-Aware Drafting)
+```mermaid
+flowchart TD
+    classDef draft fill:#4c1d95,stroke:#8b5cf6,color:#fff
+
+    D1["User input: Prompt"] --> D2["Classify draft type & Stance Rules"]
+    D2 --> D3["Retrieve context from Wiki (Optional)"]
+    D3 --> D4["LLM generates drafted text"]
+    D4 --> D5["User refines draft via chat"]
+    D5 --> D6["LLM applies refinement iteratively"]
+    D6 --> D7["User option: Export draft as .docx file"]
+
+    class D1,D2,D3,D4,D5,D6,D7 draft
 ```
 
 ### LLM Wiki Pipeline Flowchart

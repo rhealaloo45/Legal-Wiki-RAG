@@ -5,6 +5,7 @@ Legal Wiki is a research tool built as a Single-Page Flask Application to proces
 ## ✨ Features
 
 - **🧠 Wiki Pipeline**: LLM-driven structured knowledge extraction that compounds over time into a persistent index, complete with automatic cross-referencing and interactive D3.js graphs.
+- **✍️ Draft Mode**: Context-aware legal drafting with automatic stance detection (e.g. Tata-friendly, Neutral) and DOCX export.
 - **📊 Review Mode**: Concurrently extract structured cells across multiple documents into a confidence-coded Excel export.
 - **🔄 Compare Mode**: Automatically identify comparison aspects across existing wiki docs + new uploaded docs, flag outliers, and generate narratives.
 - **📈 Deep Understanding**: Granular progress tracking, interactive knowledge graphs, and wiki page browsing.
@@ -67,6 +68,7 @@ The application will be accessible at `http://localhost:5001/`. 🌐
 2. **⏳ Monitor Ingestion**: The system processes documents in parallel and generates interconnected Wiki pages.
 3. **🌐 Explore Knowledge**: Browse generated Wiki pages and click them to view detailed structured text and source citations.
 4. **❓ Query**: Ask a question in the Ask tab to generate a synthesized answer with inline citations.
+5. **✍️ Draft**: Use the Draft tab to generate, refine, and export legal clauses and agreements grounded in your wiki's knowledge.
 
 ## 📜 License
 
