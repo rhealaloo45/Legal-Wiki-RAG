@@ -664,9 +664,11 @@ PAGE_SELECT_PROMPT = """\
 You are selecting relevant wiki pages to answer a question. Below is an index \
 of all available pages with their one-line summaries.
 
-Pick the 10-15 MOST RELEVANT pages for answering this question. Pay close attention \
-to any document types, names, or categories mentioned in the question (e.g., "NDAs", "Joint Venture Agreements") \
-and ONLY select pages that match those constraints. Return ONLY a JSON array of page titles, no explanation:
+Pick the 15-25 MOST RELEVANT pages for answering this question. 
+CRITICAL RULES:
+1. If the question mentions specific document types, names, or categories (e.g., "NDAs", "Joint Venture Agreements"), ONLY select pages that match those constraints.
+2. If the question is GENERAL (e.g., "List all obligations", "Compare the terms"), you MUST select relevant pages from ACROSS MULTIPLE DIFFERENT DOCUMENTS to ensure a comprehensive, cross-document answer. Do not restrict your selection to just one document.
+3. Return ONLY a JSON array of page titles, no explanation.
 
 ["Page Title 1", "Page Title 2", ...]
 
@@ -728,22 +730,6 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
 
     bm25_count = 0
     pages_for_llm = pages
-
-    if len(pages) > 20:
-        try:
-            from rank_bm25 import BM25Okapi
-            corpus = []
-            keys = list(pages.keys())
-            for k in keys:
-                summary = pages[k].get("summary", "") if isinstance(pages[k], dict) else ""
-                corpus.append(f"{k} {summary}".lower().split())
-            bm25 = BM25Okapi(corpus)
-            tokenized_query = question.lower().split()
-            top_40_keys = bm25.get_top_n(tokenized_query, keys, n=40)
-            pages_for_llm = {k: pages[k] for k in top_40_keys}
-            bm25_count = len(pages_for_llm)
-        except ImportError:
-            pass
 
     # --- Step 1: Select relevant pages ---
     if file_pages:
