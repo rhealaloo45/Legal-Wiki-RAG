@@ -1,6 +1,5 @@
 flask
 chromadb
-ollama
 pypdf
 requests
 python-dotenv
@@ -8,6 +7,5 @@ pymupdf
 pytesseract
 Pillow
 openai
-rank_bm25==0.2.2
 openpyxl==3.1.2
 python-docx
