@@ -6,7 +6,7 @@
   <title>LexWiki</title>
   <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
-  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=DM+Sans:wght@400;500&display=swap');
@@ -111,6 +111,47 @@
       display: flex;
       align-items: center;
       gap: 8px
+    }
+
+    .provider-toggle {
+      display: flex;
+      background: var(--bg-hover);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 3px;
+      font-size: 11px;
+      font-weight: 500;
+      margin-right: 10px;
+    }
+
+    .provider-option {
+      padding: 5px 12px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .provider-option.active {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      font-weight: 600;
+    }
+
+    .provider-option i {
+      font-size: 14px;
+    }
+
+    .provider-option.active[data-val="azure"] i {
+      color: #0078D4;
+    }
+
+    .provider-option.active[data-val="openrouter"] i {
+      color: var(--accent);
     }
 
     .icon-btn {
@@ -870,13 +911,13 @@
 
     /* GRAPH OVERLAY */
     .graph-overlay {
-      position: absolute;
+      position: fixed;
       top: 0;
       left: 0;
       right: 0;
       bottom: 0;
       background: rgba(15, 15, 30, 0.55);
-      z-index: 20;
+      z-index: 9999;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1665,6 +1706,24 @@
       <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New
           Session</span></div>
       <div class="topbar-right">
+        <span style="font-size:11px;font-weight:600;margin-right:-5px;color:var(--text-muted)">LLM:</span>
+        <div class="provider-toggle" id="providerToggle" style="margin-right: 2px;">
+          <div class="provider-option active" data-val="azure" onclick="setProvider('azure')">
+            <i class="ti ti-cloud"></i> Azure
+          </div>
+          <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
+            <i class="ti ti-router"></i> OpenRouter
+          </div>
+        </div>
+        <span style="font-size:11px;font-weight:600;margin-right:-5px;margin-left:2px;color:var(--text-muted)">Embed:</span>
+        <div class="provider-toggle" id="embeddingToggle" style="margin-right: 10px;">
+          <div class="provider-option active" data-val="azure" onclick="setEmbeddingProvider('azure')">
+            <i class="ti ti-cloud"></i> Azure
+          </div>
+          <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
+            <i class="ti ti-router"></i> OpenRouter
+          </div>
+        </div>
         <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
@@ -2231,6 +2290,65 @@
     // ============================================================
     // UI Tabs & Overlays
     // ============================================================
+    function setProvider(val) {
+      document.querySelectorAll('#providerToggle .provider-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.val === val);
+      });
+      fetch('/api/settings/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: val })
+      })
+      .then(r => r.json())
+      .then(data => {
+        showToast("LLM Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+      })
+      .catch(err => {
+        console.error(err);
+        showToast("Failed to switch LLM provider", "error");
+      });
+    }
+
+    function setEmbeddingProvider(val) {
+      document.querySelectorAll('#embeddingToggle .provider-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.val === val);
+      });
+      fetch('/api/settings/embedding', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: val })
+      })
+      .then(r => r.json())
+      .then(data => {
+        showToast("Embedding Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+      })
+      .catch(err => {
+        console.error(err);
+        showToast("Failed to switch Embedding provider", "error");
+      });
+    }
+
+    // Load initial providers
+    fetch('/api/settings/llm')
+      .then(r => r.json())
+      .then(data => {
+        if (data.provider) {
+          document.querySelectorAll('#providerToggle .provider-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.val === data.provider);
+          });
+        }
+      });
+
+    fetch('/api/settings/embedding')
+      .then(r => r.json())
+      .then(data => {
+        if (data.provider) {
+          document.querySelectorAll('#embeddingToggle .provider-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.val === data.provider);
+          });
+        }
+      });
+
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
       sb.style.display = (sb.style.display === 'none') ? 'flex' : 'none';
@@ -3782,51 +3900,60 @@
 
     function renderGraph() {
       const container = document.getElementById('wiki-graph');
-      if (!wikiPages || !Object.keys(wikiPages).length) {
-        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No knowledge graph data available yet.</div>';
-        return;
+      try {
+        if (!wikiPages || !Object.keys(wikiPages).length) {
+          container.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No knowledge graph data available yet.</div>';
+          return;
+        }
+        container.innerHTML = '';
+        const w = 600, h = 320;
+        const svg = d3.select(container).append('svg')
+          .attr('width', '100%')
+          .attr('height', '100%')
+          .style('min-height', '280px')
+          .attr('viewBox', `0 0 ${w} ${h}`);
+        const g = svg.append('g');
+        svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+        const titles = Object.keys(wikiPages);
+        const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
+        const nodeSet = new Set(titles);
+        const links = wikiRelations.filter(r => nodeSet.has(r.from) && nodeSet.has(r.to)).map(r => ({ source: r.from, target: r.to, label: r.label }));
+
+        const deg = {};
+        links.forEach(l => { deg[l.source] = (deg[l.source] || 0) + 1; deg[l.target] = (deg[l.target] || 0) + 1; });
+        const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+        const sim = d3.forceSimulation(nodes)
+          .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+          .force('charge', d3.forceManyBody().strength(-200))
+          .force('center', d3.forceCenter(w / 2, h / 2))
+          .force('collision', d3.forceCollide(25));
+
+        const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
+        const node = g.selectAll('.node').data(nodes).join('circle')
+          .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
+          .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
+          .style('cursor', 'pointer').call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+        const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length > 15 ? d.id.slice(0, 13) + '…' : d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));
+
+        node.on('click', (e, d) => {
+          const tt = document.getElementById('node-tooltip');
+          tt.innerHTML = `<strong>${d.id}</strong><hr style="margin:4px 0;border-color:var(--border)"><div>${(d.summary || '').substring(0, 150)}</div>`;
+          tt.style.left = (e.pageX + 10) + 'px'; tt.style.top = (e.pageY - 10) + 'px'; tt.style.opacity = 1;
+          setTimeout(() => tt.style.opacity = 0, 4000);
+        });
+
+        sim.on('tick', () => {
+          link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+          node.attr('cx', d => d.x).attr('cy', d => d.y);
+          label.attr('x', d => d.x).attr('y', d => d.y);
+        });
+      } catch (err) {
+        console.error("D3 Render Error:", err);
+        container.innerHTML = `<div style="color:red;padding:20px;font-size:12px;word-wrap:break-word;">Graph Error: ${err.message}</div>`;
       }
-      container.innerHTML = '';
-      const w = 600, h = 320;
-      const svg = d3.select(container).append('svg').attr('viewBox', `0 0 ${w} ${h}`);
-      const g = svg.append('g');
-      svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
-
-      const titles = Object.keys(wikiPages);
-      const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
-      const nodeSet = new Set(titles);
-      const links = wikiRelations.filter(r => nodeSet.has(r.from) && nodeSet.has(r.to)).map(r => ({ source: r.from, target: r.to, label: r.label }));
-
-      const deg = {};
-      links.forEach(l => { deg[l.source] = (deg[l.source] || 0) + 1; deg[l.target] = (deg[l.target] || 0) + 1; });
-      const color = d3.scaleOrdinal(d3.schemeTableau10);
-
-      const sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id(d => d.id).distance(100))
-        .force('charge', d3.forceManyBody().strength(-200))
-        .force('center', d3.forceCenter(w / 2, h / 2))
-        .force('collision', d3.forceCollide(25));
-
-      const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
-      const node = g.selectAll('.node').data(nodes).join('circle')
-        .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
-        .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
-        .style('cursor', 'pointer').call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-
-      const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length > 15 ? d.id.slice(0, 13) + '…' : d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));
-
-      node.on('click', (e, d) => {
-        const tt = document.getElementById('node-tooltip');
-        tt.innerHTML = `<strong>${d.id}</strong><hr style="margin:4px 0;border-color:var(--border)"><div>${(d.summary || '').substring(0, 150)}</div>`;
-        tt.style.left = (e.pageX + 10) + 'px'; tt.style.top = (e.pageY - 10) + 'px'; tt.style.opacity = 1;
-        setTimeout(() => tt.style.opacity = 0, 4000);
-      });
-
-      sim.on('tick', () => {
-        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-        node.attr('cx', d => d.x).attr('cy', d => d.y);
-        label.attr('x', d => d.x).attr('y', d => d.y);
-      });
     }
   </script>
 </body>
