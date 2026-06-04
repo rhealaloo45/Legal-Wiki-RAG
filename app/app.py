@@ -117,6 +117,29 @@ def health():
     return jsonify(checks)
 
 
+@app.route("/api/settings/llm", methods=["GET"])
+def get_llm_settings():
+    return jsonify({"provider": getattr(config, "LLM_PROVIDER", "azure")})
+
+@app.route("/api/settings/llm", methods=["POST"])
+def set_llm_settings():
+    data = request.json or {}
+    provider = data.get("provider", "azure")
+    config.LLM_PROVIDER = provider
+    return jsonify({"status": "ok", "provider": provider})
+
+@app.route("/api/settings/embedding", methods=["GET"])
+def get_embedding_settings():
+    return jsonify({"provider": getattr(config, "EMBEDDING_PROVIDER", "azure")})
+
+@app.route("/api/settings/embedding", methods=["POST"])
+def set_embedding_settings():
+    data = request.json or {}
+    provider = data.get("provider", "azure")
+    config.EMBEDDING_PROVIDER = provider
+    return jsonify({"status": "ok", "provider": provider})
+
+
 @app.route("/upload", methods=["POST"])
 def upload():
     """Upload files or folders → immediately accept, then ingest in background via executor.
