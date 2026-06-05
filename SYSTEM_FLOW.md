@@ -134,7 +134,7 @@ To prevent concurrent write corruption, the database load-merge-save cycle is wr
      }
      ```
    - **Existing Page**:
-     - **Contradiction Pre-Flight**: If both existing and new content exceed 200 characters, a mini-LLM call checks for contradictions:
+     - **Contradiction Pre-Flight**: If both existing and new content exceed 200 characters, a mini-LLM call checks for contradictions using the **fast/cheap model** (`max_tokens=300`). This is a structured boolean check — not synthesis — so the cheap model is sufficient and significantly reduces ingest cost at scale.
        - *Prompt*: `"Do these two texts contradict each other on any specific factual claim (dates, values, obligations, parties)? Reply JSON only: {"contradicts": bool, "claim": str|null, "value_a": str|null, "value_b": str|null}"`
        - *Action*: If `contradicts` is `true`, the page is flagged as `contradiction_flagged = true`. A `variants` list tracks the historical values and ingestion timestamp per document:
          ```json
@@ -197,7 +197,8 @@ If the wiki is small (<= 20 pages), all pages are included. If the wiki is large
   - ...
   QUESTION: {question}
   ```
-- **LLM Output**: A plain JSON list of titles: `["Payment Terms (NDA)", "Termination (Service Agreement)"]`.
+- **Model**: Uses the **fast/cheap model** (`AZURE_FAST_DEPLOYMENT` / `OPENROUTER_FAST_MODEL`). Page selection is a title-matching task, not legal synthesis — no frontier model capability is needed here.
+- **LLM Output**: A plain JSON list of titles: `["Payment Terms (NDA)", "Termination (Service Agreement)"]`. Capped at `MAX_TOKENS_PAGE_SELECTION` (500 tokens).
 
 ### Step 2.3: Context Compilation
 - The contents of the selected pages are retrieved.
@@ -206,12 +207,15 @@ If the wiki is small (<= 20 pages), all pages are included. If the wiki is large
 - The segments are concatenated with header titles: `## Page Title\n{Content}`.
 
 ### Step 2.4: Answer Generation
-- **What is Sent to the LLM**: Rendered using `ANSWER_PROMPT` in [prompts.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/prompts.py#L9-L43):
-  - *Key prompt instructions*: Force step-by-step reasoning in `<reasoning>` tags first. Synthesize across documents and group approaches. Use IEEE brackets for inline citations (e.g. `[1]`). Construct a trailing `References` list following the format: `[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>`. Do not use external legal assumptions.
+- **Model**: Uses the **full synthesis model** (`AZURE_OPENAI_DEPLOYMENT` / `OPENROUTER_MODEL`). Capped at `MAX_TOKENS_ANSWER` (4096 tokens).
+- **What is Sent to the LLM**: Rendered using `ANSWER_PROMPT` in [prompts.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/prompts.py):
+  - *Key prompt instructions*: Force step-by-step reasoning in `<reasoning>` tags first. Synthesize across documents and group approaches. Use IEEE brackets for inline citations (e.g. `[1]`). Construct a trailing `References` list following the format: `[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>`. Do not use external legal assumptions. End the `<reasoning>` block with `CONFIDENCE_SCORE: [0-100]` and `CONFIDENCE_REASON: [sentence]` on their own lines.
 - **LLM Output**:
   ```xml
   <reasoning>
   Evaluating context... Found payment cap in Doc A [1] and Doc B [2].
+  CONFIDENCE_SCORE: 92
+  CONFIDENCE_REASON: Both payment clauses are directly quoted verbatim from the provided context.
   </reasoning>
   The payment terms require net 30 payment terms [1]. However, in service agreement [2], net 45 is defined.
   
@@ -219,12 +223,11 @@ If the wiki is small (<= 20 pages), all pages are included. If the wiki is large
   [1] Tata_NDA.pdf, Clause 4.2 | Quote: Payment shall be completed in net thirty (30) days...
   [2] Service_Agreement.pdf, Clause 12.1 | Quote: The client shall pay all invoices within forty-five days...
   ```
-- **Post-processing**: The server strips out the `<reasoning>` tags before presenting it to the user. It parses references to highlight which files and pages were used.
+- **Post-processing**: Before stripping the `<reasoning>` block, the server extracts `CONFIDENCE_SCORE` and `CONFIDENCE_REASON` via regex. The reasoning block is then stripped for the user-facing answer. References are parsed to highlight which files and pages were used. **No second LLM call is made for confidence evaluation** — it is derived from the same reasoning trace at zero additional cost.
 
-### Step 2.5: Confidence Evaluation & Wiki Saving (Compound Learning)
-1. **Confidence Pass**: The generated answer, question, and context are passed to an LLM evaluator (`_evaluate_confidence` in [wiki.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/wiki.py#L776-L815)).
-   - **LLM Output**: JSON object: `{"confidence_score": 85, "reason": "All facts fully grounded in context."}`
-2. **Answer Filing**: If the confidence score is **>= 80%**, the question and answer are compiled into a new wiki page payload:
+### Step 2.5: Confidence Scoring & Wiki Saving (Compound Learning)
+1. **Confidence Extraction**: `CONFIDENCE_SCORE` and `CONFIDENCE_REASON` are parsed directly from the `<reasoning>` block of the answer — not via a separate LLM call. This eliminates what was previously a full second round-trip using the same context.
+2. **Answer Filing**: If the confidence score is **>= 80**, the question and answer are compiled into a new wiki page payload:
    - **Title**: `Q: {first_50_chars_of_question}...`
    - **Content**: The full generated answer markdown.
    - **Summary**: First 100 characters of the answer.
