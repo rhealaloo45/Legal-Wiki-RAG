@@ -8,8 +8,8 @@ This document provides a comprehensive, step-by-step technical breakdown of the 
 
 The ingestion pipeline converts raw unstructured legal documents (PDFs and TXT files) into a structured, relational knowledge base.
 
-### Step 1.1: Upload and Queueing
-1. **Endpoint**: `POST /upload` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L120-L206)
+#### Step 1.1: Upload and Queueing
+1. **Endpoint**: `POST /upload` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L143-L228)
 2. **Inputs**:
    - `file`: One or more files.
    - `session_id`: Unique identifier for the active session (automatically generated if not provided).
@@ -18,12 +18,14 @@ The ingestion pipeline converts raw unstructured legal documents (PDFs and TXT f
 4. **Queueing**:
    - An entry is initialized in `config.PROGRESS_STORE[session_id]` to track the total document count and pipeline completion.
    - Ingestion tasks are submitted to a global `ThreadPoolExecutor` for concurrent background processing.
+     > [!NOTE]
+     > Although the backend defines a RAG pipeline, the RAG background task submission (`_ingest_single_doc_rag`) is currently deactivated (commented out) in `app.py`. Only the Wiki ingestion task (`_ingest_single_doc_wiki`) is active.
    - **Response**: The Flask server immediately returns a non-blocking `{"status": "accepted", "files_queued": N}`. The client frontend polls `/progress` every 1.5 seconds.
-
+ 
 ### Step 1.2: Text Extraction & OCR
-- **Function**: `read_file` in `services/reader.py` (triggered by [_ingest_single_doc_wiki](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L224-L235)).
+- **Function**: `read_file` in `services/reader.py` (triggered by [_ingest_single_doc_wiki](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L247-L257)).
 - **Text Files**: Read directly with UTF-8 encoding.
-- **PDF Files**: Text is extracted using `pdfplumber`. If a PDF contains scanned pages or images (no extractable text), the reader falls back to **Tesseract OCR** (configured via `TESSERACT_CMD` in the `.env` file).
+- **PDF Files**: Text is extracted using `pypdf` (`PdfReader`). If a page yields fewer than 50 characters (e.g. scanned pages or image-only PDFs), the reader renders the page to an image using `pymupdf` (`fitz`) and falls back to **pytesseract** OCR (using the executable path configured via `TESSERACT_CMD` in the `.env` file).
 
 ### Step 1.3: Adaptive Segmentation
 The system chooses an ingestion strategy depending on the length of the extracted text:
@@ -158,8 +160,11 @@ To prevent concurrent write corruption, the database load-merge-save cycle is wr
 ---
 
 ## 2. Query Pipeline ("Ask Mode")
-
+ 
 Ask Mode answers user questions using synthesized wiki pages, with a feedback loop that saves generated insights back to the wiki.
+ 
+> [!NOTE]
+> In the Flask backend (`app.py`), the query route (`/query`) is designed to query RAG, Wiki, and Hybrid contexts. However, the RAG and Hybrid query pathways are currently deactivated (commented out) and return default placeholder messages. The Ask Mode UI renders exclusively from the Wiki query pipeline.
 
 ```mermaid
 graph TD
@@ -242,7 +247,7 @@ graph TD
 ```
 
 ### Step 3.1: Start Job
-- **Endpoint**: `POST /review/start` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L591-L615) -> launches [_run_review_job](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/advanced_modes.py#L250-L360) in a background thread.
+- **Endpoint**: `POST /review/start` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L614-L638) -> launches [_run_review_job](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/advanced_modes.py#L250-L360) in a background thread.
 - **Inputs**: `session_id`, `doc_names` (manual check-boxes), and the `question` prompt.
 
 ### Step 3.2: NLP Column & Doc Inference
@@ -295,7 +300,7 @@ For each target document, the system fetches content:
 Compare Mode aligns multiple documents side-by-side against a topic, automatically detects outliers or contradictions, and writes a narrative summary.
 
 ### Step 4.1: Start Job
-- **Endpoint**: `POST /compare/start` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L662-L710) -> launches [_run_compare_job](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/advanced_modes.py#L419-L627) in a background thread.
+- **Endpoint**: `POST /compare/start` in [app.py](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/app.py#L685-L732) -> launches [_run_compare_job](file:///c:/Users/Rhea/Desktop/Tasks/Legal-wiki-RAG/app/services/advanced_modes.py#L419-L627) in a background thread.
 - **Inputs**: `session_id`, `doc_names` (existing files to compare), `question` (topic), and an optional new file uploaded on-the-fly (`uploaded_file`).
 
 ### Step 4.2: Inference and Aspect Identification
@@ -332,17 +337,17 @@ Compare Mode aligns multiple documents side-by-side against a topic, automatical
 
 Draft Mode generates ephemeral legal clauses, documents, or communications based on the user's prompt, automatically adapting its drafting stance and drawing on wiki context if requested.
 
-### Step 5.1: Start Job & Classification
-- **Endpoint**: `POST /draft/generate` in `app.py` -> launches `_run_draft_job` in a background thread.
+#### Step 5.1: Start Job & Classification
+- **Endpoint**: `POST /draft/start` in `app.py` -> launches `_run_draft_job` in a background thread.
 - **Inputs**: `session_id`, `prompt`, and `use_wiki` boolean.
 - **NLP Inference**:
   - `classify_draft`: Sends a quick LLM request to classify the prompt into one of five types: `clause`, `full_document`, `communication`, `letter`, or `tracker`.
   - `detect_stance`: Uses keyword matching on the prompt (e.g., "tata-friendly", "vendor-favorable") to select a stance template (`tata_favorable`, `counterparty_favorable`, or `neutral`).
-
+ 
 ### Step 5.2: Wiki Context Retrieval (Optional)
 If `use_wiki` is true, the system grounds the draft in existing knowledge via `get_draft_context`:
 - It checks for explicitly mentioned files in the prompt.
-- It retrieves up to 8 of the most relevant wiki pages to use as precedent.
+- It retrieves relevant wiki pages to use as precedent (up to 8 pages if a specific file is mentioned in the prompt, or up to 15-20 pages if no specific file is mentioned).
 - It truncates the context string to prevent token limits (roughly 8000 chars) and flags any contradictions found in the source pages.
 
 ### Step 5.3: Generation
