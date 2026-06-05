@@ -11,7 +11,7 @@ Legal Wiki is a research tool built as a Single-Page Flask Application to proces
 - **📈 Deep Understanding**: Granular progress tracking, interactive knowledge graphs, and wiki page browsing.
 - **🔒 Session Isolation**: Every chat session maintains its own completely independent wiki, isolating knowledge context and document uploads securely.
 - **🎨 Premium UI**: A custom-built, lightweight Light Mode Single-Page Application (SPA) designed without heavy frontend frameworks, offering a seamless and context-aware experience.
-- **☁️ Azure OpenAI Powered**: Uses Azure OpenAI for all LLM extraction, synthesis, and querying tasks.
+- **☁️ Azure OpenAI & OpenRouter Powered**: Configurable to use either Azure OpenAI or OpenRouter for all LLM extraction, embedding, synthesis, and querying tasks.
 
 ## 🏗️ Project Architecture
 
@@ -19,10 +19,11 @@ For a detailed technical and architectural breakdown of how the pipeline operate
 
 ## 🛠️ Setup & Installation
 
-### 📋 Prerequisites
+## Prerequisites
 
 - Python 3.9+ 🐍
-- Azure OpenAI account and credentials 🌐
+- Azure OpenAI credentials OR an OpenRouter API key 🌐
+- (Optional) Tesseract OCR executable installed on your system if you need to process scanned/image-based PDFs.
 
 ### Step 1: Environment Setup ⚙️
 
@@ -39,16 +40,36 @@ pip install -r requirements.txt
 Create a `.env` file in the `app/` directory by copying the `.env.example`:
 
 ```bash
-cp app/.env.example app/.env
+cp .env.example .env
 ```
 
-Edit `app/.env` to include your Azure OpenAI API keys, endpoint, and deployment name:
+Edit `app/.env` to configure your selected provider:
 
+#### Option A: OpenRouter Config
 ```env
+LLM_PROVIDER=openrouter
+EMBEDDING_PROVIDER=openrouter
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_MODEL=google/gemma-4-26b-a4b-it:free
+OPENROUTER_EMBEDDING_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
+```
+
+#### Option B: Azure OpenAI Config
+```env
+LLM_PROVIDER=azure
+EMBEDDING_PROVIDER=azure
 AZURE_OPENAI_API_KEY=your_key_here
 AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
-AZURE_OPENAI_API_VERSION=2024-02-15-preview
-AZURE_OPENAI_DEPLOYMENT=gpt-4o
+AZURE_OPENAI_API_VERSION=2025-01-01-preview
+AZURE_OPENAI_DEPLOYMENT=gpt-5.4
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+EMBEDDING_DIMENSIONS=1536
+```
+
+#### OCR Config (Optional)
+If Tesseract OCR is not on your system PATH, define its path:
+```env
+TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
 ```
 
 ### Step 3: Run the Application 🚀
@@ -56,7 +77,6 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4o
 Start the Flask server from the `app/` directory:
 
 ```bash
-cd app
 python app.py
 ```
 

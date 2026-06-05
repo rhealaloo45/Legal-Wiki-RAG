@@ -6,8 +6,10 @@ This application is a research and knowledge management tool designed to process
 
 The system is built as a **Single-Page Flask Application**:
 - **Backend**: Python/Flask utilizing a `ThreadPoolExecutor` for parallel file ingestion and query processing. Uploads are **non-blocking** — the server accepts files and returns immediately while ingestion runs in background threads. Features persistent session management with automatic naming.
-- **Frontend**: Bootstrap 5 (Dark Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a centralized Wiki response view, a wiki page browser, and a file tree viewer for nested uploads.
-- **LLM Engine**: Azure OpenAI (or equivalent provider) handles narrative synthesis, legal extraction, and query answering.
+  > [!NOTE]
+  > While the codebase includes services for raw semantic search/vector retrieval (`rag.py` and `hybrid.py`), these pipelines are currently deactivated (commented out) in the main API server (`app.py`). All document queries and analytics run exclusively through the **LLM Wiki Synthesis** engine.
+- **Frontend**: Bootstrap 5 (Light Mode), Vanilla JS, and D3.js for knowledge graph visualization. Features document-level progress bars with ETA, a centralized Wiki response view, a wiki page browser, and a file tree viewer for nested uploads.
+- **LLM Engine**: Configurable to use either Azure OpenAI or OpenRouter for narrative synthesis, legal extraction, and query answering.
 
 ### Concurrency & Routing Flow
 
@@ -60,7 +62,7 @@ The system uses **adaptive segmentation** based on document length:
 **Merge & Persistence:**
 - **New Pages**: Added to the index with content and a one-line summary (`{"title": {"content": "...", "summary": "...", "source_doc": "..."}}`).
 - **Existing Pages**: Content is appended with a separator (`---`). 
-- **Contradiction Detection**: Pre-flight checks on long appending segments (`>200 chars`) trigger a micro-LLM pass (`max_tokens=100`). Found factual contradictions push the page into a `contradiction_flagged` state and populate a `variants` array to track the document lineage of the conflicting values.
+- **Contradiction Detection**: Pre-flight checks on long appending segments (`>200 chars`) trigger a micro-LLM pass (`max_tokens=300`). Found factual contradictions push the page into a `contradiction_flagged` state and populate a `variants` array to track the document lineage of the conflicting values.
 - **Cross-Referencing**: Automatic pass to detect mentions of page titles within other pages.
 - **Thread Safety**: Per-session `threading.Lock` protects the load→merge→save cycle, preventing data loss during parallel multi-document ingestion. A separate `_log_locks` dict safeguards concurrent writes to a timestamped `log.md` file.
 - **Storage**: The wiki is stored as a structured `index.json` per session.
@@ -312,20 +314,27 @@ The frontend is a custom-built, lightweight Single-Page Application (SPA) design
 - **Technology Stack**: HTML5, Vanilla JavaScript, and minimal Bootstrap 5 (only used for structural grids).
 - **Aesthetics**: Complete departure from dark-mode; utilizes a clean Light Theme defined by custom CSS variables (`--bg-surface`, `--accent`, etc.) and Google Fonts (`Lora` and `DM Sans`).
 - **Layout**: Three fixed zones (Topbar, Sidebar, Main Workspace) with no page reloads. Modals (Doc Reader, Knowledge Graph) are implemented as absolute-positioned overlays.
-- **Documentation**: For a complete breakdown of every interface component, refer to [UI.md](UI.md).
-
 ---
 
 ## 6. Technical Specifications
 
-- **LLM**: Azure OpenAI integration configured via `config.py`
-- **Graphing**: D3.js Force Simulation
-- **Isolation**: `session_id` used for per-user database and wiki isolation
-- **Concurrency**: `ThreadPoolExecutor` for parallel document ingestion + per-session `threading.Lock` for wiki index safety. Uses nested `ThreadPoolExecutor(5)` for concurrent segment compilation inside `wiki.py`.
+- **LLM & Embeddings**: Supports both Azure OpenAI and OpenRouter configuration (via `config.py`).
+- **Graphing**: D3.js Force Simulation for navigable knowledge graph.
+- **Isolation**: `session_id` used for per-user database and wiki isolation.
+- **Concurrency**: `ThreadPoolExecutor` for parallel document ingestion + per-session `threading.Lock` for wiki index safety. Uses nested `ThreadPoolExecutor` (concurrency limited by `WIKI_MAX_WORKERS` from config, default: 3) for concurrent segment compilation inside `wiki.py`.
 - **Configurables** (via `.env`):
+  - `LLM_PROVIDER` — Provider for LLM calls (`azure` or `openrouter`, default: `azure`)
+  - `EMBEDDING_PROVIDER` — Provider for embedding generation (`azure` or `openrouter`, default: `azure`)
   - `AZURE_OPENAI_API_KEY` — Azure API key
-  - `AZURE_OPENAI_ENDPOINT` — Azure Endpoint
+  - `AZURE_OPENAI_ENDPOINT` — Azure Endpoint URL
   - `AZURE_OPENAI_API_VERSION` — Azure API version
-  - `AZURE_OPENAI_DEPLOYMENT` — Deployment name
+  - `AZURE_OPENAI_DEPLOYMENT` — Deployment name for Azure LLM (e.g. `gpt-5.4`)
+  - `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` — Deployment name for Azure embeddings (e.g. `text-embedding-3-large`)
+  - `EMBEDDING_DIMENSIONS` — Embedding dimensions (default: `1536`)
+  - `OPENROUTER_API_KEY` — OpenRouter API key
+  - `OPENROUTER_MODEL` — OpenRouter LLM model name (e.g. `google/gemma-4-26b-a4b-it:free`)
+  - `OPENROUTER_EMBEDDING_MODEL` — OpenRouter embedding model name (e.g. `nvidia/llama-nemotron-embed-vl-1b-v2:free`)
+  - `WIKI_MAX_WORKERS` — Thread workers for concurrent chunk processing (default: `3`)
+  - `TESSERACT_CMD` — Path to Tesseract executable (for OCR fallback on scanned PDFs)
   - `PORT` — server port (default: 5001)
 
