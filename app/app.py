@@ -292,10 +292,11 @@ def query_route():
     wiki_context = wiki_ctx_res.get("context", "")
     selected_titles = wiki_ctx_res.get("selected_titles", [])
     bm25_count = wiki_ctx_res.get("bm25_count", 0)
+    page_selection_usage = wiki_ctx_res.get("page_selection_usage", {})
 
     # Step 2: Generate answers concurrently
     # rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
-    wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id, bm25_count)
+    wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id, bm25_count, page_selection_usage)
     # hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
 
     rag_t0 = time.time()

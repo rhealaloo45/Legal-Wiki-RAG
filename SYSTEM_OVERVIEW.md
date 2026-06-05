@@ -62,7 +62,7 @@ The system uses **adaptive segmentation** based on document length:
 **Merge & Persistence:**
 - **New Pages**: Added to the index with content and a one-line summary (`{"title": {"content": "...", "summary": "...", "source_doc": "..."}}`).
 - **Existing Pages**: Content is appended with a separator (`---`). 
-- **Contradiction Detection**: Pre-flight checks on long appending segments (`>200 chars`) trigger a micro-LLM pass (`max_tokens=300`). Found factual contradictions push the page into a `contradiction_flagged` state and populate a `variants` array to track the document lineage of the conflicting values.
+- **Contradiction Detection**: Pre-flight checks on long appending segments (`>200 chars`) trigger a micro-LLM pass (`max_tokens=300`) using the **fast/cheap model** — this is a structured boolean JSON check, not synthesis. Found factual contradictions push the page into a `contradiction_flagged` state and populate a `variants` array to track the document lineage of the conflicting values.
 - **Cross-Referencing**: Automatic pass to detect mentions of page titles within other pages.
 - **Thread Safety**: Per-session `threading.Lock` protects the load→merge→save cycle, preventing data loss during parallel multi-document ingestion. A separate `_log_locks` dict safeguards concurrent writes to a timestamped `log.md` file.
 - **Storage**: The wiki is stored as a structured `index.json` per session.
@@ -72,10 +72,10 @@ The system uses **adaptive segmentation** based on document length:
 To prevent hallucination at scale, the query uses a **two-step retrieval** approach:
 
 1. **Document Mention Check**: Scans the user query string for mentions of any document names. If file mentions are detected, all wiki pages containing those filenames are marked as forced selections.
-2. **Page Selection**: If the wiki grows beyond 20 pages, the LLM receives the list of page titles + one-line summaries. It selects the 15-25 most relevant pages for the question.
-3. **Deep Answer**: Only the selected pages' full content is sent in the answer prompt, prepending a `[WARNING]` tag to any page flagged for contradictions.
-4. **Chain of Thought & Grounding**: The LLM first generates a `<reasoning>` trace to verify facts against the context, and uses strict inline citations to ensure no hallucination.
-5. **Answer Filing**: Highly confident answers (`>= 0.80`) are automatically filed back into the wiki as a `"Q: {question}"` page for future compound learning. An anti-duplication title check ensures similar questions append to existing pages rather than fragmenting the wiki.
+2. **Page Selection**: If the wiki grows beyond 20 pages, the **fast/cheap model** receives the list of page titles + one-line summaries and selects the 15-25 most relevant pages. Title matching does not require legal reasoning depth, so the cheap model is used here to reduce cost.
+3. **Deep Answer**: Only the selected pages' full content is sent to the **full synthesis model** in the answer prompt, prepending a `[WARNING]` tag to any page flagged for contradictions.
+4. **Chain of Thought, Grounding & Confidence**: The LLM generates a `<reasoning>` trace to verify facts against the context, ending with a self-assessed `CONFIDENCE_SCORE` (0–100) and `CONFIDENCE_REASON`. Confidence is extracted from the reasoning block via regex — **no second LLM call is made**. This halves query-time LLM cost compared to a separate confidence-evaluation round-trip.
+5. **Answer Filing**: Answers scoring `>= 80` confidence are automatically filed back into the wiki as a `"Q: {question}"` page for future compound learning. An anti-duplication title check ensures similar questions append to existing pages rather than fragmenting the wiki.
 6. **Graph Rendering**: D3.js renders the `index.json` as a force-directed graph where nodes are entities and edges are relationships.
 
 ---
@@ -319,6 +319,8 @@ The frontend is a custom-built, lightweight Single-Page Application (SPA) design
 ## 6. Technical Specifications
 
 - **LLM & Embeddings**: Supports both Azure OpenAI and OpenRouter configuration (via `config.py`).
+- **Dual-Model Routing**: Uses a large model for synthesis-heavy tasks (ingest compilation, answer generation, drafting, compare narrative) and a fast/cheap model for lightweight structured tasks (page selection, contradiction pre-flight, JSON repair, cell extraction). Routing is handled in `llm.py` via the `fast=True` flag — no code changes needed to swap models, only `.env` updates.
+- **Token Budgets**: All LLM calls have explicit `max_tokens` caps defined as constants in `config.py` (`MAX_TOKENS_*`). This prevents silently burning token budget on calls whose outputs are small JSON objects.
 - **Graphing**: D3.js Force Simulation for navigable knowledge graph.
 - **Isolation**: `session_id` used for per-user database and wiki isolation.
 - **Concurrency**: `ThreadPoolExecutor` for parallel document ingestion + per-session `threading.Lock` for wiki index safety. Uses nested `ThreadPoolExecutor` (concurrency limited by `WIKI_MAX_WORKERS` from config, default: 3) for concurrent segment compilation inside `wiki.py`.
@@ -328,11 +330,13 @@ The frontend is a custom-built, lightweight Single-Page Application (SPA) design
   - `AZURE_OPENAI_API_KEY` — Azure API key
   - `AZURE_OPENAI_ENDPOINT` — Azure Endpoint URL
   - `AZURE_OPENAI_API_VERSION` — Azure API version
-  - `AZURE_OPENAI_DEPLOYMENT` — Deployment name for Azure LLM (e.g. `gpt-5.4`)
+  - `AZURE_OPENAI_DEPLOYMENT` — **Big model** deployment for synthesis tasks (e.g. `gpt-5.4`)
+  - `AZURE_FAST_DEPLOYMENT` — **Fast/cheap model** deployment for selection, contradiction checks, repair (e.g. `gpt-5.4-mini`)
   - `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` — Deployment name for Azure embeddings (e.g. `text-embedding-3-large`)
   - `EMBEDDING_DIMENSIONS` — Embedding dimensions (default: `1536`)
   - `OPENROUTER_API_KEY` — OpenRouter API key
-  - `OPENROUTER_MODEL` — OpenRouter LLM model name (e.g. `google/gemma-4-26b-a4b-it:free`)
+  - `OPENROUTER_MODEL` — **Big model** for synthesis tasks (e.g. `openai/gpt-oss-120b:free`)
+  - `OPENROUTER_FAST_MODEL` — **Fast/cheap model** for selection, contradiction checks, repair (e.g. `openai/gpt-oss-20b:free`)
   - `OPENROUTER_EMBEDDING_MODEL` — OpenRouter embedding model name (e.g. `nvidia/llama-nemotron-embed-vl-1b-v2:free`)
   - `WIKI_MAX_WORKERS` — Thread workers for concurrent chunk processing (default: `3`)
   - `TESSERACT_CMD` — Path to Tesseract executable (for OCR fallback on scanned PDFs)

@@ -138,14 +138,24 @@ def _parse_json_safe(raw: str) -> dict | None:
 
 
 def _repair_json(raw: str) -> dict:
-    """Ask the LLM to fix malformed JSON. Returns parsed dict or empty fallback."""
+    """Ask the LLM to fix malformed JSON. Returns parsed dict or empty fallback.
+
+    Uses the fast/cheap model — JSON repair is purely syntactic formatting work,
+    not legal synthesis. Token cap at MAX_TOKENS_JSON_REPAIR since output is
+    bounded by the input size.
+    """
     repair_prompt = (
         "The following is malformed JSON. Fix it and return only valid JSON, "
         "no explanation:\n"
         f"{raw}"
     )
     try:
-        fixed, _ = llm.ask(repair_prompt, pipeline="wiki")
+        fixed, _ = llm.ask(
+            repair_prompt,
+            pipeline="wiki",
+            fast=True,
+            max_tokens=config.MAX_TOKENS_JSON_REPAIR,
+        )
         result = _parse_json_safe(fixed)
         if result is not None:
             return result
@@ -199,6 +209,7 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
             existing_summary = existing_page.get("summary", "")
             
             # Contradiction check pre-flight
+            # Uses fast/cheap model — this is a structured boolean check, not synthesis.
             if len(new_content) > 200 and len(existing_content) > 200:
                 prompt = (
                     "Do these two texts contradict each other on any specific factual claim (dates, values, obligations, parties)?\n"
@@ -208,7 +219,11 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
                     f"Text B:\n{new_content}"
                 )
                 try:
-                    raw, _ = llm.ask(prompt, max_tokens=300)
+                    raw, _ = llm.ask(
+                        prompt,
+                        fast=True,
+                        max_tokens=config.MAX_TOKENS_CONTRADICTION,
+                    )
                     parsed = _parse_json_safe(raw)
                     if parsed and parsed.get("contradicts"):
                         existing_page["contradiction_flagged"] = True
@@ -487,7 +502,7 @@ def _ingest_single_call(text: str, doc_name: str) -> dict:
     """Process a short document in one LLM call."""
     prompt = INGEST_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
     try:
-        raw, _ = llm.ask(prompt, pipeline="wiki")
+        raw, _ = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
     except RuntimeError as e:
         logger.error("LLM call failed during wiki ingest: %s", e)
         return {"pages": {}, "relations": []}
@@ -508,7 +523,11 @@ def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
     """Phase 1: extract overview + topic list from document excerpt."""
     prompt = OVERVIEW_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
     try:
-        raw, _ = llm.ask(prompt, pipeline="wiki")
+        raw, _ = llm.ask(
+            prompt,
+            pipeline="wiki",
+            max_tokens=config.MAX_TOKENS_INGEST_OVERVIEW,
+        )
     except RuntimeError as e:
         logger.error("LLM overview call failed: %s", e)
         return "Unknown Document", [], {"pages": {}, "relations": []}
@@ -527,7 +546,9 @@ def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
         # Append inferred doc type to the overview page title
         doc_pages[f"Document Overview ({doc_type})"] = overview_page
 
-    return topics, {"pages": doc_pages, "relations": []}
+    # NOTE: Must return all three values — (doc_type, topics, parsed_pages).
+    # The caller unpacks: doc_type, topics, overview_parsed = _ingest_overview(...)
+    return doc_type, topics, {"pages": doc_pages, "relations": []}
 
 
 def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str) -> dict:
@@ -535,7 +556,11 @@ def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type
     topics_str = ", ".join(topics) if topics else "None identified yet"
     prompt = DETAIL_PROMPT_TEMPLATE.format(text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type)
     try:
-        raw, _ = llm.ask(prompt, pipeline="wiki")
+        raw, _ = llm.ask(
+            prompt,
+            pipeline="wiki",
+            max_tokens=config.MAX_TOKENS_INGEST_DETAIL,
+        )
     except RuntimeError as e:
         logger.error("LLM detail call failed: %s", e)
         return {"pages": {}, "relations": []}
@@ -730,6 +755,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
 
     bm25_count = 0
     pages_for_llm = pages
+    page_selection_usage: dict = {}
 
     # --- Step 1: Select relevant pages ---
     if file_pages:
@@ -740,7 +766,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
             selected_titles = file_pages + other
         else:
             # Large wiki: file pages + LLM-selected supplementary pages
-            llm_selected = _select_relevant_pages(pages_for_llm, question)
+            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question)
             seen = set(file_pages)
             supplementary = [t for t in llm_selected if t not in seen]
             selected_titles = file_pages + supplementary
@@ -751,7 +777,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
         if len(pages) <= 20:
             selected_titles = list(pages.keys())
         else:
-            selected_titles = _select_relevant_pages(pages_for_llm, question)
+            selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question)
 
     # --- Step 2: Build context string from selected pages ---
     wiki_parts = []
@@ -769,7 +795,8 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
     return {
         "context": wiki_content,
         "selected_titles": selected_titles,
-        "bm25_count": bm25_count
+        "bm25_count": bm25_count,
+        "page_selection_usage": page_selection_usage,
     }
 
 
@@ -814,11 +841,24 @@ JSON:"""
     return {"score": score, "reason": "Confidence evaluated from context availability."}
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0) -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None) -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
     relations = index.get("relations", [])
+
+    # Accumulate per-call token usage for this query
+    token_breakdown: list[dict] = []
+
+    # Attach page-selection usage if it was an LLM call (not fallback)
+    if page_selection_usage and page_selection_usage.get("prompt_tokens"):
+        token_breakdown.append({
+            "call": "page_selection",
+            "model": llm.active_model(fast=False),
+            "prompt_tokens": page_selection_usage.get("prompt_tokens", 0),
+            "completion_tokens": page_selection_usage.get("completion_tokens", 0),
+            "total_tokens": page_selection_usage.get("prompt_tokens", 0) + page_selection_usage.get("completion_tokens", 0),
+        })
 
     if not wiki_content:
         return {
@@ -828,19 +868,57 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "relations": relations,
             "usage": {},
             "confidence_score": 0,
-            "confidence_reason": "No context available."
+            "confidence_reason": "No context available.",
+            "token_breakdown": token_breakdown,
+            "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
     from services.prompts import ANSWER_PROMPT
     prompt = ANSWER_PROMPT.format(context=wiki_content, question=question)
 
     usage = {}
+    confidence_score = 75   # conservative default if extraction fails
+    confidence_reason = "Default — could not parse confidence from reasoning block."
+
     try:
-        answer, usage = llm.ask(prompt, pipeline="wiki")
-        import re
-        answer = re.sub(r'<reasoning>.*?</reasoning>', '', answer, flags=re.DOTALL).strip()
+        raw_answer, usage = llm.ask(
+            prompt,
+            pipeline="wiki",
+            max_tokens=config.MAX_TOKENS_ANSWER,
+        )
+
+        # --- Extract confidence from reasoning BEFORE stripping the block ---
+        # The ANSWER_PROMPT instructs the model to append two structured lines
+        # at the end of <reasoning>:
+        #   CONFIDENCE_SCORE: [int]
+        #   CONFIDENCE_REASON: [sentence]
+        # Extracting here avoids a second LLM call for _evaluate_confidence().
+        reasoning_match = re.search(
+            r'<reasoning>(.*?)</reasoning>', raw_answer, flags=re.DOTALL
+        )
+        if reasoning_match:
+            reasoning_text = reasoning_match.group(1)
+            score_match = re.search(r'CONFIDENCE_SCORE:\s*(\d+)', reasoning_text)
+            reason_match = re.search(
+                r'CONFIDENCE_REASON:\s*(.+?)(?:\n|$)', reasoning_text
+            )
+            if score_match:
+                try:
+                    confidence_score = min(100, max(0, int(score_match.group(1))))
+                except ValueError:
+                    pass
+            if reason_match:
+                confidence_reason = reason_match.group(1).strip()
+
+        # Strip reasoning tags for the user-facing answer
+        answer = re.sub(
+            r'<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL
+        ).strip()
+
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
+        confidence_score = 0
+        confidence_reason = "LLM call failed."
 
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
@@ -868,8 +946,9 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                     if cfile not in files_used:
                         files_used.append(cfile)
 
-    # Evaluate confidence score
-    confidence = _evaluate_confidence(question, wiki_content, answer)
+    # Confidence is already extracted from the reasoning block above —
+    # no second LLM call needed.
+    confidence = {"score": confidence_score, "reason": confidence_reason}
 
     # Log query
     _log_event(session_id, "QUERY", f"Q: {question[:60]}... | BM25 Shortlist: {bm25_count} | Pages selected: {len(selected_titles)} | Confidence: {confidence['score']}")
@@ -902,6 +981,29 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         _atomic_merge(session_id, new_page_payload, doc_name="Query Answer")
         _log_event(session_id, "QUERY_FILED", f"Page: {target_title}")
 
+    # Record answer-generation call in the breakdown
+    token_breakdown.append({
+        "call": "answer_generation",
+        "model": llm.active_model(fast=False),
+        "prompt_tokens": usage.get("prompt_tokens", 0),
+        "completion_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
+    })
+
+    # Aggregate totals across all calls in this query
+    token_total = {
+        "prompt_tokens":     sum(e["prompt_tokens"]     for e in token_breakdown),
+        "completion_tokens": sum(e["completion_tokens"] for e in token_breakdown),
+        "total_tokens":      sum(e["total_tokens"]      for e in token_breakdown),
+    }
+
+    # Log per-call breakdown to session log
+    breakdown_str = " | ".join(
+        f"{e['call']} ({e['model']}): {e['total_tokens']} tokens"
+        for e in token_breakdown
+    )
+    _log_event(session_id, "TOKEN_USAGE", f"Total: {token_total['total_tokens']} | {breakdown_str}")
+
     return {
         "answer": answer,
         "pages_used": pages_used_dedup,
@@ -909,12 +1011,39 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "relations": relations,
         "usage": usage,
         "confidence_score": confidence["score"],
-        "confidence_reason": confidence["reason"]
+        "confidence_reason": confidence["reason"],
+        "token_breakdown": token_breakdown,
+        "token_total": token_total,
     }
 
 
-def _select_relevant_pages(pages: dict, question: str) -> list[str]:
-    """Use LLM to pick the most relevant pages for a question based on title + summary."""
+def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str]:
+    """Score pages by keyword overlap with the question — used when LLM selection fails.
+
+    Much better than first-N: ensures pages matching the question's subject matter
+    are included regardless of insertion order in the wiki.
+    """
+    # Tokenise question; drop words shorter than 4 chars (common stop words)
+    q_words = {w for w in re.sub(r'[^\w\s]', '', question.lower()).split() if len(w) >= 4}
+    scored = []
+    for title, page in pages.items():
+        summary = page.get("summary", "") if isinstance(page, dict) else ""
+        combined = (title + " " + summary).lower()
+        score = sum(1 for w in q_words if w in combined)
+        scored.append((score, title))
+    scored.sort(key=lambda x: -x[0])
+    return [t for _, t in scored[:n]]
+
+
+def _select_relevant_pages(pages: dict, question: str) -> tuple[list[str], dict]:
+    """Use LLM to pick the most relevant pages for a question based on title + summary.
+
+    Uses the FULL synthesis model — page selection directly determines answer quality.
+    A wrong selection causes the answer model to say 'not covered', so this is not
+    a task to delegate to a cheap model.
+
+    Returns (selected_titles, usage_dict).
+    """
     # Build compact index: "Title: summary"
     index_lines = []
     for title, page in pages.items():
@@ -926,18 +1055,25 @@ def _select_relevant_pages(pages: dict, question: str) -> list[str]:
     prompt = PAGE_SELECT_PROMPT.format(page_index=page_index, question=question)
 
     try:
-        raw, _ = llm.ask(prompt, pipeline="wiki")
+        raw, usage = llm.ask(
+            prompt,
+            pipeline="wiki",
+            max_tokens=config.MAX_TOKENS_PAGE_SELECTION,
+        )
         parsed = _parse_json_safe(raw)
         if isinstance(parsed, list):
-            # Filter to titles that actually exist
             valid = [t for t in parsed if t in pages]
             if valid:
-                return valid
+                logger.info("Page selection: %d pages selected by LLM", len(valid))
+                return valid, usage
+        logger.warning("Page selection: LLM returned unparseable result — using keyword fallback")
     except (RuntimeError, Exception) as e:
-        logger.error("Page selection failed: %s — falling back to all pages", e)
+        logger.error("Page selection LLM call failed: %s — using keyword fallback", e)
 
-    # Fallback: return all pages (capped at 30 to avoid prompt overflow)
-    return list(pages.keys())[:30]
+    # Keyword-overlap fallback — far better than returning first-N pages
+    fallback = _keyword_fallback_pages(pages, question)
+    logger.info("Page selection fallback: %d pages via keyword scoring", len(fallback))
+    return fallback, {}
 
 
 def get_graph(session_id: str) -> dict:
