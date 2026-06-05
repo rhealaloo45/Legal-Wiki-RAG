@@ -11,7 +11,7 @@ Legal Wiki is a research tool built as a Single-Page Flask Application to proces
 - **📈 Deep Understanding**: Granular progress tracking, interactive knowledge graphs, and wiki page browsing.
 - **🔒 Session Isolation**: Every chat session maintains its own completely independent wiki, isolating knowledge context and document uploads securely.
 - **🎨 Premium UI**: A custom-built, lightweight Light Mode Single-Page Application (SPA) designed without heavy frontend frameworks, offering a seamless and context-aware experience.
-- **☁️ Azure OpenAI & OpenRouter Powered**: Configurable to use either Azure OpenAI or OpenRouter for all LLM extraction, embedding, synthesis, and querying tasks.
+- **☁️ Azure OpenAI & OpenRouter Powered**: Configurable to use either Azure OpenAI or OpenRouter. Uses a **dual-model routing strategy** — a large model (e.g. `gpt-oss-120b`) for synthesis, answer generation, and drafting; a smaller fast model (e.g. `gpt-oss-20b`) for lightweight tasks such as page selection, contradiction checks, and cell extraction — significantly reducing cost without degrading answer quality.
 
 ## 🏗️ Project Architecture
 
@@ -50,7 +50,13 @@ Edit `app/.env` to configure your selected provider:
 LLM_PROVIDER=openrouter
 EMBEDDING_PROVIDER=openrouter
 OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=google/gemma-4-26b-a4b-it:free
+
+# Big model — used for ingest synthesis, answer generation, drafting, compare narrative
+OPENROUTER_MODEL=openai/gpt-oss-120b:free
+
+# Fast model — used for page selection, contradiction checks, JSON repair, cell extraction
+OPENROUTER_FAST_MODEL=openai/gpt-oss-20b:free
+
 OPENROUTER_EMBEDDING_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
 ```
 
@@ -61,7 +67,13 @@ EMBEDDING_PROVIDER=azure
 AZURE_OPENAI_API_KEY=your_key_here
 AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2025-01-01-preview
+
+# Big model — used for ingest synthesis, answer generation, drafting, compare narrative
 AZURE_OPENAI_DEPLOYMENT=gpt-5.4
+
+# Fast model — used for page selection, contradiction checks, JSON repair, cell extraction
+AZURE_FAST_DEPLOYMENT=gpt-5.4-mini
+
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
 EMBEDDING_DIMENSIONS=1536
 ```

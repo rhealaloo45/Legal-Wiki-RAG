@@ -62,20 +62,33 @@ def _get_fast_client() -> AzureOpenAI:
         )
     return _fast_client
 
-def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None) -> tuple[str, dict]:
+def active_model(fast: bool = False) -> str:
+    """Return the model name that will be used for a given fast/full call.
+    Useful for labelling token-usage log entries."""
+    if config.LLM_PROVIDER == "openrouter":
+        return config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
+    return config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
+
+
+def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False) -> tuple[str, dict]:
     """Send a prompt to the selected LLM and return the response text and usage dict.
 
     Args:
-        prompt:   The full prompt string.
-        pipeline: ignored in this version, but kept for compatibility.
-        max_tokens: Limit the maximum tokens in the completion response.
+        prompt:     The full prompt string.
+        pipeline:   Kept for compatibility; not used for routing.
+        max_tokens: Cap the completion token count. Always pass an explicit value —
+                    relying on the model default wastes budget on small-output calls.
+        fast:       Route to the cheap/fast model (AZURE_FAST_DEPLOYMENT /
+                    OPENROUTER_FAST_MODEL) instead of the full synthesis model.
+                    Use for: contradiction checks, page selection, JSON repair.
+                    Do NOT use for: ingest synthesis, answer generation, drafting.
     """
     if config.LLM_PROVIDER == "openrouter":
         client = get_openrouter_client()
-        model_name = config.OPENROUTER_MODEL
+        model_name = config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
     else:
         client = get_client()
-        model_name = config.AZURE_OPENAI_DEPLOYMENT
+        model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
     try:
         kwargs = {
@@ -98,17 +111,19 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None) -> tuple[st
         raise RuntimeError(f"LLM unavailable: {e}") from e
 
 def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
-    """Lightweight LLM call optimised for bulk cell extraction.
-    
-    Uses a shorter timeout and single retry to avoid blocking the 
-    ThreadPoolExecutor when the API is slow or rate-limited.
+    """Lightweight LLM call for bulk extraction tasks (cell extraction, column inference,
+    aspect identification, outlier detection).
+
+    Routes to the cheap model (AZURE_FAST_DEPLOYMENT / OPENROUTER_FAST_MODEL) with a
+    short timeout and single retry to avoid blocking the ThreadPoolExecutor.
+    Never use for synthesis tasks that require legal reasoning depth.
     """
     if config.LLM_PROVIDER == "openrouter":
         client = _get_fast_openrouter_client()
-        model_name = config.OPENROUTER_MODEL
+        model_name = config.OPENROUTER_FAST_MODEL   # cheap model
     else:
         client = _get_fast_client()
-        model_name = config.AZURE_OPENAI_DEPLOYMENT
+        model_name = config.AZURE_FAST_DEPLOYMENT   # cheap model
 
     try:
         response = client.chat.completions.create(
