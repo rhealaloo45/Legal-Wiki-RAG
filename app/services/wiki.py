@@ -699,6 +699,10 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
     replace the O(N²) loop with a single PostgreSQL FTS query and remove it).
     """
     lock = _get_session_lock(session_id)
+    # Collect (title, embed_text) pairs here; embed OUTSIDE the lock so HTTP
+    # calls don't block other ingest threads waiting on the session lock.
+    pages_to_embed: list[tuple[str, str]] = []
+
     with lock:
         pages_updated = 0
         new_rels_count = 0
@@ -760,9 +764,13 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 merged_summary = new_summary if new_summary else existing_summary
                 _db.upsert_page(session_id, title, merged_content, merged_summary, doc_name,
                                 contradiction_flagged, variants)
+                # Use the freshest summary for the embedding
+                embed_text = (new_summary or existing_summary or new_content)[:400]
             else:
                 _db.upsert_page(session_id, title, new_content, new_summary, doc_name, False, None)
+                embed_text = (new_summary or new_content)[:400]
 
+            pages_to_embed.append((title, embed_text))
             pages_updated += 1
 
         # -- Merge explicit relations --
@@ -790,7 +798,43 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 f"Page: {c['title']} | Claim: {c['claim']} | Source A: {c.get('val_a')} | Source B: {c.get('val_b')}",
             )
 
+    # -- Embed pages OUTSIDE the lock (HTTP calls should not hold the session lock) --
+    _embed_pages_batch(session_id, pages_to_embed)
+
     return pages_updated, new_rels_count, len(contradictions_found)
+
+
+# ---------------------------------------------------------------------------
+# Embedding helper (Phase 3) — called OUTSIDE the session lock
+# ---------------------------------------------------------------------------
+def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -> None:
+    """Embed page summaries and store in page_embeddings table.
+
+    Called AFTER the session lock is released so embedding HTTP calls don't
+    block other ingest threads.  Failures are logged and swallowed — vector
+    search falls back to BM25 gracefully for un-embedded pages.
+
+    Args:
+        pages_to_embed: list of (title, text_to_embed) where text_to_embed is
+                        the page summary, or the first 400 chars of content
+                        when no summary is available.
+    """
+    if not config.USE_DATABASE or not pages_to_embed:
+        return
+    try:
+        from services import embedder as _embedder
+        texts = [text for _, text in pages_to_embed]
+        embeddings = _embedder.embed_batch(texts, is_query=False)
+        for (title, _), embedding in zip(pages_to_embed, embeddings):
+            _db.upsert_embedding(session_id, title, embedding)
+        logger.info(
+            "Embedded %d pages for session %s", len(pages_to_embed), session_id
+        )
+    except Exception as e:
+        logger.error(
+            "Embedding batch failed for session %s (%d pages skipped): %s",
+            session_id, len(pages_to_embed), e,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -952,8 +996,8 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
             other = [t for t in pages if t not in file_pages]
             selected_titles = file_pages + other
         else:
-            # Large wiki: file pages + LLM-selected supplementary pages
-            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question)
+            # Large wiki: file pages + vector/LLM-selected supplementary pages
+            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
             seen = set(file_pages)
             supplementary = [t for t in llm_selected if t not in seen]
             selected_titles = file_pages + supplementary
@@ -964,7 +1008,7 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
         if len(pages) <= 20:
             selected_titles = list(pages.keys())
         else:
-            selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question)
+            selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
 
     # --- Step 2: Build context string from selected pages ---
     # Q: pages are cached prior answers, not primary source clauses.
@@ -1229,15 +1273,51 @@ def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str
     return [t for _, t in scored[:n]]
 
 
-def _select_relevant_pages(pages: dict, question: str) -> tuple[list[str], dict]:
-    """Use LLM to pick the most relevant pages for a question based on title + summary.
+def _select_relevant_pages(
+    pages: dict, question: str, session_id: str | None = None
+) -> tuple[list[str], dict]:
+    """Select the most relevant pages for a question.
 
-    Uses the FULL synthesis model — page selection directly determines answer quality.
-    A wrong selection causes the answer model to say 'not covered', so this is not
-    a task to delegate to a cheap model.
+    Priority order:
+      1. pgvector cosine similarity search (DB mode only, Phase 3) — 0 LLM calls, ~5ms
+      2. BM25 pre-filter + LLM selection (fallback or file mode)
+      3. BM25 keyword-only (if LLM selection fails)
 
     Returns (selected_titles, usage_dict).
+    usage_dict is empty when vector search is used (no LLM call made).
     """
+
+    # ------------------------------------------------------------------ #
+    # Path 1 — pgvector search (DB mode + embeddings exist)               #
+    # ------------------------------------------------------------------ #
+    if config.USE_DATABASE and session_id:
+        try:
+            emb_count = _db.count_embeddings(session_id)
+            if emb_count > 0:
+                from services import embedder as _embedder
+                q_embedding = _embedder.embed(question, is_query=True)
+                vector_titles = _db.search_similar_pages(
+                    session_id, q_embedding, limit=config.VECTOR_SEARCH_TOP_K
+                )
+                # Validate titles against the in-memory pages dict (guards against
+                # stale embeddings pointing at deleted pages)
+                valid = [t for t in vector_titles if t in pages]
+                if valid:
+                    logger.info(
+                        "Page selection: %d pages via pgvector (0 LLM calls, %d embeddings in DB)",
+                        len(valid), emb_count,
+                    )
+                    return valid, {}
+                logger.warning(
+                    "pgvector returned %d titles but none matched current pages — "
+                    "falling back to BM25+LLM", len(vector_titles)
+                )
+        except Exception as e:
+            logger.error("pgvector page selection failed: %s — falling back to BM25+LLM", e)
+
+    # ------------------------------------------------------------------ #
+    # Path 2 — BM25 pre-filter + LLM selection                           #
+    # ------------------------------------------------------------------ #
     # BM25 pre-filter: narrow to top candidates before LLM selection.
     # At 1000+ pages the full index exceeds model context; pre-filtering keeps the
     # selection prompt to ~10k tokens regardless of wiki size.
@@ -1264,13 +1344,18 @@ def _select_relevant_pages(pages: dict, question: str) -> tuple[list[str], dict]
         if isinstance(parsed, list):
             valid = [t for t in parsed if t in candidate_pages]
             if valid:
-                logger.info("Page selection: %d pages selected by LLM (from %d BM25 candidates)", len(valid), len(candidate_pages))
+                logger.info(
+                    "Page selection: %d pages selected by LLM (from %d BM25 candidates)",
+                    len(valid), len(candidate_pages),
+                )
                 return valid, usage
         logger.warning("Page selection: LLM returned unparseable result — using keyword fallback")
     except (RuntimeError, Exception) as e:
         logger.error("Page selection LLM call failed: %s — using keyword fallback", e)
 
-    # Keyword-overlap fallback — far better than returning first-N pages
+    # ------------------------------------------------------------------ #
+    # Path 3 — BM25 keyword-only fallback                                 #
+    # ------------------------------------------------------------------ #
     fallback = _keyword_fallback_pages(pages, question)
     logger.info("Page selection fallback: %d pages via keyword scoring", len(fallback))
     return fallback, {}

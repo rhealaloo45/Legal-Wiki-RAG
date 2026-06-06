@@ -53,6 +53,7 @@ MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full m
 MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context — primary clause pages uncapped
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
+VECTOR_SEARCH_TOP_K          = 25    # Nearest-neighbour results from pgvector (Phase 3 — replaces LLM page selection)
 
 # Concurrency settings for wiki pipeline
 WIKI_MAX_WORKERS = int(os.getenv("WIKI_MAX_WORKERS", "3"))

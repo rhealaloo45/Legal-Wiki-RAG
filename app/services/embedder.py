@@ -2,77 +2,116 @@
 Embedding service — supports Azure OpenAI and OpenRouter embeddings.
 
 Provides both single-text and batch embedding.
+
+OpenRouter note: the OpenAI SDK mis-parses some OpenRouter embedding responses,
+so OpenRouter calls go through a direct requests.post() call instead.
 """
 
-from openai import AzureOpenAI, OpenAI
+from __future__ import annotations
+
+import requests as _requests
+
 import config
 
-# Lazy load the clients
-_client = None
-_or_client = None
+# Lazy-loaded Azure client
+_azure_client = None
 
-def get_openrouter_client() -> OpenAI:
-    global _or_client
-    if _or_client is None:
-        _or_client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=config.OPENROUTER_API_KEY
-        )
-    return _or_client
 
-def get_client() -> AzureOpenAI:
-    global _client
-    if _client is None:
-        _client = AzureOpenAI(
+def _get_azure_client():
+    global _azure_client
+    if _azure_client is None:
+        from openai import AzureOpenAI
+        _azure_client = AzureOpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
             api_version=config.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT
+            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
         )
-    return _client
+    return _azure_client
+
+
+# ---------------------------------------------------------------------------
+# OpenRouter — direct HTTP (bypasses OpenAI SDK response-parsing issues)
+# ---------------------------------------------------------------------------
+
+def _embed_openrouter(texts: list[str]) -> list[list[float]]:
+    """Call the OpenRouter embeddings endpoint directly via requests.
+
+    The OpenAI SDK raises 'No embedding data received' for some OpenRouter
+    models (e.g. nvidia/llama-nemotron-embed-vl-1b-v2) because it expects a
+    slightly different response envelope.  A plain HTTP call avoids this.
+    """
+    resp = _requests.post(
+        "https://openrouter.ai/api/v1/embeddings",
+        headers={
+            "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"model": config.OPENROUTER_EMBEDDING_MODEL, "input": texts},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    body = resp.json()
+
+    data = body.get("data", [])
+    if not data:
+        raise ValueError(
+            f"OpenRouter embeddings API returned no data. "
+            f"Status {resp.status_code}. Body: {str(body)[:300]}"
+        )
+
+    # Sort by index so output order matches input order
+    data.sort(key=lambda x: x.get("index", 0))
+    return [item["embedding"] for item in data]
+
+
+# ---------------------------------------------------------------------------
+# Azure OpenAI
+# ---------------------------------------------------------------------------
+
+def _embed_azure(texts: list[str]) -> list[list[float]]:
+    client = _get_azure_client()
+    all_embeddings: list[list[float]] = []
+    batch_size = 16
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        response = client.embeddings.create(
+            input=batch,
+            model=config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+        )
+        all_embeddings.extend([d.embedding for d in response.data])
+    return all_embeddings
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def embed(text: str, is_query: bool = True) -> list[float]:
     """Generate an embedding vector for a single text."""
     prefix = "search_query: " if is_query else "search_document: "
-    prefixed_text = text if text.startswith(prefix) else f"{prefix}{text}"
-    
-    if config.EMBEDDING_PROVIDER == "openrouter":
-        client = get_openrouter_client()
-        model_name = config.OPENROUTER_EMBEDDING_MODEL
-    else:
-        client = get_client()
-        model_name = config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+    prefixed = text if text.startswith(prefix) else f"{prefix}{text}"
 
-    response = client.embeddings.create(
-        input=[prefixed_text],
-        model=model_name
-    )
-    return response.data[0].embedding
+    if config.EMBEDDING_PROVIDER == "openrouter":
+        return _embed_openrouter([prefixed])[0]
+    else:
+        return _embed_azure([prefixed])[0]
 
 
 def embed_batch(texts: list[str], is_query: bool = False) -> list[list[float]]:
-    """Generate embedding vectors for multiple texts in batches."""
+    """Generate embedding vectors for multiple texts."""
     if not texts:
         return []
-        
+
     prefix = "search_query: " if is_query else "search_document: "
-    prefixed_texts = [t if t.startswith(prefix) else f"{prefix}{t}" for t in texts]
-    
+    prefixed = [t if t.startswith(prefix) else f"{prefix}{t}" for t in texts]
+
     if config.EMBEDDING_PROVIDER == "openrouter":
-        client = get_openrouter_client()
-        model_name = config.OPENROUTER_EMBEDDING_MODEL
+        # OpenRouter has no documented batch limit — send in chunks of 16 to
+        # stay safe with rate limits.
+        all_embeddings: list[list[float]] = []
+        batch_size = 16
+        for i in range(0, len(prefixed), batch_size):
+            all_embeddings.extend(_embed_openrouter(prefixed[i : i + batch_size]))
+        return all_embeddings
     else:
-        client = get_client()
-        model_name = config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-        
-    all_embeddings = []
-    # Azure OpenAI embeddings limits depend on the tier, but 16/100 is usually safe
-    batch_size = 16 
-    for i in range(0, len(prefixed_texts), batch_size):
-        batch = prefixed_texts[i:i + batch_size]
-        response = client.embeddings.create(
-            input=batch,
-            model=model_name
-        )
-        all_embeddings.extend([data.embedding for data in response.data])
-            
-    return all_embeddings
+        return _embed_azure(prefixed)
