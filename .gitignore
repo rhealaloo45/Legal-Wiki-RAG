@@ -237,4 +237,7 @@ debug.log
 lexwiki_ui_v2.html
 
 # macOS
-.DS_Store
+.DS_Store
+
+# claude
+.claude/
