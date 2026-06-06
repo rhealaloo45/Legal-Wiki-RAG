@@ -196,6 +196,42 @@ def _repair_json(raw: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# C3 — Structural NER pre-filter for contradiction detection (Phase 4)
+# ---------------------------------------------------------------------------
+_AMOUNT_RE = re.compile(
+    r'\$[\d,]+(?:\.\d+)?'
+    r'|\b\d[\d,]*(?:\.\d+)?\s*(?:million|crore|lakh|thousand|USD|INR|GBP|EUR)\b',
+    re.I,
+)
+_DATE_RE = re.compile(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b')
+_PCT_RE  = re.compile(r'\b\d+(?:\.\d+)?\s*%')
+
+
+def _extract_structural_values(text: str) -> set[str]:
+    """Return lowercased set of monetary amounts, dates, and percentages found in text."""
+    vals: set[str] = set()
+    vals.update(m.strip().lower() for m in _AMOUNT_RE.findall(text))
+    vals.update(m.strip().lower() for m in _DATE_RE.findall(text))
+    vals.update(m.strip().lower() for m in _PCT_RE.findall(text))
+    return vals
+
+
+def _has_structural_conflict(text_a: str, text_b: str) -> bool:
+    """Return True if the two texts should be checked for contradictions by an LLM.
+
+    Returns False (skip LLM) only when both texts contain structured values
+    (amounts/dates/percentages) and all of those values match exactly.
+    If either text has no structured values we cannot rule out a contradiction,
+    so we return True to let the LLM decide.
+    """
+    vals_a = _extract_structural_values(text_a)
+    vals_b = _extract_structural_values(text_b)
+    if not vals_a or not vals_b:
+        return True
+    return bool(vals_a.symmetric_difference(vals_b))
+
+
+# ---------------------------------------------------------------------------
 # Merge logic — the heart of compounding wiki behaviour
 # ---------------------------------------------------------------------------
 def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tuple[dict, int, int, list]:
@@ -357,15 +393,51 @@ PRINCIPLES:
 - ARITHMETIC PROHIBITION: Never compute, derive, multiply, or extrapolate numeric values. Only state figures that appear VERBATIM in the source text. If the text says "₹1 lakh per acre" and separately mentions a land area, do NOT multiply them to produce a total — quote each figure as it appears. A derived number is a hallucination even if the arithmetic is correct.
 - STATUTE INTERPRETATION: When a statute section number appears (e.g., "Section 182 IPC"), only describe what the text explicitly says about it. Do NOT apply external legal knowledge to explain what that section means or implies.
 - RELIEF SEQUENCING: When capturing suit prayers or reliefs, preserve the exact order and primacy as stated in the plaint/petition. Do not reorder reliefs by perceived importance.
+- PROCEDURAL ORDER RATIONALE (CRITICAL): For every procedural order in a court judgment \
+  (committal to Sessions Court, framing/discharge of charges, remand, stay, transfer), you MUST \
+  explicitly record (a) which court made the order, (b) under which section/provision, and \
+  (c) the court's stated reason or finding that triggered it. Example: "The Magistrate committed \
+  the case to the Sessions Court under Section 209 CrPC because it found that Section 304 Part II \
+  IPC — an offence exclusively triable by the Sessions Court — was prima facie attracted." Never \
+  record a procedural step without its stated reason.
+- MULTI-STAGE LITIGATION (CRITICAL): When a case has multiple stages (e.g., Trial Court → High \
+  Court → Supreme Court, or First SLP → Remand → Second Appeal), clearly label and separate each \
+  stage. Record what each court decided and why, using stage labels such as "First SLP", "High \
+  Court (Writ Petition)", "Supreme Court (Final Appeal)". Never blend outcomes from different \
+  stages into a single undifferentiated account.
 - Each page should read like a well-written wiki article.
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
 
-PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. For example: "Payment Terms (Master Service Agreement)", "Confidentiality (NDA)".
+PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
+CASE-SPECIFIC PAGES (CRITICAL): For court judgments, some pages describe facts unique to THIS \
+case and must NOT merge with pages from other cases. For these pages, prefix the title with the \
+SHORT CASE IDENTIFIER (first party's last name from the document, e.g. "Yuvraj Kanther"): \
+  - Facts, Background, Procedural History, Parties → "Facts – Yuvraj Kanther (Court Judgment)" \
+  - Charges, FIR, Offences → "Charges – Yuvraj Kanther (Court Judgment)" \
+  - Holding, Disposition, Final Order → "Holding – Yuvraj Kanther (Court Judgment)" \
+  - Appellants'/Respondents' Contentions, Arguments → "Appellants' Contentions – Yuvraj Kanther (Court Judgment)" \
+  - Relief, Costs, Sentence → "Relief – Yuvraj Kanther (Court Judgment)" \
+SHARED LEGAL CONCEPT PAGES: Pages about statutes, precedents, legal doctrines, and general \
+principles should NOT include the case name — they are intentionally merged when multiple cases \
+discuss the same concept: "Section 319 CrPC (Court Judgment)", "Hardeep Singh v. Punjab (Court Judgment)". \
+For contracts: "Payment Terms (Master Service Agreement)", "Confidentiality (NDA)".
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
   "doc_type": "The inferred document type (e.g. 'NDA')",
+  "metadata": {{
+    "governing_law": "Jurisdiction whose law governs (e.g. 'English law') or null",
+    "jurisdiction": "Court/tribunal with exclusive jurisdiction or null",
+    "effective_date": "Contract start date verbatim or null",
+    "termination_notice": "Notice period required to terminate (e.g. '30 days') or null",
+    "liability_cap": "Maximum liability figure or formula verbatim or null",
+    "ip_ownership": "Who owns IP created under the agreement or null",
+    "parties": "Comma-separated list of party names or null",
+    "auto_renewal": "Auto-renewal clause verbatim or null",
+    "notice_period": "General notice period for communications or null",
+    "payment_terms": "Payment due date / terms (e.g. 'Net 30') or null"
+  }},
   "pages": {{
     "Descriptive Page Title (Inferred Doc Type)": {{
       "content": "4-10 sentence detailed synthesis with specific provisions, numbers, and conditions. Explain what it means and how it connects to other parts of the document.",
@@ -397,6 +469,14 @@ end of a larger document) and produce:
 SOURCE INTEGRITY: This excerpt is from '{doc_name}'. DO NOT hallucinate citations.
 DOCUMENT TYPE INFERENCE: You must determine the actual nature of the document from its contents \
 (e.g., "Non-Disclosure Agreement", "Master Service Agreement"). Do NOT just use the filename.
+CASE-SPECIFIC TOPICS (CRITICAL): For court judgments, separate topics into two categories: \
+1. CASE-SPECIFIC (facts, procedural history, charges, holding, parties, contentions, relief, costs): \
+   prefix each topic with the SHORT CASE IDENTIFIER (first party's last name from the document): \
+   e.g. "Procedural History – Yuvraj Kanther", "Facts – Yuvraj Kanther", "Holding – Yuvraj Kanther". \
+2. SHARED LEGAL CONCEPTS (statutes, precedents, doctrines, principles): NO case-name prefix — \
+   these pages are intentionally merged when multiple cases discuss the same concept: \
+   e.g. "Section 319 CrPC", "Hardeep Singh v. Punjab", "Non-obstante Clause". \
+For contracts, plain topic names are fine (e.g. "Payment Terms", "Confidentiality").
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
@@ -443,7 +523,22 @@ RULES:
 - ARITHMETIC PROHIBITION: Never compute, derive, multiply, or extrapolate numeric values. Only state figures that appear VERBATIM in the source text. If the text says "₹1 lakh per acre" and separately mentions a land area, do NOT multiply them — quote each figure as it appears. A derived number is a hallucination even if the arithmetic is correct.
 - STATUTE INTERPRETATION: When a statute section number appears, only describe what the text explicitly says about it. Do NOT apply external legal knowledge to explain what that section means or implies.
 - RELIEF SEQUENCING: When capturing suit prayers or reliefs, preserve the exact order and primacy as stated in the plaint/petition. Do not reorder reliefs by perceived importance.
-- PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. For example: "Topic Name ({doc_type})".
+- PROCEDURAL ORDER RATIONALE (CRITICAL): For every procedural order (committal to Sessions Court, \
+  framing/discharge of charges, remand, stay, transfer), explicitly record (a) which court made \
+  the order, (b) under which section, and (c) the court's stated reason. Never record a \
+  procedural step without its reason.
+- MULTI-STAGE LITIGATION (CRITICAL): If the case has multiple stages (Trial Court → High Court → \
+  Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
+  what each court decided and why. Never blend outcomes from different stages.
+- PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
+  CASE-SPECIFIC TITLES (CRITICAL): For court judgments, the KNOWN TOPICS list will contain \
+  some topics prefixed with a case identifier (e.g. "Facts – Yuvraj Kanther") and some without \
+  (e.g. "Section 319 CrPC"). Preserve these prefixes exactly when generating page titles. \
+  If a case-specific topic (facts, holding, charges, procedural history, contentions, relief) \
+  in the KNOWN TOPICS list lacks a prefix, add the case identifier from the document text. \
+  Shared legal concept pages (statutes, precedents, doctrines) must NOT have a case prefix. \
+  Example: "Facts – Yuvraj Kanther ({doc_type})", "Section 319 CrPC ({doc_type})". \
+  For contracts: "Topic Name ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
@@ -581,7 +676,18 @@ def ingest(file_path: str, session_id: str) -> dict:
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
     _log_event(session_id, "INGEST",
                f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
-    _update_wiki_progress(session_id, {"message": f"Complete: {total_pages} pages extracted."})
+
+    # S3: compact any pages that have grown beyond the quality thresholds
+    try:
+        compacted = run_compaction(session_id)
+        if compacted > 0:
+            _update_wiki_progress(session_id, {"message": f"Complete: {total_pages} pages extracted, {compacted} compacted."})
+        else:
+            _update_wiki_progress(session_id, {"message": f"Complete: {total_pages} pages extracted."})
+    except Exception as _ce:
+        logger.error("Post-ingest compaction failed: %s", _ce)
+        _update_wiki_progress(session_id, {"message": f"Complete: {total_pages} pages extracted."})
+
     return {"pages_updated": total_pages, "relations": total_rels}
 
 
@@ -738,35 +844,36 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 contradiction_flagged = existing.get("contradiction_flagged", False)
                 variants = existing.get("variants")
 
-                if len(new_content) > 200 and len(existing_content) > 200:
-                    prompt = (
-                        "Do these two texts contradict each other on any specific factual claim "
-                        "(dates, values, obligations, parties)?\n"
-                        'Reply JSON only:\n{"contradicts": bool, "claim": str|null, "value_a": str|null, "value_b": str|null}\n\n'
-                        f"Text A:\n{existing_content}\n\nText B:\n{new_content}"
-                    )
-                    try:
-                        raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_CONTRADICTION)
-                        parsed = _parse_json_safe(raw)
-                        if parsed and parsed.get("contradicts"):
-                            contradiction_flagged = True
-                            from datetime import datetime
-                            if not variants:
-                                variants = [{"source": "Previous", "value": existing_content,
-                                             "date_ingested": datetime.now().isoformat()}]
-                            variants.append({"source": doc_name, "value": new_content,
-                                             "date_ingested": datetime.now().isoformat()})
-                            contradictions_found.append({
-                                "title": title,
-                                "claim": parsed.get("claim"),
-                                "val_a": parsed.get("value_a"),
-                                "val_b": parsed.get("value_b"),
-                                "doc": doc_name,
-                            })
-                    except Exception as e:
-                        logger.error("Contradiction check failed: %s", e)
+                # S4 + C3: Replace per-append LLM contradiction check with a fast NER
+                # pre-filter.  If structural values (amounts, dates, percentages) differ,
+                # flag the page and record a variant snapshot so the compaction pass
+                # (S3) can detect and surface the contradiction during re-synthesis.
+                # This eliminates hundreds of thousands of LLM calls at scale while
+                # preserving all the raw material the compaction LLM needs.
+                if (len(new_content) > 200 and len(existing_content) > 200
+                        and _has_structural_conflict(existing_content, new_content)):
+                    contradiction_flagged = True
+                    from datetime import datetime
+                    if not variants:
+                        variants = [{"source": "Previous", "value": existing_content,
+                                     "date_ingested": datetime.now().isoformat()}]
+                    variants.append({"source": doc_name, "value": new_content,
+                                     "date_ingested": datetime.now().isoformat()})
+                    contradictions_found.append({
+                        "title": title, "claim": None,
+                        "val_a": None, "val_b": None, "doc": doc_name,
+                    })
 
-                merged_content = existing_content + "\n\n---\n" + new_content
+                # Strip session-UUID prefix and extension for a readable label.
+                _raw_label = doc_name
+                import re as _re
+                _raw_label = _re.sub(r'^[0-9a-f]{8}-[0-9a-f-]{27}_', '', _raw_label)
+                _raw_label = _re.sub(r'\.(pdf|PDF)$', '', _raw_label)
+                merged_content = (
+                    existing_content
+                    + f"\n\n---\n*[From: {_raw_label}]*\n\n"
+                    + new_content
+                )
                 merged_summary = new_summary if new_summary else existing_summary
                 _db.upsert_page(session_id, title, merged_content, merged_summary, doc_name,
                                 contradiction_flagged, variants)
@@ -779,6 +886,14 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             pages_to_embed.append((title, embed_text))
             pages_updated += 1
 
+        # -- C7: Persist document-level metadata extracted at ingest time --
+        metadata = new_data.get("metadata")
+        if metadata and isinstance(metadata, dict):
+            try:
+                _db.upsert_metadata(session_id, doc_name, metadata)
+            except Exception as _me:
+                logger.error("Metadata upsert failed for '%s': %s", doc_name, _me)
+
         # -- Merge explicit relations --
         for rel in new_relations:
             _db.upsert_relation(
@@ -786,14 +901,33 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
             new_rels_count += 1
 
-        # -- Cross-reference pass: detect "mentions" relations (O(N²) — replaced in Phase 4/S2) --
-        all_content = _db.get_all_page_titles_and_content(session_id)
-        all_titles = set(all_content.keys())
+        # -- S2: FTS cross-reference — O(log N) per new page instead of O(N²) --
+        # Only process pages in the current batch.  Pairs that were already in
+        # the wiki were processed in a prior merge; skipping them is safe because
+        # _db.bulk_upsert_relations uses ON CONFLICT DO NOTHING.
+        #
+        # Direction A — existing page content mentions new title:
+        #   Find pages whose content_tsv matches the new title's tokens (GIN index).
+        # Direction B — new page content mentions existing titles:
+        #   Python substring check against the title list only (no content fetch).
+        existing_titles = _db.get_page_titles(session_id)
+        existing_title_set = set(existing_titles)
         mention_rels: list[tuple[str, str, str]] = []
-        for title_a, content_a in all_content.items():
-            for title_b in all_titles:
-                if title_a != title_b and title_b in content_a:
-                    mention_rels.append((title_a, title_b, "mentions"))
+        for new_title, new_val in new_pages.items():
+            new_content_for_xref = (
+                new_val.get("content", "") if isinstance(new_val, dict) else str(new_val)
+            )
+            # Direction A: who already mentions this new title?
+            try:
+                mentioning = _db.find_pages_mentioning_title(session_id, new_title)
+                for existing_title in mentioning:
+                    mention_rels.append((existing_title, new_title, "mentions"))
+            except Exception as _xref_err:
+                logger.warning("FTS cross-ref failed for '%s': %s", new_title, _xref_err)
+            # Direction B: which existing titles does the new page mention?
+            for existing_title in existing_title_set:
+                if existing_title != new_title and existing_title in new_content_for_xref:
+                    mention_rels.append((new_title, existing_title, "mentions"))
         if mention_rels:
             _db.bulk_upsert_relations(session_id, mention_rels)
 
@@ -841,6 +975,147 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
             "Embedding batch failed for session %s (%d pages skipped): %s",
             session_id, len(pages_to_embed), e,
         )
+
+
+# ---------------------------------------------------------------------------
+# S3 — Page compaction / re-synthesis (Phase 4)
+# ---------------------------------------------------------------------------
+
+COMPACTION_PROMPT_TEMPLATE = """\
+You are a legal wiki editor. The following are {n} versions of the same topic \
+from different legal documents. Re-synthesise them into one coherent wiki page, \
+preserving ALL distinct facts, noting genuine contradictions explicitly with source \
+attribution, and tagging claims with their source document.
+
+RULES:
+- Preserve every exact figure, date, and amount VERBATIM — do not paraphrase numeric values.
+- Keep the best supporting quotes from across all versions.
+- Note contradictions explicitly: "Document A states X; Document B states Y."
+- Do NOT resolve contradictions — surface them clearly for human review.
+- The resulting page should read like a well-structured wiki article.
+- Apply all the usual hallucination-prevention rules: do not invent citations or dates.
+
+TOPIC: {title}
+
+VERSIONS:
+{variants_text}
+
+OUTPUT FORMAT — respond with valid JSON only, no markdown fences:
+{{
+  "content": "Re-synthesised wiki page content...",
+  "summary": "One-line summary.",
+  "quotes": ["Exact verbatim quote 1", "Exact verbatim quote 2"],
+  "contradictions": [
+    {{"claim": "...", "value_a": "...", "source_a": "...", "value_b": "...", "source_b": "..."}}
+  ]
+}}"""
+
+
+def _compact_page(session_id: str, title: str, page_data: dict) -> None:
+    """Re-synthesise a bloated page.  Called outside the session lock (S3, Phase 4).
+
+    Uses the variants list when available; otherwise splits content on the
+    section separator.  After compaction:
+    - append_count resets to 0
+    - variants column is cleared (they're now merged into content)
+    - The page is re-embedded with the fresh summary
+    - Detected contradictions are written to the contradictions table (S4)
+    """
+    content = page_data.get("content", "")
+    variants = page_data.get("variants") or []
+
+    if variants:
+        variants_text = "\n\n---\n".join(
+            f"**Source: {v.get('source', 'Unknown')}**\n{v.get('value', '')}"
+            for v in variants
+        )
+        n = len(variants)
+    else:
+        parts = content.split("\n\n---\n")
+        variants_text = "\n\n---\n".join(
+            f"**Version {i + 1}**\n{p}" for i, p in enumerate(parts)
+        )
+        n = len(parts)
+
+    prompt = COMPACTION_PROMPT_TEMPLATE.format(
+        title=title, variants_text=variants_text, n=n
+    )
+    try:
+        raw, _ = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_COMPACTION)
+    except RuntimeError as e:
+        logger.error("Compaction LLM call failed for '%s': %s", title, e)
+        return
+
+    parsed = _parse_json_safe(raw)
+    if parsed is None:
+        parsed = _repair_json(raw)
+
+    new_content = parsed.get("content", content)
+    new_summary = parsed.get("summary", "")
+    new_quotes  = parsed.get("quotes", [])
+    detected_contradictions = parsed.get("contradictions", [])
+
+    if new_quotes:
+        quote_text = "\n\n**Supporting Quotes:**\n" + "\n".join(f"> {q}" for q in new_quotes)
+        new_content += quote_text
+
+    contradiction_flagged = bool(detected_contradictions)
+
+    _db.reset_page_after_compaction(session_id, title, new_content, new_summary, contradiction_flagged)
+
+    # Store structured contradictions (S4)
+    for c in detected_contradictions:
+        try:
+            _db.upsert_contradiction(
+                session_id, title,
+                c.get("claim"), c.get("value_a"), c.get("source_a"),
+                c.get("value_b"), c.get("source_b"),
+            )
+            _log_event(
+                session_id, "CONTRADICTION",
+                f"Page: {title} | Claim: {c.get('claim')} | "
+                f"{c.get('source_a')} vs {c.get('source_b')}",
+            )
+        except Exception as _ce:
+            logger.error("Failed to store contradiction for '%s': %s", title, _ce)
+
+    # Re-embed with fresh summary
+    embed_text = (new_summary or new_content[:400])
+    _embed_pages_batch(session_id, [(title, embed_text)])
+
+    logger.info("Compacted page '%s' (%d → 1 version, contradictions=%d)",
+                title, n, len(detected_contradictions))
+
+
+def run_compaction(session_id: str) -> int:
+    """Find pages due for compaction and re-synthesise them.
+
+    Called at the end of every ingest so the wiki quality stays high as
+    documents accumulate.  No-op in file mode (compaction is DB-only).
+    Returns the number of pages successfully compacted.
+    """
+    if not config.USE_DATABASE:
+        return 0
+
+    due = _db.find_pages_due_for_compaction(
+        session_id,
+        config.COMPACTION_APPEND_THRESHOLD,
+        config.COMPACTION_CHAR_THRESHOLD,
+    )
+    if not due:
+        return 0
+
+    logger.info("Compaction: %d pages due for session %s", len(due), session_id)
+    compacted = 0
+    for page_data in due:
+        try:
+            _compact_page(session_id, page_data["title"], dict(page_data))
+            compacted += 1
+        except Exception as e:
+            logger.error("Compaction failed for page '%s': %s", page_data["title"], e)
+
+    _log_event(session_id, "COMPACTION", f"Compacted {compacted}/{len(due)} pages")
+    return compacted
 
 
 # ---------------------------------------------------------------------------
