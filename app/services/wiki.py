@@ -780,15 +780,22 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
             selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question)
 
     # --- Step 2: Build context string from selected pages ---
+    # Q: pages are cached prior answers, not primary source clauses.
+    # Cap them so they don't crowd out actual contract content.
+    _QPAGE_CAP = config.MAX_QPAGE_CONTEXT_CHARS
+
     wiki_parts = []
     for title in selected_titles:
         if title in pages:
             page = pages[title]
             content = page.get("content", "") if isinstance(page, dict) else page
-            
+
             if isinstance(page, dict) and page.get("contradiction_flagged"):
                 content = "[WARNING: This page contains conflicting claims. Surface the conflict explicitly in your answer. Do not resolve it.]\n" + content
-                
+
+            if title.startswith("Q:") and len(content) > _QPAGE_CAP:
+                content = content[:_QPAGE_CAP] + "\n[...truncated — cached answer summary only]"
+
             wiki_parts.append(f"## {title}\n{content}\n")
     wiki_content = "\n".join(wiki_parts)
 
@@ -1044,9 +1051,15 @@ def _select_relevant_pages(pages: dict, question: str) -> tuple[list[str], dict]
 
     Returns (selected_titles, usage_dict).
     """
+    # BM25 pre-filter: narrow to top candidates before LLM selection.
+    # At 1000+ pages the full index exceeds model context; pre-filtering keeps the
+    # selection prompt to ~10k tokens regardless of wiki size.
+    candidate_titles = _keyword_fallback_pages(pages, question, n=config.PAGE_SELECTION_PREFILTER_N)
+    candidate_pages = {t: pages[t] for t in candidate_titles if t in pages}
+
     # Build compact index: "Title: summary"
     index_lines = []
-    for title, page in pages.items():
+    for title, page in candidate_pages.items():
         summary = page.get("summary", "") if isinstance(page, dict) else ""
         line = f"- {title}: {summary}" if summary else f"- {title}"
         index_lines.append(line)
@@ -1062,9 +1075,9 @@ def _select_relevant_pages(pages: dict, question: str) -> tuple[list[str], dict]
         )
         parsed = _parse_json_safe(raw)
         if isinstance(parsed, list):
-            valid = [t for t in parsed if t in pages]
+            valid = [t for t in parsed if t in candidate_pages]
             if valid:
-                logger.info("Page selection: %d pages selected by LLM", len(valid))
+                logger.info("Page selection: %d pages selected by LLM (from %d BM25 candidates)", len(valid), len(candidate_pages))
                 return valid, usage
         logger.warning("Page selection: LLM returned unparseable result — using keyword fallback")
     except (RuntimeError, Exception) as e:

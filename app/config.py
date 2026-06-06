@@ -42,8 +42,10 @@ MAX_TOKENS_CONTRADICTION   = 300    # Pairwise contradiction pre-flight
 MAX_TOKENS_JSON_REPAIR     = 2048   # LLM JSON repair (bounded by input)
 
 # Query pipeline
-MAX_TOKENS_PAGE_SELECTION  = 1000   # JSON list of up to 25 page titles (full model)
-MAX_TOKENS_ANSWER          = 4096   # Full legal synthesis with CoT + citations
+MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full model)
+MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
+MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context — primary clause pages uncapped
+PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
 
 # Concurrency settings for wiki pipeline
 WIKI_MAX_WORKERS = int(os.getenv("WIKI_MAX_WORKERS", "3"))
