@@ -117,7 +117,7 @@ All `llm.ask()` call sites now pass an explicit cap — no more silent 4096-toke
 
 ---
 
-## Phase 2 — Storage Foundation ⬜ PLANNED
+## Phase 2 — Storage Foundation ✅ COMPLETE
 
 **Why PostgreSQL, not SQLite:**
 
@@ -134,7 +134,7 @@ In short: PostgreSQL + pgvector does the work of SQLite + a vector DB + a custom
 inverted index — as a single managed service, with proper concurrency, and without
 additional infrastructure.
 
-### S1 — Replace `index.json` with PostgreSQL ⬜
+### S1 — Replace `index.json` with PostgreSQL ✅
 **Files:** `wiki.py`, `config.py`, new `services/db.py`
 
 **Why it's critical:** At 140k pages, `index.json` will be several GB. Every single ingest
@@ -221,8 +221,8 @@ base with no recovery path.
 
 **Unlocks:** S2, S3, S4, C4, C7 all depend on this.
 
-### S5 — Replace In-Memory `PROGRESS_STORE` with Persistent State ⬜
-**Files:** `config.py`, `app.py` (uses `ingest_progress` table from S1)
+### S5 — Replace In-Memory `PROGRESS_STORE` with Persistent State ✅
+**Files:** `config.py`, `app.py`, `wiki.py` (uses `ingest_progress` table from S1)
 
 **Why:** `PROGRESS_STORE = {}` is a plain Python dict. Dies on restart, not shared between
 Gunicorn workers, grows forever in long-running processes.

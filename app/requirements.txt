@@ -9,3 +9,7 @@ Pillow
 openai
 openpyxl==3.1.2
 python-docx
+# Phase 2 — PostgreSQL storage (only required when DATABASE_URL is set)
+sqlalchemy>=2.0
+psycopg2-binary
+pgvector
