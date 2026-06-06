@@ -240,4 +240,10 @@ lexwiki_ui_v2.html
 .DS_Store
 
 # claude
-.claude/
+.claude/
+
+
+# Understanding
+ARCHITECTURE.md
+PLAN.md
+FLOWCHART.md
