@@ -52,10 +52,11 @@ MAX_TOKENS_JSON_REPAIR     = 2048   # LLM JSON repair (bounded by input)
 MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full model)
 MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
-MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context — primary clause pages uncapped
+MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
+MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
-VECTOR_SEARCH_TOP_K          = 25    # Nearest-neighbour results from pgvector (Phase 3)
-HYBRID_BM25_SUPPLEMENT_N     = 15    # BM25 keyword pages added on top of vector results (hybrid retrieval)
+VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
+HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector results (hybrid retrieval)
 
 # Compaction thresholds (S3, Phase 4)
 COMPACTION_APPEND_THRESHOLD  = int(os.getenv("COMPACTION_APPEND_THRESHOLD", "5"))
