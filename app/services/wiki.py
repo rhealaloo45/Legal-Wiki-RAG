@@ -354,6 +354,9 @@ PRINCIPLES:
 - ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
 - LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
 - TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
+- ARITHMETIC PROHIBITION: Never compute, derive, multiply, or extrapolate numeric values. Only state figures that appear VERBATIM in the source text. If the text says "₹1 lakh per acre" and separately mentions a land area, do NOT multiply them to produce a total — quote each figure as it appears. A derived number is a hallucination even if the arithmetic is correct.
+- STATUTE INTERPRETATION: When a statute section number appears (e.g., "Section 182 IPC"), only describe what the text explicitly says about it. Do NOT apply external legal knowledge to explain what that section means or implies.
+- RELIEF SEQUENCING: When capturing suit prayers or reliefs, preserve the exact order and primacy as stated in the plaint/petition. Do not reorder reliefs by perceived importance.
 - Each page should read like a well-written wiki article.
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
@@ -437,6 +440,9 @@ RULES:
 - ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
 - LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
 - TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
+- ARITHMETIC PROHIBITION: Never compute, derive, multiply, or extrapolate numeric values. Only state figures that appear VERBATIM in the source text. If the text says "₹1 lakh per acre" and separately mentions a land area, do NOT multiply them — quote each figure as it appears. A derived number is a hallucination even if the arithmetic is correct.
+- STATUTE INTERPRETATION: When a statute section number appears, only describe what the text explicitly says about it. Do NOT apply external legal knowledge to explain what that section means or implies.
+- RELIEF SEQUENCING: When capturing suit prayers or reliefs, preserve the exact order and primacy as stated in the plaint/petition. Do not reorder reliefs by perceived importance.
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. For example: "Topic Name ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
 
@@ -1153,6 +1159,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             r'<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL
         ).strip()
 
+        # --- Fallback confidence when model skipped the reasoning block ---
+        # A short "Not covered" answer means the context had nothing relevant —
+        # confidence should be 0, not the generic 75 default.
+        if confidence_score == 75 and confidence_reason.startswith("Default"):
+            _not_covered = re.search(
+                r'not covered|no information|not contain|no relevant|'
+                r'does not contain|not found|not available',
+                answer, flags=re.IGNORECASE
+            )
+            if _not_covered or len(answer) < 150:
+                confidence_score = 0
+                confidence_reason = "Model found no relevant context for this question."
+            else:
+                # Substantial answer but no reasoning block — model answered directly
+                confidence_score = 72
+                confidence_reason = "Model answered without reasoning block; score estimated."
+
     except RuntimeError as e:
         answer = f"⚠️ LLM error: {e}"
         confidence_score = 0
@@ -1288,7 +1311,12 @@ def _select_relevant_pages(
     """
 
     # ------------------------------------------------------------------ #
-    # Path 1 — pgvector search (DB mode + embeddings exist)               #
+    # Path 1 — hybrid: pgvector cosine + BM25 keyword supplement         #
+    #                                                                     #
+    # Vector search alone can miss pages where the query terms have low  #
+    # semantic overlap with the embedding but strong keyword overlap      #
+    # (e.g. "committed to Sessions Court", "Yogesh Kumar preserved").    #
+    # Merging BM25 results fills that gap without an LLM call.           #
     # ------------------------------------------------------------------ #
     if config.USE_DATABASE and session_id:
         try:
@@ -1301,13 +1329,31 @@ def _select_relevant_pages(
                 )
                 # Validate titles against the in-memory pages dict (guards against
                 # stale embeddings pointing at deleted pages)
-                valid = [t for t in vector_titles if t in pages]
-                if valid:
+                valid_vector = [t for t in vector_titles if t in pages]
+
+                # BM25 supplement: add keyword-matched pages that vector missed.
+                # Vector results come first (better semantic rank); BM25 pages
+                # are appended only if not already present.
+                bm25_supplement = _keyword_fallback_pages(
+                    pages, question, n=config.HYBRID_BM25_SUPPLEMENT_N
+                )
+                seen: set[str] = set(valid_vector)
+                hybrid: list[str] = list(valid_vector)
+                bm25_added = 0
+                for t in bm25_supplement:
+                    if t not in seen:
+                        hybrid.append(t)
+                        seen.add(t)
+                        bm25_added += 1
+
+                if hybrid:
                     logger.info(
-                        "Page selection: %d pages via pgvector (0 LLM calls, %d embeddings in DB)",
-                        len(valid), emb_count,
+                        "Page selection: %d pages via hybrid "
+                        "(vector=%d, bm25_added=%d, embeddings_in_db=%d)",
+                        len(hybrid), len(valid_vector), bm25_added, emb_count,
                     )
-                    return valid, {}
+                    return hybrid, {}
+
                 logger.warning(
                     "pgvector returned %d titles but none matched current pages — "
                     "falling back to BM25+LLM", len(vector_titles)
