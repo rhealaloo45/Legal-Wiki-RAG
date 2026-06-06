@@ -276,12 +276,12 @@ would throw a context-length error. This is not a cost problem — it's a hard c
 
 ---
 
-## Phase 4 — Ingest Quality & Scale ⬜ PLANNED
+## Phase 4 — Ingest Quality & Scale ✅ COMPLETE
 
 Fixes the silent quality failures that grow worse as the wiki scales.
 Depends on S1 (PostgreSQL).
 
-### S2 — Replace O(N²) Cross-Reference with PostgreSQL FTS ⬜
+### S2 — Replace O(N²) Cross-Reference with PostgreSQL FTS ✅
 **Files:** `wiki.py`
 
 **Why it's critical:** The cross-reference pass in `_merge_wiki()` runs on every single ingest:
@@ -307,7 +307,7 @@ under the session lock. The system stops responding.
 - Replace the nested loop in `_merge_wiki()` with a single DB query per new page insert.
 - **Effect:** O(N²) Python loop → O(log N) GIN index lookup per insert.
 
-### S3 — Page Compaction / Re-Synthesis ⬜
+### S3 — Page Compaction / Re-Synthesis ✅
 **Files:** `wiki.py`, `services/db.py`
 
 **Why:** Pages grow without bound. "Governing Law (NDA)" after 500 NDAs is 500 content blocks
@@ -346,7 +346,7 @@ The wiki is supposed to get smarter over time — instead it gets worse for the 
 > All other Phase 4 and Phase 5 components improve accuracy and reduce cost with no
 > meaningful downside risk.
 
-### S4 — Fix Contradiction Detection Architecture ⬜
+### S4 — Fix Contradiction Detection Architecture ✅
 **Files:** `wiki.py`
 
 **Why:** The current pairwise per-append model breaks down at scale. After 50 appends,
@@ -362,7 +362,7 @@ against an incoherent blob. Contradiction flags accumulate but are never resolve
 - Store resolved contradictions as structured data in a `contradictions` table:
   `(session_id, page_title, claim, value_a, source_a, value_b, source_b, detected_at)`
 
-### C3 — Structural NER Pre-Filter for Contradiction Detection ⬜
+### C3 — Structural NER Pre-Filter for Contradiction Detection ✅
 **Files:** `wiki.py`
 
 **Why:** The contradiction pre-flight fires an LLM call for every page append with >200 chars
@@ -381,7 +381,7 @@ standard percentages) — the LLM call adds no value.
 - Pages where all structural values agree skip the LLM pass entirely
 - Estimated reduction: ~80% of contradiction check calls eliminated
 
-### C7 — Structured Metadata Pre-Extraction for Review Mode ⬜
+### C7 — Structured Metadata Pre-Extraction for Review Mode ✅
 **Files:** `wiki.py`, `advanced_modes.py` (uses `page_metadata` table from S1)
 
 **Why:** Review mode fires `N_docs × N_columns` LLM calls every time a job runs. Standard legal
@@ -394,6 +394,103 @@ Notice, Parties) appear in virtually every document and could be extracted once 
 - Review jobs: query `page_metadata` first; only fire an LLM extraction call for
   non-standard or missing columns
 - **Effect:** majority of Review cells become DB lookups instead of LLM calls
+
+---
+
+## Phase 4.5 — Answer Quality Hardening ✅ COMPLETE
+
+Discovered and fixed during Phase 4 testing with real court judgment documents.
+No architectural changes — all improvements are prompt and merge logic.
+
+### Q1 — Page Title Disambiguation ✅
+**Files:** `wiki.py` (all three ingest prompt templates)
+
+**Problem:** All court judgment documents produced pages with the same generic titles
+(e.g. `Procedural History (Court Judgment)`, `Facts (Court Judgment)`). The wiki merger
+merged all five cases into the same pages, making case-specific queries unanswerable.
+
+**Fix:** Ingest prompts now distinguish two categories:
+- **Case-specific pages** (facts, procedural history, charges, holding, parties,
+  contentions, relief) — model must prefix the title with a short case identifier
+  derived from the parties' names: `Facts – Yuvraj Kanther (Court Judgment)`
+- **Shared legal concept pages** (statutes, precedents, doctrines) — no prefix,
+  intentionally merged across cases: `Section 319 CrPC (Court Judgment)`
+
+### Q2 — Ingest: Procedural Order Rationale ✅
+**Files:** `wiki.py` (INGEST_PROMPT_TEMPLATE, DETAIL_PROMPT_TEMPLATE)
+
+**Problem:** Pages captured *what* procedural orders were made but not *why*.
+"Why did the Magistrate commit the case?" had no answer even though the excerpt
+contained "Section 304 Part II IPC was prima facie attracted."
+
+**Fix:** Added `PROCEDURAL ORDER RATIONALE` rule: for every procedural order
+(committal, discharge, framing of charges, remand, stay), the model must record
+(a) which court made the order, (b) under which section, and (c) the court's stated reason.
+
+Added `MULTI-STAGE LITIGATION` rule: cases with multiple stages (Trial Court →
+High Court → Supreme Court, or First SLP → Second Appeal) must be clearly labelled
+and separated — outcomes from different stages must never be blended.
+
+### Q3 — Answer Prompt: Source Attribution in Merged Pages ✅
+**Files:** `wiki.py` (_atomic_merge_db), `prompts.py`
+
+**Problem:** Shared concept pages (e.g. `Section 319 CrPC`) accumulate content from
+multiple cases separated only by `---`. The answer model attributed one case's
+proceedings to another.
+
+**Fix:** Merge now labels each appended block:
+```
+[existing content]
+
+---
+*[From: Yuvraj_Laxmilal_Kanther_vs_Maharashtra...]*
+
+[new content]
+```
+Answer prompt rule `CROSS-DOCUMENT SOURCE DISCIPLINE` instructs the model to treat
+`[From: ...]` labels as source separators and not blend claims across them.
+
+### Q4 — Answer Prompt: Named-Document Completeness ✅
+**Files:** `prompts.py`
+
+**Problem:** When a comparison question named two specific cases and one was missing
+from context, the model hallucinated content for it (e.g. invented a ₹70 lakh figure)
+rather than acknowledging the gap.
+
+**Fix:** `NAMED-DOCUMENT COMPLETENESS` rule: when the question explicitly names two or
+more cases for comparison, each must be addressed individually. If excerpts for one are
+absent, state it explicitly ("No relevant excerpts for X were found") — never hallucinate
+or substitute content from a different case.
+
+### Q5 — Answer Prompt: Procedural Stage Precision ✅
+**Files:** `prompts.py`
+
+**Problem:** When asked about a specific stage of litigation ("the earlier SLP"),
+the model answered with the final appeal outcome instead.
+
+**Fix:** `PROCEDURAL STAGE PRECISION` rule: confine the answer to the exact stage
+named in the question. Do not substitute events from a later stage.
+
+### Q6 — Answer Prompt: Legal Standard Precision ✅
+**Files:** `prompts.py`
+
+**Problem:** Model upgraded legal standards — "rebuttable presumption" became
+"conclusive evidence", "prima facie satisfaction" became a "finding", and
+standard criminal law terminology not in the source was added.
+
+**Fix:** `LEGAL STANDARD PRECISION` rule: match the source's language exactly —
+neither weaker nor stronger. A rebuttable presumption must not be called conclusive;
+a party's submission must not be attributed to the court.
+
+### Q7 — Answer Prompt: Thematic Selectivity ✅
+**Files:** `prompts.py`
+
+**Problem:** When asked "which cases demonstrate X", the model forced all cases into
+the framing, producing diluted analysis with weak connections for cases that didn't fit.
+
+**Fix:** `THEMATIC SELECTIVITY` rule: only include cases where the theme is clearly
+demonstrated. Explicitly noting "Case X only tangentially relates" is preferred over
+stretching a weak connection into a full example.
 
 ---
 
