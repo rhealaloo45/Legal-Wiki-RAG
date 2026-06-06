@@ -1,0 +1,46 @@
+# ── .dockerignore ─────────────────────────────────────────────────────────────
+# Files excluded from the Docker build context.
+# Keeps the image lean and prevents secrets from leaking into layers.
+
+# Secrets / environment
+app/.env
+**/.env
+**/.env.local
+**/*.key
+**/*.pem
+
+# Uploaded & generated data (mounted as a volume at runtime instead)
+app/data/
+
+# Python cache
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Docs / planning files (not needed at runtime)
+*.md
+PLAN.md
+SYSTEM_FLOW.md
+SYSTEM_OVERVIEW.md
+check_errors.js
+debug.log
+test_*.py
