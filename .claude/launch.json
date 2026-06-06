@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Legal Wiki RAG (Flask)",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["app.py"],
+      "cwd": "app",
+      "port": 5001
+    }
+  ]
+}
