@@ -68,6 +68,67 @@ if config.TESSERACT_CMD:
 
 executor = ThreadPoolExecutor(max_workers=10)
 
+# ---------------------------------------------------------------------------
+# Progress store helpers — abstract over in-memory dict vs PostgreSQL (S5)
+# ---------------------------------------------------------------------------
+def _update_doc_status(session_id: str, doc_name: str, status: str,
+                        step: str = "", pages: int = 0) -> None:
+    """Set a specific document's status in the docs_list of the progress dict."""
+    progress = _get_progress(session_id)
+    for doc in progress.get("docs_list", []):
+        if doc.get("name") == doc_name:
+            doc["status"] = status
+            doc["step"] = step
+            if pages:
+                doc["pages"] = pages
+            break
+    _set_progress(session_id, progress)
+
+
+def _refresh_wiki_stats(session_id: str) -> None:
+    """Update pages_total and relations_total in the wiki progress block."""
+    try:
+        if config.USE_DATABASE:
+            from services import db as _db
+            pages = _db.count_pages(session_id)
+            rels = _db.count_relations(session_id)
+        else:
+            idx = wiki._load_index(session_id)
+            pages = len(idx.get("pages", {}))
+            rels = len(idx.get("relations", []))
+        progress = _get_progress(session_id)
+        wiki_prog = progress.get("wiki", {})
+        wiki_prog["pages_total"] = pages
+        wiki_prog["relations_total"] = rels
+        progress["wiki"] = wiki_prog
+        _set_progress(session_id, progress)
+    except Exception as e:
+        logger.error("Failed to refresh wiki stats: %s", e)
+
+
+def _get_progress(session_id: str) -> dict:
+    if config.USE_DATABASE:
+        from services import db as _db
+        return _db.get_progress(session_id) or {}
+    return config.PROGRESS_STORE.get(session_id, {})
+
+
+def _set_progress(session_id: str, data: dict) -> None:
+    if config.USE_DATABASE:
+        from services import db as _db
+        _db.set_progress(session_id, data)
+    else:
+        config.PROGRESS_STORE[session_id] = data
+
+
+def _delete_progress(session_id: str) -> None:
+    if config.USE_DATABASE:
+        from services import db as _db
+        _db.delete_progress(session_id)
+    else:
+        config.PROGRESS_STORE.pop(session_id, None)
+
+
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
 def load_sessions():
@@ -193,14 +254,17 @@ def upload():
     if not saved_paths:
         return jsonify({"error": "No valid files (.txt, .pdf) found"}), 400
 
-    # Initialize progress with document-level counters
+    # Initialize progress with per-document tracking
     progress = {
         "phase": "processing",
-        "docs": {"total": len(saved_paths), "rag_done": 0, "wiki_done": 0},
-        "rag": {},
-        "wiki": {},
+        "docs": {"total": len(saved_paths), "wiki_done": 0},
+        "wiki": {"step": "queued", "message": "", "pages_total": 0, "relations_total": 0},
+        "docs_list": [
+            {"name": os.path.basename(p), "status": "queued", "pages": 0, "step": ""}
+            for p in saved_paths
+        ],
     }
-    config.PROGRESS_STORE[session_id] = progress
+    _set_progress(session_id, progress)
 
     # Submit all tasks to executor (non-blocking)
     for save_path, meta in zip(saved_paths, metadata_list):
@@ -238,33 +302,43 @@ def _ingest_single_doc_rag(file_path: str, session_id: str, meta: dict = None):
     except Exception as e:
         logger.error("RAG ingest failed for %s: %s", file_path, e)
     finally:
-        progress = config.PROGRESS_STORE.get(session_id, {})
+        progress = _get_progress(session_id)
         docs = progress.get("docs", {})
         docs["rag_done"] = docs.get("rag_done", 0) + 1
+        progress["docs"] = docs
+        _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
 def _ingest_single_doc_wiki(file_path: str, session_id: str):
     """Worker for Wiki building of a single doc."""
+    doc_name = os.path.basename(file_path)
     try:
-        wiki.ingest(file_path, session_id)
+        result = wiki.ingest(file_path, session_id)
+        pages = (result or {}).get("pages_updated", 0)
+        _refresh_wiki_stats(session_id)
+        _update_doc_status(session_id, doc_name, "done", "", pages)
     except Exception as e:
         logger.error("Wiki ingest failed for %s: %s", file_path, e)
+        _update_doc_status(session_id, doc_name, "error", str(e)[:60])
     finally:
-        progress = config.PROGRESS_STORE.get(session_id, {})
+        progress = _get_progress(session_id)
         docs = progress.get("docs", {})
         docs["wiki_done"] = docs.get("wiki_done", 0) + 1
+        progress["docs"] = docs
+        _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
 def _check_completion(session_id: str):
     """Mark phase as complete when all documents finish both pipelines."""
-    progress = config.PROGRESS_STORE.get(session_id, {})
+    progress = _get_progress(session_id)
     docs = progress.get("docs", {})
     total = docs.get("total", 0)
     # if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
     if total > 0 and docs.get("wiki_done", 0) >= total:
         progress["phase"] = "complete"
+        _set_progress(session_id, progress)
 
 
 @app.route("/query", methods=["POST"])
@@ -518,7 +592,7 @@ def get_log():
 def progress():
     """Return the current progress of an ongoing ingest."""
     session_id = request.args.get("session_id", "")
-    return jsonify(config.PROGRESS_STORE.get(session_id, {"rag": {}, "wiki": {}}))
+    return jsonify(_get_progress(session_id) or {"rag": {}, "wiki": {}})
 
 
 @app.route("/sessions", methods=["GET"])
@@ -596,7 +670,7 @@ def clear_session():
         errors.append(f"uploads: {e}")
 
     # Clear progress store entry
-    config.PROGRESS_STORE.pop(session_id, None)
+    _delete_progress(session_id)
 
     # Remove from sessions metadata
     sessions = load_sessions()

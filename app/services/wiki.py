@@ -24,6 +24,9 @@ import config
 from services import llm
 from services.reader import read_file as _read_file
 
+if config.USE_DATABASE:
+    from services import db as _db
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -68,7 +71,7 @@ def _log_event(session_id: str, event_type: str, detail: str):
 
 
 # ---------------------------------------------------------------------------
-# Wiki I/O
+# Wiki I/O — file-based (fallback when DATABASE_URL is not set)
 # ---------------------------------------------------------------------------
 def _wiki_dir(session_id: str) -> str:
     """Return the wiki directory for a session, creating it if needed."""
@@ -81,12 +84,8 @@ def _index_path(session_id: str) -> str:
     return os.path.join(_wiki_dir(session_id), "index.json")
 
 
-def _load_index(session_id: str) -> dict:
-    """Load existing wiki index or return empty scaffold.
-
-    Pages use the new structure: {"title": {"content": "...", "summary": "..."}}
-    Gracefully handles the old flat format {"title": "content string"}.
-    """
+def _load_index_file(session_id: str) -> dict:
+    """Load wiki index from index.json or return empty scaffold."""
     path = _index_path(session_id)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
@@ -104,11 +103,42 @@ def _load_index(session_id: str) -> dict:
     return {"pages": {}, "relations": []}
 
 
-def _save_index(session_id: str, index: dict):
+def _save_index_file(session_id: str, index: dict) -> None:
     """Persist wiki index to disk."""
     path = _index_path(session_id)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Wiki I/O — DB-backed (when DATABASE_URL is set)
+# ---------------------------------------------------------------------------
+def _load_index_db(session_id: str) -> dict:
+    """Load wiki index from PostgreSQL. Auto-migrates from index.json on first access."""
+    json_path = _index_path(session_id)
+    if os.path.exists(json_path) and _db.count_pages(session_id) == 0:
+        logger.info("Auto-migrating session %s from index.json to PostgreSQL", session_id)
+        _db.migrate_from_json(session_id, json_path)
+        os.rename(json_path, json_path + ".migrated")
+
+    pages = _db.get_pages(session_id)
+    relations = _db.get_relations(session_id)
+    return {"pages": pages, "relations": relations}
+
+
+# ---------------------------------------------------------------------------
+# Unified Wiki I/O — dispatches to DB or file based on config
+# ---------------------------------------------------------------------------
+def _load_index(session_id: str) -> dict:
+    if config.USE_DATABASE:
+        return _load_index_db(session_id)
+    return _load_index_file(session_id)
+
+
+def _save_index(session_id: str, index: dict) -> None:
+    """Persist wiki index. No-op in DB mode — writes happen directly in _atomic_merge."""
+    if not config.USE_DATABASE:
+        _save_index_file(session_id, index)
 
 
 
@@ -316,6 +346,11 @@ PRINCIPLES:
 - LEGAL DEPTH: Create pages for key precedents, statutory provisions, and the \
   judicial reasoning (ratio decidendi). Explain HOW the law was applied to the \
   facts, not just what the law is. Explain the Holding/Conclusion.
+- ALLEGATIONS VS. FINDINGS: In court judgments and criminal matters, rigorously \
+  distinguish between (1) prosecution/plaintiff allegations, (2) party contentions, \
+  (3) court observations or prima facie findings, and (4) final orders/convictions. \
+  Use language like "the prosecution alleged", "the court held", "the petitioner contended". \
+  Never write a charge or prosecution theory as if it were a concluded judicial finding.
 - ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
 - LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
 - TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
@@ -394,6 +429,11 @@ RULES:
 - FACTUAL PRECISION: Extract exact dates, amounts, and figures verbatim. Do not invent dates.
 - ANTI-HALLUCINATION: You MUST extract exact verbatim quotes to support your synthesis for EVERY page.
 - LEGAL DEPTH: Focus on statutory interpretation, judicial reasoning, and precedents.
+- ALLEGATIONS VS. FINDINGS: In court judgments and criminal matters, rigorously \
+  distinguish between (1) prosecution/plaintiff allegations, (2) party contentions, \
+  (3) court observations or prima facie findings, and (4) final orders/convictions. \
+  Use language like "the prosecution alleged", "the court held", "the petitioner contended". \
+  Never write a charge or prosecution theory as if it were a concluded judicial finding.
 - ROLE & OBLIGATION ACCURACY: Be extremely precise about WHO bears an obligation and WHO receives a benefit (e.g., who pays a fee, who provides a certificate). Do not reverse roles.
 - LIMITATIONS & EXCEPTIONS: Accurately capture if a clause (like indemnity or confidentiality) is subject to a limitation of liability. Do not state obligations remain 'full' if they are capped or limited.
 - TERMINATION: Clearly distinguish between unilateral (one-party) and mutual termination rights.
@@ -424,6 +464,44 @@ _SINGLE_CALL_THRESHOLD = 100000
 _INGEST_CHUNK_SIZE = 40000
 
 
+# ---------------------------------------------------------------------------
+# Progress helpers — abstract over PROGRESS_STORE vs PostgreSQL (S5)
+# ---------------------------------------------------------------------------
+def _get_session_progress(session_id: str) -> dict:
+    """Return the current progress dict for this session."""
+    if config.USE_DATABASE:
+        return _db.get_progress(session_id) or {"rag": {}, "wiki": {}}
+    return config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
+
+
+def _save_session_progress(session_id: str, progress: dict) -> None:
+    """Persist the progress dict (no-op for in-memory store since it mutates by reference)."""
+    if config.USE_DATABASE:
+        _db.set_progress(session_id, progress)
+    else:
+        config.PROGRESS_STORE[session_id] = progress
+
+
+def _update_wiki_progress(session_id: str, wiki_update: dict) -> None:
+    """Merge wiki_update into the 'wiki' sub-dict and persist."""
+    progress = _get_session_progress(session_id)
+    w = progress.setdefault("wiki", {})
+    w.update(wiki_update)
+    _save_session_progress(session_id, progress)
+
+
+def _update_doc_step(session_id: str, doc_name: str, status: str, step: str = "") -> None:
+    """Update a single document's status in the progress docs_list."""
+    progress = _get_session_progress(session_id)
+    bare = os.path.basename(doc_name)
+    for doc in progress.get("docs_list", []):
+        if doc.get("name") == bare:
+            doc["status"] = status
+            doc["step"] = step
+            break
+    _save_session_progress(session_id, progress)
+
+
 def ingest(file_path: str, session_id: str) -> dict:
     """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
 
@@ -437,51 +515,53 @@ def ingest(file_path: str, session_id: str) -> dict:
 
     logger.info("Wiki ingest: %s (%d chars)", doc_name, len(text))
 
-    progress = config.PROGRESS_STORE.setdefault(session_id, {"rag": {}, "wiki": {}})
+    # Signal: file has been read, starting synthesis
+    _update_doc_step(session_id, doc_name, "synthesizing")
 
     total_contradictions = 0
 
     if len(text) <= _SINGLE_CALL_THRESHOLD:
         # --- Short document: single LLM call ---
-        progress["wiki"] = {"current": 0, "total": 1, "message": f"Processing {doc_name}..."}
-
+        _update_wiki_progress(session_id, {"current": 0, "total": 1,
+                                            "message": f"Processing {doc_name}..."})
+        _update_doc_step(session_id, doc_name, "synthesizing", "1/1")
         parsed = _ingest_single_call(text, doc_name)
-        progress["wiki"]["current"] = 1
-
+        _update_doc_step(session_id, doc_name, "merging")
+        _update_wiki_progress(session_id, {"current": 1, "total": 1,
+                                            "message": f"Processing {doc_name}..."})
         total_pages, total_rels, total_contradictions = _atomic_merge(session_id, parsed, doc_name)
     else:
         # --- Long document: two-phase approach ---
         segments = _split_segments(text)
-        total_steps = 1 + len(segments)  # 1 overview + N segments
-        progress["wiki"] = {"current": 0, "total": total_steps, "message": f"Overview pass for {doc_name}..."}
+        total_steps = 1 + len(segments)
+        _update_wiki_progress(session_id, {"current": 0, "total": total_steps,
+                                            "message": f"Overview pass for {doc_name}..."})
+        _update_doc_step(session_id, doc_name, "synthesizing", f"0/{len(segments)}")
 
-        # Phase 1: Overview
         overview_text = text[:6000] + "\n\n[...]\n\n" + text[-3000:]
         doc_type, topics, overview_parsed = _ingest_overview(overview_text, doc_name)
-        progress["wiki"]["current"] = 1
+        _update_wiki_progress(session_id, {"current": 1, "total": total_steps,
+                                            "message": f"Overview pass for {doc_name}..."})
 
-        # Merge overview page immediately
         total_pages, total_rels, tc = _atomic_merge(session_id, overview_parsed, doc_name)
         total_contradictions += tc
 
-        # Phase 2: Detailed segments concurrently
         completed_segments = 0
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=config.WIKI_MAX_WORKERS
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.WIKI_MAX_WORKERS) as executor:
             future_to_index = {
                 executor.submit(_ingest_detail_segment, seg, topics, doc_name, doc_type): i
                 for i, seg in enumerate(segments)
             }
-            
+
             for future in concurrent.futures.as_completed(future_to_index):
                 i = future_to_index[future]
                 completed_segments += 1
                 msg = f"Detail pass completed {completed_segments}/{len(segments)} for {doc_name}"
                 logger.info("  %s", msg)
-                progress["wiki"]["current"] = 1 + completed_segments
-                progress["wiki"]["message"] = msg
-                
+                _update_doc_step(session_id, doc_name, "synthesizing",
+                                 f"{completed_segments}/{len(segments)}")
+                _update_wiki_progress(session_id, {"current": 1 + completed_segments,
+                                                    "total": total_steps, "message": msg})
                 try:
                     parsed = future.result()
                     p, r, c = _atomic_merge(session_id, parsed, doc_name)
@@ -493,8 +573,9 @@ def ingest(file_path: str, session_id: str) -> dict:
                     _log_event(session_id, "ERROR", f"Doc: {doc_name} | Segment {i} failed: {exc}")
 
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
-    _log_event(session_id, "INGEST", f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
-    progress["wiki"]["message"] = f"Complete: {total_pages} pages extracted."
+    _log_event(session_id, "INGEST",
+               f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
+    _update_wiki_progress(session_id, {"message": f"Complete: {total_pages} pages extracted."})
     return {"pages_updated": total_pages, "relations": total_rels}
 
 
@@ -589,21 +670,127 @@ def _split_segments(text: str) -> list[str]:
 
 
 def _atomic_merge(session_id: str, new_data: dict, doc_name: str = "Unknown") -> tuple[int, int, int]:
-    """Thread-safe: load index, merge new data, save — all under lock."""
+    """Thread-safe merge: dispatches to DB or file path based on config.USE_DATABASE."""
+    if config.USE_DATABASE:
+        return _atomic_merge_db(session_id, new_data, doc_name)
+    return _atomic_merge_file(session_id, new_data, doc_name)
+
+
+def _atomic_merge_file(session_id: str, new_data: dict, doc_name: str = "Unknown") -> tuple[int, int, int]:
+    """File-based merge: load index.json → merge in Python → save index.json, under lock."""
     lock = _get_session_lock(session_id)
     with lock:
-        existing = _load_index(session_id)
+        existing = _load_index_file(session_id)
         merged, pages_updated, new_rels, contradictions = _merge_wiki(existing, new_data, doc_name)
-        _save_index(session_id, merged)
-        
+        _save_index_file(session_id, merged)
         for c in contradictions:
             _log_event(
-                session_id, 
-                "CONTRADICTION", 
-                f"Page: {c['title']} | Claim: {c['claim']} | Source A: {c.get('val_a')} | Source B: {c.get('val_b')}"
+                session_id,
+                "CONTRADICTION",
+                f"Page: {c['title']} | Claim: {c['claim']} | Source A: {c.get('val_a')} | Source B: {c.get('val_b')}",
             )
-            
     return pages_updated, new_rels, len(contradictions)
+
+
+def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown") -> tuple[int, int, int]:
+    """DB-backed merge: per-row upserts under a session lock.
+
+    Keeps the Python lock to serialize the cross-reference pass (Phase 4/S2 will
+    replace the O(N²) loop with a single PostgreSQL FTS query and remove it).
+    """
+    lock = _get_session_lock(session_id)
+    with lock:
+        pages_updated = 0
+        new_rels_count = 0
+        contradictions_found: list[dict] = []
+
+        new_pages = new_data.get("pages", {})
+        new_relations = new_data.get("relations", [])
+
+        # -- Merge pages --
+        for title, new_value in new_pages.items():
+            if isinstance(new_value, str):
+                new_content, new_summary, new_quotes = new_value, "", []
+            else:
+                new_content = new_value.get("content", "")
+                new_summary = new_value.get("summary", "")
+                new_quotes = new_value.get("quotes", [])
+
+            if new_quotes:
+                quote_text = "\n\n**Supporting Quotes:**\n" + "\n".join(f"> {q}" for q in new_quotes)
+                new_content += quote_text
+
+            existing = _db.get_page(session_id, title)
+
+            if existing:
+                existing_content = existing["content"]
+                existing_summary = existing["summary"]
+                contradiction_flagged = existing.get("contradiction_flagged", False)
+                variants = existing.get("variants")
+
+                if len(new_content) > 200 and len(existing_content) > 200:
+                    prompt = (
+                        "Do these two texts contradict each other on any specific factual claim "
+                        "(dates, values, obligations, parties)?\n"
+                        'Reply JSON only:\n{"contradicts": bool, "claim": str|null, "value_a": str|null, "value_b": str|null}\n\n'
+                        f"Text A:\n{existing_content}\n\nText B:\n{new_content}"
+                    )
+                    try:
+                        raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_CONTRADICTION)
+                        parsed = _parse_json_safe(raw)
+                        if parsed and parsed.get("contradicts"):
+                            contradiction_flagged = True
+                            from datetime import datetime
+                            if not variants:
+                                variants = [{"source": "Previous", "value": existing_content,
+                                             "date_ingested": datetime.now().isoformat()}]
+                            variants.append({"source": doc_name, "value": new_content,
+                                             "date_ingested": datetime.now().isoformat()})
+                            contradictions_found.append({
+                                "title": title,
+                                "claim": parsed.get("claim"),
+                                "val_a": parsed.get("value_a"),
+                                "val_b": parsed.get("value_b"),
+                                "doc": doc_name,
+                            })
+                    except Exception as e:
+                        logger.error("Contradiction check failed: %s", e)
+
+                merged_content = existing_content + "\n\n---\n" + new_content
+                merged_summary = new_summary if new_summary else existing_summary
+                _db.upsert_page(session_id, title, merged_content, merged_summary, doc_name,
+                                contradiction_flagged, variants)
+            else:
+                _db.upsert_page(session_id, title, new_content, new_summary, doc_name, False, None)
+
+            pages_updated += 1
+
+        # -- Merge explicit relations --
+        for rel in new_relations:
+            _db.upsert_relation(
+                session_id, rel.get("from", ""), rel.get("to", ""), rel.get("label", "")
+            )
+            new_rels_count += 1
+
+        # -- Cross-reference pass: detect "mentions" relations (O(N²) — replaced in Phase 4/S2) --
+        all_content = _db.get_all_page_titles_and_content(session_id)
+        all_titles = set(all_content.keys())
+        mention_rels: list[tuple[str, str, str]] = []
+        for title_a, content_a in all_content.items():
+            for title_b in all_titles:
+                if title_a != title_b and title_b in content_a:
+                    mention_rels.append((title_a, title_b, "mentions"))
+        if mention_rels:
+            _db.bulk_upsert_relations(session_id, mention_rels)
+
+        for c in contradictions_found:
+            _log_event(
+                session_id,
+                "CONTRADICTION",
+                f"Page: {c['title']} | Claim: {c['claim']} | Source A: {c.get('val_a')} | Source B: {c.get('val_b')}",
+            )
+
+    return pages_updated, new_rels_count, len(contradictions_found)
 
 
 # ---------------------------------------------------------------------------

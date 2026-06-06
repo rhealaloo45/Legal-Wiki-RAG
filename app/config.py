@@ -3,6 +3,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Database — set DATABASE_URL to enable PostgreSQL storage (Phase 2+).
+# When unset, the system falls back to file-based index.json storage.
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+USE_DATABASE = bool(DATABASE_URL)
+
 # Global Providers (azure or openrouter)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")

@@ -1692,6 +1692,83 @@
       background-color: var(--accent-light);
       box-shadow: 0 0 0 1px var(--accent);
     }
+
+    /* ── INGEST DASHBOARD ─────────────────────────────── */
+    .ingest-dash {
+      width: 100%; max-width: 620px; margin: 0 auto;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .id-header { padding-bottom: 10px; border-bottom: 0.5px solid var(--border); }
+    .id-title {
+      font-size: 14px; font-weight: 500; color: var(--text-primary);
+      display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
+    }
+    .id-spin { animation: spin 1.6s linear infinite; color: var(--accent); display: inline-block; }
+    .id-overall-row { display: flex; align-items: center; gap: 10px; }
+    .id-overall-bar {
+      flex: 1; height: 3px; background: var(--bg-base);
+      border-radius: 2px; overflow: hidden;
+    }
+    #id-overall-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent) 0%, var(--green) 100%);
+      width: 0%; transition: width 0.7s ease; border-radius: 2px;
+    }
+    .id-overall-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+    .id-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .id-panel {
+      background: var(--bg-surface); border: 0.5px solid var(--border);
+      border-radius: var(--radius-md); padding: 11px 13px;
+    }
+    .id-panel-title {
+      font-size: 9px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px;
+    }
+    /* Pipeline steps */
+    .id-step {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--text-muted); padding: 3px 0; transition: color 0.3s;
+    }
+    .id-step.done  { color: var(--green-text); }
+    .id-step.active { color: var(--text-primary); }
+    .id-step-icon { width: 14px; font-size: 11px; flex-shrink: 0; text-align: center; }
+    .id-step.done  .id-step-icon { color: var(--green); }
+    .id-step.active .id-step-icon { color: var(--accent); animation: spin 1.2s linear infinite; display: inline-block; }
+    /* Stats */
+    .id-stats-row { display: flex; gap: 6px; margin-bottom: 10px; }
+    .id-stat {
+      flex: 1; background: var(--accent-light);
+      border-radius: var(--radius-sm); padding: 7px 4px; text-align: center;
+    }
+    .id-stat-val {
+      font-size: 17px; font-weight: 600; color: var(--accent);
+      font-family: var(--font-heading); line-height: 1;
+    }
+    .id-stat-lbl {
+      font-size: 9px; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px;
+    }
+    #id-minigraph { width: 100%; height: 92px; display: block; }
+    /* Document feed */
+    .id-feed-panel { max-height: 190px; overflow-y: auto; }
+    .id-doc-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 4px; border-radius: var(--radius-sm); transition: background 0.15s;
+    }
+    .id-doc-item:hover { background: var(--bg-base); }
+    .id-doc-icon { width: 16px; font-size: 13px; flex-shrink: 0; text-align: center; }
+    .id-doc-name {
+      flex: 1; font-size: 12px; color: var(--text-primary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .id-doc-step { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+    .id-doc-item.status-done .id-doc-icon { color: var(--green); }
+    .id-doc-item.status-done .id-doc-step { color: var(--green-text); font-weight: 500; }
+    .id-doc-item.status-error .id-doc-icon, .id-doc-item.status-error .id-doc-step { color: var(--red); }
+    .id-doc-item.status-queued .id-doc-icon { color: var(--text-muted); }
+    .id-doc-item.status-synthesizing .id-doc-icon,
+    .id-doc-item.status-extracting   .id-doc-icon,
+    .id-doc-item.status-merging      .id-doc-icon { color: var(--accent); animation: spin 1.2s linear infinite; display: inline-block; }
   </style>
 </head>
 
@@ -1758,8 +1835,10 @@
         <!-- PRE-SESSION UPLOAD SCREEN -->
         <div id="panel-upload" class="panel" style="display:flex;">
           <div class="upload-screen" id="upload-screen">
-            <div class="upl-title">Upload your documents</div>
-            <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
+            <div id="upl-title-wrap">
+              <div class="upl-title">Upload your documents</div>
+              <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
+            </div>
 
             <div class="upl-zone" id="upload-zone">
               <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
@@ -1776,20 +1855,69 @@
                 style="background:var(--accent);color:#fff;border:none">Ingest Now</button>
             </div>
 
-            <div class="main-prog-wrap d-none" id="progress-wrap">
-              <div class="main-prog-lbl"><span style="color:var(--accent)">RAG Pipeline</span><span
-                  id="rag-prog-label">0/0</span></div>
-              <div class="prog-container">
-                <div class="prog-fill" id="rag-prog-bar"></div>
-              </div>
-              <div class="prog-lbls"><span id="rag-prog-msg">Starting...</span><span></span></div>
+            <!-- INGEST DASHBOARD — replaces old dual-pipeline bars -->
+            <div class="ingest-dash d-none" id="ingest-dash">
 
-              <div class="main-prog-lbl" style="margin-top:10px"><span style="color:var(--green)">Wiki
-                  Pipeline</span><span id="wiki-prog-label">0/0</span></div>
-              <div class="prog-container">
-                <div class="prog-fill" id="wiki-prog-bar"></div>
+              <!-- Header: title + overall bar -->
+              <div class="id-header">
+                <div class="id-title">
+                  <i class="ti ti-brain id-spin" id="id-brain-icon"></i>
+                  <span id="id-title-text">Building Knowledge Base</span>
+                </div>
+                <div class="id-overall-row">
+                  <div class="id-overall-bar"><div id="id-overall-fill"></div></div>
+                  <div class="id-overall-lbl">
+                    <span id="id-docs-done">0</span>&thinsp;/&thinsp;<span id="id-docs-total">0</span> docs
+                  </div>
+                </div>
               </div>
-              <div class="prog-lbls"><span id="wiki-prog-msg">Starting...</span><span id="eta-label"></span></div>
+
+              <!-- Two columns: pipeline steps | knowledge stats -->
+              <div class="id-cols">
+
+                <div class="id-panel">
+                  <div class="id-panel-title">Pipeline Stages</div>
+                  <div class="id-step" id="id-step-extract">
+                    <span class="id-step-icon">○</span><span>Text Extraction</span>
+                  </div>
+                  <div class="id-step" id="id-step-segment">
+                    <span class="id-step-icon">○</span><span>Segmentation</span>
+                  </div>
+                  <div class="id-step" id="id-step-synth">
+                    <span class="id-step-icon">○</span><span>Knowledge Synthesis</span>
+                  </div>
+                  <div class="id-step" id="id-step-merge">
+                    <span class="id-step-icon">○</span><span>Knowledge Merge</span>
+                  </div>
+                </div>
+
+                <div class="id-panel">
+                  <div class="id-panel-title">Knowledge Base</div>
+                  <div class="id-stats-row">
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-pages">0</div>
+                      <div class="id-stat-lbl">Pages</div>
+                    </div>
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-rels">0</div>
+                      <div class="id-stat-lbl">Relations</div>
+                    </div>
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-docs-done2">0</div>
+                      <div class="id-stat-lbl">Done</div>
+                    </div>
+                  </div>
+                  <svg id="id-minigraph"></svg>
+                </div>
+
+              </div>
+
+              <!-- Document feed -->
+              <div class="id-panel id-feed-panel">
+                <div class="id-panel-title">Documents</div>
+                <div id="id-doc-feed"></div>
+              </div>
+
             </div>
           </div>
         </div>
@@ -3041,9 +3169,13 @@
     document.getElementById('upload-btn').addEventListener('click', async () => {
       if (!stagedFiles.length) return;
       document.getElementById('upload-btn').disabled = true;
+      // Hide upload zone + buttons, show ingest dashboard
+      document.getElementById('upload-zone').style.display = 'none';
       document.getElementById('pick-btns-wrap').classList.add('d-none');
-      document.getElementById('progress-wrap').classList.remove('d-none');
+      document.getElementById('upl-title-wrap').style.display = 'none';
+      document.getElementById('ingest-dash').classList.remove('d-none');
       ingestStartTime = Date.now();
+      initMiniGraph();
 
       const fd = new FormData();
       const relativePaths = [];
@@ -3065,34 +3197,158 @@
           try {
             const pRes = await fetch(`/progress?session_id=${SID}`);
             const pData = await pRes.json();
-            const docs = pData.docs || {};
-            const total = docs.total || totalFilesQueued;
-
-            setDocProgress('rag', docs.rag_done || 0, total, pData.rag?.message || '');
-            setDocProgress('wiki', docs.wiki_done || 0, total, pData.wiki?.message || '');
+            renderIngestDashboard(pData, totalFilesQueued);
 
             if (pData.phase === 'complete') {
               clearInterval(pollTimer);
-              setDocProgress('rag', total, total, 'Complete');
-              setDocProgress('wiki', total, total, 'Complete');
+              renderIngestDashboard(pData, totalFilesQueued);
               uploadDone = true;
-              document.getElementById('modeTabs').classList.remove('d-none');
-              document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
-              switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
-              showToast('Ingestion complete', 'success');
-              loadGraph();
-              loadFileTree();
+              setTimeout(() => {
+                document.getElementById('modeTabs').classList.remove('d-none');
+                document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+                switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
+                showToast('Knowledge base ready', 'success');
+                loadGraph();
+                loadFileTree();
+              }, 900);
             }
           } catch (e) { }
         }, 1500);
       } catch (e) { showToast('Upload failed', 'error'); }
     });
 
-    function setDocProgress(pipe, done, total, msg) {
-      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-      document.getElementById(`${pipe}-prog-bar`).style.width = pct + '%';
-      document.getElementById(`${pipe}-prog-label`).textContent = `${done}/${total}`;
-      document.getElementById(`${pipe}-prog-msg`).textContent = msg || `${done} of ${total}`;
+    // ============================================================
+    // Ingest Dashboard
+    // ============================================================
+    let _miniSim = null, _miniNodes = [], _miniLinks = [], _lastPages = 0;
+    const _DOC_COLORS = ['#2B5CE6','#1D9E75','#7C3AED','#D97706','#0891B2','#4F46E5','#DC2626'];
+    const _ctrTargets = {}, _ctrCurrents = {};
+
+    function initMiniGraph() {
+      _miniNodes = []; _miniLinks = []; _lastPages = 0;
+      const svg = d3.select('#id-minigraph');
+      svg.selectAll('*').remove();
+      const w = svg.node()?.clientWidth || 220, h = 92;
+      const g = svg.append('g');
+      _miniSim = d3.forceSimulation([])
+        .force('link', d3.forceLink([]).id(d => d.id).distance(16).strength(0.7))
+        .force('charge', d3.forceManyBody().strength(-22))
+        .force('center', d3.forceCenter(w / 2, h / 2))
+        .force('collision', d3.forceCollide(7))
+        .alphaDecay(0.018)
+        .on('tick', () => {
+          const cx = v => Math.max(5, Math.min(w - 5, v));
+          const cy = v => Math.max(5, Math.min(h - 5, v));
+          g.selectAll('.mg-l').attr('x1', d => cx(d.source.x)).attr('y1', d => cy(d.source.y))
+                              .attr('x2', d => cx(d.target.x)).attr('y2', d => cy(d.target.y));
+          g.selectAll('.mg-n').attr('cx', d => cx(d.x)).attr('cy', d => cy(d.y));
+        });
+    }
+
+    function growMiniGraph(pagesTotal) {
+      if (!_miniSim || pagesTotal <= _lastPages) return;
+      _lastPages = pagesTotal;
+      const MAX = 38;
+      const target = Math.min(Math.ceil(pagesTotal / 4) + 1, MAX);
+      if (target <= _miniNodes.length) return;
+
+      const svg = d3.select('#id-minigraph');
+      const g = svg.select('g');
+      const w = svg.node()?.clientWidth || 220, h = 92;
+
+      while (_miniNodes.length < target) {
+        const id = _miniNodes.length;
+        _miniNodes.push({ id, color: _DOC_COLORS[id % _DOC_COLORS.length],
+                          x: w/2 + (Math.random()-.5)*50, y: h/2 + (Math.random()-.5)*30 });
+        if (_miniNodes.length > 1) {
+          const t = Math.floor(Math.random() * (_miniNodes.length - 1));
+          _miniLinks.push({ source: id, target: t });
+          if (Math.random() > .55 && _miniNodes.length > 4)
+            _miniLinks.push({ source: id, target: Math.floor(Math.random() * (_miniNodes.length - 1)) });
+        }
+      }
+      g.selectAll('.mg-l').data(_miniLinks).join('line').attr('class','mg-l')
+        .attr('stroke','#d1d5db').attr('stroke-width',.7).attr('opacity',.7);
+      g.selectAll('.mg-n').data(_miniNodes).join('circle').attr('class','mg-n')
+        .attr('r', d => d.id < 2 ? 5 : 3.5).attr('fill', d => d.color).attr('opacity',.82);
+      _miniSim.nodes(_miniNodes);
+      _miniSim.force('link').links(_miniLinks);
+      _miniSim.alpha(.45).restart();
+    }
+
+    function animCounter(id, target) {
+      _ctrTargets[id] = target;
+      if (_ctrCurrents[id] === undefined) _ctrCurrents[id] = 0;
+      (function tick() {
+        const cur = _ctrCurrents[id] || 0, tgt = _ctrTargets[id];
+        if (cur >= tgt) { document.getElementById(id).textContent = tgt; return; }
+        _ctrCurrents[id] = cur + Math.ceil((tgt - cur) / 5);
+        document.getElementById(id).textContent = _ctrCurrents[id];
+        requestAnimationFrame(tick);
+      })();
+    }
+
+    function renderIngestDashboard(pData, fallbackTotal) {
+      const docs = pData.docs || {}, wProg = pData.wiki || {};
+      const docsList = pData.docs_list || [];
+      const total = docs.total || fallbackTotal || 0;
+      const done = docs.wiki_done || 0;
+      const pages = wProg.pages_total || 0, rels = wProg.relations_total || 0;
+
+      // Overall bar + counters
+      const pct = total > 0 ? Math.round(done / total * 100) : 0;
+      document.getElementById('id-overall-fill').style.width = pct + '%';
+      document.getElementById('id-docs-done').textContent = done;
+      document.getElementById('id-docs-total').textContent = total;
+      document.getElementById('id-docs-done2').textContent = done;
+      animCounter('id-pages', pages);
+      animCounter('id-rels', rels);
+      growMiniGraph(pages);
+
+      // Pipeline step states derived from docs_list
+      const statuses = docsList.map(d => d.status);
+      const anyStarted = statuses.some(s => s !== 'queued');
+      const anySynth   = statuses.some(s => ['synthesizing','merging'].includes(s));
+      const anyDone    = statuses.some(s => s === 'done');
+      const allDone    = total > 0 && done >= total;
+
+      function applyStep(el, state) {
+        if (!el) return;
+        el.className = 'id-step' + (state === 'done' ? ' done' : state === 'active' ? ' active' : '');
+        el.querySelector('.id-step-icon').textContent = state === 'done' ? '✓' : state === 'active' ? '↻' : '○';
+      }
+      applyStep(document.getElementById('id-step-extract'), anyStarted ? 'done' : 'pending');
+      applyStep(document.getElementById('id-step-segment'), anyStarted ? 'done' : 'pending');
+      applyStep(document.getElementById('id-step-synth'),   allDone ? 'done' : (anySynth || anyStarted) ? 'active' : 'pending');
+      applyStep(document.getElementById('id-step-merge'),   allDone ? 'done' : anyDone ? 'active' : 'pending');
+
+      // Title when done
+      if (allDone) {
+        document.getElementById('id-title-text').textContent = 'Knowledge Base Ready';
+        document.getElementById('id-brain-icon').classList.remove('id-spin');
+      }
+
+      // Document feed
+      const ICONS = { queued:'ti-clock', extracting:'ti-refresh', synthesizing:'ti-refresh',
+                      merging:'ti-refresh', done:'ti-circle-check', error:'ti-alert-circle' };
+      const feed = document.getElementById('id-doc-feed');
+      feed.innerHTML = (docsList.length ? docsList : stagedFiles.map(f => ({ name: f.file.name, status: 'queued', pages: 0, step: '' })))
+        .map(doc => {
+          const st = doc.status || 'queued';
+          const icon = ICONS[st] || 'ti-clock';
+          const label = st === 'done'  ? (doc.pages ? `${doc.pages} pages` : 'complete')
+                      : st === 'error' ? (doc.step || 'error')
+                      : st === 'synthesizing' ? (doc.step ? `synthesizing ${doc.step}` : 'synthesizing…')
+                      : st === 'merging'      ? 'merging…'
+                      : st === 'extracting'   ? 'extracting…'
+                      : 'queued';
+          const name = (doc.name || '').replace(/_/g,' ').replace(/\.[^.]+$/,'');
+          return `<div class="id-doc-item status-${st}">
+            <span class="id-doc-icon"><i class="ti ${icon}"></i></span>
+            <span class="id-doc-name" title="${doc.name || ''}">${name}</span>
+            <span class="id-doc-step">${label}</span>
+          </div>`;
+        }).join('');
     }
 
     // ============================================================
