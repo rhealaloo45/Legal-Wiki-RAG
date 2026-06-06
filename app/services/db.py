@@ -174,6 +174,43 @@ def _init_schema(engine) -> None:
             )
         """))
 
+        # S2: FTS column + GIN index for O(log N) cross-reference (Phase 4)
+        # Add generated tsvector column to pages if it doesn't exist yet.
+        try:
+            conn.execute(text("""
+                ALTER TABLE pages
+                ADD COLUMN IF NOT EXISTS content_tsv TSVECTOR
+                    GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+            """))
+        except Exception as _tsv_err:
+            logger.warning("Could not add content_tsv column (may already exist): %s", _tsv_err)
+        try:
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS pages_content_tsv_gin_idx
+                ON pages USING GIN(content_tsv)
+            """))
+        except Exception as _gin_err:
+            logger.warning("Could not create GIN index (may already exist): %s", _gin_err)
+
+        # S4: Structured contradictions table (Phase 4)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS contradictions (
+                id          BIGSERIAL PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                page_title  TEXT NOT NULL,
+                claim       TEXT,
+                value_a     TEXT,
+                source_a    TEXT,
+                value_b     TEXT,
+                source_b    TEXT,
+                detected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS contradictions_session_idx
+            ON contradictions (session_id, page_title)
+        """))
+
         conn.commit()
 
 
@@ -574,3 +611,181 @@ def migrate_from_json(session_id: str, json_path: str) -> None:
         "Migrated session %s from JSON: %d pages, %d relations",
         session_id, len(raw_pages), len(raw_rels),
     )
+
+
+# ---------------------------------------------------------------------------
+# S2: FTS cross-reference helpers (Phase 4)
+# ---------------------------------------------------------------------------
+
+def find_pages_mentioning_title(session_id: str, title: str) -> list[str]:
+    """Return titles of pages whose content mentions the given title.
+
+    Uses the GIN-indexed content_tsv column for O(log N) lookup instead of
+    the O(N) Python substring scan.  Returns [] if the title produces no FTS
+    tokens (e.g. a single stop-word title).
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT title FROM pages
+                WHERE session_id = :sid
+                  AND title      != :title
+                  AND content_tsv @@ plainto_tsquery('english', :tokens)
+            """),
+            {"sid": session_id, "title": title, "tokens": title},
+        )
+        return [row.title for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# S3: Page compaction helpers (Phase 4)
+# ---------------------------------------------------------------------------
+
+def find_pages_due_for_compaction(
+    session_id: str, append_threshold: int, char_threshold: int
+) -> list[dict]:
+    """Return pages that exceed the compaction thresholds."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT title, content, summary, variants, append_count, char_count, source_doc
+                FROM pages
+                WHERE session_id = :sid
+                  AND (
+                    append_count >= :at
+                    OR (append_count >= 2 AND char_count >= :ct)
+                  )
+                ORDER BY append_count DESC, char_count DESC
+            """),
+            {"sid": session_id, "at": append_threshold, "ct": char_threshold},
+        )
+        return [dict(row._mapping) for row in rows]
+
+
+def reset_page_after_compaction(
+    session_id: str,
+    title: str,
+    content: str,
+    summary: str,
+    contradiction_flagged: bool,
+) -> None:
+    """Replace page content after re-synthesis and reset append_count to 0."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            text("""
+                UPDATE pages
+                SET content               = :content,
+                    summary               = :summary,
+                    contradiction_flagged = :cf,
+                    append_count          = 0,
+                    char_count            = :char_count,
+                    variants              = NULL,
+                    last_modified         = now()
+                WHERE session_id = :sid AND title = :title
+            """),
+            {
+                "sid": session_id,
+                "title": title,
+                "content": content,
+                "summary": summary,
+                "cf": contradiction_flagged,
+                "char_count": len(content),
+            },
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# S4: Structured contradiction storage (Phase 4)
+# ---------------------------------------------------------------------------
+
+def upsert_contradiction(
+    session_id: str,
+    page_title: str,
+    claim: str | None,
+    value_a: str | None,
+    source_a: str | None,
+    value_b: str | None,
+    source_b: str | None,
+) -> None:
+    """Record a detected contradiction for a page."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO contradictions
+                    (session_id, page_title, claim, value_a, source_a, value_b, source_b)
+                VALUES (:sid, :title, :claim, :va, :sa, :vb, :sb)
+            """),
+            {
+                "sid": session_id, "title": page_title,
+                "claim": claim, "va": value_a, "sa": source_a,
+                "vb": value_b, "sb": source_b,
+            },
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# C7: Metadata helpers (Phase 4)
+# ---------------------------------------------------------------------------
+
+_METADATA_COLUMNS = (
+    "governing_law", "jurisdiction", "effective_date", "termination_notice",
+    "liability_cap", "ip_ownership", "parties", "auto_renewal",
+    "notice_period", "payment_terms",
+)
+
+
+def upsert_metadata(session_id: str, doc_name: str, metadata: dict) -> None:
+    """Store document-level metadata extracted at ingest time.
+
+    `doc_name` is used as the `title` key — Review mode looks up by doc_name.
+    Only non-None values are written; existing values are preserved for fields
+    not present in the new metadata dict.
+    """
+    if not metadata:
+        return
+    from sqlalchemy import text
+    engine = get_engine()
+    # Build dynamic SET clause for non-None fields only
+    updates = {k: metadata[k] for k in _METADATA_COLUMNS if metadata.get(k) is not None}
+    if not updates:
+        return
+    set_clause = ", ".join(f"{k} = COALESCE(:{k}, page_metadata.{k})" for k in updates)
+    params = {"sid": session_id, "title": doc_name, **updates}
+    with engine.connect() as conn:
+        conn.execute(
+            text(f"""
+                INSERT INTO page_metadata (session_id, title, {', '.join(updates)})
+                VALUES (:sid, :title, {', '.join(':' + k for k in updates)})
+                ON CONFLICT (session_id, title) DO UPDATE SET {set_clause}
+            """),
+            params,
+        )
+        conn.commit()
+
+
+def get_metadata(session_id: str, doc_name: str) -> dict:
+    """Return the metadata dict for a document, or {} if none stored."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(f"""
+                SELECT {', '.join(_METADATA_COLUMNS)}
+                FROM page_metadata
+                WHERE session_id = :sid AND title = :title
+            """),
+            {"sid": session_id, "title": doc_name},
+        ).fetchone()
+        if row is None:
+            return {}
+        return {k: v for k, v in zip(_METADATA_COLUMNS, row) if v is not None}
