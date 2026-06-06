@@ -1292,9 +1292,12 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
             selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
 
     # --- Step 2: Build context string from selected pages ---
-    # Q: pages are cached prior answers, not primary source clauses.
-    # Cap them so they don't crowd out actual contract content.
+    # Q: pages are cached prior answers — cap so they don't crowd out source content.
+    # Regular pages: cap at MAX_PAGE_CONTEXT_CHARS to bound total prompt size.
+    # Shared concept pages (no case prefix, multi-source) can grow large through merges;
+    # capping ensures one bloated page doesn't consume half the context window.
     _QPAGE_CAP = config.MAX_QPAGE_CONTEXT_CHARS
+    _PAGE_CAP  = config.MAX_PAGE_CONTEXT_CHARS
 
     wiki_parts = []
     for title in selected_titles:
@@ -1307,6 +1310,8 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
 
             if title.startswith("Q:") and len(content) > _QPAGE_CAP:
                 content = content[:_QPAGE_CAP] + "\n[...truncated — cached answer summary only]"
+            elif len(content) > _PAGE_CAP:
+                content = content[:_PAGE_CAP] + "\n[...truncated]"
 
             wiki_parts.append(f"## {title}\n{content}\n")
     wiki_content = "\n".join(wiki_parts)
