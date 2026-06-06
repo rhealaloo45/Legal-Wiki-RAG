@@ -1,107 +1,167 @@
-# ⚖️ Legal Wiki
+# Legal Wiki RAG
 
-Legal Wiki is a research tool built as a Single-Page Flask Application to process large-scale document knowledge using **LLM Wiki Synthesis**. 🚀
+A production-grade legal intelligence platform that transforms unstructured legal documents into a structured, queryable knowledge base using LLM-driven wiki synthesis — not retrieval-augmented generation.
 
-## ✨ Features
+---
 
-- **🧠 Wiki Pipeline**: LLM-driven structured knowledge extraction that compounds over time into a persistent index, complete with automatic cross-referencing and interactive D3.js graphs.
-- **✍️ Draft Mode**: Context-aware legal drafting with automatic stance detection (e.g. Tata-friendly, Neutral) and DOCX export.
-- **📊 Review Mode**: Concurrently extract structured cells across multiple documents into a confidence-coded Excel export.
-- **🔄 Compare Mode**: Automatically identify comparison aspects across existing wiki docs + new uploaded docs, flag outliers, and generate narratives.
-- **📈 Deep Understanding**: Granular progress tracking, interactive knowledge graphs, and wiki page browsing.
-- **🔒 Session Isolation**: Every chat session maintains its own completely independent wiki, isolating knowledge context and document uploads securely.
-- **🎨 Premium UI**: A custom-built, lightweight Light Mode Single-Page Application (SPA) designed without heavy frontend frameworks, offering a seamless and context-aware experience.
-- **☁️ Azure OpenAI & OpenRouter Powered**: Configurable to use either Azure OpenAI or OpenRouter. Uses a **dual-model routing strategy** — a large model (e.g. `gpt-oss-120b`) for synthesis, answer generation, and drafting; a smaller fast model (e.g. `gpt-oss-20b`) for lightweight tasks such as page selection, contradiction checks, and cell extraction — significantly reducing cost without degrading answer quality.
+## What makes this different from RAG
 
-## 🏗️ Project Architecture
+Standard RAG retrieves raw document chunks at query time and asks the LLM to reason over them on the fly. Legal Wiki builds a **persistent structured wiki** at ingest time. Each document enriches the same knowledge base: pages are merged, contradictions flagged, cross-references built, and shared legal concepts accumulated across all cases. Queries read from pre-compiled synthesis, not raw text.
 
-For a detailed technical and architectural breakdown of how the pipeline operates, please refer to the [System Overview](SYSTEM_OVERVIEW.md) 📘 and [System Flow](SYSTEM_FLOW.md) 📄.
+| | Standard RAG | Legal Wiki |
+|---|---|---|
+| Query cost | ~2,000–5,500 tokens | ~5,000–6,000 tokens |
+| Cross-doc synthesis quality | Weak | Strong (pre-built) |
+| At 20k docs | Recall degrades | Consistent (compaction keeps pages coherent) |
+| Ingest cost | Near zero | LLM calls per doc (paid once, queried many times) |
+| Hallucination surface | Raw chunks, no pre-filtering | Pre-synthesised + 20 answer-prompt rules |
 
-## 🛠️ Setup & Installation
+---
 
-## Prerequisites
+## Features
 
-- Python 3.9+ 🐍
-- Azure OpenAI credentials OR an OpenRouter API key 🌐
-- (Optional) Tesseract OCR executable installed on your system if you need to process scanned/image-based PDFs.
+### Wiki Pipeline
+- **Adaptive ingest**: single LLM call for short docs (≤100K chars); two-phase overview + parallel segmentation for long docs
+- **Case-aware page titling**: case-specific pages (facts, holding, charges, procedural history) isolated per case; shared legal concepts (statutes, precedents, doctrines) merged and enriched across all cases
+- **Source attribution**: merged pages carry `[From: ...]` labels so the answer model attributes correctly without cross-case contamination
+- **Hybrid retrieval**: pgvector cosine top-15 + BM25 keyword supplement at query time
+- **Page compaction**: pages that grow through repeated merges are re-synthesised by the LLM, keeping the wiki coherent at scale
+- **D3.js knowledge graph** visualisation of pages and relations
 
-### Step 1: Environment Setup ⚙️
+### Query Mode (Ask)
+- Chain-of-thought reasoning with self-assessed confidence score (0–100) extracted from `<reasoning>` block — zero extra LLM calls
+- 20 precision rules in the answer prompt: procedural stage precision, legal standard precision, named-document completeness, cross-document source discipline, allegations vs findings, thematic selectivity, arithmetic prohibition, statute interpretation, and more
+- Per-page context cap (2,000 chars) prevents any single large merged page from crowding out others
 
-Clone the repository and install dependencies:
+### Review Mode
+- User defines columns (e.g. "Governing Law", "Liability Cap"); system extracts values from all uploaded documents concurrently
+- Metadata cache: standard legal fields extracted once at ingest time and served from DB — repeated jobs do not re-call the LLM for cached fields
+- Confidence-colour-coded Excel export (green ≥ 0.8, yellow ≥ 0.5, red < 0.5)
+
+### Compare Mode
+- Automatic aspect identification across selected documents
+- Outlier detection with narrative synthesis
+- Excel export (aspects as rows, documents as columns)
+
+### Draft Mode
+- Context-aware legal document drafting grounded in wiki knowledge
+- Stance detection (favours party A / party B / neutral)
+- Iterative refinement with DOCX export
+
+### Infrastructure
+- **PostgreSQL + pgvector**: single managed store for pages, embeddings, metadata, progress, contradictions, relations
+- **Dual-model routing**: full model for synthesis/answers, fast model for contradiction checks/cell extraction/JSON repair
+- **SQLAlchemy connection pool** (pool_size=10, max_overflow=20)
+- Per-session threading locks for race-free parallel ingest
+- OCR fallback via Tesseract for scanned PDFs
+
+---
+
+## Setup
+
+### Requirements
+- Python 3.9+
+- PostgreSQL 14+ with `pgvector` extension
+- Azure OpenAI **or** OpenRouter API credentials
+- Tesseract (optional, for scanned PDFs)
+
+### Install
 
 ```bash
-git clone <repository-url>
-cd Legal-wiki-RAG/app
+git clone <repo>
+cd Legal-Wiki-RAG
 pip install -r requirements.txt
 ```
 
-### Step 2: Configuration 🔑
-
-Create a `.env` file in the `app/` directory by copying the `.env.example`:
+### Configure
 
 ```bash
-cp .env.example .env
+cp app/.env.example app/.env
 ```
 
-Edit `app/.env` to configure your selected provider:
+Key variables in `app/.env`:
 
-#### Option A: OpenRouter Config
 ```env
+# Provider: "azure" or "openrouter"
 LLM_PROVIDER=openrouter
 EMBEDDING_PROVIDER=openrouter
-OPENROUTER_API_KEY=your_openrouter_api_key_here
 
-# Big model — used for ingest synthesis, answer generation, drafting, compare narrative
-OPENROUTER_MODEL=openai/gpt-oss-120b:free
-
-# Fast model — used for page selection, contradiction checks, JSON repair, cell extraction
-OPENROUTER_FAST_MODEL=openai/gpt-oss-20b:free
-
+# OpenRouter
+OPENROUTER_API_KEY=sk-or-...
+OPENROUTER_MODEL=openai/gpt-4o
+OPENROUTER_FAST_MODEL=google/gemma-4-27b-it
 OPENROUTER_EMBEDDING_MODEL=nvidia/llama-nemotron-embed-vl-1b-v2:free
-```
 
-#### Option B: Azure OpenAI Config
-```env
-LLM_PROVIDER=azure
-EMBEDDING_PROVIDER=azure
-AZURE_OPENAI_API_KEY=your_key_here
-AZURE_OPENAI_ENDPOINT=https://your-endpoint.openai.azure.com/
-AZURE_OPENAI_API_VERSION=2025-01-01-preview
-
-# Big model — used for ingest synthesis, answer generation, drafting, compare narrative
-AZURE_OPENAI_DEPLOYMENT=gpt-5.4
-
-# Fast model — used for page selection, contradiction checks, JSON repair, cell extraction
-AZURE_FAST_DEPLOYMENT=gpt-5.4-mini
-
+# Azure OpenAI (alternative)
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_ENDPOINT=https://....openai.azure.com/
+AZURE_OPENAI_DEPLOYMENT=gpt-4o
+AZURE_FAST_DEPLOYMENT=gpt-4o-mini
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
-EMBEDDING_DIMENSIONS=1536
+
+# PostgreSQL
+DATABASE_URL=postgresql://user:password@localhost:5432/legalwiki
 ```
 
-#### OCR Config (Optional)
-If Tesseract OCR is not on your system PATH, define its path:
-```env
-TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
-```
-
-### Step 3: Run the Application 🚀
-
-Start the Flask server from the `app/` directory:
+### Run
 
 ```bash
+cd app
 python app.py
+# Open http://localhost:5001
 ```
 
-The application will be accessible at `http://localhost:5001/`. 🌐
+---
 
-## 📖 Usage
+## Project structure
 
-1. **📄 Upload Documents**: Drag and drop `.pdf` or `.txt` files into the upload card. 
-2. **⏳ Monitor Ingestion**: The system processes documents in parallel and generates interconnected Wiki pages.
-3. **🌐 Explore Knowledge**: Browse generated Wiki pages and click them to view detailed structured text and source citations.
-4. **❓ Query**: Ask a question in the Ask tab to generate a synthesized answer with inline citations.
-5. **✍️ Draft**: Use the Draft tab to generate, refine, and export legal clauses and agreements grounded in your wiki's knowledge.
+```
+app/
+├── app.py                   # Flask routes + ThreadPoolExecutor ingest scheduler
+├── config.py                # All constants and env-var loading
+├── services/
+│   ├── db.py                # PostgreSQL abstraction layer (SQLAlchemy)
+│   ├── wiki.py              # Ingest pipeline, query pipeline, compaction
+│   ├── llm.py               # Dual-model LLM routing (Azure / OpenRouter)
+│   ├── embedder.py          # Embedding service (batch, query/doc mode prefixes)
+│   ├── prompts.py           # All prompt templates (ingest, answer, compaction)
+│   ├── advanced_modes.py    # Review, Compare, Draft shared logic + cell extraction
+│   └── reader.py            # PDF/DOCX text extraction with OCR fallback
+├── data/
+│   ├── uploads/             # Uploaded files ({session_id}_{filename})
+│   ├── logs/                # Per-session markdown event logs
+│   └── sessions.json        # Session name/metadata store
+└── templates/               # Single-page HTML + Bootstrap 5 + D3.js
+```
 
-## 📜 License
+---
 
-MIT 📝
+## Key configuration constants
+
+| Constant | Default | Effect |
+|---|---|---|
+| `VECTOR_SEARCH_TOP_K` | 15 | pgvector nearest-neighbour results per query |
+| `HYBRID_BM25_SUPPLEMENT_N` | 8 | BM25 keyword pages added on top of vector results |
+| `MAX_PAGE_CONTEXT_CHARS` | 2,000 | Per-page character cap in answer context |
+| `MAX_TOKENS_ANSWER` | 4,096 | Answer generation token budget |
+| `MAX_TOKENS_COMPACTION` | 4,096 | Page compaction re-synthesis token budget |
+| `COMPACTION_APPEND_THRESHOLD` | 5 | Compaction trigger: number of appends |
+| `COMPACTION_CHAR_THRESHOLD` | 8,000 | Compaction trigger: char count (requires append_count ≥ 2) |
+| `WIKI_MAX_WORKERS` | 3 | Parallel ingest worker threads |
+
+---
+
+## Phases completed
+
+| Phase | What | Status |
+|---|---|---|
+| 1 | Dual-model routing, merged confidence eval, explicit token budgets | ✅ |
+| 2 | PostgreSQL + pgvector storage, persistent progress tracking | ✅ |
+| 3 | Hybrid retrieval: pgvector cosine top-K + BM25 supplement | ✅ |
+| 4 | FTS cross-reference (GIN), page compaction (S3), NER contradiction pre-filter (C3), metadata cache (C7) | ✅ |
+| 4.5 | Answer quality hardening: page title disambiguation, source attribution in merges, 6 new answer-prompt precision rules | ✅ |
+| 5 | Celery job queue for production-scale ingest | ⬜ planned |
+| 6 | Multi-tenancy, PgBouncer, read replicas, audit logging | ⬜ planned |
+
+See `PLAN.md` for full technical specification of each phase.
+See `ARCHITECTURE.md` for component diagram and `FLOWCHART.md` for pipeline flowcharts.
