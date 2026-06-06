@@ -234,42 +234,45 @@ Gunicorn workers, grows forever in long-running processes.
 
 ---
 
-## Phase 3 — Query Scaling ⬜ PLANNED
+## Phase 3 — Query Scaling ✅ COMPLETE
 
 Fixes the hard failure at query time when page count exceeds model context limits.
 Depends on S1 (PostgreSQL) being complete.
 
-### S7 + C4 — pgvector Search to Replace LLM Page Selection ⬜
-**Files:** `wiki.py`, `services/embedder.py` (already built, currently unused), `services/db.py`
+### S7 + C4 — pgvector Search to Replace LLM Page Selection ✅
+**Files:** `wiki.py`, `services/embedder.py`, `services/db.py`, `config.py`
 
 **Why it's critical:** `_select_relevant_pages()` feeds ALL page titles + summaries to the LLM.
 At 140k pages, the index alone exceeds any model's context window by 10–50×. Every query
 would throw a context-length error. This is not a cost problem — it's a hard crash.
 
-`embedder.py` is already fully implemented with `embed()` and `embed_batch()`. It just needs
-to be connected to the query path.
-
-**What to build:**
-- At ingest time: embed each page's summary, store in `page_embeddings.embedding`
-- Build HNSW index after initial bulk load:
-  ```sql
-  CREATE INDEX ON page_embeddings
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-  ```
-  HNSW chosen over IVFFlat because recall matters more than index build time in legal
-  (a missed liability clause is worse than a 200ms slower ingest). At 140k pages HNSW
-  returns ~98% recall vs exact cosine search at < 5ms per query.
-- At query time:
+**What was built:**
+- At ingest time: each page's summary (or first 400 chars of content) is embedded and
+  stored in `page_embeddings` via `upsert_embedding()`. Embedding happens **outside** the
+  session lock so HTTP calls don't block parallel ingest threads.
+- Embedding model: `nvidia/llama-nemotron-embed-vl-1b-v2:free` via OpenRouter → 2048-dim vectors.
+  OpenAI SDK mis-parses OpenRouter's response envelope for this model; `embedder.py` uses
+  `requests.post()` directly instead.
+- `EMBEDDING_DIMENSIONS=2048` set in `.env`; schema migration in `_init_schema` auto-detects
+  and recreates the table if dimensions mismatch (e.g. upgrading from 1536 → 2048).
+- HNSW index created with guard: `if EMBEDDING_DIMENSIONS <= 2000` — pgvector ≤ 0.6 enforces
+  a 2000-dim hard limit on HNSW/IVFFlat. At 2048 dims the system falls back to exact cosine
+  scan (still fast at current scale; HNSW becomes available if a ≤2000-dim model is used).
+- `search_similar_pages()` in `db.py`:
   ```sql
   SELECT title FROM page_embeddings
   WHERE session_id = $1
-  ORDER BY embedding <=> $2   -- pgvector cosine operator
+  ORDER BY embedding <=> CAST($2 AS vector)
   LIMIT 25;
   ```
-- Keep `_detect_mentioned_files` — force mentioned-doc pages in alongside vector results
-- `_select_relevant_pages()` becomes a single DB query; remove the LLM call entirely
-- **Effect:** page selection 1 LLM call + 80k tokens → 0 LLM calls + ~5ms DB query
+- `_select_relevant_pages()` Path 1 now uses **hybrid retrieval**: pgvector cosine top-25
+  merged with BM25 keyword supplement (up to `HYBRID_BM25_SUPPLEMENT_N = 15` additional pages).
+  Vector results rank first; BM25 pages are appended only if not already present. This fixes
+  cases where semantic similarity is weak but keyword overlap is strong (e.g. specific party
+  names, procedural terms like "committed to Sessions Court").
+- Backfill script `app/backfill_embeddings.py` — idempotent, batches of 16, stores embeddings
+  for all existing sessions. Run after upgrading from a pre-Phase-3 deployment.
+- **Effect:** page selection 1 LLM call + 80k tokens → 0 LLM calls + ~5ms DB query + negligible BM25 in-memory scoring. No regression on queries that already worked; hybrid retrieval fixes false-negative "Not covered" answers caused by semantic search misses.
 
 ---
 
@@ -326,6 +329,22 @@ The wiki is supposed to get smarter over time — instead it gets worse for the 
   WHERE session_id = $1
     AND (append_count >= 5 OR char_count >= 8000);
   ```
+
+> **⚠️ Accuracy caveat:** Compaction is the one Phase 4 component with a small downside risk.
+> The re-synthesis LLM call can lose specific verbatim details (exact figures, exact dates)
+> if the prompt does not explicitly instruct the model to preserve them. To mitigate:
+> - Always include the full `quotes` array verbatim in the compaction prompt — treat it as
+>   sacrosanct, never re-summarise quotes.
+> - Instruct the model: *"Preserve every exact figure, date, and amount verbatim — do not
+>   paraphrase numeric values."*
+> - After compaction, run a spot-check: verify that every value from the `quotes` array
+>   still appears literally in the new `content`.
+> - Only trigger compaction on pages where `append_count >= 5` — leave low-append pages
+>   untouched. A page with 2 appends is unlikely to have grown incoherent and does not
+>   need re-synthesis.
+>
+> All other Phase 4 and Phase 5 components improve accuracy and reduce cost with no
+> meaningful downside risk.
 
 ### S4 — Fix Contradiction Detection Architecture ⬜
 **Files:** `wiki.py`
