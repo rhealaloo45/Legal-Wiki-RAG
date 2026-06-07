@@ -103,6 +103,86 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-large
 DATABASE_URL=postgresql://user:password@localhost:5432/legalwiki
 ```
 
+### Database Setup
+
+The app uses **PostgreSQL + pgvector** as its primary store. Tables are created automatically on first connect — no manual migrations needed.
+
+#### Quick start with Docker
+
+```bash
+# Pull and run pgvector (PostgreSQL 17 with vector extension pre-installed)
+docker run -d \
+  --name legal-wiki-pg \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=pw \
+  -e POSTGRES_DB=legal_wiki \
+  -p 5432:5432 \
+  pgvector/pgvector:pg17
+```
+
+> **Port conflict?** If port 5432 is already in use (e.g. a local Postgres install), map to a different host port:
+> ```bash
+> docker run -d --name legal-wiki-pg \
+>   -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=legal_wiki \
+>   -p 5433:5432 pgvector/pgvector:pg17
+> ```
+> Then update your `.env`: `DATABASE_URL=postgresql://postgres:pw@localhost:5433/legal_wiki`
+
+#### Set the connection string
+
+Add this to `app/.env`:
+
+```env
+DATABASE_URL=postgresql://postgres:pw@localhost:5432/legal_wiki
+```
+
+#### What happens on first connect
+
+When the app starts and `DATABASE_URL` is set, [`db.py`](app/services/db.py) automatically:
+
+1. Enables the `vector` extension (`CREATE EXTENSION IF NOT EXISTS vector`)
+2. Creates all tables (`IF NOT EXISTS` — safe to run repeatedly):
+
+| Table | Purpose |
+|---|---|
+| `pages` | Wiki pages with content, summary, source attribution, contradiction flags, FTS tsvector column |
+| `relations` | Cross-reference edges between pages (from → to, label) |
+| `page_embeddings` | pgvector embeddings for cosine similarity search (HNSW-indexed for dims ≤ 2000) |
+| `ingest_progress` | Real-time ingest progress tracking per session |
+| `page_metadata` | Cached document-level metadata (governing law, jurisdiction, parties, etc.) |
+| `contradictions` | Structured contradiction records detected during compaction |
+
+3. Creates GIN index on `content_tsv` for full-text cross-referencing
+4. Creates HNSW index on embeddings for sub-5ms vector search (auto-skipped if embedding dimensions > 2000)
+
+#### File-mode fallback
+
+If `DATABASE_URL` is **not set**, the app falls back to file-based storage (`data/index.json`). This mode works for single-user local testing but does not support:
+- pgvector hybrid retrieval
+- Page compaction
+- FTS cross-referencing
+- Metadata caching
+
+#### Useful Docker commands
+
+```bash
+# Check container status
+docker ps -a | grep legal-wiki-pg
+
+# View logs
+docker logs legal-wiki-pg
+
+# Stop / start
+docker stop legal-wiki-pg
+docker start legal-wiki-pg
+
+# Connect with psql (inside container)
+docker exec -it legal-wiki-pg psql -U postgres -d legal_wiki
+
+# Remove container and data (destructive)
+docker rm -f legal-wiki-pg
+```
+
 ### Run
 
 ```bash
