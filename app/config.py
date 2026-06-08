@@ -22,6 +22,17 @@ AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 
+# OpenRouter embedding models may produce different vector dimensions from Azure.
+# nvidia/llama-nemotron-embed-vl-1b-v2 outputs 2048 dims; override via env if needed.
+OPENROUTER_EMBEDDING_DIMENSIONS = int(os.getenv("OPENROUTER_EMBEDDING_DIMENSIONS", "2048"))
+
+
+def get_embedding_dimensions() -> int:
+    """Return the vector dimension for the currently active embedding provider."""
+    if EMBEDDING_PROVIDER == "openrouter":
+        return OPENROUTER_EMBEDDING_DIMENSIONS
+    return EMBEDDING_DIMENSIONS
+
 # OpenRouter Config
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY_WIKI", ""))
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
