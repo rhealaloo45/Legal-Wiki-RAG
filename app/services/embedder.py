@@ -9,9 +9,18 @@ so OpenRouter calls go through a direct requests.post() call instead.
 
 from __future__ import annotations
 
+import logging
+import time
 import requests as _requests
 
 import config
+
+logger = logging.getLogger(__name__)
+
+# Transient HTTP status codes worth retrying (gateway errors, rate limits, etc.)
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BACKOFF_BASE = 2.0  # seconds — doubles each attempt: 2s, 4s, 8s
 
 # Lazy-loaded Azure client
 _azure_client = None
@@ -39,29 +48,81 @@ def _embed_openrouter(texts: list[str]) -> list[list[float]]:
     The OpenAI SDK raises 'No embedding data received' for some OpenRouter
     models (e.g. nvidia/llama-nemotron-embed-vl-1b-v2) because it expects a
     slightly different response envelope.  A plain HTTP call avoids this.
+
+    Retries up to _MAX_RETRIES times with exponential backoff on transient
+    5xx / 429 errors (e.g. 502 Bad Gateway from OpenRouter's upstream).
     """
-    resp = _requests.post(
-        "https://openrouter.ai/api/v1/embeddings",
-        headers={
-            "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={"model": config.OPENROUTER_EMBEDDING_MODEL, "input": texts},
-        timeout=60,
+    last_exc: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = _requests.post(
+                "https://openrouter.ai/api/v1/embeddings",
+                headers={
+                    "Authorization": f"Bearer {config.OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={"model": config.OPENROUTER_EMBEDDING_MODEL, "input": texts},
+                timeout=60,
+            )
+
+            # Retry on transient server-side errors without raising immediately
+            if resp.status_code in _RETRYABLE_STATUSES:
+                wait = _BACKOFF_BASE ** attempt
+                logger.warning(
+                    "OpenRouter embeddings returned HTTP %d (attempt %d/%d) — "
+                    "retrying in %.0fs. Body: %s",
+                    resp.status_code, attempt + 1, _MAX_RETRIES,
+                    wait, resp.text[:200],
+                )
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+            body = resp.json()
+
+            # OpenRouter sometimes returns 200 with an error payload instead of
+            # a proper 5xx — treat it as retryable too.
+            if "error" in body and "data" not in body:
+                err_code = body["error"].get("code", 0)
+                if err_code in _RETRYABLE_STATUSES or err_code == 0:
+                    wait = _BACKOFF_BASE ** attempt
+                    logger.warning(
+                        "OpenRouter embeddings returned error payload (attempt %d/%d) — "
+                        "retrying in %.0fs. Body: %s",
+                        attempt + 1, _MAX_RETRIES, wait, str(body)[:200],
+                    )
+                    time.sleep(wait)
+                    continue
+                raise ValueError(
+                    f"OpenRouter embeddings API error: {body['error']}"
+                )
+
+            data = body.get("data", [])
+            if not data:
+                raise ValueError(
+                    f"OpenRouter embeddings API returned no data. "
+                    f"Status {resp.status_code}. Body: {str(body)[:300]}"
+                )
+
+            # Sort by index so output order matches input order
+            data.sort(key=lambda x: x.get("index", 0))
+            return [item["embedding"] for item in data]
+
+        except (_requests.exceptions.ConnectionError,
+                _requests.exceptions.Timeout) as exc:
+            wait = _BACKOFF_BASE ** attempt
+            logger.warning(
+                "OpenRouter embeddings network error (attempt %d/%d) — "
+                "retrying in %.0fs: %s",
+                attempt + 1, _MAX_RETRIES, wait, exc,
+            )
+            last_exc = exc
+            time.sleep(wait)
+
+    raise RuntimeError(
+        f"OpenRouter embeddings failed after {_MAX_RETRIES} attempts"
+        + (f": {last_exc}" if last_exc else "")
     )
-    resp.raise_for_status()
-    body = resp.json()
-
-    data = body.get("data", [])
-    if not data:
-        raise ValueError(
-            f"OpenRouter embeddings API returned no data. "
-            f"Status {resp.status_code}. Body: {str(body)[:300]}"
-        )
-
-    # Sort by index so output order matches input order
-    data.sort(key=lambda x: x.get("index", 0))
-    return [item["embedding"] for item in data]
 
 
 # ---------------------------------------------------------------------------

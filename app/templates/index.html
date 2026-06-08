@@ -1840,9 +1840,9 @@
               <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
             </div>
 
+            <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+            <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
             <div class="upl-zone" id="upload-zone">
-              <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
-              <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
               <i class="ti ti-upload upl-icon"></i>
               <div class="upl-text-p">Drop .txt / .pdf files or folders here</div>
               <div class="upl-text-s" id="staged-label">or choose below</div>
@@ -3107,11 +3107,11 @@
     const $file = document.getElementById('file-input');
     const $folder = document.getElementById('folder-input');
 
-    document.getElementById('pick-files-btn').addEventListener('click', () => $file.click());
-    document.getElementById('pick-folder-btn').addEventListener('click', () => $folder.click());
+    document.getElementById('pick-files-btn').addEventListener('click', (e) => { e.stopPropagation(); $file.click(); });
+    document.getElementById('pick-folder-btn').addEventListener('click', (e) => { e.stopPropagation(); $folder.click(); });
 
     const $zone = document.getElementById('upload-zone');
-    $zone.addEventListener('click', () => $file.click());
+    $zone.addEventListener('click', (e) => { if (e.target === $zone || !e.target.closest('button')) $file.click(); });
     $zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
     $zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
     $zone.addEventListener('drop', async e => {

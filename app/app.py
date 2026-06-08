@@ -22,6 +22,7 @@ import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import threading
 
 from flask import Flask, render_template, request, jsonify
 
@@ -67,6 +68,17 @@ if config.TESSERACT_CMD:
     configure_tesseract(config.TESSERACT_CMD)
 
 executor = ThreadPoolExecutor(max_workers=10)
+
+# Per-session locks so concurrent ingest threads can atomically increment the
+# wiki_done counter without racing each other and under-counting completions.
+_progress_locks: dict[str, threading.Lock] = {}
+_progress_locks_lock = threading.Lock()
+
+def _get_progress_lock(session_id: str) -> threading.Lock:
+    with _progress_locks_lock:
+        if session_id not in _progress_locks:
+            _progress_locks[session_id] = threading.Lock()
+        return _progress_locks[session_id]
 
 # ---------------------------------------------------------------------------
 # Progress store helpers — abstract over in-memory dict vs PostgreSQL (S5)
@@ -178,6 +190,63 @@ def health():
     return jsonify(checks)
 
 
+@app.route("/api/admin/reembed/<session_id>", methods=["POST"])
+def reembed_session(session_id: str):
+    """Backfill pgvector embeddings for all wiki pages in a session.
+
+    Safe to call at any time — it upserts, so re-running is idempotent.
+    Use this when the embedding provider was changed after ingestion (e.g. from
+    azure to openrouter) or when embeddings failed silently during ingest.
+
+    Returns JSON: {"embedded": N, "skipped": M, "provider": "openrouter"}
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured — no embeddings to backfill"}), 400
+
+    try:
+        from services import db as _db, embedder as _embedder
+
+        pages = _db.get_pages(session_id)
+        if not pages:
+            return jsonify({"error": f"No pages found for session {session_id}"}), 404
+
+        # Build (title, text_to_embed) pairs — prefer summary, fall back to content[:400]
+        pairs: list[tuple[str, str]] = []
+        for title, page in pages.items():
+            summary = page.get("summary", "") if isinstance(page, dict) else ""
+            content = page.get("content", "") if isinstance(page, dict) else str(page)
+            embed_text = (summary or content[:400]).strip()
+            if embed_text:
+                pairs.append((title, embed_text))
+
+        if not pairs:
+            return jsonify({"embedded": 0, "skipped": 0, "provider": config.EMBEDDING_PROVIDER}), 200
+
+        # Embed in batches of 16 (matches embedder.py's internal batch size)
+        BATCH = 16
+        embedded = 0
+        skipped = 0
+        for i in range(0, len(pairs), BATCH):
+            batch = pairs[i : i + BATCH]
+            texts = [t for _, t in batch]
+            try:
+                embeddings = _embedder.embed_batch(texts, is_query=False)
+                for (title, _), embedding in zip(batch, embeddings):
+                    _db.upsert_embedding(session_id, title, embedding)
+                    embedded += 1
+                logger.info("reembed %s: batch %d/%d done (%d pages)", session_id, i // BATCH + 1, (len(pairs) + BATCH - 1) // BATCH, embedded)
+            except Exception as exc:
+                logger.error("reembed batch %d failed: %s", i // BATCH, exc)
+                skipped += len(batch)
+
+        logger.info("reembed complete for session %s: %d embedded, %d skipped", session_id, embedded, skipped)
+        return jsonify({"embedded": embedded, "skipped": skipped, "provider": config.EMBEDDING_PROVIDER})
+
+    except Exception as exc:
+        logger.error("reembed endpoint error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.route("/api/settings/llm", methods=["GET"])
 def get_llm_settings():
     return jsonify({"provider": getattr(config, "LLM_PROVIDER", "azure")})
@@ -197,7 +266,17 @@ def get_embedding_settings():
 def set_embedding_settings():
     data = request.json or {}
     provider = data.get("provider", "azure")
+    old_provider = config.EMBEDDING_PROVIDER
     config.EMBEDDING_PROVIDER = provider
+    # If the provider changed and we're using PostgreSQL, reset the DB engine so
+    # the dimension migration check re-runs against the new vector size on next use.
+    if provider != old_provider and config.USE_DATABASE:
+        try:
+            from services import db as _db
+            _db.reset_engine()
+            logger.info("DB engine reset after embedding provider change: %s → %s", old_provider, provider)
+        except Exception as _e:
+            logger.warning("Could not reset DB engine after provider change: %s", _e)
     return jsonify({"status": "ok", "provider": provider})
 
 
@@ -322,11 +401,12 @@ def _ingest_single_doc_wiki(file_path: str, session_id: str):
         logger.error("Wiki ingest failed for %s: %s", file_path, e)
         _update_doc_status(session_id, doc_name, "error", str(e)[:60])
     finally:
-        progress = _get_progress(session_id)
-        docs = progress.get("docs", {})
-        docs["wiki_done"] = docs.get("wiki_done", 0) + 1
-        progress["docs"] = docs
-        _set_progress(session_id, progress)
+        with _get_progress_lock(session_id):
+            progress = _get_progress(session_id)
+            docs = progress.get("docs", {})
+            docs["wiki_done"] = docs.get("wiki_done", 0) + 1
+            progress["docs"] = docs
+            _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
