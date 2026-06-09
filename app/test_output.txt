@@ -1,0 +1,12 @@
+**Allocation of capital‑contribution obligations in the ReVolt Circular Mobility Materials Private Limited Joint‑Venture Agreement (JVA 2)**  
+
+- The agreement states that **“Each party shall contribute the assets, licences, personnel support, commercial relationships, and other value inputs described in the schedules.”** [1]  
+- The parties identified in the JVA are **Tata Motors Limited, Tata Power Company Limited, and the Redacted Recycling Technology Partner (the “ReVolt” partner).** Consequently, **all three parties are contractually bound to make the contributions set out in the schedules**, whether those contributions are capital‑funding, assets, or other inputs.  
+- The clause further limits the scope of the obligation to **what is “described in the schedules”** and notes that **participation in workshops or design reviews does not enlarge a party’s contribution unless formally captured in the approved business plan or a written amendment** [2].  
+- Because the schedules (which would detail the amount and timing of any **initial** and **subsequent** capital tranches) are not reproduced in the provided excerpt, the JVA does **not disclose** the precise split of capital‑contribution amounts or the sequencing of payments among the three parties.  
+
+**Summary:** The JVA obliges Tata Motors Limited, Tata Power Company Limited, and the ReVolt partner each to provide the contributions set out in the (redacted) schedules, with no further allocation detail available in the excerpt.  
+
+**References**  
+[1] 7e11398d-1e7c-4587-9ad5-86c67087757c_Legal AI Tool - Tata Group_Joint Venture Agreements_Joint Venture Agreement 2_redacted.pdf, Clause “Contribution Obligations of the Parties” | Quote: “Each party shall contribute the assets, licences, personnel support, commercial relationships, and other value inputs described in the schedules.”  
+[2] 7e11398d-1e7c-4587-9ad5-86c67087757c_Legal AI Tool - Tata Group_Joint Venture Agreements_Joint Venture Agreement 2_redacted.pdf, Clause “No Implied Additional Contributions” | Quote: “No party shall be deemed to have made any additional contribution… unless the same is expressly captured in the approved business plan or a written amendment.”
