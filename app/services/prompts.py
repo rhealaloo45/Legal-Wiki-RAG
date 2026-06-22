@@ -33,16 +33,16 @@ RULES:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
 
-OUTPUT FORMAT:
+CONTEXT:
+{context}
+
+---
+QUESTION: {question}
+
+REQUIRED OUTPUT FORMAT (Start your response exactly like this):
 <reasoning>
 (Your step-by-step reasoning and verification against the context)
 CONFIDENCE_SCORE: [integer 0-100]
 CONFIDENCE_REASON: [one sentence]
 </reasoning>
-(Your final, comprehensive markdown answer goes here)
-
-CONTEXT:
-{context}
-
----
-QUESTION: {question}"""
+(Your final, comprehensive markdown answer goes here)"""
