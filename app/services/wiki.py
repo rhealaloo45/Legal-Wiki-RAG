@@ -1418,13 +1418,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         #   CONFIDENCE_REASON: [sentence]
         # Extracting here avoids a second LLM call for _evaluate_confidence().
         reasoning_match = re.search(
-            r'<reasoning>(.*?)</reasoning>', raw_answer, flags=re.DOTALL
+            r'(?i)<reasoning>(.*?)</reasoning>', raw_answer, flags=re.DOTALL
         )
         if reasoning_match:
             reasoning_text = reasoning_match.group(1)
-            score_match = re.search(r'CONFIDENCE_SCORE:\s*(\d+)', reasoning_text)
+            score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
             reason_match = re.search(
-                r'CONFIDENCE_REASON:\s*(.+?)(?:\n|$)', reasoning_text
+                r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
             )
             if score_match:
                 try:
@@ -1436,7 +1436,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
         # Strip reasoning tags for the user-facing answer
         answer = re.sub(
-            r'<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL
+            r'(?i)<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL
         ).strip()
 
         # --- Fallback confidence when model skipped the reasoning block ---
