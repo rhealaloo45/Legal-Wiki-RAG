@@ -241,6 +241,7 @@ lexwiki_ui_v2.html
 
 # claude
 .claude/
+.vscode/
 
 
 # Understanding
