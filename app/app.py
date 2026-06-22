@@ -143,6 +143,54 @@ def _delete_progress(session_id: str) -> None:
 
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
 
+# ---------------------------------------------------------------------------
+# RAG Query Logging — append every query/context/response to a JSON file
+# ---------------------------------------------------------------------------
+RAG_QUERY_LOG_PATH = os.path.join(config.LOGS_PATH, "rag_query_log.json")
+_rag_log_lock = threading.Lock()
+
+
+def _log_rag_query(question: str, wiki_context: str, answer: str) -> None:
+    """Append a query record to the RAG query log JSON file.
+
+    The wiki_context string is split on '## ' page headings so each
+    retrieved wiki section becomes a separate entry in the contexts list.
+    """
+    # Split the context into individual page chunks
+    contexts: list[str] = []
+    if wiki_context:
+        # wiki_context is formatted as "## Title\ncontent\n\n## Title2\ncontent2..."
+        import re as _re
+        parts = _re.split(r'(?=^## )', wiki_context, flags=_re.MULTILINE)
+        for part in parts:
+            chunk = part.strip()
+            if chunk:
+                contexts.append(chunk)
+
+    record = {
+        "query": question,
+        "contexts": contexts,
+        "response": answer,
+    }
+
+    with _rag_log_lock:
+        # Read existing log (or start fresh)
+        existing: list[dict] = []
+        if os.path.exists(RAG_QUERY_LOG_PATH):
+            try:
+                with open(RAG_QUERY_LOG_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                existing = []
+
+        existing.append(record)
+
+        with open(RAG_QUERY_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+
+    logger.info("Logged RAG query to %s (total records: %d)", RAG_QUERY_LOG_PATH, len(existing))
+
+
 def load_sessions():
     if not os.path.exists(config.SESSIONS_PATH):
         return {}
@@ -483,6 +531,12 @@ def query_route():
             sessions[session_id]["name"] = new_name
             
         save_sessions(sessions)
+
+    # Log this RAG query/context/response for audit
+    try:
+        _log_rag_query(question, wiki_context, wiki_result.get("answer", ""))
+    except Exception as log_err:
+        logger.error("Failed to log RAG query: %s", log_err)
 
     return jsonify({
         "rag": rag_result,
