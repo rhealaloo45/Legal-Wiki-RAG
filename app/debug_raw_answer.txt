@@ -1,0 +1,46 @@
+**Potential questions Legal should pose to the business owner before approving the document**
+
+1. **Trademark & Trade‑Dress Infringement**
+   - How does the proposed use of “Vizag Gold’s COPPER+ WATER” avoid the “essential, memorable, and source‑identifying features” of the Tata Power Solar mark that the court found to be prima‑facie infringing?  
+   - What evidence (e.g., domain‑registration extracts, comparative screenshots, customer complaints) will be gathered to demonstrate lack of likelihood of confusion?  
+
+2. **Cost & Damages Assessment**
+   - Given the court’s view that a “first‑time infringer” should pay only nominal costs, what specific cost figure is being sought and how is it justified as “nominal” under the judgment?  
+
+3. **Compliance with Reserved‑Matter Provisions**
+   - Does the proposed activity (e.g., new channel partnership, brand‑architecture change, formulation outsourcing) trigger any of the listed reserved matters in the Shareholder Agreements?  
+   - If so, has board approval been obtained or is a bypass‑by‑fragmentation risk identified?  
+
+4. **Brand‑Governance Protocols**
+   - Have all external communications involving the Tata name, logo, trade dress, or other brand indicia been reviewed and approved in accordance with the Joint Venture Agreement’s brand‑governance protocols?  
+
+5. **Confidentiality & IP Ownership**
+   - Does the document involve any Confidential Information or pre‑existing IP of the vendor that could be inadvertently disclosed or licensed beyond the limited “purpose” right in the NDAs?  
+   - How will the “work‑for‑hire” provisions in the Service Agreement be satisfied (e.g., execution of assignment documents, restriction on reuse of work product)?  
+
+6. **Conflict Resolution & Survival Clauses**
+   - Which clauses (e.g., notice, amendment, survival) from the Master Service Agreement are relevant if the proposed action is later challenged, and have they been correctly incorporated?  
+
+7. **Data‑Protection & Training Restrictions**
+   - Are there explicit “no‑training, no‑reuse, and no onward‑disclosure” obligations in the services contract to prevent the vendor from using Tata data to train AI models, as required by the Legal Opinion?  
+
+8. **Governance Controls & Audit Rights**
+   - What segregated environment, audit rights, and data‑deletion procedures will be put in place to meet the recommendations in the Legal Opinion?  
+
+9. **Dynamic Injunction Considerations**
+   - If infringement re‑occurs, is there a plan for a “dynamic injunction framework” (e.g., rapid takedown, monitoring of mirror domains) as suggested in the Legal Opinion?  
+
+10. **Board‑Level Guardrails**
+    - Has the business owner confirmed that all required board‑approved guardrails (e.g., capital raises, business‑plan deviations, IP assignments) are in place before proceeding?  
+
+---  
+
+**References**  
+[1] Legal Issue – Tata Sons Private Limited (Court Judgment) – “Considering the fact that the defendant is a first time infringer… nominal cost…”.  
+[2] Reserved Matters (Shareholders' Agreement) – list of reserved matters and prohibition on bypass via fragmentation.  
+[3] Brand Governance Protocols (Joint Venture Agreement) – approval‑based brand usage requirement.  
+[4] NDA – confidentiality obligations and limited use rights.  
+[5] Intellectual Property (Master Service Agreement) – work‑for‑hire and IP vesting provisions.  
+[6] Legal Analysis – Contractual Scope (Legal Opinion) – “no‑training, no‑reuse, and no onward‑disclosure” obligations.  
+[7] Legal Analysis (Legal Opinion) – dynamic injunction framework and evidentiary package.  
+[8] Board Approval Requirement (Legal Opinion) – “board‑approved guardrails”.  
