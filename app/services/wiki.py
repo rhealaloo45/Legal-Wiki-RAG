@@ -234,6 +234,99 @@ def _has_structural_conflict(text_a: str, text_b: str) -> bool:
 # ---------------------------------------------------------------------------
 # Merge logic — the heart of compounding wiki behaviour
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Auto-prefix: ensure every document-specific page has a unique identifier
+# ---------------------------------------------------------------------------
+# Doc types whose pages are document-specific and MUST be prefixed
+_CONTRACT_DOC_TYPES = re.compile(
+    r'\b(?:Master Service Agreement|Service Agreement|Service Level Agreement|'
+    r'Professional Services Agreement|NDA|Non.?Disclosure|Shareholder.?s? Agreement|'
+    r'Joint Venture|Share Purchase|Subscription Agreement|'
+    r'Master Service Agreement Amendment|Employment Agreement|'
+    r'Consulting Agreement|License Agreement|Supply Agreement)\b',
+    re.IGNORECASE,
+)
+# Shared concept pages that should NOT be prefixed (statutes, legal doctrines)
+_SHARED_PAGE_PATTERNS = re.compile(
+    r'^(?:Section\s+\d|Article\s+\d|Indian\s+Arbitration|'
+    r'Arbitration\s+Act|Companies\s+Act|SEBI|RBI|GDPR|'
+    r'IT\s+Act|Contract\s+Act|Transfer\s+of\s+Property|'
+    r'Code\s+of\s+Civil\s+Procedure|CPC|CrPC|IPC)',
+    re.IGNORECASE,
+)
+
+
+def _make_doc_identifier(doc_name: str) -> str:
+    """Derive a short identifier from a filename for page-title prefixing.
+
+    "2109224e_Service Agreement 1_redacted.pdf" → "SA1"
+    "Legal_AI_Tool_NDA_3_Redacted.pdf" → "NDA3"
+    """
+    # Strip UUID prefix and extension
+    clean = re.sub(r'^[a-f0-9-]{36}_', '', doc_name)
+    clean = re.sub(r'_redacted\.pdf$', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\.pdf$', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\.txt$', '', clean, flags=re.IGNORECASE)
+    # Replace separators
+    clean = clean.replace('_', ' ').replace('-', ' ').strip()
+
+    # Try to extract type + number: "Service Agreement 1" → "SA1"
+    m = re.search(r'(Service\s+Agreement|Shareholder\s+Agreement|Joint\s+Venture(?:\s+Agreement)?|'
+                  r'NDA|Legal\s+Opinion|Court\s+Case(?:\s+Document)?|Judgment|'
+                  r'Tata\s+Brand\s+Judgment)\s*(\d+)',
+                  clean, re.IGNORECASE)
+    if m:
+        type_str = m.group(1).strip()
+        num = m.group(2)
+        abbrevs = {
+            'service agreement': 'SA', 'shareholder agreement': 'SHA',
+            'joint venture agreement': 'JVA', 'joint venture': 'JVA',
+            'nda': 'NDA', 'legal opinion': 'LO',
+            'court case document': 'CCD', 'court case': 'CCD',
+            'judgment': 'J', 'tata brand judgment': 'TBJ',
+        }
+        abbr = abbrevs.get(type_str.lower(), type_str[:3].upper())
+        return f"{abbr}{num}"
+
+    # Try "Test_SA_01" pattern
+    m2 = re.search(r'Test\s+(SA|SHA|JVA|NDA|CCD|LO|Judgment)\s*(\d+)', clean, re.IGNORECASE)
+    if m2:
+        return f"Test-{m2.group(1).upper()}{m2.group(2)}"
+
+    # Fallback: use first 15 chars
+    fallback = clean[:15].strip()
+    return fallback if fallback else "Doc"
+
+
+def _auto_prefix_title(title: str, doc_id: str) -> str:
+    """Add document identifier prefix to unprefixed contract/agreement pages.
+
+    Pages that already have a ' – ' prefix or are shared legal concepts are left unchanged.
+    Only pages whose doc-type parenthetical matches a contract type get prefixed.
+    """
+    if not doc_id or doc_id == "Doc":
+        return title
+    # Already has a prefix (contains " – " before the parenthetical)
+    if ' – ' in title.split('(')[0]:
+        return title
+    # Check if this is a contract-type page
+    paren_match = re.search(r'\(([^)]+)\)\s*$', title)
+    if not paren_match:
+        return title
+    doc_type = paren_match.group(1)
+    if not _CONTRACT_DOC_TYPES.search(doc_type):
+        return title
+    # Don't prefix shared legal concept pages
+    base_title = title[:paren_match.start()].strip()
+    if _SHARED_PAGE_PATTERNS.match(base_title):
+        return title
+    # Don't prefix "Document Overview" or "Q:" pages
+    if base_title.startswith(('Document Overview', 'Q:')):
+        return title
+    # Add prefix
+    return f"{base_title} – {doc_id} ({doc_type})"
+
+
 def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tuple[dict, int, int, list]:
     """
     Merge new_data into existing wiki index.
@@ -250,6 +343,7 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
 
     pages_updated = 0
     contradictions_found = []
+    _doc_id = _make_doc_identifier(doc_name)
 
     # -- Merge pages --
     for title, new_value in new_pages.items():
@@ -262,6 +356,9 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
             new_content = new_value.get("content", "")
             new_summary = new_value.get("summary", "")
             new_quotes = new_value.get("quotes", [])
+
+        # Auto-prefix unprefixed contract/agreement pages
+        title = _auto_prefix_title(title, _doc_id)
 
         # Append quotes to the content
         if new_quotes:
@@ -410,18 +507,26 @@ PRINCIPLES:
 - Flag contradictions or ambiguities you notice.
 
 PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
-CASE-SPECIFIC PAGES (CRITICAL): For court judgments, some pages describe facts unique to THIS \
-case and must NOT merge with pages from other cases. For these pages, prefix the title with the \
-SHORT CASE IDENTIFIER (first party's last name from the document, e.g. "Yuvraj Kanther"): \
-  - Facts, Background, Procedural History, Parties → "Facts – Yuvraj Kanther (Court Judgment)" \
-  - Charges, FIR, Offences → "Charges – Yuvraj Kanther (Court Judgment)" \
-  - Holding, Disposition, Final Order → "Holding – Yuvraj Kanther (Court Judgment)" \
-  - Appellants'/Respondents' Contentions, Arguments → "Appellants' Contentions – Yuvraj Kanther (Court Judgment)" \
-  - Relief, Costs, Sentence → "Relief – Yuvraj Kanther (Court Judgment)" \
+DOCUMENT-SPECIFIC PAGES (CRITICAL): Most pages describe provisions unique to THIS specific \
+document and must NOT merge with pages from other documents of the same type. You MUST prefix \
+the title with a SHORT DOCUMENT IDENTIFIER derived from the document: \
+  For court judgments: use first party's last name (e.g. "Yuvraj Kanther") \
+  For contracts/agreements: use a short identifier from filename or parties that distinguishes \
+  this document from others of the same type. Derive it from the counterparty name, the \
+  filename, or a unique label (e.g. "SA1-Crayons" for Service Agreement 1 with Crayons, \
+  "NDA-Acme" for an NDA with Acme Corp, "SHA3-Meridian" for Shareholder Agreement 3 with Meridian). \
+  Keep identifier SHORT (2-4 words max). \
+Examples of DOCUMENT-SPECIFIC pages that MUST have the prefix: \
+  - Court judgments: Facts, Procedural History, Charges, Holding, Contentions, Relief, Costs \
+    → "Facts – Yuvraj Kanther (Court Judgment)" \
+  - Contracts: Term, Termination, Payment, Fees, Indemnity, Liability, Scope of Services, \
+    Obligations, Representations, IP Ownership, Confidentiality, Governing Law, Dispute Resolution, \
+    Parties, Assignment → "Term and Termination – SA1-Crayons (Service Agreement)" \
 SHARED LEGAL CONCEPT PAGES: Pages about statutes, precedents, legal doctrines, and general \
-principles should NOT include the case name — they are intentionally merged when multiple cases \
-discuss the same concept: "Section 319 CrPC (Court Judgment)", "Hardeep Singh v. Punjab (Court Judgment)". \
-For contracts: "Payment Terms (Master Service Agreement)", "Confidentiality (NDA)".
+legal principles that are the SAME regardless of which document discusses them should NOT \
+include the document identifier — they merge intentionally: \
+  "Section 319 CrPC (Court Judgment)", "Indian Arbitration Act (Service Agreement)". \
+Only use shared pages for genuinely universal legal concepts, NOT for document-specific clauses.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
@@ -469,14 +574,16 @@ end of a larger document) and produce:
 SOURCE INTEGRITY: This excerpt is from '{doc_name}'. DO NOT hallucinate citations.
 DOCUMENT TYPE INFERENCE: You must determine the actual nature of the document from its contents \
 (e.g., "Non-Disclosure Agreement", "Master Service Agreement"). Do NOT just use the filename.
-CASE-SPECIFIC TOPICS (CRITICAL): For court judgments, separate topics into two categories: \
-1. CASE-SPECIFIC (facts, procedural history, charges, holding, parties, contentions, relief, costs): \
-   prefix each topic with the SHORT CASE IDENTIFIER (first party's last name from the document): \
-   e.g. "Procedural History – Yuvraj Kanther", "Facts – Yuvraj Kanther", "Holding – Yuvraj Kanther". \
-2. SHARED LEGAL CONCEPTS (statutes, precedents, doctrines, principles): NO case-name prefix — \
-   these pages are intentionally merged when multiple cases discuss the same concept: \
-   e.g. "Section 319 CrPC", "Hardeep Singh v. Punjab", "Non-obstante Clause". \
-For contracts, plain topic names are fine (e.g. "Payment Terms", "Confidentiality").
+DOCUMENT-SPECIFIC TOPICS (CRITICAL): Separate topics into two categories: \
+1. DOCUMENT-SPECIFIC (provisions, clauses, obligations, terms unique to THIS document): \
+   prefix each topic with a SHORT DOCUMENT IDENTIFIER: \
+   For court judgments: first party's last name (e.g. "Facts – Yuvraj Kanther", "Holding – Yuvraj Kanther"). \
+   For contracts/agreements: a short identifier from the counterparty name or filename that \
+   distinguishes this document from others of the same type (e.g. "Term – SA1-Crayons", \
+   "Indemnity – SA1-Crayons", "Payment – NDA-Acme", "Scope – SHA3-Meridian"). \
+   Keep identifier SHORT (2-4 words max). EVERY clause-level topic MUST have this prefix. \
+2. SHARED LEGAL CONCEPTS (statutes, precedents, doctrines, principles): NO prefix — \
+   these merge intentionally: e.g. "Section 319 CrPC", "Indian Arbitration Act".
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
 {{
@@ -531,14 +638,15 @@ RULES:
   Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
   what each court decided and why. Never blend outcomes from different stages.
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
-  CASE-SPECIFIC TITLES (CRITICAL): For court judgments, the KNOWN TOPICS list will contain \
-  some topics prefixed with a case identifier (e.g. "Facts – Yuvraj Kanther") and some without \
-  (e.g. "Section 319 CrPC"). Preserve these prefixes exactly when generating page titles. \
-  If a case-specific topic (facts, holding, charges, procedural history, contentions, relief) \
-  in the KNOWN TOPICS list lacks a prefix, add the case identifier from the document text. \
-  Shared legal concept pages (statutes, precedents, doctrines) must NOT have a case prefix. \
-  Example: "Facts – Yuvraj Kanther ({doc_type})", "Section 319 CrPC ({doc_type})". \
-  For contracts: "Topic Name ({doc_type})".
+  DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics prefixed \
+  with a document identifier (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
+  without (e.g. "Section 319 CrPC", "Indian Arbitration Act"). Preserve these prefixes exactly \
+  when generating page titles. \
+  If a document-specific topic (any clause, provision, obligation, term, or fact specific to \
+  THIS document) in the KNOWN TOPICS list lacks a prefix, add the document identifier. \
+  Shared legal concept pages (statutes, precedents, doctrines) must NOT have a prefix. \
+  Examples: "Facts – Yuvraj Kanther ({doc_type})", "Term – SA1-Crayons ({doc_type})", \
+  "Section 319 CrPC ({doc_type})", "Indian Arbitration Act ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
 
 OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fences:
@@ -611,10 +719,20 @@ def ingest(file_path: str, session_id: str) -> dict:
     with the overview's topic list as context to reduce redundancy.
     Segments are processed concurrently to improve speed.
     """
-    text = _read_file(file_path)
+    from services.reader import read_file_with_positions as _read_with_pos
+    result = _read_with_pos(file_path)
+    text = result["text"]
+    page_map = result["page_map"]
     doc_name = os.path.basename(file_path)
 
-    logger.info("Wiki ingest: %s (%d chars)", doc_name, len(text))
+    # Store page-level positions for citation location support
+    if config.USE_DATABASE and page_map:
+        try:
+            _db.store_page_map(session_id, doc_name, page_map)
+        except Exception as _pm_err:
+            logger.warning("Failed to store page map for %s: %s", doc_name, _pm_err)
+
+    logger.info("Wiki ingest: %s (%d chars, %d pages)", doc_name, len(text), len(page_map))
 
     # Signal: file has been read, starting synthesis
     _update_doc_step(session_id, doc_name, "synthesizing")
@@ -823,6 +941,9 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
         new_pages = new_data.get("pages", {})
         new_relations = new_data.get("relations", [])
 
+        # Build a short doc identifier for auto-prefixing unprefixed pages
+        _doc_id = _make_doc_identifier(doc_name)
+
         # -- Merge pages --
         for title, new_value in new_pages.items():
             if isinstance(new_value, str):
@@ -835,6 +956,9 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             if new_quotes:
                 quote_text = "\n\n**Supporting Quotes:**\n" + "\n".join(f"> {q}" for q in new_quotes)
                 new_content += quote_text
+
+            # Auto-prefix unprefixed contract/agreement pages
+            title = _auto_prefix_title(title, _doc_id)
 
             existing = _db.get_page(session_id, title)
 
@@ -1248,7 +1372,7 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
-def get_context(question: str, session_id: str) -> tuple[str, list]:
+def get_context(question: str, session_id: str, target_doc: str = "") -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
@@ -1261,9 +1385,21 @@ def get_context(question: str, session_id: str) -> tuple[str, list]:
     if not pages:
         return {"context": "", "selected_titles": [], "bm25_count": 0}
 
-    # --- Step 0: Detect file mentions in the question ---
-    mentioned_files = _detect_mentioned_files(question, pages)
-    file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
+    # --- Step 0: Detect file mentions in the question or use target_doc ---
+    if target_doc:
+        # Match by source_doc field (DB) or by title substring (file-based)
+        file_pages = [
+            title for title, page in pages.items()
+            if isinstance(page, dict) and (
+                page.get("source_doc", "") == target_doc
+                or target_doc in page.get("source_doc", "")
+                or target_doc in title
+            )
+        ]
+        mentioned_files = {target_doc} if file_pages else set()
+    else:
+        mentioned_files = _detect_mentioned_files(question, pages)
+        file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
 
     bm25_count = 0
     pages_for_llm = pages
@@ -1365,7 +1501,86 @@ JSON:"""
     return {"score": score, "reason": "Confidence evaluated from context availability."}
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None) -> dict:
+_ASSESSMENT_PATTERNS = re.compile(
+    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?:we|i|tata)\s+sign|'
+    r'risk\s+assessment|risk\s+review|advise|advisory|red\s+flag|deal[- ]?breaker|'
+    r'approve|approval|sign\s+off|signoff|would\s+you\s+(?:recommend|advise|sign)|'
+    r'safe\s+to\s+sign|ready\s+to\s+(?:sign|execute)|negotiation\s+strategy|'
+    r'accept\s+or\s+reject|proceed\s+or\s+not)',
+    re.IGNORECASE,
+)
+
+
+def _is_assessment_query(question: str) -> bool:
+    """Return True if the question asks for a legal recommendation or risk assessment."""
+    return bool(_ASSESSMENT_PATTERNS.search(question))
+
+
+def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -> str:
+    """Build a metadata context block with party names and document info.
+
+    Fetches from the page_metadata table (C7) when available, falls back to
+    extracting party info from page titles and content.
+    """
+    metadata_lines = []
+
+    # Collect source docs from selected pages
+    source_docs = set()
+    for title in selected_titles:
+        if title in pages:
+            page = pages[title]
+            if isinstance(page, dict):
+                sd = page.get("source_doc", "")
+                if sd:
+                    source_docs.add(sd)
+
+    if not source_docs:
+        return ""
+
+    # Try DB metadata first
+    if config.USE_DATABASE:
+        for doc in source_docs:
+            try:
+                meta = _db.get_metadata(session_id, doc)
+                if meta:
+                    clean_name = re.sub(r'^[a-f0-9-]{36}_', '', doc)
+                    parts = [f"Document: {clean_name}"]
+                    if meta.get("parties"):
+                        parts.append(f"Parties: {meta['parties']}")
+                    if meta.get("governing_law"):
+                        parts.append(f"Governing Law: {meta['governing_law']}")
+                    if meta.get("effective_date"):
+                        parts.append(f"Effective Date: {meta['effective_date']}")
+                    if meta.get("jurisdiction"):
+                        parts.append(f"Jurisdiction: {meta['jurisdiction']}")
+                    if meta.get("liability_cap"):
+                        parts.append(f"Liability Cap: {meta['liability_cap']}")
+                    if meta.get("termination_notice"):
+                        parts.append(f"Termination Notice: {meta['termination_notice']}")
+                    if meta.get("payment_terms"):
+                        parts.append(f"Payment Terms: {meta['payment_terms']}")
+                    if len(parts) > 1:
+                        metadata_lines.append(" | ".join(parts))
+            except Exception:
+                pass
+
+    # Fallback: extract party info from page content if no DB metadata
+    if not metadata_lines:
+        for title in selected_titles:
+            if title in pages and any(kw in title.lower() for kw in ["parties", "overview", "recital"]):
+                page = pages[title]
+                content = page.get("content", "") if isinstance(page, dict) else str(page)
+                if content:
+                    metadata_lines.append(f"From '{title}': {content[:300]}")
+                    break
+
+    if not metadata_lines:
+        return ""
+
+    return "\nDOCUMENT METADATA:\n" + "\n".join(metadata_lines) + "\n"
+
+
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "") -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -1397,8 +1612,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    from services.prompts import ANSWER_PROMPT
-    prompt = ANSWER_PROMPT.format(context=wiki_content, question=question)
+    from services.prompts import ANSWER_PROMPT, ASSESSMENT_PROMPT
+
+    conv_block = ""
+    if conversation_context:
+        conv_block = f"\nPREVIOUS CONVERSATION:\n{conversation_context}\n"
+
+    # Build metadata block with party names from ingested documents
+    metadata_block = _build_metadata_block(session_id, selected_titles, pages)
+
+    # Pick prompt based on query type
+    prompt_template = ASSESSMENT_PROMPT if _is_assessment_query(question) else ANSWER_PROMPT
+    prompt = prompt_template.format(
+        context=wiki_content,
+        question=question,
+        conversation_block=conv_block,
+        metadata_block=metadata_block,
+    )
 
     usage = {}
     confidence_score = 75   # conservative default if extraction fails
@@ -1443,14 +1673,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         # A short "Not covered" answer means the context had nothing relevant —
         # confidence should be 0, not the generic 75 default.
         if confidence_score == 75 and confidence_reason.startswith("Default"):
-            _not_covered = re.search(
-                r'not covered|no information|not contain|no relevant|'
-                r'does not contain|not found|not available',
-                answer, flags=re.IGNORECASE
-            )
-            if _not_covered or len(answer) < 150:
-                confidence_score = 0
-                confidence_reason = "Model found no relevant context for this question."
+            if len(answer) < 150:
+                _not_covered = re.search(
+                    r'not covered|no information|not contain|no relevant|'
+                    r'does not contain|not found|not available',
+                    answer, flags=re.IGNORECASE
+                )
+                if _not_covered:
+                    confidence_score = 0
+                    confidence_reason = "Model found no relevant context for this question."
+                else:
+                    confidence_score = 50
+                    confidence_reason = "Very short answer; limited context."
             else:
                 # Substantial answer but no reasoning block — model answered directly
                 confidence_score = 72
@@ -1556,6 +1790,179 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "token_breakdown": token_breakdown,
         "token_total": token_total,
     }
+
+
+# ---------------------------------------------------------------------------
+# Conversational UX — disambiguation & clarification
+# ---------------------------------------------------------------------------
+
+_DOC_NAME_PATTERN = re.compile(
+    r'(?:service\s+agreement|shareholder\s+agreement|nda|joint\s+venture|'
+    r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)\s*'
+    r'(?:#?\s*)?(\d+)',
+    re.IGNORECASE,
+)
+
+
+def _question_names_a_document(question: str, docs: list[str]) -> bool:
+    """Return True if the question contains a recognizable document reference.
+
+    Matches patterns like 'service agreement 1', 'NDA 3', 'SA1', 'SHA 4',
+    and checks if any ingested document name contains that same number+type combo.
+    """
+    match = _DOC_NAME_PATTERN.search(question)
+    if not match:
+        return False
+    # The question mentions a specific numbered document — that's enough
+    return True
+
+
+def classify_query(question: str, session_id: str) -> dict:
+    """Determine if the query targets a specific unnamed document.
+
+    Uses a fast LLM call. Returns {needs_disambiguation, documents}.
+    """
+    index = _load_index(session_id)
+    pages = index.get("pages", {})
+
+    # Skip if the question already names a specific file
+    mentioned = _detect_mentioned_files(question, pages)
+    if mentioned:
+        return {"needs_disambiguation": False, "documents": []}
+
+    # Get distinct source documents
+    if config.USE_DATABASE:
+        docs = _db.get_source_docs(session_id)
+    else:
+        docs = list({
+            p.get("source_doc", "") for p in pages.values()
+            if isinstance(p, dict) and p.get("source_doc")
+        })
+
+    if len(docs) <= 1:
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # Skip if the question contains a recognizable document name pattern
+    if _question_names_a_document(question, docs):
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # Clean document names for display
+    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
+    doc_list_str = "\n".join(f"- {d}" for d in clean_docs)
+
+    prompt = (
+        "You are a triage system for a legal document Q&A platform.\n"
+        "Determine if the user's question is about a SPECIFIC document without naming it.\n\n"
+        f"Available documents:\n{doc_list_str}\n\n"
+        f"Question: {question}\n\n"
+        "A question DOES NOT need disambiguation when:\n"
+        "- It names or numbers a specific document (e.g. 'service agreement 1', 'NDA 3', 'the SHA')\n"
+        "- It's a cross-document comparison or general legal question\n"
+        "- It mentions a document type with a number or identifier\n\n"
+        "A question NEEDS disambiguation ONLY when:\n"
+        "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
+        "without ANY identifier or number\n\n"
+        "When in doubt, choose false (no disambiguation needed).\n\n"
+        "Respond with JSON only:\n"
+        '{"needs_disambiguation": bool, "reason": "one sentence"}'
+    )
+    try:
+        raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_DISAMBIGUATION)
+        parsed = _parse_json_safe(raw)
+        if parsed and parsed.get("needs_disambiguation"):
+            return {"needs_disambiguation": True, "documents": docs}
+    except Exception as e:
+        logger.error("classify_query failed: %s", e)
+
+    return {"needs_disambiguation": False, "documents": docs}
+
+
+def check_ambiguity(question: str, session_id: str, conversation_context: str = "") -> dict:
+    """Determine if the query needs clarification before answering.
+
+    Uses a fast LLM call. Returns {needs_clarification, question, options}.
+    """
+    if not config.ENABLE_CLARIFICATION:
+        return {"needs_clarification": False}
+
+    # Get doc types for context
+    if config.USE_DATABASE:
+        docs = _db.get_source_docs(session_id)
+    else:
+        index = _load_index(session_id)
+        pages = index.get("pages", {})
+        docs = list({
+            p.get("source_doc", "") for p in pages.values()
+            if isinstance(p, dict) and p.get("source_doc")
+        })
+    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs[:20]]
+
+    conv_snippet = ""
+    if conversation_context:
+        conv_snippet = f"\nRecent conversation:\n{conversation_context[:500]}\n"
+
+    prompt = (
+        "You are a legal assistant triage system. Determine if the user's question "
+        "is clear enough to answer directly or needs ONE clarifying question.\n\n"
+        "A question needs clarification when:\n"
+        "- It could mean multiple very different things\n"
+        "- The scope is unclear (e.g., 'summarize' without specifying focus area)\n"
+        "- Key terms are ambiguous in context\n\n"
+        "A question does NOT need clarification when:\n"
+        "- It's straightforward even if broad\n"
+        "- It names a specific document AND states what to do with it\n"
+        "- Standard legal analysis is implied\n"
+        "- The intent is obvious from context or conversation history\n"
+        "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n\n"
+        "When in doubt, answer directly — do NOT ask for clarification.\n\n"
+        f"Available documents: {', '.join(clean_docs[:10])}\n"
+        f"{conv_snippet}\n"
+        f"Question: {question}\n\n"
+        "Respond with JSON only:\n"
+        '{"needs_clarification": bool, "clarification_question": "string or null", '
+        '"options": ["option1", "option2", "option3"] or null}'
+    )
+    try:
+        raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_AMBIGUITY_CHECK)
+        parsed = _parse_json_safe(raw)
+        if parsed and parsed.get("needs_clarification"):
+            return {
+                "needs_clarification": True,
+                "question": parsed.get("clarification_question", "Could you clarify your question?"),
+                "options": parsed.get("options") or [],
+            }
+    except Exception as e:
+        logger.error("check_ambiguity failed: %s", e)
+
+    return {"needs_clarification": False}
+
+
+def build_conversation_context(session_id: str) -> str:
+    """Build a conversation context string from recent chat messages."""
+    if not config.USE_DATABASE:
+        return ""
+    try:
+        recent = _db.get_recent_context(session_id, n=6)
+    except Exception:
+        return ""
+
+    if not recent:
+        return ""
+
+    parts = []
+    total_chars = 0
+    for msg in recent:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"]
+        if msg["msg_type"] == "answer" and len(content) > 300:
+            content = content[:300] + "..."
+        line = f"{role}: {content}"
+        if total_chars + len(line) > 2000:
+            break
+        parts.append(line)
+        total_chars += len(line)
+
+    return "\n".join(parts)
 
 
 def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str]:

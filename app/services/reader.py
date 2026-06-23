@@ -64,6 +64,27 @@ def configure_tesseract(cmd_path: str | None = None):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+def read_file_with_positions(file_path: str) -> dict:
+    """Read a file and return text with page-level character positions.
+
+    Returns: {text: str, page_map: [{page_num, char_start, char_end}, ...]}
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+
+    if ext == ".pdf":
+        return _read_pdf_with_positions(file_path)
+
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = text.strip()
+    return {
+        "text": text,
+        "page_map": [{"page_num": 1, "char_start": 0, "char_end": len(text)}],
+    }
+
+
 def read_file(file_path: str) -> str:
     """Read text from a .txt or .pdf file, using OCR for scanned pages.
 
@@ -105,6 +126,53 @@ def read_file(file_path: str) -> str:
 # ---------------------------------------------------------------------------
 # PDF reading with per-page OCR fallback
 # ---------------------------------------------------------------------------
+def _read_pdf_with_positions(file_path: str) -> dict:
+    """Read PDF and return text with per-page character offsets."""
+    from pypdf import PdfReader
+
+    reader = PdfReader(file_path)
+    page_texts: list[str] = []
+
+    for page in reader.pages:
+        text = (page.extract_text() or "").strip()
+        page_texts.append(text)
+
+    if _ocr_available:
+        needs_ocr = [i for i, t in enumerate(page_texts) if len(t) < MIN_CHARS_PER_PAGE]
+        if needs_ocr:
+            try:
+                doc = fitz.open(file_path)
+                for i in needs_ocr:
+                    try:
+                        ocr_text = _ocr_page(doc[i])
+                        if ocr_text.strip():
+                            page_texts[i] = ocr_text
+                    except Exception:
+                        pass
+                doc.close()
+            except Exception:
+                pass
+
+    full_text = "\n".join(page_texts)
+    full_text = re.sub(r"\n{3,}", "\n\n", full_text)
+    full_text = re.sub(r"[ \t]{2,}", " ", full_text)
+    full_text = full_text.strip()
+
+    page_map = []
+    offset = 0
+    for i, pt in enumerate(page_texts):
+        cleaned = re.sub(r"\n{3,}", "\n\n", pt)
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        start = full_text.find(cleaned, max(0, offset - 50)) if cleaned else offset
+        if start == -1:
+            start = offset
+        end = start + len(cleaned)
+        page_map.append({"page_num": i + 1, "char_start": start, "char_end": end})
+        offset = end
+
+    return {"text": full_text, "page_map": page_map}
+
+
 def _read_pdf(file_path: str) -> str:
     """Read PDF, falling back to OCR for pages where pypdf extracts little text."""
     from pypdf import PdfReader

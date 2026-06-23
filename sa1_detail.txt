@@ -1,0 +1,166 @@
+Total length: 34981 chars
+Defined terms found: 1
+Force Majeure Event
+
+=== FULL TEXT 8000-16000 ===
+ directly or indirectly replaced; and
+
+(f) No rule of construction or interpretation shall apply to the disadvantage or
+detriment of the Party having control or being responsible for the preparation of
+
+; this Agreement.
+
+2. PROVISION OF SERVICES
+
+2.1 The Parties hereby agree that Service Provider shall, from the Effective Date, in terms of
+this Agreement, render services to TATA in accordance with the details and timelines, as
+more particularly set out in Schedule I hereto (“Services”).
+
+2.2 In providing the Services, the Service Provider shall:
+
+(a) take due care in providing the Services to TATA;
+
+(b) comply with all applicable laws, regulations and guidelines in the provision of the
+Services;
+
+(c) ensure that the Services are provided efficiently, observing the highest standards,
+in a professional manner and according to the terms and conditions of this
+Agreement and as acceptable to the TATA; and
+
+(d) comply with requests of TATA in relation to the provision of the Services as per
+the terms of the Agreement.
+
+. 2.3 The Service Provider further undertakes to provide such information in relation to the
+
+Services and at such intervals as TATA may reasonably require.
+
+2.4 Upon identifying or being notified by TATA of any problem with any of the Services, the
+Service Provider shall initiate such investigative and remedial measures as are appropriate
+to the satisfaction of TATA.
+
+2.5 TATA and the Service Provider may from time to time with mutual agreement amend the
+
+scope of the Services by amending Schedule I in accordance with the provisions of this
+Agreement.
+
+2.6 The Service Provider acknowledges that time is of essence for this Agreement and
+undertakes to provide quality professional services in a timely manner.
+
+2.7 Service Provider shall obtain, keep valid and subsisting, and comply with the conditions
+of, all permits, licenses, authorizations and consents as may be required from time to time
+in respect of and in relation to the performance of its obligations under this Agreement.
+
+3. SERVICE FEE
+
+3.1 In consideration of the Service Provider providing the Services, a fee as set out in
+Schedule I (“Service Fee’’) shall be payable to the Service Provider.
+
+3.2 All payments under this Agreement shall be subject to deduction of tax at source, if
+applicable, as per prevailing laws. The Party deducting any tax at source pursuant to any
+NG *:
+
+applicable law shall deliver to the other Party, TDS certificates in accordance with the
+
+provisions of such law.
+
+. 3.4 The payments due under this Agreement are expressed exclusive of Goods and Services
+
+Tax that may be payable by reference to the Service Fee, and it shall be paid by the
+
+Service Provider, subject to the same being marked separately in the invoice along with
+
+all relevant GST registration details.
+
+4, PROJECT MANAGER
+4.1 TATA may assign a representative (‘TATA Manager”) for coordination with the
+Service Provider Manager to review performance of this Agreement, resolutions of
+problems and other activities to facilitate success of this Agreement.
+4.2 TATA shall send written notice to the Service Provider 14 (fourteen) days in advance
+; about change of TATA Manager at any time during the term of this Agreement.
+5. TEAM STRUCTURE
+5.1 The Team Structure of Crayons for providing the services as per the Scope of work to the
+client is mentioned in the Schedule-III
+6. REPRESENTATIONS AND WARRANTIES
+6.1 The Service Provider represents and warrants to TATA that:
+
+(a) it has the requisite rights, power and authority to provide the information,
+specifications, data, work for hire and Services that it has or shall provide
+pursuant to this Agreement and that possession and use of such information,
+specifications, data, work for hire and Services shall, at no point in time, whether
+
+. during or after expiry / termination of this Agreement, constitute an
+infringement, or threaten infringement, of any patent, copyright, trade secret, or
+any other Intellectual Property Right of any third party or give rise to any claims
+of any nature on TATA by any third party;
+
+(b) the execution and delivery of this Agreement by it, the performance by it of its
+obligations hereunder and compliance by it with the provisions hereof will not
+
+; violate, contravene or breach or create a default under any agreement,
+instrument, charter or by-law provision, statute, regulation, judgment, ordinance,
+decree, writ, injunction or applicable law;
+
+(c) it has all necessary licenses, permits, approvals, consents and sanctions as may
+be necessary or required from time to time under Applicable Law or regulation
+or otherwise for performance by it of all its duties, obligations, Services and
+responsibilities hereunder;
+
+(d) it has the requisite experience, knowledge, expertise, capability, availability of
+manpower and infrastructure necessary to effectively and properly provide the
+Services to the satisfaction of TATA and that the Services provided under this
+Agreement shall be performed with the highest degree of skill and judgment and
+
+as per the good industry practice.
+
+7. INTELLECTUAL PROPERTY
+
+71 Each Party owns all right, title and interest in its respective Intellectual Property and
+nothing in this Agreement shall be construed to create any right of ownership or any other
+right or interest of any Party over the Intellectual Property of the other Party.
+
+. 7.2 The Service Provider acknowledges and agrees that the Services are performed and
+provided under this Agreement on a “work for hire” basis and TATA shall own all
+Intellectual Property Rights contained in and with respect to the Services, including
+without limitation, all modifications, adaptations, enhancements and/or derivative works
+thereof, free from any lien or encumbrances (of any nature whatsoever). Service Provider
+shall execute the necessary documents to solely and exclusively vest all the foregoing
+rights in the Services with TATA..
+
+73 The Service Provider undertakes that it shall not use any or otherwise any work product
+resulting from the Services and/or Intellectual Property Rights of TATA in any manner
+whatsoever for itself or for any client other than TATA, at any time.
+
+, 74 Service Provider shall also, under no circumstances whatsoever, use any Intellectual
+Property Right of TATA for any purpose other than providing Services to TATA.
+
+7.5 Service Provider acknowledges and agrees that it shall not use TATA’s Intellectual
+Property including its company name, trademarks, logos, patterns, advertising material
+and product representations, know-how, in any country and for any reason whatsoever or
+identify itself to be associated with TATA in any form or manner without prior written
+permission of TATA.
+
+8. FORCE MAJEURE
+
+8.1 Neither Party shall be liable to the other Party for any delay or non-performance of its
+obligations under this Agreement arising from any cause beyond its reasonable control
+including any act of God, war, pandemic, epidemic, fire, flood, explosion, power
+blackout, political unrest (a “Force Majeure Event”). The affected Party (‘Force
+Majeure Party”) shall promptly notify the other Party (“Non-Force Majeure Party”)
+orally or in writing, as the circumstances warrant, of the cause and the Force Majeure
+Event and its likely duration. If performance as per the terms of this Agreement is not
+resumed within 30 (Thirty) days after the Force Majeure Event, then the Non-Force
+Majeure Party may terminate this Agreement at its sole discretion.
+
+8.2 On the occurrence of any Force Majeure Event, both Parties shall use reasonable efforts
+to perform the obligations under this Agreement during the period of suspension.
+
+9. TERM AND TERMINATION
+
+9.1 This Agreement shall be effective from the date of its execution and shall remain valid for
+a period of | year, unless mutually extended by the Parties in writing or terminated earlier
+pursuant to terms hereof (“Term”).
+
+9.2 This Agreement may, however, be, terminated:
+
+(a) upon mutual agreement of the Parties;
+(b) in acc
