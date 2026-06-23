@@ -1,10 +1,10 @@
 """
-LLM abstraction — supports Azure OpenAI.
+LLM abstraction — supports Azure OpenAI and OpenRouter.
 Entry point: ask(prompt, pipeline) -> tuple[str, dict]
 """
 
 import logging
-from openai import AzureOpenAI
+from openai import AzureOpenAI, OpenAI
 import config
 
 logger = logging.getLogger(__name__)
@@ -12,6 +12,30 @@ logger = logging.getLogger(__name__)
 # Lazy load clients — default and fast (shorter timeout for bulk extraction)
 _client = None
 _fast_client = None
+_or_client = None
+_or_fast_client = None
+
+def get_openrouter_client() -> OpenAI:
+    global _or_client
+    if _or_client is None:
+        _or_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=config.OPENROUTER_API_KEY,
+            timeout=120.0,
+            max_retries=2
+        )
+    return _or_client
+
+def _get_fast_openrouter_client() -> OpenAI:
+    global _or_fast_client
+    if _or_fast_client is None:
+        _or_fast_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=config.OPENROUTER_API_KEY,
+            timeout=45.0,
+            max_retries=1
+        )
+    return _or_fast_client
 
 def get_client() -> AzureOpenAI:
     global _client
@@ -38,18 +62,37 @@ def _get_fast_client() -> AzureOpenAI:
         )
     return _fast_client
 
-def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None) -> tuple[str, dict]:
-    """Send a prompt to Azure OpenAI and return the response text and usage dict.
+def active_model(fast: bool = False) -> str:
+    """Return the model name that will be used for a given fast/full call.
+    Useful for labelling token-usage log entries."""
+    if config.LLM_PROVIDER == "openrouter":
+        return config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
+    return config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
+
+
+def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False) -> tuple[str, dict]:
+    """Send a prompt to the selected LLM and return the response text and usage dict.
 
     Args:
-        prompt:   The full prompt string.
-        pipeline: ignored in this Azure OpenAI version, but kept for compatibility.
-        max_tokens: Limit the maximum tokens in the completion response.
+        prompt:     The full prompt string.
+        pipeline:   Kept for compatibility; not used for routing.
+        max_tokens: Cap the completion token count. Always pass an explicit value —
+                    relying on the model default wastes budget on small-output calls.
+        fast:       Route to the cheap/fast model (AZURE_FAST_DEPLOYMENT /
+                    OPENROUTER_FAST_MODEL) instead of the full synthesis model.
+                    Use for: contradiction checks, page selection, JSON repair.
+                    Do NOT use for: ingest synthesis, answer generation, drafting.
     """
-    client = get_client()
+    if config.LLM_PROVIDER == "openrouter":
+        client = get_openrouter_client()
+        model_name = config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
+    else:
+        client = get_client()
+        model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
+
     try:
         kwargs = {
-            "model": config.AZURE_OPENAI_DEPLOYMENT,
+            "model": model_name,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.0
         }
@@ -59,34 +102,42 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None) -> tuple[st
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
         }
         return content, usage
     except Exception as e:
-        logger.error(f"Azure OpenAI call failed: {e}")
-        raise RuntimeError(f"Azure OpenAI unavailable: {e}") from e
+        logger.error(f"LLM call failed: {e}")
+        raise RuntimeError(f"LLM unavailable: {e}") from e
 
 def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
-    """Lightweight LLM call optimised for bulk cell extraction.
-    
-    Uses a shorter timeout and single retry to avoid blocking the 
-    ThreadPoolExecutor when the API is slow or rate-limited.
+    """Lightweight LLM call for bulk extraction tasks (cell extraction, column inference,
+    aspect identification, outlier detection).
+
+    Routes to the cheap model (AZURE_FAST_DEPLOYMENT / OPENROUTER_FAST_MODEL) with a
+    short timeout and single retry to avoid blocking the ThreadPoolExecutor.
+    Never use for synthesis tasks that require legal reasoning depth.
     """
-    client = _get_fast_client()
+    if config.LLM_PROVIDER == "openrouter":
+        client = _get_fast_openrouter_client()
+        model_name = config.OPENROUTER_FAST_MODEL   # cheap model
+    else:
+        client = _get_fast_client()
+        model_name = config.AZURE_FAST_DEPLOYMENT   # cheap model
+
     try:
         response = client.chat.completions.create(
-            model=config.AZURE_OPENAI_DEPLOYMENT,
+            model=model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_completion_tokens=max_tokens
         )
         content = response.choices[0].message.content or ""
         usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
         }
         return content, usage
     except Exception as e:
         logger.error(f"Fast LLM call failed: {e}")
-        raise RuntimeError(f"Azure OpenAI unavailable (fast): {e}") from e
+        raise RuntimeError(f"LLM unavailable (fast): {e}") from e

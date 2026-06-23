@@ -6,7 +6,7 @@
   <title>LexWiki</title>
   <link rel="icon" type="image/png" href="/static/favicon.png">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
-  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=DM+Sans:wght@400;500&display=swap');
@@ -111,6 +111,47 @@
       display: flex;
       align-items: center;
       gap: 8px
+    }
+
+    .provider-toggle {
+      display: flex;
+      background: var(--bg-hover);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 3px;
+      font-size: 11px;
+      font-weight: 500;
+      margin-right: 10px;
+    }
+
+    .provider-option {
+      padding: 5px 12px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      color: var(--text-secondary);
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .provider-option.active {
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      font-weight: 600;
+    }
+
+    .provider-option i {
+      font-size: 14px;
+    }
+
+    .provider-option.active[data-val="azure"] i {
+      color: #0078D4;
+    }
+
+    .provider-option.active[data-val="openrouter"] i {
+      color: var(--accent);
     }
 
     .icon-btn {
@@ -280,7 +321,104 @@
     .ask-wrap {
       max-width: 740px;
       margin: 0 auto;
-      width: 100%
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden
+    }
+
+    .chat-thread {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 0 10px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px
+    }
+
+    .chat-msg {
+      display: flex;
+      gap: 10px;
+      max-width: 95%
+    }
+    .chat-msg-user {
+      align-self: flex-end;
+      flex-direction: row-reverse
+    }
+    .chat-msg-assistant, .chat-msg-system {
+      align-self: flex-start
+    }
+
+    .chat-bubble {
+      padding: 10px 14px;
+      border-radius: var(--radius-lg);
+      font-size: 13px;
+      line-height: 1.6;
+      word-break: break-word
+    }
+    .chat-msg-user .chat-bubble {
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px
+    }
+    .chat-msg-assistant .chat-bubble {
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      color: var(--text-primary);
+      border-bottom-left-radius: 4px
+    }
+    .chat-msg-system .chat-bubble {
+      background: var(--accent-light);
+      border: 0.5px solid var(--accent-border);
+      color: var(--text-primary);
+      border-bottom-left-radius: 4px
+    }
+
+    .chat-typing {
+      align-self: flex-start;
+      padding: 10px 14px;
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 4px;
+      align-items: center
+    }
+    .chat-typing .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted);
+      animation: chatTypingDot 1.2s infinite ease-in-out
+    }
+    .chat-typing .dot:nth-child(2) { animation-delay: 0.2s }
+    .chat-typing .dot:nth-child(3) { animation-delay: 0.4s }
+    @keyframes chatTypingDot {
+      0%, 80%, 100% { opacity: 0.3; transform: scale(0.8) }
+      40% { opacity: 1; transform: scale(1) }
+    }
+
+    .disambig-chips {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
+    }
+    .disambig-chip {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+      background: var(--bg-surface); border: 1px solid var(--accent-border);
+      color: var(--accent); cursor: pointer; transition: all 0.15s
+    }
+    .disambig-chip:hover {
+      background: var(--accent); color: #fff
+    }
+    .clarif-options {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
+    }
+    .clarif-option-btn {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+      background: var(--bg-surface); border: 1px solid var(--green-border);
+      color: var(--green-text); cursor: pointer; transition: all 0.15s
+    }
+    .clarif-option-btn:hover {
+      background: var(--green); color: #fff
     }
 
     .ask-box {
@@ -291,7 +429,8 @@
       display: flex;
       align-items: flex-end;
       gap: 10px;
-      margin-bottom: 20px
+      flex-shrink: 0;
+      margin-top: 10px
     }
 
     .ask-input {
@@ -870,13 +1009,13 @@
 
     /* GRAPH OVERLAY */
     .graph-overlay {
-      position: absolute;
+      position: fixed;
       top: 0;
       left: 0;
       right: 0;
       bottom: 0;
       background: rgba(15, 15, 30, 0.55);
-      z-index: 20;
+      z-index: 9999;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1651,6 +1790,83 @@
       background-color: var(--accent-light);
       box-shadow: 0 0 0 1px var(--accent);
     }
+
+    /* ── INGEST DASHBOARD ─────────────────────────────── */
+    .ingest-dash {
+      width: 100%; max-width: 620px; margin: 0 auto;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .id-header { padding-bottom: 10px; border-bottom: 0.5px solid var(--border); }
+    .id-title {
+      font-size: 14px; font-weight: 500; color: var(--text-primary);
+      display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
+    }
+    .id-spin { animation: spin 1.6s linear infinite; color: var(--accent); display: inline-block; }
+    .id-overall-row { display: flex; align-items: center; gap: 10px; }
+    .id-overall-bar {
+      flex: 1; height: 3px; background: var(--bg-base);
+      border-radius: 2px; overflow: hidden;
+    }
+    #id-overall-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent) 0%, var(--green) 100%);
+      width: 0%; transition: width 0.7s ease; border-radius: 2px;
+    }
+    .id-overall-lbl { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+    .id-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .id-panel {
+      background: var(--bg-surface); border: 0.5px solid var(--border);
+      border-radius: var(--radius-md); padding: 11px 13px;
+    }
+    .id-panel-title {
+      font-size: 9px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px;
+    }
+    /* Pipeline steps */
+    .id-step {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px; color: var(--text-muted); padding: 3px 0; transition: color 0.3s;
+    }
+    .id-step.done  { color: var(--green-text); }
+    .id-step.active { color: var(--text-primary); }
+    .id-step-icon { width: 14px; font-size: 11px; flex-shrink: 0; text-align: center; }
+    .id-step.done  .id-step-icon { color: var(--green); }
+    .id-step.active .id-step-icon { color: var(--accent); animation: spin 1.2s linear infinite; display: inline-block; }
+    /* Stats */
+    .id-stats-row { display: flex; gap: 6px; margin-bottom: 10px; }
+    .id-stat {
+      flex: 1; background: var(--accent-light);
+      border-radius: var(--radius-sm); padding: 7px 4px; text-align: center;
+    }
+    .id-stat-val {
+      font-size: 17px; font-weight: 600; color: var(--accent);
+      font-family: var(--font-heading); line-height: 1;
+    }
+    .id-stat-lbl {
+      font-size: 9px; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.04em; margin-top: 2px;
+    }
+    #id-minigraph { width: 100%; height: 92px; display: block; }
+    /* Document feed */
+    .id-feed-panel { max-height: 190px; overflow-y: auto; }
+    .id-doc-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 4px; border-radius: var(--radius-sm); transition: background 0.15s;
+    }
+    .id-doc-item:hover { background: var(--bg-base); }
+    .id-doc-icon { width: 16px; font-size: 13px; flex-shrink: 0; text-align: center; }
+    .id-doc-name {
+      flex: 1; font-size: 12px; color: var(--text-primary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .id-doc-step { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+    .id-doc-item.status-done .id-doc-icon { color: var(--green); }
+    .id-doc-item.status-done .id-doc-step { color: var(--green-text); font-weight: 500; }
+    .id-doc-item.status-error .id-doc-icon, .id-doc-item.status-error .id-doc-step { color: var(--red); }
+    .id-doc-item.status-queued .id-doc-icon { color: var(--text-muted); }
+    .id-doc-item.status-synthesizing .id-doc-icon,
+    .id-doc-item.status-extracting   .id-doc-icon,
+    .id-doc-item.status-merging      .id-doc-icon { color: var(--accent); animation: spin 1.2s linear infinite; display: inline-block; }
   </style>
 </head>
 
@@ -1665,6 +1881,24 @@
       <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New
           Session</span></div>
       <div class="topbar-right">
+        <span style="font-size:11px;font-weight:600;margin-right:-5px;color:var(--text-muted)">LLM:</span>
+        <div class="provider-toggle" id="providerToggle" style="margin-right: 2px;">
+          <div class="provider-option active" data-val="azure" onclick="setProvider('azure')">
+            <i class="ti ti-cloud"></i> Azure
+          </div>
+          <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
+            <i class="ti ti-router"></i> OpenRouter
+          </div>
+        </div>
+        <span style="font-size:11px;font-weight:600;margin-right:-5px;margin-left:2px;color:var(--text-muted)">Embed:</span>
+        <div class="provider-toggle" id="embeddingToggle" style="margin-right: 10px;">
+          <div class="provider-option active" data-val="azure" onclick="setEmbeddingProvider('azure')">
+            <i class="ti ti-cloud"></i> Azure
+          </div>
+          <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
+            <i class="ti ti-router"></i> OpenRouter
+          </div>
+        </div>
         <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
@@ -1699,12 +1933,14 @@
         <!-- PRE-SESSION UPLOAD SCREEN -->
         <div id="panel-upload" class="panel" style="display:flex;">
           <div class="upload-screen" id="upload-screen">
-            <div class="upl-title">Upload your documents</div>
-            <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
+            <div id="upl-title-wrap">
+              <div class="upl-title">Upload your documents</div>
+              <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
+            </div>
 
+            <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+            <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
             <div class="upl-zone" id="upload-zone">
-              <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
-              <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
               <i class="ti ti-upload upl-icon"></i>
               <div class="upl-text-p">Drop .txt / .pdf files or folders here</div>
               <div class="upl-text-s" id="staged-label">or choose below</div>
@@ -1717,34 +1953,82 @@
                 style="background:var(--accent);color:#fff;border:none">Ingest Now</button>
             </div>
 
-            <div class="main-prog-wrap d-none" id="progress-wrap">
-              <div class="main-prog-lbl"><span style="color:var(--accent)">RAG Pipeline</span><span
-                  id="rag-prog-label">0/0</span></div>
-              <div class="prog-container">
-                <div class="prog-fill" id="rag-prog-bar"></div>
-              </div>
-              <div class="prog-lbls"><span id="rag-prog-msg">Starting...</span><span></span></div>
+            <!-- INGEST DASHBOARD — replaces old dual-pipeline bars -->
+            <div class="ingest-dash d-none" id="ingest-dash">
 
-              <div class="main-prog-lbl" style="margin-top:10px"><span style="color:var(--green)">Wiki
-                  Pipeline</span><span id="wiki-prog-label">0/0</span></div>
-              <div class="prog-container">
-                <div class="prog-fill" id="wiki-prog-bar"></div>
+              <!-- Header: title + overall bar -->
+              <div class="id-header">
+                <div class="id-title">
+                  <i class="ti ti-brain id-spin" id="id-brain-icon"></i>
+                  <span id="id-title-text">Building Knowledge Base</span>
+                </div>
+                <div class="id-overall-row">
+                  <div class="id-overall-bar"><div id="id-overall-fill"></div></div>
+                  <div class="id-overall-lbl">
+                    <span id="id-docs-done">0</span>&thinsp;/&thinsp;<span id="id-docs-total">0</span> docs
+                  </div>
+                </div>
               </div>
-              <div class="prog-lbls"><span id="wiki-prog-msg">Starting...</span><span id="eta-label"></span></div>
+
+              <!-- Two columns: pipeline steps | knowledge stats -->
+              <div class="id-cols">
+
+                <div class="id-panel">
+                  <div class="id-panel-title">Pipeline Stages</div>
+                  <div class="id-step" id="id-step-extract">
+                    <span class="id-step-icon">○</span><span>Text Extraction</span>
+                  </div>
+                  <div class="id-step" id="id-step-segment">
+                    <span class="id-step-icon">○</span><span>Segmentation</span>
+                  </div>
+                  <div class="id-step" id="id-step-synth">
+                    <span class="id-step-icon">○</span><span>Knowledge Synthesis</span>
+                  </div>
+                  <div class="id-step" id="id-step-merge">
+                    <span class="id-step-icon">○</span><span>Knowledge Merge</span>
+                  </div>
+                </div>
+
+                <div class="id-panel">
+                  <div class="id-panel-title">Knowledge Base</div>
+                  <div class="id-stats-row">
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-pages">0</div>
+                      <div class="id-stat-lbl">Pages</div>
+                    </div>
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-rels">0</div>
+                      <div class="id-stat-lbl">Relations</div>
+                    </div>
+                    <div class="id-stat">
+                      <div class="id-stat-val" id="id-docs-done2">0</div>
+                      <div class="id-stat-lbl">Done</div>
+                    </div>
+                  </div>
+                  <svg id="id-minigraph"></svg>
+                </div>
+
+              </div>
+
+              <!-- Document feed -->
+              <div class="id-panel id-feed-panel">
+                <div class="id-panel-title">Documents</div>
+                <div id="id-doc-feed"></div>
+              </div>
+
             </div>
           </div>
         </div>
 
         <!-- ASK -->
-        <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow-y:auto">
+        <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow:hidden">
           <div class="ask-wrap">
+            <div class="chat-thread" id="chat-thread"></div>
             <div class="ask-box">
               <textarea class="ask-input" id="question-input" rows="2"
                 placeholder="Ask anything about your documents…"></textarea>
-              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Ask</button>
+              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Send</button>
             </div>
-
-            <div id="answers-container"></div>
           </div>
         </div>
 
@@ -2231,6 +2515,65 @@
     // ============================================================
     // UI Tabs & Overlays
     // ============================================================
+    function setProvider(val) {
+      document.querySelectorAll('#providerToggle .provider-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.val === val);
+      });
+      fetch('/api/settings/llm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: val })
+      })
+      .then(r => r.json())
+      .then(data => {
+        showToast("LLM Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+      })
+      .catch(err => {
+        console.error(err);
+        showToast("Failed to switch LLM provider", "error");
+      });
+    }
+
+    function setEmbeddingProvider(val) {
+      document.querySelectorAll('#embeddingToggle .provider-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.val === val);
+      });
+      fetch('/api/settings/embedding', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: val })
+      })
+      .then(r => r.json())
+      .then(data => {
+        showToast("Embedding Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+      })
+      .catch(err => {
+        console.error(err);
+        showToast("Failed to switch Embedding provider", "error");
+      });
+    }
+
+    // Load initial providers
+    fetch('/api/settings/llm')
+      .then(r => r.json())
+      .then(data => {
+        if (data.provider) {
+          document.querySelectorAll('#providerToggle .provider-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.val === data.provider);
+          });
+        }
+      });
+
+    fetch('/api/settings/embedding')
+      .then(r => r.json())
+      .then(data => {
+        if (data.provider) {
+          document.querySelectorAll('#embeddingToggle .provider-option').forEach(el => {
+            el.classList.toggle('active', el.dataset.val === data.provider);
+          });
+        }
+      });
+
     function toggleSidebar() {
       const sb = document.getElementById('sidebar');
       sb.style.display = (sb.style.display === 'none') ? 'flex' : 'none';
@@ -2278,6 +2621,7 @@
     let currentPdfModalDoc = '';
     let currentPdfModalSearch = '';
     let currentPdfModalHighlights = [];
+    let currentPdfModalPageNum = null;
 
     function switchPdfModalTab(tabName) {
       const textTab = document.getElementById('pdf-tab-text');
@@ -2299,8 +2643,13 @@
         // Load iframe if not already loaded
         if (!pdfPanel.innerHTML || pdfPanel.innerHTML.trim() === '') {
           const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(currentPdfModalDoc)}`;
-          const searchParam = currentPdfModalSearch ? `#search=${encodeURIComponent(currentPdfModalSearch)}` : '';
-          pdfPanel.innerHTML = `<iframe src="${url}${searchParam}" style="width:100%;height:100%;border:none;"></iframe>`;
+          let fragment = '';
+          if (currentPdfModalPageNum) {
+            fragment = `#page=${currentPdfModalPageNum}`;
+          } else if (currentPdfModalSearch) {
+            fragment = `#search=${encodeURIComponent(currentPdfModalSearch)}`;
+          }
+          pdfPanel.innerHTML = `<iframe src="${url}${fragment}" style="width:100%;height:100%;border:none;"></iframe>`;
         }
       }
     }
@@ -2321,16 +2670,80 @@
 
       const lines = refsContent.split('\n');
       const refs = [];
-      const lineRegex = /\[(\d+)\]\s*([^,|]+?)(?:,\s*([^|]+))?(?:\s*\|\s*Quote:\s*(.+))?$/i;
 
       for (const line of lines) {
-        const lineMatch = line.trim().match(lineRegex);
-        if (lineMatch) {
-          const num = parseInt(lineMatch[1]);
-          const docName = lineMatch[2].trim();
-          const location = lineMatch[3] ? lineMatch[3].trim() : '';
-          const quote = lineMatch[4] ? lineMatch[4].trim() : '';
-          refs.push({ num, docName, location, quote });
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Match [N] at the start
+        const numMatch = trimmed.match(/^\[(\d+)\]\s*/);
+        if (!numMatch) continue;
+
+        const num = parseInt(numMatch[1]);
+        let rest = trimmed.slice(numMatch[0].length);
+
+        let docName = '', location = '', quote = '', pageNum = null;
+
+        // Extract quote: either after "| Quote:" or after ": " followed by quoted text
+        const quoteMatch1 = rest.match(/\|\s*Quote:\s*(.+)$/i);
+        const quoteMatch2 = rest.match(/:\s*[""“](.+?)[""”]\s*$/);
+        const quoteMatch3 = rest.match(/[""“](.{20,})[""”]\s*$/);
+        if (quoteMatch1) {
+          quote = quoteMatch1[1].replace(/^[""“]+|[""”]+$/g, '').trim();
+          rest = rest.slice(0, quoteMatch1.index).trim();
+        } else if (quoteMatch2) {
+          quote = quoteMatch2[1].trim();
+          rest = rest.slice(0, quoteMatch2.index).trim();
+        } else if (quoteMatch3) {
+          quote = quoteMatch3[1].trim();
+          rest = rest.slice(0, quoteMatch3.index).trim();
+        }
+
+        // Remove trailing periods, "(Unspecified)" markers
+        rest = rest.replace(/\s*\(Unspecified\)\s*/gi, '').replace(/[.,;:\s]+$/, '').trim();
+
+        // Split doc name from location: try comma first, then period+space, then "–"
+        // Format 1: "FileName.pdf, Clause 5, Page 3"
+        // Format 2: "SA1-Tata (Service Agreement). Clause 1 – Definitions"
+        // Format 3: "FileName.pdf Page 5 Clause 3"
+        let parts;
+        if (rest.includes('|')) {
+          parts = rest.split('|').map(s => s.trim());
+          docName = parts[0];
+          location = parts.slice(1).join(', ');
+        } else if (rest.includes(',')) {
+          parts = rest.split(',').map(s => s.trim());
+          docName = parts[0];
+          location = parts.slice(1).join(', ');
+        } else if (/\)\.\s/.test(rest)) {
+          // "SA1-Tata (Service Agreement). Clause 1"
+          const dotSplit = rest.match(/^(.+?\))\.\s*(.+)$/);
+          if (dotSplit) {
+            docName = dotSplit[1].trim();
+            location = dotSplit[2].trim();
+          } else {
+            docName = rest;
+          }
+        } else if (rest.includes(' – ')) {
+          parts = rest.split(' – ');
+          docName = parts[0].trim();
+          location = parts.slice(1).join(' – ').trim();
+        } else {
+          docName = rest;
+        }
+
+        // Clean docName: remove .pdf extension noise, trim
+        docName = docName.replace(/\.?\s*$/, '').trim();
+
+        // Extract page number from location
+        const pageMatch = location.match(/Page\s+(\d+)/i);
+        if (pageMatch) {
+          pageNum = parseInt(pageMatch[1]);
+          location = location.replace(/Page\s+\d+\s*,?\s*/i, '').trim();
+        }
+
+        if (docName) {
+          refs.push({ num, docName, location, quote, pageNum });
         }
       }
 
@@ -2341,18 +2754,53 @@
     function findCanonicalDocName(refDocName) {
       if (!refDocName) return '';
       const cleanRef = refDocName.trim().toLowerCase();
+
+      // Exact or path-suffix match
       for (const doc of currentDocs) {
         const cleanDoc = doc.toLowerCase();
         if (cleanDoc === cleanRef || cleanDoc.endsWith('/' + cleanRef) || cleanDoc.endsWith('\\' + cleanRef)) {
           return doc;
         }
       }
-      // Fallback substring search
+      // Substring match
       for (const doc of currentDocs) {
         if (doc.toLowerCase().includes(cleanRef)) {
           return doc;
         }
       }
+
+      // Fuzzy match: extract key words from ref (e.g. "SA1-Tata (Service Agreement)" → "service agreement 1")
+      // and match against doc paths
+      const refWords = cleanRef.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+      // Extract number from ref (e.g. "SA1" → "1", "agreement 3" → "3")
+      const numMatch = cleanRef.match(/(\d+)/);
+      const refNum = numMatch ? numMatch[1] : '';
+
+      let bestDoc = '';
+      let bestScore = 0;
+      for (const doc of currentDocs) {
+        const cleanDoc = doc.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+        let score = 0;
+        for (const w of refWords) {
+          if (cleanDoc.includes(w)) score++;
+        }
+        // Boost if the document number matches
+        if (refNum && cleanDoc.includes(refNum)) score += 3;
+        // Boost if doc type matches (service agreement, nda, etc.)
+        if (cleanRef.includes('service') && cleanDoc.includes('service')) score += 2;
+        if (cleanRef.includes('nda') && cleanDoc.includes('nda')) score += 2;
+        if (cleanRef.includes('shareholder') && cleanDoc.includes('shareholder')) score += 2;
+        if (cleanRef.includes('joint venture') && cleanDoc.includes('joint venture')) score += 2;
+        if (cleanRef.includes('judgment') && cleanDoc.includes('judgment')) score += 2;
+        if (cleanRef.includes('legal opinion') && cleanDoc.includes('legal opinion')) score += 2;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestDoc = doc;
+        }
+      }
+      if (bestScore >= 3 && bestDoc) return bestDoc;
+
       return refDocName;
     }
 
@@ -2376,6 +2824,9 @@
           groupedRefs[canonicalName].locations.push(ref.location);
         }
         groupedRefs[canonicalName].nums.push(ref.num);
+        if (ref.pageNum && !groupedRefs[canonicalName].pageNum) {
+          groupedRefs[canonicalName].pageNum = ref.pageNum;
+        }
         if (ref.quote && !groupedRefs[canonicalName].quotes.some(q => q.text === ref.quote)) {
           groupedRefs[canonicalName].quotes.push({ num: ref.num, location: ref.location, text: ref.quote });
         }
@@ -2389,17 +2840,19 @@
         const safeCanonical = entry.canonicalName.replace(/'/g, "\\'");
         const safeLocations = entry.locations.join('|||').replace(/'/g, "\\'");
         const firstLocation = entry.locations.length > 0 ? entry.locations[0].replace(/'/g, "\\'") : '';
+        const pageNumArg = entry.pageNum || 'null';
 
+        const pageBadge = entry.pageNum ? `<span style="font-size:10px;background:var(--accent-light);color:var(--accent);padding:2px 6px;border-radius:4px;margin-left:6px">Page ${entry.pageNum}</span>` : '';
         const subtext = entry.locations.length > 0 ? entry.locations.join(', ') : 'Referenced in answer';
 
         return `
-        <div class="source-ref-card" onclick="openFileModal('${safeCanonical}', '${safeLocations}', '${firstLocation}')">
+        <div class="source-ref-card" onclick="openFileModal('${safeCanonical}', '${safeLocations}', '${firstLocation}', ${pageNumArg})">
           <div class="source-ref-icon-wrapper">
             <i class="ti ti-file-text"></i>
           </div>
           <div class="source-ref-info">
             <div class="source-ref-name" title="${cleanDocName}">
-              ${cleanDocName}
+              ${cleanDocName}${pageBadge}
             </div>
             <div class="source-ref-sub" title="${subtext}">
               ${subtext}
@@ -2521,7 +2974,7 @@
     }
 
     // Upgraded PDF Modal handler
-    async function openPdfModal(docName, searchText, allHighlights) {
+    async function openPdfModal(docName, searchText, allHighlights, pageNum) {
       if (!docName) {
         showToast('No document name provided for citation.', 'error');
         return;
@@ -2530,6 +2983,7 @@
       currentPdfModalDoc = docName;
       currentPdfModalSearch = searchText;
       currentPdfModalHighlights = allHighlights || [];
+      currentPdfModalPageNum = pageNum || null;
 
       const cleanDoc = docName.replace(/^[a-f0-9-]{36}_/, '').split('/').pop();
       document.getElementById('pdf-modal-name').textContent = cleanDoc;
@@ -2607,6 +3061,7 @@
       currentPdfModalDoc = '';
       currentPdfModalSearch = '';
       currentPdfModalHighlights = [];
+      currentPdfModalPageNum = null;
     }
 
     window.selectModalCitation = function (el, location) {
@@ -2644,6 +3099,29 @@
       const numMatch = searchText.match(/(\d+(?:\.\d+)*(?:\s*\([a-z]\))?)/i);
       if (numMatch) {
         cleanPatterns.push(normalizeStr(numMatch[1]));
+      }
+
+      // Extract topic name after dash/colon: "Clause 7 – Intellectual Property" -> "intellectual property"
+      const topicMatch = searchText.match(/[-–—:]\s*(.+)$/);
+      if (topicMatch) {
+        const topic = normalizeStr(topicMatch[1]);
+        if (topic.length > 3) cleanPatterns.push(topic);
+      }
+
+      // For clause references, also search for "N." and "N," patterns (common in PDFs)
+      if (numMatch) {
+        const num = numMatch[1];
+        cleanPatterns.push(num + '.');
+        cleanPatterns.push(num + ',');
+        cleanPatterns.push(num + ' ');
+      }
+
+      // If there's a verbatim quote available in the citation, use that too
+      const currentCite = currentResultReferences.find(r => r.location === searchText || r.quote);
+      if (currentCite && currentCite.quote && currentCite.quote.length > 15) {
+        // Use first 60 chars of the quote for matching
+        const quoteSnippet = normalizeStr(currentCite.quote.slice(0, 60));
+        cleanPatterns.unshift(quoteSnippet);
       }
 
       // --- Strategy 1: Try matching existing .pdf-highlight marks ---
@@ -2754,7 +3232,7 @@
       }
     }
 
-    window.clickInlineCitation = function (num, event) {
+    window.clickInlineCitation = async function (num, event) {
       if (event) {
         event.preventDefault();
         event.stopPropagation();
@@ -2763,16 +3241,28 @@
       if (citation) {
         const canonicalName = findCanonicalDocName(citation.docName);
         const docRefs = currentResultReferences.filter(r => findCanonicalDocName(r.docName) === canonicalName);
-        const highlights = docRefs.map(r => r.location).filter(Boolean);
-        openPdfModal(canonicalName, citation.location || '', highlights);
+        const highlights = docRefs.map(r => r.quote || r.location).filter(Boolean);
+
+        if (citation.quote && SID) {
+          try {
+            const locRes = await fetch(`/document/locate?session_id=${SID}&doc_name=${encodeURIComponent(canonicalName)}&quote=${encodeURIComponent(citation.quote)}`);
+            const locData = await locRes.json();
+            if (locData.found) {
+              citation._locatedPageNum = locData.page_num;
+              citation._locatedOffset = locData.char_offset;
+            }
+          } catch (e) { console.warn('Quote location lookup failed:', e); }
+        }
+
+        openPdfModal(canonicalName, citation.quote || citation.location || '', highlights, citation.pageNum || citation._locatedPageNum);
       } else {
         showToast(`Citation [${num}] not found.`, 'info');
       }
     };
 
-    window.openFileModal = function (canonicalName, locationsString, scrollToText) {
+    window.openFileModal = function (canonicalName, locationsString, scrollToText, pageNum) {
       const highlights = locationsString ? locationsString.split('|||') : [];
-      openPdfModal(canonicalName, scrollToText || '', highlights);
+      openPdfModal(canonicalName, scrollToText || '', highlights, pageNum || null);
     };
 
     async function toggleLog() {
@@ -2840,6 +3330,7 @@
       loadSessions();
       loadFileTree();
       loadGraph();
+      loadChatHistory();
     }
 
     async function deleteSession(e, id) {
@@ -2861,11 +3352,11 @@
     const $file = document.getElementById('file-input');
     const $folder = document.getElementById('folder-input');
 
-    document.getElementById('pick-files-btn').addEventListener('click', () => $file.click());
-    document.getElementById('pick-folder-btn').addEventListener('click', () => $folder.click());
+    document.getElementById('pick-files-btn').addEventListener('click', (e) => { e.stopPropagation(); $file.click(); });
+    document.getElementById('pick-folder-btn').addEventListener('click', (e) => { e.stopPropagation(); $folder.click(); });
 
     const $zone = document.getElementById('upload-zone');
-    $zone.addEventListener('click', () => $file.click());
+    $zone.addEventListener('click', (e) => { if (e.target === $zone || !e.target.closest('button')) $file.click(); });
     $zone.addEventListener('dragover', e => { e.preventDefault(); $zone.classList.add('dragover'); });
     $zone.addEventListener('dragleave', () => $zone.classList.remove('dragover'));
     $zone.addEventListener('drop', async e => {
@@ -2923,9 +3414,13 @@
     document.getElementById('upload-btn').addEventListener('click', async () => {
       if (!stagedFiles.length) return;
       document.getElementById('upload-btn').disabled = true;
+      // Hide upload zone + buttons, show ingest dashboard
+      document.getElementById('upload-zone').style.display = 'none';
       document.getElementById('pick-btns-wrap').classList.add('d-none');
-      document.getElementById('progress-wrap').classList.remove('d-none');
+      document.getElementById('upl-title-wrap').style.display = 'none';
+      document.getElementById('ingest-dash').classList.remove('d-none');
       ingestStartTime = Date.now();
+      initMiniGraph();
 
       const fd = new FormData();
       const relativePaths = [];
@@ -2947,44 +3442,172 @@
           try {
             const pRes = await fetch(`/progress?session_id=${SID}`);
             const pData = await pRes.json();
-            const docs = pData.docs || {};
-            const total = docs.total || totalFilesQueued;
-
-            setDocProgress('rag', docs.rag_done || 0, total, pData.rag?.message || '');
-            setDocProgress('wiki', docs.wiki_done || 0, total, pData.wiki?.message || '');
+            renderIngestDashboard(pData, totalFilesQueued);
 
             if (pData.phase === 'complete') {
               clearInterval(pollTimer);
-              setDocProgress('rag', total, total, 'Complete');
-              setDocProgress('wiki', total, total, 'Complete');
+              renderIngestDashboard(pData, totalFilesQueued);
               uploadDone = true;
-              document.getElementById('modeTabs').classList.remove('d-none');
-              document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
-              switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
-              showToast('Ingestion complete', 'success');
-              loadGraph();
-              loadFileTree();
+              setTimeout(() => {
+                document.getElementById('modeTabs').classList.remove('d-none');
+                document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+                switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
+                showToast('Knowledge base ready', 'success');
+                loadGraph();
+                loadFileTree();
+              }, 900);
             }
           } catch (e) { }
         }, 1500);
       } catch (e) { showToast('Upload failed', 'error'); }
     });
 
-    function setDocProgress(pipe, done, total, msg) {
-      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-      document.getElementById(`${pipe}-prog-bar`).style.width = pct + '%';
-      document.getElementById(`${pipe}-prog-label`).textContent = `${done}/${total}`;
-      document.getElementById(`${pipe}-prog-msg`).textContent = msg || `${done} of ${total}`;
+    // ============================================================
+    // Ingest Dashboard
+    // ============================================================
+    let _miniSim = null, _miniNodes = [], _miniLinks = [], _lastPages = 0;
+    const _DOC_COLORS = ['#2B5CE6','#1D9E75','#7C3AED','#D97706','#0891B2','#4F46E5','#DC2626'];
+    const _ctrTargets = {}, _ctrCurrents = {};
+
+    function initMiniGraph() {
+      _miniNodes = []; _miniLinks = []; _lastPages = 0;
+      const svg = d3.select('#id-minigraph');
+      svg.selectAll('*').remove();
+      const w = svg.node()?.clientWidth || 220, h = 92;
+      const g = svg.append('g');
+      _miniSim = d3.forceSimulation([])
+        .force('link', d3.forceLink([]).id(d => d.id).distance(16).strength(0.7))
+        .force('charge', d3.forceManyBody().strength(-22))
+        .force('center', d3.forceCenter(w / 2, h / 2))
+        .force('collision', d3.forceCollide(7))
+        .alphaDecay(0.018)
+        .on('tick', () => {
+          const cx = v => Math.max(5, Math.min(w - 5, v));
+          const cy = v => Math.max(5, Math.min(h - 5, v));
+          g.selectAll('.mg-l').attr('x1', d => cx(d.source.x)).attr('y1', d => cy(d.source.y))
+                              .attr('x2', d => cx(d.target.x)).attr('y2', d => cy(d.target.y));
+          g.selectAll('.mg-n').attr('cx', d => cx(d.x)).attr('cy', d => cy(d.y));
+        });
+    }
+
+    function growMiniGraph(pagesTotal) {
+      if (!_miniSim || pagesTotal <= _lastPages) return;
+      _lastPages = pagesTotal;
+      const MAX = 38;
+      const target = Math.min(Math.ceil(pagesTotal / 4) + 1, MAX);
+      if (target <= _miniNodes.length) return;
+
+      const svg = d3.select('#id-minigraph');
+      const g = svg.select('g');
+      const w = svg.node()?.clientWidth || 220, h = 92;
+
+      while (_miniNodes.length < target) {
+        const id = _miniNodes.length;
+        _miniNodes.push({ id, color: _DOC_COLORS[id % _DOC_COLORS.length],
+                          x: w/2 + (Math.random()-.5)*50, y: h/2 + (Math.random()-.5)*30 });
+        if (_miniNodes.length > 1) {
+          const t = Math.floor(Math.random() * (_miniNodes.length - 1));
+          _miniLinks.push({ source: id, target: t });
+          if (Math.random() > .55 && _miniNodes.length > 4)
+            _miniLinks.push({ source: id, target: Math.floor(Math.random() * (_miniNodes.length - 1)) });
+        }
+      }
+      g.selectAll('.mg-l').data(_miniLinks).join('line').attr('class','mg-l')
+        .attr('stroke','#d1d5db').attr('stroke-width',.7).attr('opacity',.7);
+      g.selectAll('.mg-n').data(_miniNodes).join('circle').attr('class','mg-n')
+        .attr('r', d => d.id < 2 ? 5 : 3.5).attr('fill', d => d.color).attr('opacity',.82);
+      _miniSim.nodes(_miniNodes);
+      _miniSim.force('link').links(_miniLinks);
+      _miniSim.alpha(.45).restart();
+    }
+
+    function animCounter(id, target) {
+      _ctrTargets[id] = target;
+      if (_ctrCurrents[id] === undefined) _ctrCurrents[id] = 0;
+      (function tick() {
+        const cur = _ctrCurrents[id] || 0, tgt = _ctrTargets[id];
+        if (cur >= tgt) { document.getElementById(id).textContent = tgt; return; }
+        _ctrCurrents[id] = cur + Math.ceil((tgt - cur) / 5);
+        document.getElementById(id).textContent = _ctrCurrents[id];
+        requestAnimationFrame(tick);
+      })();
+    }
+
+    function renderIngestDashboard(pData, fallbackTotal) {
+      const docs = pData.docs || {}, wProg = pData.wiki || {};
+      const docsList = pData.docs_list || [];
+      const total = docs.total || fallbackTotal || 0;
+      const done = docs.wiki_done || 0;
+      const pages = wProg.pages_total || 0, rels = wProg.relations_total || 0;
+
+      // Overall bar + counters
+      const pct = total > 0 ? Math.round(done / total * 100) : 0;
+      document.getElementById('id-overall-fill').style.width = pct + '%';
+      document.getElementById('id-docs-done').textContent = done;
+      document.getElementById('id-docs-total').textContent = total;
+      document.getElementById('id-docs-done2').textContent = done;
+      animCounter('id-pages', pages);
+      animCounter('id-rels', rels);
+      growMiniGraph(pages);
+
+      // Pipeline step states derived from docs_list
+      const statuses = docsList.map(d => d.status);
+      const anyStarted = statuses.some(s => s !== 'queued');
+      const anySynth   = statuses.some(s => ['synthesizing','merging'].includes(s));
+      const anyDone    = statuses.some(s => s === 'done');
+      const allDone    = total > 0 && done >= total;
+
+      function applyStep(el, state) {
+        if (!el) return;
+        el.className = 'id-step' + (state === 'done' ? ' done' : state === 'active' ? ' active' : '');
+        el.querySelector('.id-step-icon').textContent = state === 'done' ? '✓' : state === 'active' ? '↻' : '○';
+      }
+      applyStep(document.getElementById('id-step-extract'), anyStarted ? 'done' : 'pending');
+      applyStep(document.getElementById('id-step-segment'), anyStarted ? 'done' : 'pending');
+      applyStep(document.getElementById('id-step-synth'),   allDone ? 'done' : (anySynth || anyStarted) ? 'active' : 'pending');
+      applyStep(document.getElementById('id-step-merge'),   allDone ? 'done' : anyDone ? 'active' : 'pending');
+
+      // Title when done
+      if (allDone) {
+        document.getElementById('id-title-text').textContent = 'Knowledge Base Ready';
+        document.getElementById('id-brain-icon').classList.remove('id-spin');
+      }
+
+      // Document feed
+      const ICONS = { queued:'ti-clock', extracting:'ti-refresh', synthesizing:'ti-refresh',
+                      merging:'ti-refresh', done:'ti-circle-check', error:'ti-alert-circle' };
+      const feed = document.getElementById('id-doc-feed');
+      feed.innerHTML = (docsList.length ? docsList : stagedFiles.map(f => ({ name: f.file.name, status: 'queued', pages: 0, step: '' })))
+        .map(doc => {
+          const st = doc.status || 'queued';
+          const icon = ICONS[st] || 'ti-clock';
+          const label = st === 'done'  ? (doc.pages ? `${doc.pages} pages` : 'complete')
+                      : st === 'error' ? (doc.step || 'error')
+                      : st === 'synthesizing' ? (doc.step ? `synthesizing ${doc.step}` : 'synthesizing…')
+                      : st === 'merging'      ? 'merging…'
+                      : st === 'extracting'   ? 'extracting…'
+                      : 'queued';
+          const name = (doc.name || '').replace(/_/g,' ').replace(/\.[^.]+$/,'');
+          return `<div class="id-doc-item status-${st}">
+            <span class="id-doc-icon"><i class="ti ${icon}"></i></span>
+            <span class="id-doc-name" title="${doc.name || ''}">${name}</span>
+            <span class="id-doc-step">${label}</span>
+          </div>`;
+        }).join('');
     }
 
     // ============================================================
-    // Ask Mode
+    // Ask Mode — Chat Interface
     // ============================================================
     const $qInput = document.getElementById('question-input');
     const $askBtn = document.getElementById('ask-btn');
+    const $chatThread = document.getElementById('chat-thread');
+    let _pendingQuestion = '';
+    let _pendingTargetDoc = '';
+    let _isFollowup = false;
 
     $askBtn.addEventListener('click', doQuery);
-    $qInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doQuery(); } });
+    $qInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery(); } });
 
     function renderMarkdown(text) {
       if (!text) return '';
@@ -2992,59 +3615,60 @@
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
     }
 
-    async function doQuery() {
-      const q = $qInput.value.trim();
-      if (!q || q.length < 3) return;
-      $askBtn.disabled = true;
+    function scrollChatToBottom() {
+      setTimeout(() => { $chatThread.scrollTop = $chatThread.scrollHeight; }, 50);
+    }
 
-      document.getElementById('answers-container').innerHTML = `<div style="font-size:13px;color:var(--text-secondary);text-align:center;padding:40px">Analyzing documents...</div>`;
+    function appendUserMsg(text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-user';
+      div.innerHTML = `<div class="chat-bubble">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
 
-      try {
-        const res = await fetch('/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q, session_id: SID })
-        });
-        const d = await res.json();
-        if (d.error) { showToast(d.error, 'error'); return; }
+    function appendTypingIndicator() {
+      const div = document.createElement('div');
+      div.className = 'chat-typing';
+      div.id = 'chat-typing-indicator';
+      div.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
 
-        let html = '';
+    function removeTypingIndicator() {
+      const el = document.getElementById('chat-typing-indicator');
+      if (el) el.remove();
+    }
 
-        // Render Wiki Answer
-        if (d.wiki && d.wiki.answer) {
-          const score = d.wiki.confidence_score || 0;
-          let confDot = 'var(--green)';
-          if (score < 50) confDot = 'var(--red)';
-          else if (score < 80) confDot = 'var(--amber)';
+    function appendAnswerMsg(wikiResult) {
+      const score = wikiResult.confidence_score || 0;
+      let confDot = 'var(--green)';
+      if (score < 50) confDot = 'var(--red)';
+      else if (score < 80) confDot = 'var(--amber)';
 
-          const filesUsed = d.wiki.files_used || [];
+      const filesUsed = wikiResult.files_used || [];
+      const parsed = extractReferencesSection(wikiResult.answer);
+      let refs = parsed.refs;
+      if (refs.length === 0 && filesUsed.length > 0) {
+        refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+      }
+      currentResultReferences = refs;
 
-          // Parse references and clean text
-          const parsed = extractReferencesSection(d.wiki.answer);
-          let refs = parsed.refs;
-          if (refs.length === 0 && filesUsed.length > 0) {
-            refs = filesUsed.map((f, idx) => ({
-              num: idx + 1,
-              docName: f,
-              location: ''
-            }));
-          }
-          currentResultReferences = refs;
+      let md = renderMarkdown(parsed.cleanText);
+      md = md.replace(/\[(\d+)\]/g, (match, num) => {
+        return `<span class="inline-cite" onclick="clickInlineCitation(${num}, event)">[${num}]</span>`;
+      });
 
-          // Render clean markdown and make inline citations clickable
-          let md = renderMarkdown(parsed.cleanText);
-          md = md.replace(/\[(\d+)\]/g, (match, num) => {
-            return `<span class="inline-cite" onclick="clickInlineCitation(${num}, event)">[${num}]</span>`;
-          });
+      const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
+      const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
+      const tokens = (wikiResult.usage && wikiResult.usage.prompt_tokens) ?
+        (wikiResult.usage.prompt_tokens + wikiResult.usage.completion_tokens) : 0;
 
-          const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
-
-          const elapsed = (d.wiki.elapsed_ms / 1000).toFixed(1);
-          const tokens = (d.wiki.usage && d.wiki.usage.prompt_tokens) ?
-            (d.wiki.usage.prompt_tokens + d.wiki.usage.completion_tokens) : 0;
-
-          html += `
-        <div class="answer-card">
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-assistant';
+      div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
+        <div class="answer-card" style="margin-bottom:0">
           <div class="answer-topbar">
             <div class="answer-tags">
               <span class="tag-synth">SYNTHESIZED</span>
@@ -3052,26 +3676,168 @@
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
-              <span class="answer-time" style="margin-left:8px">Analysis: ${elapsed}s</span>
-              <button class="act-btn" id="copy-answer-btn" onclick="copyAnswer(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
-              <button class="act-btn" onclick="shareAnswer()"><i class="ti ti-share"></i>Share</button>
+              <span class="answer-time" style="margin-left:8px">${elapsed}s</span>
+              <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
             </div>
           </div>
           <div class="answer-body">${md}</div>
           ${cardsBlockHtml}
-        </div>`;
+        </div>
+      </div>`;
+      $chatThread.appendChild(div);
+      window._lastAnswer = parsed.cleanText;
+      scrollChatToBottom();
+    }
 
-          // Store answer text for copy
-          window._lastAnswer = parsed.cleanText;
+    function appendDisambiguationMsg(message, documents, rawDocuments) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      const chips = documents.map((doc, i) => {
+        const rawDoc = rawDocuments[i] || doc;
+        const cleanName = doc.replace(/^[a-f0-9-]{36}_/, '').replace(/\.[^.]+$/, '').replace(/_/g, ' ');
+        return `<div class="disambig-chip" onclick="selectDisambigDoc('${rawDoc.replace(/'/g, "\\'")}', '${cleanName.replace(/'/g, "\\'")}')">${cleanName}</div>`;
+      }).join('');
+
+      div.innerHTML = `<div class="chat-bubble">
+        <div style="margin-bottom:4px">${message}</div>
+        <div class="disambig-chips">${chips}
+          <div class="disambig-chip" onclick="document.querySelector('[data-tab=ingest]').click()" style="border-style:dashed"><i class="ti ti-upload" style="font-size:12px;margin-right:4px"></i>Upload new</div>
+        </div>
+      </div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    function appendClarificationMsg(message, options) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      const btns = (options || []).map(opt => {
+        return `<div class="clarif-option-btn" onclick="selectClarification('${opt.replace(/'/g, "\\'")}')">${opt}</div>`;
+      }).join('');
+
+      div.innerHTML = `<div class="chat-bubble">
+        <div style="margin-bottom:4px">${message}</div>
+        ${btns ? `<div class="clarif-options">${btns}</div>` : ''}
+      </div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    function appendSystemMsg(text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      div.innerHTML = `<div class="chat-bubble">${renderMarkdown(text)}</div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    window.selectDisambigDoc = function(rawDoc, cleanName) {
+      appendUserMsg('Focus on: ' + cleanName);
+      _pendingTargetDoc = rawDoc;
+      _isFollowup = true;
+      doQueryInternal(_pendingQuestion, rawDoc, true);
+    };
+
+    window.selectClarification = function(option) {
+      appendUserMsg(option);
+      const enrichedQ = _pendingQuestion + ' — ' + option;
+      _isFollowup = true;
+      doQueryInternal(enrichedQ, '', true);
+    };
+
+    async function doQuery() {
+      const q = $qInput.value.trim();
+      if (!q || q.length < 3) return;
+      $qInput.value = '';
+      _pendingQuestion = q;
+      _pendingTargetDoc = '';
+      _isFollowup = false;
+      appendUserMsg(q);
+      await doQueryInternal(q, '', false);
+    }
+
+    async function doQueryInternal(question, targetDoc, isFollowup) {
+      $askBtn.disabled = true;
+      appendTypingIndicator();
+
+      try {
+        const payload = { question, session_id: SID };
+        if (targetDoc) payload.target_doc = targetDoc;
+        if (isFollowup) payload.is_followup = true;
+
+        const res = await fetch('/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await res.json();
+        removeTypingIndicator();
+
+        if (d.error) { appendSystemMsg('Error: ' + d.error); return; }
+
+        if (d.type === 'disambiguation') {
+          appendDisambiguationMsg(d.message, d.documents, d.raw_documents || d.documents);
+        } else if (d.type === 'clarification') {
+          _pendingQuestion = question;
+          appendClarificationMsg(d.message, d.options);
+        } else if (d.type === 'answer' && d.wiki) {
+          appendAnswerMsg(d.wiki);
+        } else if (d.wiki && d.wiki.answer) {
+          appendAnswerMsg(d.wiki);
         }
-
-        document.getElementById('answers-container').innerHTML = html;
-
       } catch (e) {
-        document.getElementById('answers-container').innerHTML = `<div class="toast-error" style="padding:10px">Query failed: ${e}</div>`;
+        removeTypingIndicator();
+        appendSystemMsg('Query failed: ' + e);
       } finally {
         $askBtn.disabled = false;
+        $qInput.focus();
       }
+    }
+
+    async function loadChatHistory() {
+      if (!SID) return;
+      try {
+        const res = await fetch(`/messages?session_id=${SID}&limit=100`);
+        const data = await res.json();
+        const messages = data.messages || [];
+        $chatThread.innerHTML = '';
+        for (const msg of messages) {
+          if (msg.role === 'user') {
+            appendUserMsg(msg.content);
+          } else if (msg.msg_type === 'answer') {
+            const meta = msg.metadata || {};
+            appendAnswerMsg({
+              answer: msg.content,
+              confidence_score: meta.confidence_score || 0,
+              files_used: meta.files_used || [],
+              token_total: meta.token_total || {},
+              usage: {},
+              elapsed_ms: 0,
+            });
+          } else if (msg.msg_type === 'disambiguation') {
+            const meta = msg.metadata || {};
+            appendDisambiguationMsg(msg.content, meta.documents || [], meta.raw_documents || meta.documents || []);
+          } else if (msg.msg_type === 'clarification') {
+            const meta = msg.metadata || {};
+            appendClarificationMsg(msg.content, meta.options || []);
+          } else {
+            appendSystemMsg(msg.content);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load chat history:', e);
+      }
+    }
+
+    function copyAnswerFromEl(btn) {
+      const body = btn.closest('.answer-card')?.querySelector('.answer-body');
+      if (!body) return;
+      navigator.clipboard.writeText(body.innerText).then(() => {
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="ti ti-check"></i>Copied';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
+      });
     }
 
     function copyAnswer(btn) {
@@ -3080,10 +3846,7 @@
         const orig = btn.innerHTML;
         btn.innerHTML = '<i class="ti ti-check"></i>Copied';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.innerHTML = orig;
-          btn.classList.remove('copied');
-        }, 2000);
+        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
       });
     }
 
@@ -3782,51 +4545,60 @@
 
     function renderGraph() {
       const container = document.getElementById('wiki-graph');
-      if (!wikiPages || !Object.keys(wikiPages).length) {
-        container.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No knowledge graph data available yet.</div>';
-        return;
+      try {
+        if (!wikiPages || !Object.keys(wikiPages).length) {
+          container.innerHTML = '<div style="font-size:12px;color:var(--text-muted)">No knowledge graph data available yet.</div>';
+          return;
+        }
+        container.innerHTML = '';
+        const w = 600, h = 320;
+        const svg = d3.select(container).append('svg')
+          .attr('width', '100%')
+          .attr('height', '100%')
+          .style('min-height', '280px')
+          .attr('viewBox', `0 0 ${w} ${h}`);
+        const g = svg.append('g');
+        svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
+
+        const titles = Object.keys(wikiPages);
+        const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
+        const nodeSet = new Set(titles);
+        const links = wikiRelations.filter(r => nodeSet.has(r.from) && nodeSet.has(r.to)).map(r => ({ source: r.from, target: r.to, label: r.label }));
+
+        const deg = {};
+        links.forEach(l => { deg[l.source] = (deg[l.source] || 0) + 1; deg[l.target] = (deg[l.target] || 0) + 1; });
+        const color = d3.scaleOrdinal(d3.schemeTableau10);
+
+        const sim = d3.forceSimulation(nodes)
+          .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+          .force('charge', d3.forceManyBody().strength(-200))
+          .force('center', d3.forceCenter(w / 2, h / 2))
+          .force('collision', d3.forceCollide(25));
+
+        const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
+        const node = g.selectAll('.node').data(nodes).join('circle')
+          .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
+          .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
+          .style('cursor', 'pointer').call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+        const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length > 15 ? d.id.slice(0, 13) + '…' : d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));
+
+        node.on('click', (e, d) => {
+          const tt = document.getElementById('node-tooltip');
+          tt.innerHTML = `<strong>${d.id}</strong><hr style="margin:4px 0;border-color:var(--border)"><div>${(d.summary || '').substring(0, 150)}</div>`;
+          tt.style.left = (e.pageX + 10) + 'px'; tt.style.top = (e.pageY - 10) + 'px'; tt.style.opacity = 1;
+          setTimeout(() => tt.style.opacity = 0, 4000);
+        });
+
+        sim.on('tick', () => {
+          link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+          node.attr('cx', d => d.x).attr('cy', d => d.y);
+          label.attr('x', d => d.x).attr('y', d => d.y);
+        });
+      } catch (err) {
+        console.error("D3 Render Error:", err);
+        container.innerHTML = `<div style="color:red;padding:20px;font-size:12px;word-wrap:break-word;">Graph Error: ${err.message}</div>`;
       }
-      container.innerHTML = '';
-      const w = 600, h = 320;
-      const svg = d3.select(container).append('svg').attr('viewBox', `0 0 ${w} ${h}`);
-      const g = svg.append('g');
-      svg.call(d3.zoom().scaleExtent([.3, 4]).on('zoom', e => g.attr('transform', e.transform)));
-
-      const titles = Object.keys(wikiPages);
-      const nodes = titles.map(t => ({ id: t, summary: wikiPages[t] }));
-      const nodeSet = new Set(titles);
-      const links = wikiRelations.filter(r => nodeSet.has(r.from) && nodeSet.has(r.to)).map(r => ({ source: r.from, target: r.to, label: r.label }));
-
-      const deg = {};
-      links.forEach(l => { deg[l.source] = (deg[l.source] || 0) + 1; deg[l.target] = (deg[l.target] || 0) + 1; });
-      const color = d3.scaleOrdinal(d3.schemeTableau10);
-
-      const sim = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id(d => d.id).distance(100))
-        .force('charge', d3.forceManyBody().strength(-200))
-        .force('center', d3.forceCenter(w / 2, h / 2))
-        .force('collision', d3.forceCollide(25));
-
-      const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
-      const node = g.selectAll('.node').data(nodes).join('circle')
-        .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
-        .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
-        .style('cursor', 'pointer').call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
-
-      const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length > 15 ? d.id.slice(0, 13) + '…' : d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));
-
-      node.on('click', (e, d) => {
-        const tt = document.getElementById('node-tooltip');
-        tt.innerHTML = `<strong>${d.id}</strong><hr style="margin:4px 0;border-color:var(--border)"><div>${(d.summary || '').substring(0, 150)}</div>`;
-        tt.style.left = (e.pageX + 10) + 'px'; tt.style.top = (e.pageY - 10) + 'px'; tt.style.opacity = 1;
-        setTimeout(() => tt.style.opacity = 0, 4000);
-      });
-
-      sim.on('tick', () => {
-        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-        node.attr('cx', d => d.x).attr('cy', d => d.y);
-        label.attr('x', d => d.x).attr('y', d => d.y);
-      });
     }
   </script>
 </body>
