@@ -494,6 +494,55 @@ stretching a weak connection into a full example.
 
 ---
 
+## Phase 4.6 — Conversational UX & Citation Improvements ✅ COMPLETE
+
+Transforms the system from single-turn Q&A to a conversational interface with
+intelligent pre-query checks and precise source linking. No architectural changes
+to the ingest/query pipeline — adds a conversational layer on top.
+
+### UX1 — Chat-Format Conversation ✅
+**Files:** `app.py`, `services/db.py`, `services/wiki.py`, `services/prompts.py`, `templates/index.html`
+
+- New `chat_messages` PostgreSQL table stores full conversation history per session
+- `GET /messages` endpoint returns chat history; frontend renders as scrollable thread
+- User messages right-aligned, assistant answers left-aligned with existing answer card styling
+- `generate_answer()` accepts optional `conversation_context` from recent messages
+- `ANSWER_PROMPT` includes conversation history block when available
+- Chat history persists across page refreshes and session switches
+- Typing indicator shown while waiting for response
+
+### UX2 — Document Disambiguation ✅
+**Files:** `app.py`, `services/wiki.py`, `services/db.py`, `templates/index.html`
+
+- `classify_query()` uses fast LLM call to detect when a question targets an unspecified document
+- Skips check when file is already named in the question or session has only 1 document
+- Returns clickable document chips in the chat thread + "Upload new" option
+- `target_doc` parameter on `/query` forces page selection to that document's pages
+- `get_source_docs()` in `db.py` returns distinct ingested document names
+
+### UX3 — Follow-up Clarification Questions ✅
+**Files:** `app.py`, `services/wiki.py`, `config.py`, `templates/index.html`
+
+- `check_ambiguity()` uses fast LLM call to determine if question needs clarification
+- Returns a clarifying question + 2-3 suggested option buttons
+- Hard limit: 1 clarification per turn (never re-asks after user responds)
+- `is_followup` flag bypasses disambiguation and clarification checks
+- Controlled by `ENABLE_CLARIFICATION` env var (default: true)
+
+### UX4 — Better Citations with Exact Location ✅
+**Files:** `services/reader.py`, `services/db.py`, `services/prompts.py`, `app.py`, `templates/index.html`
+
+- `read_file_with_positions()` tracks per-page character offsets during PDF extraction
+- New `source_positions` PostgreSQL table stores page-level character ranges per document
+- `GET /document/locate` endpoint fuzzy-matches a verbatim quote to its page number + offset
+- Citation format updated to include page numbers: `[1] File.pdf, Page 5, Clause 14.1 | Quote: ...`
+- Frontend parses `pageNum` from citations, shows "Page N" badge on source cards
+- PDF modal opens directly to the cited page via `#page=N` URL fragment
+- Inline citation clicks call `/document/locate` for precise text highlighting
+- Falls back to existing fuzzy matching for documents ingested before this change
+
+---
+
 ## Phase 5 — Infrastructure ⬜ PLANNED
 
 Operational hardening for multi-user production. Depends on Phases 2–4.
@@ -605,6 +654,7 @@ S1 (PostgreSQL + pgvector)  ←── Required by everything below
 └── O1 (multi-tenancy)           ←── requires S1 schema design to support tenant scoping
 
 C3 (NER pre-filter)              ←── no dependencies, can be done anytime
+UX1-4 (Conversational UX)        ←── requires S1 (chat_messages + source_positions tables)
 S6 (Celery)                      ←── requires S1 + S5
 O2 (PgBouncer)                   ←── requires S1 deployed
 O3 (read replicas)               ←── requires S1 + read/write split in db.py
@@ -625,6 +675,7 @@ O4 (audit logging)               ←── requires S1 + multi-tenancy awareness
 | 6 | **S4** — Contradiction rework | Medium | Requires S3 |
 | 7 | **C3** — NER pre-filter | Low | ~80% reduction in contradiction LLM calls |
 | 8 | **C7** — Metadata cache | Medium | Reduces Review mode from N×M calls to DB lookups |
+| 8.5 | **UX1-4** — Conversational UX + Citations | Medium | ✅ Chat format, disambiguation, clarification, exact citations |
 | 9 | **S6** — Celery | High | Production-grade ingest; required before 20k doc load |
 | 10 | **O1** — Multi-tenancy | Medium | Required before multiple teams go live |
 | 11 | **O2** — PgBouncer | Low | Add when concurrent users > 100 |

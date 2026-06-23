@@ -321,7 +321,104 @@
     .ask-wrap {
       max-width: 740px;
       margin: 0 auto;
-      width: 100%
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      overflow: hidden
+    }
+
+    .chat-thread {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 0 10px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 16px
+    }
+
+    .chat-msg {
+      display: flex;
+      gap: 10px;
+      max-width: 95%
+    }
+    .chat-msg-user {
+      align-self: flex-end;
+      flex-direction: row-reverse
+    }
+    .chat-msg-assistant, .chat-msg-system {
+      align-self: flex-start
+    }
+
+    .chat-bubble {
+      padding: 10px 14px;
+      border-radius: var(--radius-lg);
+      font-size: 13px;
+      line-height: 1.6;
+      word-break: break-word
+    }
+    .chat-msg-user .chat-bubble {
+      background: var(--accent);
+      color: #fff;
+      border-bottom-right-radius: 4px
+    }
+    .chat-msg-assistant .chat-bubble {
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      color: var(--text-primary);
+      border-bottom-left-radius: 4px
+    }
+    .chat-msg-system .chat-bubble {
+      background: var(--accent-light);
+      border: 0.5px solid var(--accent-border);
+      color: var(--text-primary);
+      border-bottom-left-radius: 4px
+    }
+
+    .chat-typing {
+      align-self: flex-start;
+      padding: 10px 14px;
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg);
+      font-size: 12px;
+      color: var(--text-muted);
+      display: flex;
+      gap: 4px;
+      align-items: center
+    }
+    .chat-typing .dot {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted);
+      animation: chatTypingDot 1.2s infinite ease-in-out
+    }
+    .chat-typing .dot:nth-child(2) { animation-delay: 0.2s }
+    .chat-typing .dot:nth-child(3) { animation-delay: 0.4s }
+    @keyframes chatTypingDot {
+      0%, 80%, 100% { opacity: 0.3; transform: scale(0.8) }
+      40% { opacity: 1; transform: scale(1) }
+    }
+
+    .disambig-chips {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
+    }
+    .disambig-chip {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+      background: var(--bg-surface); border: 1px solid var(--accent-border);
+      color: var(--accent); cursor: pointer; transition: all 0.15s
+    }
+    .disambig-chip:hover {
+      background: var(--accent); color: #fff
+    }
+    .clarif-options {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
+    }
+    .clarif-option-btn {
+      padding: 6px 14px; border-radius: 20px; font-size: 12px; font-weight: 500;
+      background: var(--bg-surface); border: 1px solid var(--green-border);
+      color: var(--green-text); cursor: pointer; transition: all 0.15s
+    }
+    .clarif-option-btn:hover {
+      background: var(--green); color: #fff
     }
 
     .ask-box {
@@ -332,7 +429,8 @@
       display: flex;
       align-items: flex-end;
       gap: 10px;
-      margin-bottom: 20px
+      flex-shrink: 0;
+      margin-top: 10px
     }
 
     .ask-input {
@@ -1923,15 +2021,14 @@
         </div>
 
         <!-- ASK -->
-        <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow-y:auto">
+        <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow:hidden">
           <div class="ask-wrap">
+            <div class="chat-thread" id="chat-thread"></div>
             <div class="ask-box">
               <textarea class="ask-input" id="question-input" rows="2"
                 placeholder="Ask anything about your documents…"></textarea>
-              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Ask</button>
+              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Send</button>
             </div>
-
-            <div id="answers-container"></div>
           </div>
         </div>
 
@@ -2524,6 +2621,7 @@
     let currentPdfModalDoc = '';
     let currentPdfModalSearch = '';
     let currentPdfModalHighlights = [];
+    let currentPdfModalPageNum = null;
 
     function switchPdfModalTab(tabName) {
       const textTab = document.getElementById('pdf-tab-text');
@@ -2545,8 +2643,13 @@
         // Load iframe if not already loaded
         if (!pdfPanel.innerHTML || pdfPanel.innerHTML.trim() === '') {
           const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(currentPdfModalDoc)}`;
-          const searchParam = currentPdfModalSearch ? `#search=${encodeURIComponent(currentPdfModalSearch)}` : '';
-          pdfPanel.innerHTML = `<iframe src="${url}${searchParam}" style="width:100%;height:100%;border:none;"></iframe>`;
+          let fragment = '';
+          if (currentPdfModalPageNum) {
+            fragment = `#page=${currentPdfModalPageNum}`;
+          } else if (currentPdfModalSearch) {
+            fragment = `#search=${encodeURIComponent(currentPdfModalSearch)}`;
+          }
+          pdfPanel.innerHTML = `<iframe src="${url}${fragment}" style="width:100%;height:100%;border:none;"></iframe>`;
         }
       }
     }
@@ -2567,16 +2670,80 @@
 
       const lines = refsContent.split('\n');
       const refs = [];
-      const lineRegex = /\[(\d+)\]\s*([^,|]+?)(?:,\s*([^|]+))?(?:\s*\|\s*Quote:\s*(.+))?$/i;
 
       for (const line of lines) {
-        const lineMatch = line.trim().match(lineRegex);
-        if (lineMatch) {
-          const num = parseInt(lineMatch[1]);
-          const docName = lineMatch[2].trim();
-          const location = lineMatch[3] ? lineMatch[3].trim() : '';
-          const quote = lineMatch[4] ? lineMatch[4].trim() : '';
-          refs.push({ num, docName, location, quote });
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+
+        // Match [N] at the start
+        const numMatch = trimmed.match(/^\[(\d+)\]\s*/);
+        if (!numMatch) continue;
+
+        const num = parseInt(numMatch[1]);
+        let rest = trimmed.slice(numMatch[0].length);
+
+        let docName = '', location = '', quote = '', pageNum = null;
+
+        // Extract quote: either after "| Quote:" or after ": " followed by quoted text
+        const quoteMatch1 = rest.match(/\|\s*Quote:\s*(.+)$/i);
+        const quoteMatch2 = rest.match(/:\s*[""“](.+?)[""”]\s*$/);
+        const quoteMatch3 = rest.match(/[""“](.{20,})[""”]\s*$/);
+        if (quoteMatch1) {
+          quote = quoteMatch1[1].replace(/^[""“]+|[""”]+$/g, '').trim();
+          rest = rest.slice(0, quoteMatch1.index).trim();
+        } else if (quoteMatch2) {
+          quote = quoteMatch2[1].trim();
+          rest = rest.slice(0, quoteMatch2.index).trim();
+        } else if (quoteMatch3) {
+          quote = quoteMatch3[1].trim();
+          rest = rest.slice(0, quoteMatch3.index).trim();
+        }
+
+        // Remove trailing periods, "(Unspecified)" markers
+        rest = rest.replace(/\s*\(Unspecified\)\s*/gi, '').replace(/[.,;:\s]+$/, '').trim();
+
+        // Split doc name from location: try comma first, then period+space, then "–"
+        // Format 1: "FileName.pdf, Clause 5, Page 3"
+        // Format 2: "SA1-Tata (Service Agreement). Clause 1 – Definitions"
+        // Format 3: "FileName.pdf Page 5 Clause 3"
+        let parts;
+        if (rest.includes('|')) {
+          parts = rest.split('|').map(s => s.trim());
+          docName = parts[0];
+          location = parts.slice(1).join(', ');
+        } else if (rest.includes(',')) {
+          parts = rest.split(',').map(s => s.trim());
+          docName = parts[0];
+          location = parts.slice(1).join(', ');
+        } else if (/\)\.\s/.test(rest)) {
+          // "SA1-Tata (Service Agreement). Clause 1"
+          const dotSplit = rest.match(/^(.+?\))\.\s*(.+)$/);
+          if (dotSplit) {
+            docName = dotSplit[1].trim();
+            location = dotSplit[2].trim();
+          } else {
+            docName = rest;
+          }
+        } else if (rest.includes(' – ')) {
+          parts = rest.split(' – ');
+          docName = parts[0].trim();
+          location = parts.slice(1).join(' – ').trim();
+        } else {
+          docName = rest;
+        }
+
+        // Clean docName: remove .pdf extension noise, trim
+        docName = docName.replace(/\.?\s*$/, '').trim();
+
+        // Extract page number from location
+        const pageMatch = location.match(/Page\s+(\d+)/i);
+        if (pageMatch) {
+          pageNum = parseInt(pageMatch[1]);
+          location = location.replace(/Page\s+\d+\s*,?\s*/i, '').trim();
+        }
+
+        if (docName) {
+          refs.push({ num, docName, location, quote, pageNum });
         }
       }
 
@@ -2587,18 +2754,53 @@
     function findCanonicalDocName(refDocName) {
       if (!refDocName) return '';
       const cleanRef = refDocName.trim().toLowerCase();
+
+      // Exact or path-suffix match
       for (const doc of currentDocs) {
         const cleanDoc = doc.toLowerCase();
         if (cleanDoc === cleanRef || cleanDoc.endsWith('/' + cleanRef) || cleanDoc.endsWith('\\' + cleanRef)) {
           return doc;
         }
       }
-      // Fallback substring search
+      // Substring match
       for (const doc of currentDocs) {
         if (doc.toLowerCase().includes(cleanRef)) {
           return doc;
         }
       }
+
+      // Fuzzy match: extract key words from ref (e.g. "SA1-Tata (Service Agreement)" → "service agreement 1")
+      // and match against doc paths
+      const refWords = cleanRef.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+      // Extract number from ref (e.g. "SA1" → "1", "agreement 3" → "3")
+      const numMatch = cleanRef.match(/(\d+)/);
+      const refNum = numMatch ? numMatch[1] : '';
+
+      let bestDoc = '';
+      let bestScore = 0;
+      for (const doc of currentDocs) {
+        const cleanDoc = doc.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+        let score = 0;
+        for (const w of refWords) {
+          if (cleanDoc.includes(w)) score++;
+        }
+        // Boost if the document number matches
+        if (refNum && cleanDoc.includes(refNum)) score += 3;
+        // Boost if doc type matches (service agreement, nda, etc.)
+        if (cleanRef.includes('service') && cleanDoc.includes('service')) score += 2;
+        if (cleanRef.includes('nda') && cleanDoc.includes('nda')) score += 2;
+        if (cleanRef.includes('shareholder') && cleanDoc.includes('shareholder')) score += 2;
+        if (cleanRef.includes('joint venture') && cleanDoc.includes('joint venture')) score += 2;
+        if (cleanRef.includes('judgment') && cleanDoc.includes('judgment')) score += 2;
+        if (cleanRef.includes('legal opinion') && cleanDoc.includes('legal opinion')) score += 2;
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestDoc = doc;
+        }
+      }
+      if (bestScore >= 3 && bestDoc) return bestDoc;
+
       return refDocName;
     }
 
@@ -2622,6 +2824,9 @@
           groupedRefs[canonicalName].locations.push(ref.location);
         }
         groupedRefs[canonicalName].nums.push(ref.num);
+        if (ref.pageNum && !groupedRefs[canonicalName].pageNum) {
+          groupedRefs[canonicalName].pageNum = ref.pageNum;
+        }
         if (ref.quote && !groupedRefs[canonicalName].quotes.some(q => q.text === ref.quote)) {
           groupedRefs[canonicalName].quotes.push({ num: ref.num, location: ref.location, text: ref.quote });
         }
@@ -2635,17 +2840,19 @@
         const safeCanonical = entry.canonicalName.replace(/'/g, "\\'");
         const safeLocations = entry.locations.join('|||').replace(/'/g, "\\'");
         const firstLocation = entry.locations.length > 0 ? entry.locations[0].replace(/'/g, "\\'") : '';
+        const pageNumArg = entry.pageNum || 'null';
 
+        const pageBadge = entry.pageNum ? `<span style="font-size:10px;background:var(--accent-light);color:var(--accent);padding:2px 6px;border-radius:4px;margin-left:6px">Page ${entry.pageNum}</span>` : '';
         const subtext = entry.locations.length > 0 ? entry.locations.join(', ') : 'Referenced in answer';
 
         return `
-        <div class="source-ref-card" onclick="openFileModal('${safeCanonical}', '${safeLocations}', '${firstLocation}')">
+        <div class="source-ref-card" onclick="openFileModal('${safeCanonical}', '${safeLocations}', '${firstLocation}', ${pageNumArg})">
           <div class="source-ref-icon-wrapper">
             <i class="ti ti-file-text"></i>
           </div>
           <div class="source-ref-info">
             <div class="source-ref-name" title="${cleanDocName}">
-              ${cleanDocName}
+              ${cleanDocName}${pageBadge}
             </div>
             <div class="source-ref-sub" title="${subtext}">
               ${subtext}
@@ -2767,7 +2974,7 @@
     }
 
     // Upgraded PDF Modal handler
-    async function openPdfModal(docName, searchText, allHighlights) {
+    async function openPdfModal(docName, searchText, allHighlights, pageNum) {
       if (!docName) {
         showToast('No document name provided for citation.', 'error');
         return;
@@ -2776,6 +2983,7 @@
       currentPdfModalDoc = docName;
       currentPdfModalSearch = searchText;
       currentPdfModalHighlights = allHighlights || [];
+      currentPdfModalPageNum = pageNum || null;
 
       const cleanDoc = docName.replace(/^[a-f0-9-]{36}_/, '').split('/').pop();
       document.getElementById('pdf-modal-name').textContent = cleanDoc;
@@ -2853,6 +3061,7 @@
       currentPdfModalDoc = '';
       currentPdfModalSearch = '';
       currentPdfModalHighlights = [];
+      currentPdfModalPageNum = null;
     }
 
     window.selectModalCitation = function (el, location) {
@@ -2890,6 +3099,29 @@
       const numMatch = searchText.match(/(\d+(?:\.\d+)*(?:\s*\([a-z]\))?)/i);
       if (numMatch) {
         cleanPatterns.push(normalizeStr(numMatch[1]));
+      }
+
+      // Extract topic name after dash/colon: "Clause 7 – Intellectual Property" -> "intellectual property"
+      const topicMatch = searchText.match(/[-–—:]\s*(.+)$/);
+      if (topicMatch) {
+        const topic = normalizeStr(topicMatch[1]);
+        if (topic.length > 3) cleanPatterns.push(topic);
+      }
+
+      // For clause references, also search for "N." and "N," patterns (common in PDFs)
+      if (numMatch) {
+        const num = numMatch[1];
+        cleanPatterns.push(num + '.');
+        cleanPatterns.push(num + ',');
+        cleanPatterns.push(num + ' ');
+      }
+
+      // If there's a verbatim quote available in the citation, use that too
+      const currentCite = currentResultReferences.find(r => r.location === searchText || r.quote);
+      if (currentCite && currentCite.quote && currentCite.quote.length > 15) {
+        // Use first 60 chars of the quote for matching
+        const quoteSnippet = normalizeStr(currentCite.quote.slice(0, 60));
+        cleanPatterns.unshift(quoteSnippet);
       }
 
       // --- Strategy 1: Try matching existing .pdf-highlight marks ---
@@ -3000,7 +3232,7 @@
       }
     }
 
-    window.clickInlineCitation = function (num, event) {
+    window.clickInlineCitation = async function (num, event) {
       if (event) {
         event.preventDefault();
         event.stopPropagation();
@@ -3009,16 +3241,28 @@
       if (citation) {
         const canonicalName = findCanonicalDocName(citation.docName);
         const docRefs = currentResultReferences.filter(r => findCanonicalDocName(r.docName) === canonicalName);
-        const highlights = docRefs.map(r => r.location).filter(Boolean);
-        openPdfModal(canonicalName, citation.location || '', highlights);
+        const highlights = docRefs.map(r => r.quote || r.location).filter(Boolean);
+
+        if (citation.quote && SID) {
+          try {
+            const locRes = await fetch(`/document/locate?session_id=${SID}&doc_name=${encodeURIComponent(canonicalName)}&quote=${encodeURIComponent(citation.quote)}`);
+            const locData = await locRes.json();
+            if (locData.found) {
+              citation._locatedPageNum = locData.page_num;
+              citation._locatedOffset = locData.char_offset;
+            }
+          } catch (e) { console.warn('Quote location lookup failed:', e); }
+        }
+
+        openPdfModal(canonicalName, citation.quote || citation.location || '', highlights, citation.pageNum || citation._locatedPageNum);
       } else {
         showToast(`Citation [${num}] not found.`, 'info');
       }
     };
 
-    window.openFileModal = function (canonicalName, locationsString, scrollToText) {
+    window.openFileModal = function (canonicalName, locationsString, scrollToText, pageNum) {
       const highlights = locationsString ? locationsString.split('|||') : [];
-      openPdfModal(canonicalName, scrollToText || '', highlights);
+      openPdfModal(canonicalName, scrollToText || '', highlights, pageNum || null);
     };
 
     async function toggleLog() {
@@ -3086,6 +3330,7 @@
       loadSessions();
       loadFileTree();
       loadGraph();
+      loadChatHistory();
     }
 
     async function deleteSession(e, id) {
@@ -3352,13 +3597,17 @@
     }
 
     // ============================================================
-    // Ask Mode
+    // Ask Mode — Chat Interface
     // ============================================================
     const $qInput = document.getElementById('question-input');
     const $askBtn = document.getElementById('ask-btn');
+    const $chatThread = document.getElementById('chat-thread');
+    let _pendingQuestion = '';
+    let _pendingTargetDoc = '';
+    let _isFollowup = false;
 
     $askBtn.addEventListener('click', doQuery);
-    $qInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); doQuery(); } });
+    $qInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery(); } });
 
     function renderMarkdown(text) {
       if (!text) return '';
@@ -3366,59 +3615,60 @@
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
     }
 
-    async function doQuery() {
-      const q = $qInput.value.trim();
-      if (!q || q.length < 3) return;
-      $askBtn.disabled = true;
+    function scrollChatToBottom() {
+      setTimeout(() => { $chatThread.scrollTop = $chatThread.scrollHeight; }, 50);
+    }
 
-      document.getElementById('answers-container').innerHTML = `<div style="font-size:13px;color:var(--text-secondary);text-align:center;padding:40px">Analyzing documents...</div>`;
+    function appendUserMsg(text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-user';
+      div.innerHTML = `<div class="chat-bubble">${text.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
 
-      try {
-        const res = await fetch('/query', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question: q, session_id: SID })
-        });
-        const d = await res.json();
-        if (d.error) { showToast(d.error, 'error'); return; }
+    function appendTypingIndicator() {
+      const div = document.createElement('div');
+      div.className = 'chat-typing';
+      div.id = 'chat-typing-indicator';
+      div.innerHTML = '<div class="dot"></div><div class="dot"></div><div class="dot"></div>';
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
 
-        let html = '';
+    function removeTypingIndicator() {
+      const el = document.getElementById('chat-typing-indicator');
+      if (el) el.remove();
+    }
 
-        // Render Wiki Answer
-        if (d.wiki && d.wiki.answer) {
-          const score = d.wiki.confidence_score || 0;
-          let confDot = 'var(--green)';
-          if (score < 50) confDot = 'var(--red)';
-          else if (score < 80) confDot = 'var(--amber)';
+    function appendAnswerMsg(wikiResult) {
+      const score = wikiResult.confidence_score || 0;
+      let confDot = 'var(--green)';
+      if (score < 50) confDot = 'var(--red)';
+      else if (score < 80) confDot = 'var(--amber)';
 
-          const filesUsed = d.wiki.files_used || [];
+      const filesUsed = wikiResult.files_used || [];
+      const parsed = extractReferencesSection(wikiResult.answer);
+      let refs = parsed.refs;
+      if (refs.length === 0 && filesUsed.length > 0) {
+        refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+      }
+      currentResultReferences = refs;
 
-          // Parse references and clean text
-          const parsed = extractReferencesSection(d.wiki.answer);
-          let refs = parsed.refs;
-          if (refs.length === 0 && filesUsed.length > 0) {
-            refs = filesUsed.map((f, idx) => ({
-              num: idx + 1,
-              docName: f,
-              location: ''
-            }));
-          }
-          currentResultReferences = refs;
+      let md = renderMarkdown(parsed.cleanText);
+      md = md.replace(/\[(\d+)\]/g, (match, num) => {
+        return `<span class="inline-cite" onclick="clickInlineCitation(${num}, event)">[${num}]</span>`;
+      });
 
-          // Render clean markdown and make inline citations clickable
-          let md = renderMarkdown(parsed.cleanText);
-          md = md.replace(/\[(\d+)\]/g, (match, num) => {
-            return `<span class="inline-cite" onclick="clickInlineCitation(${num}, event)">[${num}]</span>`;
-          });
+      const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
+      const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
+      const tokens = (wikiResult.usage && wikiResult.usage.prompt_tokens) ?
+        (wikiResult.usage.prompt_tokens + wikiResult.usage.completion_tokens) : 0;
 
-          const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
-
-          const elapsed = (d.wiki.elapsed_ms / 1000).toFixed(1);
-          const tokens = (d.wiki.usage && d.wiki.usage.prompt_tokens) ?
-            (d.wiki.usage.prompt_tokens + d.wiki.usage.completion_tokens) : 0;
-
-          html += `
-        <div class="answer-card">
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-assistant';
+      div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
+        <div class="answer-card" style="margin-bottom:0">
           <div class="answer-topbar">
             <div class="answer-tags">
               <span class="tag-synth">SYNTHESIZED</span>
@@ -3426,26 +3676,168 @@
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
-              <span class="answer-time" style="margin-left:8px">Analysis: ${elapsed}s</span>
-              <button class="act-btn" id="copy-answer-btn" onclick="copyAnswer(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
-              <button class="act-btn" onclick="shareAnswer()"><i class="ti ti-share"></i>Share</button>
+              <span class="answer-time" style="margin-left:8px">${elapsed}s</span>
+              <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
             </div>
           </div>
           <div class="answer-body">${md}</div>
           ${cardsBlockHtml}
-        </div>`;
+        </div>
+      </div>`;
+      $chatThread.appendChild(div);
+      window._lastAnswer = parsed.cleanText;
+      scrollChatToBottom();
+    }
 
-          // Store answer text for copy
-          window._lastAnswer = parsed.cleanText;
+    function appendDisambiguationMsg(message, documents, rawDocuments) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      const chips = documents.map((doc, i) => {
+        const rawDoc = rawDocuments[i] || doc;
+        const cleanName = doc.replace(/^[a-f0-9-]{36}_/, '').replace(/\.[^.]+$/, '').replace(/_/g, ' ');
+        return `<div class="disambig-chip" onclick="selectDisambigDoc('${rawDoc.replace(/'/g, "\\'")}', '${cleanName.replace(/'/g, "\\'")}')">${cleanName}</div>`;
+      }).join('');
+
+      div.innerHTML = `<div class="chat-bubble">
+        <div style="margin-bottom:4px">${message}</div>
+        <div class="disambig-chips">${chips}
+          <div class="disambig-chip" onclick="document.querySelector('[data-tab=ingest]').click()" style="border-style:dashed"><i class="ti ti-upload" style="font-size:12px;margin-right:4px"></i>Upload new</div>
+        </div>
+      </div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    function appendClarificationMsg(message, options) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      const btns = (options || []).map(opt => {
+        return `<div class="clarif-option-btn" onclick="selectClarification('${opt.replace(/'/g, "\\'")}')">${opt}</div>`;
+      }).join('');
+
+      div.innerHTML = `<div class="chat-bubble">
+        <div style="margin-bottom:4px">${message}</div>
+        ${btns ? `<div class="clarif-options">${btns}</div>` : ''}
+      </div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    function appendSystemMsg(text) {
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-system';
+      div.innerHTML = `<div class="chat-bubble">${renderMarkdown(text)}</div>`;
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+
+    window.selectDisambigDoc = function(rawDoc, cleanName) {
+      appendUserMsg('Focus on: ' + cleanName);
+      _pendingTargetDoc = rawDoc;
+      _isFollowup = true;
+      doQueryInternal(_pendingQuestion, rawDoc, true);
+    };
+
+    window.selectClarification = function(option) {
+      appendUserMsg(option);
+      const enrichedQ = _pendingQuestion + ' — ' + option;
+      _isFollowup = true;
+      doQueryInternal(enrichedQ, '', true);
+    };
+
+    async function doQuery() {
+      const q = $qInput.value.trim();
+      if (!q || q.length < 3) return;
+      $qInput.value = '';
+      _pendingQuestion = q;
+      _pendingTargetDoc = '';
+      _isFollowup = false;
+      appendUserMsg(q);
+      await doQueryInternal(q, '', false);
+    }
+
+    async function doQueryInternal(question, targetDoc, isFollowup) {
+      $askBtn.disabled = true;
+      appendTypingIndicator();
+
+      try {
+        const payload = { question, session_id: SID };
+        if (targetDoc) payload.target_doc = targetDoc;
+        if (isFollowup) payload.is_followup = true;
+
+        const res = await fetch('/query', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const d = await res.json();
+        removeTypingIndicator();
+
+        if (d.error) { appendSystemMsg('Error: ' + d.error); return; }
+
+        if (d.type === 'disambiguation') {
+          appendDisambiguationMsg(d.message, d.documents, d.raw_documents || d.documents);
+        } else if (d.type === 'clarification') {
+          _pendingQuestion = question;
+          appendClarificationMsg(d.message, d.options);
+        } else if (d.type === 'answer' && d.wiki) {
+          appendAnswerMsg(d.wiki);
+        } else if (d.wiki && d.wiki.answer) {
+          appendAnswerMsg(d.wiki);
         }
-
-        document.getElementById('answers-container').innerHTML = html;
-
       } catch (e) {
-        document.getElementById('answers-container').innerHTML = `<div class="toast-error" style="padding:10px">Query failed: ${e}</div>`;
+        removeTypingIndicator();
+        appendSystemMsg('Query failed: ' + e);
       } finally {
         $askBtn.disabled = false;
+        $qInput.focus();
       }
+    }
+
+    async function loadChatHistory() {
+      if (!SID) return;
+      try {
+        const res = await fetch(`/messages?session_id=${SID}&limit=100`);
+        const data = await res.json();
+        const messages = data.messages || [];
+        $chatThread.innerHTML = '';
+        for (const msg of messages) {
+          if (msg.role === 'user') {
+            appendUserMsg(msg.content);
+          } else if (msg.msg_type === 'answer') {
+            const meta = msg.metadata || {};
+            appendAnswerMsg({
+              answer: msg.content,
+              confidence_score: meta.confidence_score || 0,
+              files_used: meta.files_used || [],
+              token_total: meta.token_total || {},
+              usage: {},
+              elapsed_ms: 0,
+            });
+          } else if (msg.msg_type === 'disambiguation') {
+            const meta = msg.metadata || {};
+            appendDisambiguationMsg(msg.content, meta.documents || [], meta.raw_documents || meta.documents || []);
+          } else if (msg.msg_type === 'clarification') {
+            const meta = msg.metadata || {};
+            appendClarificationMsg(msg.content, meta.options || []);
+          } else {
+            appendSystemMsg(msg.content);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load chat history:', e);
+      }
+    }
+
+    function copyAnswerFromEl(btn) {
+      const body = btn.closest('.answer-card')?.querySelector('.answer-body');
+      if (!body) return;
+      navigator.clipboard.writeText(body.innerText).then(() => {
+        const orig = btn.innerHTML;
+        btn.innerHTML = '<i class="ti ti-check"></i>Copied';
+        btn.classList.add('copied');
+        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
+      });
     }
 
     function copyAnswer(btn) {
@@ -3454,10 +3846,7 @@
         const orig = btn.innerHTML;
         btn.innerHTML = '<i class="ti ti-check"></i>Copied';
         btn.classList.add('copied');
-        setTimeout(() => {
-          btn.innerHTML = orig;
-          btn.classList.remove('copied');
-        }, 2000);
+        setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
       });
     }
 

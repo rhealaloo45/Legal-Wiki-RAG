@@ -239,6 +239,9 @@ lexwiki_ui_v2.html
 # macOS
 .DS_Store
 
+# Windows reserved device names
+NUL
+
 # claude
 .claude/
 .vscode/
