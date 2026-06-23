@@ -469,80 +469,163 @@ def _check_completion(session_id: str):
         _set_progress(session_id, progress)
 
 
+@app.route("/messages")
+def get_messages():
+    """Return chat message history for a session."""
+    session_id = request.args.get("session_id", "")
+    limit = int(request.args.get("limit", "100"))
+    if not session_id:
+        return jsonify({"messages": []})
+    if config.USE_DATABASE:
+        from services import db as _db
+        messages = _db.get_messages(session_id, limit=limit)
+    else:
+        messages = []
+    return jsonify({"messages": messages})
+
+
+@app.route("/document/locate")
+def locate_in_document():
+    """Find the page number and character offset of a quote in a source document."""
+    session_id = request.args.get("session_id", "")
+    doc_name = request.args.get("doc_name", "").strip()
+    quote = request.args.get("quote", "").strip()
+    if not session_id or not doc_name or not quote:
+        return jsonify({"found": False, "page_num": 0, "char_offset": 0})
+    if config.USE_DATABASE:
+        from services import db as _db
+        result = _db.find_quote_position(session_id, doc_name, quote)
+        return jsonify(result)
+    return jsonify({"found": False, "page_num": 0, "char_offset": 0})
+
+
+def _store_chat_msg(session_id, role, content, msg_type="text", metadata=None):
+    """Insert a chat message if DB is enabled, otherwise no-op."""
+    if config.USE_DATABASE:
+        from services import db as _db
+        try:
+            return _db.insert_message(session_id, role, content, msg_type, metadata)
+        except Exception as e:
+            logger.error("Failed to store chat message: %s", e)
+    return None
+
+
 @app.route("/query", methods=["POST"])
 def query_route():
-    """Query all pipelines (RAG, Wiki, Hybrid) in parallel and return side-by-side answers."""
+    """Query the wiki pipeline with disambiguation and clarification support."""
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
     session_id = data.get("session_id", "")
+    target_doc = data.get("target_doc", "").strip()
+    is_followup = data.get("is_followup", False)
 
     if not question:
         return jsonify({"error": "No question provided"}), 400
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
 
-    # Step 1: Fetch contexts concurrently
     t0 = time.time()
-    # rag_ctx_future = executor.submit(rag.get_context, question, session_id)
-    wiki_ctx_future = executor.submit(wiki.get_context, question, session_id)
 
-    # rag_context, chunk_details = rag_ctx_future.result(timeout=60)
-    rag_context = ""
-    chunk_details = []
-    
-    wiki_ctx_res = wiki_ctx_future.result(timeout=300) # Wiki context fetch does an LLM call if pages > 20
+    # Store user message in chat history
+    _store_chat_msg(session_id, "user", question, "text")
+
+    # Pre-check: does the question already name a specific document?
+    _names_doc = wiki._question_names_a_document(question, [])
+
+    # --- Step 0: Disambiguation check ---
+    if not target_doc and not is_followup and not _names_doc:
+        try:
+            classify_result = wiki.classify_query(question, session_id)
+            if classify_result.get("needs_disambiguation"):
+                docs = classify_result["documents"]
+                import re as _re
+                clean_docs = [_re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
+                msg = "I'd like to help, but could you specify which document you're referring to? Please select one below, or upload a new document."
+                _store_chat_msg(session_id, "assistant", msg, "disambiguation",
+                               {"documents": clean_docs, "raw_documents": docs})
+                return jsonify({
+                    "type": "disambiguation",
+                    "message": msg,
+                    "documents": clean_docs,
+                    "raw_documents": docs,
+                    "total_elapsed_ms": round((time.time() - t0) * 1000),
+                })
+        except Exception as e:
+            logger.error("Disambiguation check failed: %s", e)
+
+    # --- Step 0b: Ambiguity/clarification check ---
+    if not is_followup and not _names_doc and config.ENABLE_CLARIFICATION:
+        try:
+            conv_ctx = wiki.build_conversation_context(session_id)
+            ambiguity = wiki.check_ambiguity(question, session_id, conv_ctx)
+            if ambiguity.get("needs_clarification"):
+                clarif_q = ambiguity["question"]
+                options = ambiguity.get("options") or []
+                _store_chat_msg(session_id, "assistant", clarif_q, "clarification",
+                               {"options": options, "original_question": question})
+                return jsonify({
+                    "type": "clarification",
+                    "message": clarif_q,
+                    "options": options,
+                    "total_elapsed_ms": round((time.time() - t0) * 1000),
+                })
+        except Exception as e:
+            logger.error("Ambiguity check failed: %s", e)
+
+    # --- Step 1: Build conversation context ---
+    conversation_context = wiki.build_conversation_context(session_id)
+
+    # --- Step 2: Fetch wiki context ---
+    if target_doc:
+        wiki_ctx_res = wiki.get_context(question, session_id, target_doc=target_doc)
+    else:
+        wiki_ctx_res = wiki.get_context(question, session_id)
+
     wiki_context = wiki_ctx_res.get("context", "")
     selected_titles = wiki_ctx_res.get("selected_titles", [])
     bm25_count = wiki_ctx_res.get("bm25_count", 0)
     page_selection_usage = wiki_ctx_res.get("page_selection_usage", {})
 
-    # Step 2: Generate answers concurrently
-    # rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
-    wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id, bm25_count, page_selection_usage)
-    # hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
-
-    rag_t0 = time.time()
-    rag_result = {"answer": "RAG is temporarily disabled.", "chunks": []}
-    rag_result["elapsed_ms"] = round((time.time() - rag_t0) * 1000)
-
+    # --- Step 3: Generate answer ---
     wiki_t0 = time.time()
     try:
-        wiki_result = wiki_ans_future.result(timeout=300)
+        wiki_result = wiki.generate_answer(
+            question, wiki_context, selected_titles, session_id,
+            bm25_count, page_selection_usage, conversation_context,
+        )
     except Exception as e:
         logger.error("Wiki generation error (%s): %s", type(e).__name__, e)
-        wiki_result = {"answer": f"⚠️ Wiki error: {type(e).__name__}: {e}", "pages_used": []}
+        wiki_result = {"answer": f"Wiki error: {type(e).__name__}: {e}", "pages_used": []}
     wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
 
-    hybrid_t0 = time.time()
-    hybrid_result = {"answer": "Hybrid is temporarily disabled.", "usage": {}}
-    hybrid_result["elapsed_ms"] = round((time.time() - hybrid_t0) * 1000)
+    # Store assistant answer in chat history
+    _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""), "answer", {
+        "confidence_score": wiki_result.get("confidence_score", 0),
+        "files_used": wiki_result.get("files_used", []),
+        "token_total": wiki_result.get("token_total", {}),
+    })
 
-    # Update session history
+    # Update session history (backward compat)
     sessions = load_sessions()
     if session_id in sessions:
-        # Avoid duplicate consecutive questions
         if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
             sessions[session_id].setdefault("history", []).insert(0, question)
         sessions[session_id]["updated_at"] = time.time()
-        
-        # Rename session if it's the first question and still using the default name
         if len(sessions[session_id]["history"]) == 1 and sessions[session_id]["name"].startswith("Session "):
             new_name = question[:30] + ("..." if len(question) > 30 else "")
             sessions[session_id]["name"] = new_name
-            
         save_sessions(sessions)
 
-    # Log this RAG query/context/response for audit
+    # Log query for audit
     try:
         _log_rag_query(question, wiki_context, wiki_result.get("answer", ""))
     except Exception as log_err:
         logger.error("Failed to log RAG query: %s", log_err)
 
     return jsonify({
-        "rag": rag_result,
+        "type": "answer",
         "wiki": wiki_result,
-        "hybrid": hybrid_result,
-        "total_elapsed_ms": round((time.time() - t0) * 1000)
+        "total_elapsed_ms": round((time.time() - t0) * 1000),
     })
 
 
@@ -805,6 +888,14 @@ def clear_session():
 
     # Clear progress store entry
     _delete_progress(session_id)
+
+    # Clear chat messages
+    if config.USE_DATABASE:
+        try:
+            from services import db as _db
+            _db.delete_messages(session_id)
+        except Exception as e:
+            errors.append(f"chat: {e}")
 
     # Remove from sessions metadata
     sessions = load_sessions()
