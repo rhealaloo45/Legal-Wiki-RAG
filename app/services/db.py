@@ -225,6 +225,35 @@ def _init_schema(engine) -> None:
             ON contradictions (session_id, page_title)
         """))
 
+        # Chat messages table (conversational UX)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id          BIGSERIAL PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                content     TEXT NOT NULL,
+                msg_type    TEXT NOT NULL DEFAULT 'text',
+                metadata    JSONB,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS chat_messages_session_idx
+            ON chat_messages (session_id, created_at)
+        """))
+
+        # Source positions table (citation exact-location support)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS source_positions (
+                session_id  TEXT NOT NULL,
+                source_doc  TEXT NOT NULL,
+                page_num    INT NOT NULL,
+                char_start  INT NOT NULL,
+                char_end    INT NOT NULL,
+                PRIMARY KEY (session_id, source_doc, page_num)
+            )
+        """))
+
         conn.commit()
 
 
@@ -785,6 +814,228 @@ def upsert_metadata(session_id: str, doc_name: str, metadata: dict) -> None:
             params,
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Chat messages (conversational UX)
+# ---------------------------------------------------------------------------
+
+def insert_message(
+    session_id: str,
+    role: str,
+    content: str,
+    msg_type: str = "text",
+    metadata: dict | None = None,
+) -> int:
+    """Insert a chat message and return its id."""
+    from sqlalchemy import text
+    engine = get_engine()
+    meta_json = json.dumps(metadata) if metadata is not None else None
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                INSERT INTO chat_messages (session_id, role, content, msg_type, metadata)
+                VALUES (:sid, :role, :content, :msg_type, CAST(:metadata AS jsonb))
+                RETURNING id
+            """),
+            {
+                "sid": session_id, "role": role, "content": content,
+                "msg_type": msg_type, "metadata": meta_json,
+            },
+        ).fetchone()
+        conn.commit()
+        return row.id
+
+
+def get_messages(session_id: str, limit: int = 50) -> list[dict]:
+    """Return chat messages for a session, oldest first."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, role, content, msg_type, metadata, created_at
+                FROM chat_messages
+                WHERE session_id = :sid
+                ORDER BY created_at ASC
+                LIMIT :limit
+            """),
+            {"sid": session_id, "limit": limit},
+        )
+        result = []
+        for r in rows:
+            msg = {
+                "id": r.id,
+                "role": r.role,
+                "content": r.content,
+                "msg_type": r.msg_type,
+                "metadata": r.metadata if r.metadata else {},
+                "created_at": r.created_at.isoformat() if r.created_at else "",
+            }
+            result.append(msg)
+        return result
+
+
+def get_recent_context(session_id: str, n: int = 5) -> list[dict]:
+    """Return the last n messages for building conversation context."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT role, content, msg_type
+                FROM (
+                    SELECT role, content, msg_type, created_at
+                    FROM chat_messages
+                    WHERE session_id = :sid AND msg_type IN ('text', 'answer')
+                    ORDER BY created_at DESC
+                    LIMIT :n
+                ) sub
+                ORDER BY created_at ASC
+            """),
+            {"sid": session_id, "n": n},
+        )
+        return [{"role": r.role, "content": r.content, "msg_type": r.msg_type} for r in rows]
+
+
+def delete_messages(session_id: str) -> None:
+    """Delete all chat messages for a session."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM chat_messages WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Source document helpers
+# ---------------------------------------------------------------------------
+
+def get_source_docs(session_id: str) -> list[str]:
+    """Return distinct source_doc values for a session."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT source_doc FROM pages
+                WHERE session_id = :sid AND source_doc != ''
+            """),
+            {"sid": session_id},
+        )
+        return [r.source_doc for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Source positions (citation exact-location support)
+# ---------------------------------------------------------------------------
+
+def store_page_map(session_id: str, source_doc: str, page_map: list[dict]) -> None:
+    """Store page-level character positions for a source document."""
+    if not page_map:
+        return
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        for entry in page_map:
+            conn.execute(
+                text("""
+                    INSERT INTO source_positions (session_id, source_doc, page_num, char_start, char_end)
+                    VALUES (:sid, :doc, :pn, :cs, :ce)
+                    ON CONFLICT (session_id, source_doc, page_num) DO UPDATE SET
+                        char_start = EXCLUDED.char_start,
+                        char_end   = EXCLUDED.char_end
+                """),
+                {
+                    "sid": session_id, "doc": source_doc,
+                    "pn": entry["page_num"], "cs": entry["char_start"], "ce": entry["char_end"],
+                },
+            )
+        conn.commit()
+
+
+def get_page_map(session_id: str, source_doc: str) -> list[dict]:
+    """Return page positions for a source document."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT page_num, char_start, char_end
+                FROM source_positions
+                WHERE session_id = :sid AND source_doc = :doc
+                ORDER BY page_num
+            """),
+            {"sid": session_id, "doc": source_doc},
+        )
+        return [{"page_num": r.page_num, "char_start": r.char_start, "char_end": r.char_end} for r in rows]
+
+
+def find_quote_position(session_id: str, source_doc: str, quote_text: str) -> dict:
+    """Find the page number and character offset of a quote in a source document.
+
+    Loads the document text from the upload path, does a fuzzy match, then maps
+    the offset back to a PDF page using the stored page_map.
+    """
+    import re as _re
+
+    page_map = get_page_map(session_id, source_doc)
+    if not page_map:
+        return {"found": False, "page_num": 0, "char_offset": 0}
+
+    # We need the full document text to search in. Load from the uploads directory.
+    import config as _cfg
+    import os as _os
+    from services.reader import read_file as _read
+
+    target_path = None
+    prefix = f"{session_id}_"
+    upload_dir = _cfg.UPLOAD_PATH
+    doc_basename = source_doc.replace("/", "_").replace("\\", "_")
+    if _os.path.isdir(upload_dir):
+        for fname in _os.listdir(upload_dir):
+            if fname.startswith(prefix) and fname.endswith(doc_basename):
+                target_path = _os.path.join(upload_dir, fname)
+                break
+        if not target_path:
+            for fname in _os.listdir(upload_dir):
+                if fname.endswith(doc_basename):
+                    target_path = _os.path.join(upload_dir, fname)
+                    break
+
+    if not target_path or not _os.path.exists(target_path):
+        return {"found": False, "page_num": 0, "char_offset": 0}
+
+    try:
+        full_text = _read(target_path)
+    except Exception:
+        return {"found": False, "page_num": 0, "char_offset": 0}
+
+    # Normalize for fuzzy matching
+    norm_text = _re.sub(r'\s+', ' ', full_text.lower())
+    norm_quote = _re.sub(r'\s+', ' ', quote_text.strip().lower())
+
+    idx = norm_text.find(norm_quote)
+    if idx == -1 and len(norm_quote) > 40:
+        idx = norm_text.find(norm_quote[:40])
+
+    if idx == -1:
+        return {"found": False, "page_num": 0, "char_offset": 0}
+
+    # Map offset to page number
+    matched_page = 1
+    for entry in page_map:
+        if entry["char_start"] <= idx < entry["char_end"]:
+            matched_page = entry["page_num"]
+            break
+    else:
+        if page_map:
+            matched_page = page_map[-1]["page_num"]
+
+    return {"found": True, "page_num": matched_page, "char_offset": idx}
 
 
 def get_metadata(session_id: str, doc_name: str) -> dict:
