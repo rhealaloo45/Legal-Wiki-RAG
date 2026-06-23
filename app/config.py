@@ -3,12 +3,77 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Database — set DATABASE_URL to enable PostgreSQL storage (Phase 2+).
+# When unset, the system falls back to file-based index.json storage.
+# ---------------------------------------------------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+USE_DATABASE = bool(DATABASE_URL)
+
+# Global Providers (azure or openrouter)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
+
+# Azure Config
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+
+# OpenRouter embedding models may produce different vector dimensions from Azure.
+# nvidia/llama-nemotron-embed-vl-1b-v2 outputs 2048 dims; override via env if needed.
+OPENROUTER_EMBEDDING_DIMENSIONS = int(os.getenv("OPENROUTER_EMBEDDING_DIMENSIONS", "2048"))
+
+
+def get_embedding_dimensions() -> int:
+    """Return the vector dimension for the currently active embedding provider."""
+    if EMBEDDING_PROVIDER == "openrouter":
+        return OPENROUTER_EMBEDDING_DIMENSIONS
+    return EMBEDDING_DIMENSIONS
+
+# OpenRouter Config
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY_WIKI", ""))
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
+OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "nvidia/llama-nemotron-embed-vl-1b-v2:free")
+
+# Fast/cheap model for non-synthesis tasks:
+#   contradiction pre-flight, page selection, JSON repair, cell extraction.
+#   Set these to a smaller/cheaper deployment — full synthesis calls ignore these.
+AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", "gpt-5.4-mini")
+OPENROUTER_FAST_MODEL = os.getenv("OPENROUTER_FAST_MODEL", "google/gemma-4-27b-it")
+
+# ---------------------------------------------------------------------------
+# Token budget constants — one source of truth for every llm.ask() call.
+# Keeping these explicit prevents silently burning 4096-token defaults on
+# calls whose outputs are small JSON objects.
+# ---------------------------------------------------------------------------
+
+# Ingest pipeline
+MAX_TOKENS_INGEST_SINGLE   = 4096   # Single-call short-doc synthesis (10-30 pages)
+MAX_TOKENS_INGEST_OVERVIEW = 1500   # Phase-1 overview + topic list
+MAX_TOKENS_INGEST_DETAIL   = 3500   # Phase-2 per-segment detail extraction
+
+# Merge / maintenance  (cheap model)
+MAX_TOKENS_CONTRADICTION   = 300    # Pairwise contradiction pre-flight
+MAX_TOKENS_JSON_REPAIR     = 2048   # LLM JSON repair (bounded by input)
+
+# Query pipeline
+MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full model)
+MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
+MAX_TOKENS_DISAMBIGUATION    = 200   # Classify if query targets an unspecified document
+MAX_TOKENS_AMBIGUITY_CHECK   = 300   # Determine if query needs clarification
+MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
+MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
+MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
+PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
+VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
+HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector results (hybrid retrieval)
+
+# Compaction thresholds (S3, Phase 4)
+COMPACTION_APPEND_THRESHOLD  = int(os.getenv("COMPACTION_APPEND_THRESHOLD", "5"))
+COMPACTION_CHAR_THRESHOLD    = int(os.getenv("COMPACTION_CHAR_THRESHOLD", "8000"))
 
 # Concurrency settings for wiki pipeline
 WIKI_MAX_WORKERS = int(os.getenv("WIKI_MAX_WORKERS", "3"))
@@ -31,6 +96,9 @@ TOP_K = int(os.getenv("TOP_K", "40"))
 
 # Global progress store for UI feedback
 PROGRESS_STORE = {}
+
+# Conversational UX
+ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

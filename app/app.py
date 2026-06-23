@@ -22,6 +22,7 @@ import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+import threading
 
 from flask import Flask, render_template, request, jsonify
 
@@ -68,7 +69,127 @@ if config.TESSERACT_CMD:
 
 executor = ThreadPoolExecutor(max_workers=10)
 
+# Per-session locks so concurrent ingest threads can atomically increment the
+# wiki_done counter without racing each other and under-counting completions.
+_progress_locks: dict[str, threading.Lock] = {}
+_progress_locks_lock = threading.Lock()
+
+def _get_progress_lock(session_id: str) -> threading.Lock:
+    with _progress_locks_lock:
+        if session_id not in _progress_locks:
+            _progress_locks[session_id] = threading.Lock()
+        return _progress_locks[session_id]
+
+# ---------------------------------------------------------------------------
+# Progress store helpers — abstract over in-memory dict vs PostgreSQL (S5)
+# ---------------------------------------------------------------------------
+def _update_doc_status(session_id: str, doc_name: str, status: str,
+                        step: str = "", pages: int = 0) -> None:
+    """Set a specific document's status in the docs_list of the progress dict."""
+    progress = _get_progress(session_id)
+    for doc in progress.get("docs_list", []):
+        if doc.get("name") == doc_name:
+            doc["status"] = status
+            doc["step"] = step
+            if pages:
+                doc["pages"] = pages
+            break
+    _set_progress(session_id, progress)
+
+
+def _refresh_wiki_stats(session_id: str) -> None:
+    """Update pages_total and relations_total in the wiki progress block."""
+    try:
+        if config.USE_DATABASE:
+            from services import db as _db
+            pages = _db.count_pages(session_id)
+            rels = _db.count_relations(session_id)
+        else:
+            idx = wiki._load_index(session_id)
+            pages = len(idx.get("pages", {}))
+            rels = len(idx.get("relations", []))
+        progress = _get_progress(session_id)
+        wiki_prog = progress.get("wiki", {})
+        wiki_prog["pages_total"] = pages
+        wiki_prog["relations_total"] = rels
+        progress["wiki"] = wiki_prog
+        _set_progress(session_id, progress)
+    except Exception as e:
+        logger.error("Failed to refresh wiki stats: %s", e)
+
+
+def _get_progress(session_id: str) -> dict:
+    if config.USE_DATABASE:
+        from services import db as _db
+        return _db.get_progress(session_id) or {}
+    return config.PROGRESS_STORE.get(session_id, {})
+
+
+def _set_progress(session_id: str, data: dict) -> None:
+    if config.USE_DATABASE:
+        from services import db as _db
+        _db.set_progress(session_id, data)
+    else:
+        config.PROGRESS_STORE[session_id] = data
+
+
+def _delete_progress(session_id: str) -> None:
+    if config.USE_DATABASE:
+        from services import db as _db
+        _db.delete_progress(session_id)
+    else:
+        config.PROGRESS_STORE.pop(session_id, None)
+
+
 ALLOWED_EXTENSIONS = {".txt", ".pdf"}
+
+# ---------------------------------------------------------------------------
+# RAG Query Logging — append every query/context/response to a JSON file
+# ---------------------------------------------------------------------------
+RAG_QUERY_LOG_PATH = os.path.join(config.LOGS_PATH, "rag_query_log.json")
+_rag_log_lock = threading.Lock()
+
+
+def _log_rag_query(question: str, wiki_context: str, answer: str) -> None:
+    """Append a query record to the RAG query log JSON file.
+
+    The wiki_context string is split on '## ' page headings so each
+    retrieved wiki section becomes a separate entry in the contexts list.
+    """
+    # Split the context into individual page chunks
+    contexts: list[str] = []
+    if wiki_context:
+        # wiki_context is formatted as "## Title\ncontent\n\n## Title2\ncontent2..."
+        import re as _re
+        parts = _re.split(r'(?=^## )', wiki_context, flags=_re.MULTILINE)
+        for part in parts:
+            chunk = part.strip()
+            if chunk:
+                contexts.append(chunk)
+
+    record = {
+        "query": question,
+        "contexts": contexts,
+        "response": answer,
+    }
+
+    with _rag_log_lock:
+        # Read existing log (or start fresh)
+        existing: list[dict] = []
+        if os.path.exists(RAG_QUERY_LOG_PATH):
+            try:
+                with open(RAG_QUERY_LOG_PATH, "r", encoding="utf-8") as f:
+                    existing = json.load(f)
+            except (json.JSONDecodeError, IOError):
+                existing = []
+
+        existing.append(record)
+
+        with open(RAG_QUERY_LOG_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+
+    logger.info("Logged RAG query to %s (total records: %d)", RAG_QUERY_LOG_PATH, len(existing))
+
 
 def load_sessions():
     if not os.path.exists(config.SESSIONS_PATH):
@@ -115,6 +236,96 @@ def health():
         },
     }
     return jsonify(checks)
+
+
+@app.route("/api/admin/reembed/<session_id>", methods=["POST"])
+def reembed_session(session_id: str):
+    """Backfill pgvector embeddings for all wiki pages in a session.
+
+    Safe to call at any time — it upserts, so re-running is idempotent.
+    Use this when the embedding provider was changed after ingestion (e.g. from
+    azure to openrouter) or when embeddings failed silently during ingest.
+
+    Returns JSON: {"embedded": N, "skipped": M, "provider": "openrouter"}
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured — no embeddings to backfill"}), 400
+
+    try:
+        from services import db as _db, embedder as _embedder
+
+        pages = _db.get_pages(session_id)
+        if not pages:
+            return jsonify({"error": f"No pages found for session {session_id}"}), 404
+
+        # Build (title, text_to_embed) pairs — prefer summary, fall back to content[:400]
+        pairs: list[tuple[str, str]] = []
+        for title, page in pages.items():
+            summary = page.get("summary", "") if isinstance(page, dict) else ""
+            content = page.get("content", "") if isinstance(page, dict) else str(page)
+            embed_text = (summary or content[:400]).strip()
+            if embed_text:
+                pairs.append((title, embed_text))
+
+        if not pairs:
+            return jsonify({"embedded": 0, "skipped": 0, "provider": config.EMBEDDING_PROVIDER}), 200
+
+        # Embed in batches of 16 (matches embedder.py's internal batch size)
+        BATCH = 16
+        embedded = 0
+        skipped = 0
+        for i in range(0, len(pairs), BATCH):
+            batch = pairs[i : i + BATCH]
+            texts = [t for _, t in batch]
+            try:
+                embeddings = _embedder.embed_batch(texts, is_query=False)
+                for (title, _), embedding in zip(batch, embeddings):
+                    _db.upsert_embedding(session_id, title, embedding)
+                    embedded += 1
+                logger.info("reembed %s: batch %d/%d done (%d pages)", session_id, i // BATCH + 1, (len(pairs) + BATCH - 1) // BATCH, embedded)
+            except Exception as exc:
+                logger.error("reembed batch %d failed: %s", i // BATCH, exc)
+                skipped += len(batch)
+
+        logger.info("reembed complete for session %s: %d embedded, %d skipped", session_id, embedded, skipped)
+        return jsonify({"embedded": embedded, "skipped": skipped, "provider": config.EMBEDDING_PROVIDER})
+
+    except Exception as exc:
+        logger.error("reembed endpoint error: %s", exc)
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/settings/llm", methods=["GET"])
+def get_llm_settings():
+    return jsonify({"provider": getattr(config, "LLM_PROVIDER", "azure")})
+
+@app.route("/api/settings/llm", methods=["POST"])
+def set_llm_settings():
+    data = request.json or {}
+    provider = data.get("provider", "azure")
+    config.LLM_PROVIDER = provider
+    return jsonify({"status": "ok", "provider": provider})
+
+@app.route("/api/settings/embedding", methods=["GET"])
+def get_embedding_settings():
+    return jsonify({"provider": getattr(config, "EMBEDDING_PROVIDER", "azure")})
+
+@app.route("/api/settings/embedding", methods=["POST"])
+def set_embedding_settings():
+    data = request.json or {}
+    provider = data.get("provider", "azure")
+    old_provider = config.EMBEDDING_PROVIDER
+    config.EMBEDDING_PROVIDER = provider
+    # If the provider changed and we're using PostgreSQL, reset the DB engine so
+    # the dimension migration check re-runs against the new vector size on next use.
+    if provider != old_provider and config.USE_DATABASE:
+        try:
+            from services import db as _db
+            _db.reset_engine()
+            logger.info("DB engine reset after embedding provider change: %s → %s", old_provider, provider)
+        except Exception as _e:
+            logger.warning("Could not reset DB engine after provider change: %s", _e)
+    return jsonify({"status": "ok", "provider": provider})
 
 
 @app.route("/upload", methods=["POST"])
@@ -170,14 +381,17 @@ def upload():
     if not saved_paths:
         return jsonify({"error": "No valid files (.txt, .pdf) found"}), 400
 
-    # Initialize progress with document-level counters
+    # Initialize progress with per-document tracking
     progress = {
         "phase": "processing",
-        "docs": {"total": len(saved_paths), "rag_done": 0, "wiki_done": 0},
-        "rag": {},
-        "wiki": {},
+        "docs": {"total": len(saved_paths), "wiki_done": 0},
+        "wiki": {"step": "queued", "message": "", "pages_total": 0, "relations_total": 0},
+        "docs_list": [
+            {"name": os.path.basename(p), "status": "queued", "pages": 0, "step": ""}
+            for p in saved_paths
+        ],
     }
-    config.PROGRESS_STORE[session_id] = progress
+    _set_progress(session_id, progress)
 
     # Submit all tasks to executor (non-blocking)
     for save_path, meta in zip(saved_paths, metadata_list):
@@ -215,102 +429,203 @@ def _ingest_single_doc_rag(file_path: str, session_id: str, meta: dict = None):
     except Exception as e:
         logger.error("RAG ingest failed for %s: %s", file_path, e)
     finally:
-        progress = config.PROGRESS_STORE.get(session_id, {})
+        progress = _get_progress(session_id)
         docs = progress.get("docs", {})
         docs["rag_done"] = docs.get("rag_done", 0) + 1
+        progress["docs"] = docs
+        _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
 def _ingest_single_doc_wiki(file_path: str, session_id: str):
     """Worker for Wiki building of a single doc."""
+    doc_name = os.path.basename(file_path)
     try:
-        wiki.ingest(file_path, session_id)
+        result = wiki.ingest(file_path, session_id)
+        pages = (result or {}).get("pages_updated", 0)
+        _refresh_wiki_stats(session_id)
+        _update_doc_status(session_id, doc_name, "done", "", pages)
     except Exception as e:
         logger.error("Wiki ingest failed for %s: %s", file_path, e)
+        _update_doc_status(session_id, doc_name, "error", str(e)[:60])
     finally:
-        progress = config.PROGRESS_STORE.get(session_id, {})
-        docs = progress.get("docs", {})
-        docs["wiki_done"] = docs.get("wiki_done", 0) + 1
+        with _get_progress_lock(session_id):
+            progress = _get_progress(session_id)
+            docs = progress.get("docs", {})
+            docs["wiki_done"] = docs.get("wiki_done", 0) + 1
+            progress["docs"] = docs
+            _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
 def _check_completion(session_id: str):
     """Mark phase as complete when all documents finish both pipelines."""
-    progress = config.PROGRESS_STORE.get(session_id, {})
+    progress = _get_progress(session_id)
     docs = progress.get("docs", {})
     total = docs.get("total", 0)
     # if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
     if total > 0 and docs.get("wiki_done", 0) >= total:
         progress["phase"] = "complete"
+        _set_progress(session_id, progress)
+
+
+@app.route("/messages")
+def get_messages():
+    """Return chat message history for a session."""
+    session_id = request.args.get("session_id", "")
+    limit = int(request.args.get("limit", "100"))
+    if not session_id:
+        return jsonify({"messages": []})
+    if config.USE_DATABASE:
+        from services import db as _db
+        messages = _db.get_messages(session_id, limit=limit)
+    else:
+        messages = []
+    return jsonify({"messages": messages})
+
+
+@app.route("/document/locate")
+def locate_in_document():
+    """Find the page number and character offset of a quote in a source document."""
+    session_id = request.args.get("session_id", "")
+    doc_name = request.args.get("doc_name", "").strip()
+    quote = request.args.get("quote", "").strip()
+    if not session_id or not doc_name or not quote:
+        return jsonify({"found": False, "page_num": 0, "char_offset": 0})
+    if config.USE_DATABASE:
+        from services import db as _db
+        result = _db.find_quote_position(session_id, doc_name, quote)
+        return jsonify(result)
+    return jsonify({"found": False, "page_num": 0, "char_offset": 0})
+
+
+def _store_chat_msg(session_id, role, content, msg_type="text", metadata=None):
+    """Insert a chat message if DB is enabled, otherwise no-op."""
+    if config.USE_DATABASE:
+        from services import db as _db
+        try:
+            return _db.insert_message(session_id, role, content, msg_type, metadata)
+        except Exception as e:
+            logger.error("Failed to store chat message: %s", e)
+    return None
 
 
 @app.route("/query", methods=["POST"])
 def query_route():
-    """Query all pipelines (RAG, Wiki, Hybrid) in parallel and return side-by-side answers."""
+    """Query the wiki pipeline with disambiguation and clarification support."""
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
     session_id = data.get("session_id", "")
+    target_doc = data.get("target_doc", "").strip()
+    is_followup = data.get("is_followup", False)
 
     if not question:
         return jsonify({"error": "No question provided"}), 400
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
 
-    # Step 1: Fetch contexts concurrently
     t0 = time.time()
-    # rag_ctx_future = executor.submit(rag.get_context, question, session_id)
-    wiki_ctx_future = executor.submit(wiki.get_context, question, session_id)
 
-    # rag_context, chunk_details = rag_ctx_future.result(timeout=60)
-    rag_context = ""
-    chunk_details = []
-    
-    wiki_ctx_res = wiki_ctx_future.result(timeout=300) # Wiki context fetch does an LLM call if pages > 20
+    # Store user message in chat history
+    _store_chat_msg(session_id, "user", question, "text")
+
+    # Pre-check: does the question already name a specific document?
+    _names_doc = wiki._question_names_a_document(question, [])
+
+    # --- Step 0: Disambiguation check ---
+    if not target_doc and not is_followup and not _names_doc:
+        try:
+            classify_result = wiki.classify_query(question, session_id)
+            if classify_result.get("needs_disambiguation"):
+                docs = classify_result["documents"]
+                import re as _re
+                clean_docs = [_re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
+                msg = "I'd like to help, but could you specify which document you're referring to? Please select one below, or upload a new document."
+                _store_chat_msg(session_id, "assistant", msg, "disambiguation",
+                               {"documents": clean_docs, "raw_documents": docs})
+                return jsonify({
+                    "type": "disambiguation",
+                    "message": msg,
+                    "documents": clean_docs,
+                    "raw_documents": docs,
+                    "total_elapsed_ms": round((time.time() - t0) * 1000),
+                })
+        except Exception as e:
+            logger.error("Disambiguation check failed: %s", e)
+
+    # --- Step 0b: Ambiguity/clarification check ---
+    if not is_followup and not _names_doc and config.ENABLE_CLARIFICATION:
+        try:
+            conv_ctx = wiki.build_conversation_context(session_id)
+            ambiguity = wiki.check_ambiguity(question, session_id, conv_ctx)
+            if ambiguity.get("needs_clarification"):
+                clarif_q = ambiguity["question"]
+                options = ambiguity.get("options") or []
+                _store_chat_msg(session_id, "assistant", clarif_q, "clarification",
+                               {"options": options, "original_question": question})
+                return jsonify({
+                    "type": "clarification",
+                    "message": clarif_q,
+                    "options": options,
+                    "total_elapsed_ms": round((time.time() - t0) * 1000),
+                })
+        except Exception as e:
+            logger.error("Ambiguity check failed: %s", e)
+
+    # --- Step 1: Build conversation context ---
+    conversation_context = wiki.build_conversation_context(session_id)
+
+    # --- Step 2: Fetch wiki context ---
+    if target_doc:
+        wiki_ctx_res = wiki.get_context(question, session_id, target_doc=target_doc)
+    else:
+        wiki_ctx_res = wiki.get_context(question, session_id)
+
     wiki_context = wiki_ctx_res.get("context", "")
     selected_titles = wiki_ctx_res.get("selected_titles", [])
     bm25_count = wiki_ctx_res.get("bm25_count", 0)
+    page_selection_usage = wiki_ctx_res.get("page_selection_usage", {})
 
-    # Step 2: Generate answers concurrently
-    # rag_ans_future = executor.submit(rag.generate_answer, question, rag_context, chunk_details)
-    wiki_ans_future = executor.submit(wiki.generate_answer, question, wiki_context, selected_titles, session_id, bm25_count)
-    # hybrid_ans_future = executor.submit(hybrid.generate_answer, question, rag_context, chunk_details, wiki_context, selected_titles)
-
-    rag_t0 = time.time()
-    rag_result = {"answer": "RAG is temporarily disabled.", "chunks": []}
-    rag_result["elapsed_ms"] = round((time.time() - rag_t0) * 1000)
-
+    # --- Step 3: Generate answer ---
     wiki_t0 = time.time()
     try:
-        wiki_result = wiki_ans_future.result(timeout=300)
+        wiki_result = wiki.generate_answer(
+            question, wiki_context, selected_titles, session_id,
+            bm25_count, page_selection_usage, conversation_context,
+        )
     except Exception as e:
         logger.error("Wiki generation error (%s): %s", type(e).__name__, e)
-        wiki_result = {"answer": f"⚠️ Wiki error: {type(e).__name__}: {e}", "pages_used": []}
+        wiki_result = {"answer": f"Wiki error: {type(e).__name__}: {e}", "pages_used": []}
     wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
 
-    hybrid_t0 = time.time()
-    hybrid_result = {"answer": "Hybrid is temporarily disabled.", "usage": {}}
-    hybrid_result["elapsed_ms"] = round((time.time() - hybrid_t0) * 1000)
+    # Store assistant answer in chat history
+    _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""), "answer", {
+        "confidence_score": wiki_result.get("confidence_score", 0),
+        "files_used": wiki_result.get("files_used", []),
+        "token_total": wiki_result.get("token_total", {}),
+    })
 
-    # Update session history
+    # Update session history (backward compat)
     sessions = load_sessions()
     if session_id in sessions:
-        # Avoid duplicate consecutive questions
         if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
             sessions[session_id].setdefault("history", []).insert(0, question)
         sessions[session_id]["updated_at"] = time.time()
-        
-        # Rename session if it's the first question and still using the default name
         if len(sessions[session_id]["history"]) == 1 and sessions[session_id]["name"].startswith("Session "):
             new_name = question[:30] + ("..." if len(question) > 30 else "")
             sessions[session_id]["name"] = new_name
-            
         save_sessions(sessions)
 
+    # Log query for audit
+    try:
+        _log_rag_query(question, wiki_context, wiki_result.get("answer", ""))
+    except Exception as log_err:
+        logger.error("Failed to log RAG query: %s", log_err)
+
     return jsonify({
-        "rag": rag_result,
+        "type": "answer",
         "wiki": wiki_result,
-        "hybrid": hybrid_result,
-        "total_elapsed_ms": round((time.time() - t0) * 1000)
+        "total_elapsed_ms": round((time.time() - t0) * 1000),
     })
 
 
@@ -494,7 +809,7 @@ def get_log():
 def progress():
     """Return the current progress of an ongoing ingest."""
     session_id = request.args.get("session_id", "")
-    return jsonify(config.PROGRESS_STORE.get(session_id, {"rag": {}, "wiki": {}}))
+    return jsonify(_get_progress(session_id) or {"rag": {}, "wiki": {}})
 
 
 @app.route("/sessions", methods=["GET"])
@@ -572,7 +887,15 @@ def clear_session():
         errors.append(f"uploads: {e}")
 
     # Clear progress store entry
-    config.PROGRESS_STORE.pop(session_id, None)
+    _delete_progress(session_id)
+
+    # Clear chat messages
+    if config.USE_DATABASE:
+        try:
+            from services import db as _db
+            _db.delete_messages(session_id)
+        except Exception as e:
+            errors.append(f"chat: {e}")
 
     # Remove from sessions metadata
     sessions = load_sessions()
