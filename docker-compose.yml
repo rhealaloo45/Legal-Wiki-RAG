@@ -1,0 +1,60 @@
+# ── Legal Wiki RAG — Full Stack ────────────────────────────────────────────────
+#
+# Quick start (first time):
+#   cp app/.env.example app/.env      # fill in your API keys
+#   docker compose up --build
+#
+# Subsequent starts:
+#   docker compose up
+#
+# Stop and remove containers (data volumes are preserved):
+#   docker compose down
+#
+# Wipe everything including the DB volume:
+#   docker compose down -v
+# ------------------------------------------------------------------------------
+
+services:
+
+  # ── PostgreSQL + pgvector ──────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pw
+      POSTGRES_DB: legal_wiki
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # expose on 5433 locally so it doesn't clash with any native Postgres
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d legal_wiki"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Flask application ──────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - app/.env
+    environment:
+      # Override DATABASE_URL so it points at the compose db service
+      DATABASE_URL: postgresql://postgres:pw@db:5432/legal_wiki
+      PORT: 5001
+    ports:
+      - "5001:5001"
+    volumes:
+      # Persist uploaded files and wiki indexes across restarts
+      - ./app/data:/app/data
+
+volumes:
+  pgdata:

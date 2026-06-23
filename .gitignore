@@ -237,4 +237,24 @@ debug.log
 lexwiki_ui_v2.html
 
 # macOS
-.DS_Store
+.DS_Store
+
+# Windows reserved device names
+NUL
+
+# claude
+.claude/
+.vscode/
+
+
+# Query & test data files
+/q*.json
+/t*.json
+/sa1_detail.txt
+/sa1_raw.json
+
+# Understanding
+ARCHITECTURE.md
+PLAN.md
+FLOWCHART.md
+questions.txt

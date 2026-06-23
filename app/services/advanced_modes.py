@@ -254,8 +254,42 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str
     instead of raw document text where available, dramatically reducing prompt size and latency.
     """
     lock = locks_ref[job_id]
-    
+
+    # C7: mapping from normalised column names to page_metadata field names.
+    # When a Review column matches a standard field that was pre-extracted at
+    # ingest time, we serve it directly from the DB — no LLM call needed.
+    _METADATA_FIELD_MAP = {
+        "governing law": "governing_law",
+        "jurisdiction": "jurisdiction",
+        "effective date": "effective_date",
+        "termination notice": "termination_notice",
+        "termination notice period": "termination_notice",
+        "liability cap": "liability_cap",
+        "ip ownership": "ip_ownership",
+        "intellectual property ownership": "ip_ownership",
+        "parties": "parties",
+        "auto renewal": "auto_renewal",
+        "auto-renewal": "auto_renewal",
+        "notice period": "notice_period",
+        "payment terms": "payment_terms",
+    }
+
     def _extract_worker(doc_name, col_name, doc_text):
+        # C7: try metadata cache before firing an LLM call
+        field_key = _METADATA_FIELD_MAP.get(col_name.lower().strip())
+        if field_key and config.USE_DATABASE:
+            try:
+                from services import db as _db
+                cached = _db.get_metadata(session_id, doc_name)
+                if cached.get(field_key) is not None:
+                    res = {"value": cached[field_key], "confidence": 0.95, "quote": None}
+                    with lock:
+                        store_ref[job_id]["rows"][doc_name][col_name] = res
+                        store_ref[job_id]["completed"] += 1
+                    return
+            except Exception as _e:
+                logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
+
         try:
             res = extract_cell(doc_text, col_name)
         except Exception as e:
