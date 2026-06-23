@@ -247,6 +247,12 @@ NUL
 .vscode/
 
 
+# Query & test data files
+/q*.json
+/t*.json
+/sa1_detail.txt
+/sa1_raw.json
+
 # Understanding
 ARCHITECTURE.md
 PLAN.md
