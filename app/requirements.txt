@@ -13,3 +13,6 @@ python-docx
 sqlalchemy>=2.0
 psycopg2-binary
 pgvector
+# Phase 4.7 — Intent classifier agent (LangGraph orchestration)
+langgraph>=1.0
+langchain-core
