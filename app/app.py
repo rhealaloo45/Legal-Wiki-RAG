@@ -717,6 +717,21 @@ def wiki_backfill_embeddings():
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/wiki/backfill_source_docs", methods=["POST"])
+def wiki_backfill_source_docs():
+    """Populate empty source_doc fields from page title parentheses."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "") or request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    try:
+        result = wiki.backfill_source_docs(session_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Backfill source_docs failed: %s", e)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/wiki/pages")
 def wiki_pages_list():
     """Return a sorted list of all wiki page titles for the browser panel."""

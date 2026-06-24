@@ -1101,6 +1101,48 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         )
 
 
+def backfill_source_docs(session_id: str) -> dict:
+    """Populate empty source_doc fields by extracting the filename from page titles.
+
+    Page titles follow the pattern:
+        Topic Name (sessionid_path_to_filename.pdf)
+    This extracts the filename portion and updates DB rows where source_doc is empty.
+    """
+    if not config.USE_DATABASE:
+        return {"ok": False, "reason": "file mode — source_doc backfill is DB-only"}
+
+    from sqlalchemy import text
+    engine = _db.get_engine()
+    updated = 0
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT title FROM pages WHERE session_id = :sid AND (source_doc IS NULL OR source_doc = '')"),
+            {"sid": session_id},
+        ).fetchall()
+        for (title,) in rows:
+            paren_start = title.rfind("(")
+            paren_end = title.rfind(")")
+            if paren_start < 0 or paren_end <= paren_start:
+                continue
+            raw_path = title[paren_start + 1:paren_end]
+            # Strip session_id prefix (uuid_)
+            parts = raw_path.split("_", 1)
+            if len(parts) == 2 and len(parts[0]) == 36:
+                raw_path = parts[1]
+            # Extract just the filename (last path segment)
+            filename = raw_path.replace("\\", "/").rsplit("/", 1)[-1]
+            if not filename:
+                continue
+            conn.execute(
+                text("UPDATE pages SET source_doc = :sd WHERE session_id = :sid AND title = :title"),
+                {"sd": filename, "sid": session_id, "title": title},
+            )
+            updated += 1
+        conn.commit()
+    logger.info("Backfilled source_doc for %d pages in session %s", updated, session_id)
+    return {"ok": True, "updated": updated, "total_empty": len(rows)}
+
+
 def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
     """Generate embeddings for any pages in a session that lack them.
 
@@ -1775,6 +1817,41 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         answer = re.sub(
             rf'(?i){_REASON_OPEN}.*', '', answer, flags=re.DOTALL
         ).strip()
+
+        # Fallback: if stripping left an empty/trivial answer but reasoning had
+        # real content, the model put the answer inside the reasoning block.
+        # Recover by stripping tags, confidence lines, and reasoning preamble.
+        _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
+        if len(answer) <= 10 and reasoning_match:
+            reasoning_body = reasoning_match.group(1)
+            recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
+            # Strip reasoning preamble: numbered analysis steps before the
+            # actual content (e.g. "1. Identify the core language...\n2. Add...")
+            # Heuristic: find the first markdown heading, divider, or
+            # numbered formulation header — everything before is preamble.
+            content_start = re.search(
+                r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
+                recovered,
+            )
+            if content_start and content_start.start() > 20:
+                recovered = recovered[content_start.start():].strip()
+            # Re-extract confidence from recovered text if main extraction got default
+            if confidence_score == 75:
+                re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
+                if re_score:
+                    try:
+                        confidence_score = min(100, max(0, int(re_score.group(1))))
+                    except ValueError:
+                        pass
+                re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
+                if re_reason:
+                    confidence_reason = re_reason.group(1).strip()
+            if len(recovered) > len(answer):
+                logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
+                answer = recovered
+
+        # Always strip any stray CONFIDENCE lines that leaked into the answer
+        answer = re.sub(_CONFIDENCE_LINE_RE, '', answer).strip()
 
         # --- Fallback confidence when model skipped the reasoning block ---
         # A short "Not covered" answer means the context had nothing relevant —
