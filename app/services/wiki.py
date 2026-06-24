@@ -1101,6 +1101,52 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         )
 
 
+def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
+    """Generate embeddings for any pages in a session that lack them.
+
+    Lets existing sessions (ingested before embeddings existed, or when the
+    embedding API was rate-limited) gain pgvector hybrid retrieval without a full
+    re-ingest. Embeds the page summary (or first 400 chars of content) — the same
+    text used during normal ingest. Returns a summary dict.
+    """
+    if not config.USE_DATABASE:
+        return {"ok": False, "reason": "file mode — embeddings are DB-only", "embedded": 0}
+
+    pages = _db.get_pages(session_id)
+    if not pages:
+        return {"ok": False, "reason": "no pages in session", "embedded": 0}
+
+    existing = _db.count_embeddings(session_id)
+
+    # Build the list of (title, text) for pages that need embedding.
+    pending: list[tuple[str, str]] = []
+    for title, page in pages.items():
+        text = (page.get("summary") or page.get("content", "")[:400]).strip()
+        if text:
+            pending.append((title, text))
+
+    if not pending:
+        return {"ok": True, "reason": "nothing to embed", "embedded": 0,
+                "total_pages": len(pages), "existing_embeddings": existing}
+
+    embedded = 0
+    for i in range(0, len(pending), batch_size):
+        chunk = pending[i:i + batch_size]
+        _embed_pages_batch(session_id, chunk)  # logs + swallows failures per batch
+        embedded += len(chunk)
+
+    final = _db.count_embeddings(session_id)
+    logger.info("Backfill complete for session %s: %d embeddings now present (was %d)",
+                session_id, final, existing)
+    return {
+        "ok": True,
+        "total_pages": len(pages),
+        "attempted": embedded,
+        "existing_embeddings": existing,
+        "embeddings_now": final,
+    }
+
+
 # ---------------------------------------------------------------------------
 # S3 — Page compaction / re-synthesis (Phase 4)
 # ---------------------------------------------------------------------------
@@ -1260,59 +1306,89 @@ def _extract_doc_names(pages: dict) -> dict[str, str]:
     return doc_names
 
 
-def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
-    """Detect which source documents the user is asking about.
+def _distinct_source_docs(pages: dict) -> set[str]:
+    """Return the set of distinct raw source_doc values across all pages."""
+    docs: set[str] = set()
+    for page in pages.values():
+        if isinstance(page, dict):
+            sd = page.get("source_doc", "")
+            if sd:
+                docs.add(sd)
+    return docs
 
-    Builds several normalised variants of each doc name (with/without session
-    prefix, underscores replaced by spaces, etc.) and checks whether any of
-    them appear in the question text.  Returns the set of *canonical* doc names
-    (as they appear in page titles) that matched.
+
+def _norm_doc_name(name: str) -> str:
+    """Normalise a source-doc path/filename to a comparable lowercase string.
+
+    "<uuid>_Legal AI Tool .../Service Agreement 2_redacted.pdf" → "service agreement 2"
     """
-    doc_names = _extract_doc_names(pages)
-    if not doc_names:
+    s = name.replace("\\", "/").rsplit("/", 1)[-1]      # basename
+    s = re.sub(r'^[a-f0-9-]{36}_', '', s)               # strip session-id prefix
+    s = os.path.splitext(s)[0]                          # drop extension
+    s = s.replace('_', ' ').lower()
+    s = re.sub(r'\b(redacted|test|final|draft|copy|v\d+)\b', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
+    """Detect which SPECIFIC source documents the user is asking about.
+
+    Matches the question against each distinct ``source_doc`` (filename), not
+    against the document *type* — so "service agreement 2" scopes to exactly that
+    document instead of every service agreement. Returns a set of raw source_doc
+    strings (use ``_pages_from_files`` to expand to page titles).
+
+    Priority:
+      1. Numbered type pattern ("service agreement 2", "NDA 3") → the doc whose
+         normalised name contains that type word AND that number.
+      2. Distinctive full-name match (the doc's normalised name appears verbatim).
+    """
+    src_docs = _distinct_source_docs(pages)
+    if not src_docs:
         return set()
 
-    question_lower = question.lower()
+    q = " " + re.sub(r'\s+', ' ', question.lower()).strip() + " "
     matched: set[str] = set()
 
-    for canonical in doc_names:
-        # 1. Exact match on the full doc name
-        if canonical.lower() in question_lower:
-            matched.add(canonical)
-            continue
+    # 1. Numbered type pattern — precise per-document scoping
+    num_match = _DOC_NAME_PATTERN.search(question)
+    if num_match:
+        doc_num = num_match.group(1)
+        type_match = re.search(
+            r'(service\s+agreement|shareholder\s+agreement|nda|joint\s+venture|'
+            r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)',
+            question, re.IGNORECASE,
+        )
+        type_core = ""
+        if type_match:
+            t = type_match.group(1).lower()
+            # First word distinguishes the type in the filename ("service", "nda", ...)
+            type_core = {"jva": "joint", "sha": "shareholder", "sa": "service"}.get(t, t.split()[0])
+        for sd in src_docs:
+            norm = _norm_doc_name(sd)
+            if re.search(rf'\b{re.escape(doc_num)}\b', norm) and (not type_core or type_core in norm):
+                matched.add(sd)
+        if matched:
+            logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
+            return matched
 
-        # 2. Strip a leading session-id prefix (UUID or hex followed by _)
-        stripped = re.sub(r'^[a-f0-9_-]+?_', '', canonical, count=1)
-        if stripped and stripped.lower() in question_lower:
-            matched.add(canonical)
-            continue
-
-        # 3. Replace underscores with spaces (user likely types spaces)
-        spacified = stripped.replace('_', ' ')
-        if spacified and spacified.lower() in question_lower:
-            matched.add(canonical)
-            continue
-
-        # 4. Also try the spacified version without the extension
-        no_ext = os.path.splitext(spacified)[0]
-        if no_ext and len(no_ext) >= 4 and no_ext.lower() in question_lower:
-            matched.add(canonical)
-            continue
-
+    # 2. Distinctive full-name match (e.g. user pastes the exact doc name)
+    for sd in src_docs:
+        norm = _norm_doc_name(sd)
+        if len(norm) >= 6 and norm in q:
+            matched.add(sd)
     if matched:
-        logger.info("Detected file mentions in query: %s", matched)
+        logger.info("Detected file mention (name): %s", {_norm_doc_name(d) for d in matched})
 
     return matched
 
 
-def _pages_from_files(pages: dict, file_names: set[str]) -> list[str]:
-    """Return page titles that belong to any of the given source files."""
+def _pages_from_files(pages: dict, source_docs: set[str]) -> list[str]:
+    """Return page titles whose ``source_doc`` is in the given set."""
     result = []
-    for title in pages:
-        for fname in file_names:
-            if fname in title:
-                result.append(title)
-                break
+    for title, page in pages.items():
+        if isinstance(page, dict) and page.get("source_doc", "") in source_docs:
+            result.append(title)
     return result
 
 
@@ -1372,7 +1448,7 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
-def get_context(question: str, session_id: str, target_doc: str = "") -> tuple[str, list]:
+def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None) -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
@@ -1400,6 +1476,15 @@ def get_context(question: str, session_id: str, target_doc: str = "") -> tuple[s
     else:
         mentioned_files = _detect_mentioned_files(question, pages)
         file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
+
+        # Fallback: if no file-level mention, check if the question names a known
+        # entity from a document identifier (e.g. "ReVolt", "Meridian", "Yuvraj
+        # Kanther") and force-include those pages so the answer is correctly scoped.
+        if not file_pages:
+            matched_titles = _pages_matching_question_entity(question, pages)
+            if matched_titles:
+                file_pages = matched_titles
+                logger.info("Entity-matched %d pages from question", len(file_pages))
 
     bm25_count = 0
     pages_for_llm = pages
@@ -1580,7 +1665,7 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
     return "\nDOCUMENT METADATA:\n" + "\n".join(metadata_lines) + "\n"
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -1612,7 +1697,10 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
-    from services.prompts import ANSWER_PROMPT, ASSESSMENT_PROMPT
+    from services.prompts import (
+        ANSWER_PROMPT, ASSESSMENT_PROMPT, COMPARISON_PROMPT,
+        OBLIGATION_PROMPT, DRAFTING_PROMPT,
+    )
 
     conv_block = ""
     if conversation_context:
@@ -1621,8 +1709,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Build metadata block with party names from ingested documents
     metadata_block = _build_metadata_block(session_id, selected_titles, pages)
 
-    # Pick prompt based on query type
-    prompt_template = ASSESSMENT_PROMPT if _is_assessment_query(question) else ANSWER_PROMPT
+    # Pick prompt based on the classified lawyer intent (intent_agent upstream)
+    _intent_prompt_map = {
+        "factual": ANSWER_PROMPT,
+        "risk_assessment": ASSESSMENT_PROMPT,
+        "comparison": COMPARISON_PROMPT,
+        "obligation": OBLIGATION_PROMPT,
+        "drafting": DRAFTING_PROMPT,
+    }
+    prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
     prompt = prompt_template.format(
         context=wiki_content,
         question=question,
@@ -1647,9 +1742,17 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         #   CONFIDENCE_SCORE: [int]
         #   CONFIDENCE_REASON: [sentence]
         # Extracting here avoids a second LLM call for _evaluate_confidence().
+        # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
+        _REASON_OPEN = r'<\s*reasoning\s*>'
+        _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
         reasoning_match = re.search(
-            r'(?i)<reasoning>(.*?)</reasoning>', raw_answer, flags=re.DOTALL
+            rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
         )
+        # Fallback: if no closing tag, grab everything after the opening tag
+        if not reasoning_match:
+            reasoning_match = re.search(
+                rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
+            )
         if reasoning_match:
             reasoning_text = reasoning_match.group(1)
             score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
@@ -1664,9 +1767,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             if reason_match:
                 confidence_reason = reason_match.group(1).strip()
 
-        # Strip reasoning tags for the user-facing answer
+        # Strip reasoning tags for the user-facing answer (all variants)
         answer = re.sub(
-            r'(?i)<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL
+            rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
+        ).strip()
+        # Also strip unclosed reasoning block (model wrote opening tag but no closing)
+        answer = re.sub(
+            rf'(?i){_REASON_OPEN}.*', '', answer, flags=re.DOTALL
         ).strip()
 
         # --- Fallback confidence when model skipped the reasoning block ---
@@ -1803,18 +1910,149 @@ _DOC_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Matches when a question names a document type together with a distinctive entity
+# or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement").
+_DOC_WITH_ENTITY_PATTERN = re.compile(
+    r'(?:the\s+)?([A-Za-z]+(?:\s+[A-Za-z]+)*)\s+'
+    r'(?:jv\s+agreement|jva|joint\s+venture|service\s+agreement|nda|'
+    r'shareholder\s+agreement|sha|court\s+case|judgment|legal\s+opinion)',
+    re.IGNORECASE,
+)
+
+# Words that are NOT distinctive entity names — when one of these immediately
+# precedes a doc type ("this NDA", "the agreement"), the reference is VAGUE and
+# should trigger disambiguation, not be treated as naming a specific document.
+_NON_ENTITY_WORDS = {
+    "this", "that", "the", "a", "an", "any", "each", "every", "our", "their",
+    "your", "its", "his", "her", "some", "no", "which", "what", "does", "do",
+    "is", "are", "was", "were", "review", "summarize", "summarise", "analyze",
+    "analyse", "explain", "describe", "identify", "assess", "evaluate", "draft",
+    "compare", "in", "of", "for", "on", "about", "regarding", "tata", "given",
+}
+
+# Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
+# (a determiner + a doc type/noun) NOT followed by a number. Used to disambiguate
+# among multiple documents of the same type.
+_VAGUE_DOC_PATTERN = re.compile(
+    r'\b(?:this|that|the|a|an)\s+'
+    r'(service\s+agreement|shareholders?\s+agreement|nda|'
+    r'non[-\s]?disclosure(?:\s+agreement)?|joint\s+venture(?:\s+agreement)?|'
+    r'jva|sha|legal\s+opinion|court\s+case|judgment|agreement|document|contract)'
+    r'\b(?!\s*#?\s*\d)',
+    re.IGNORECASE,
+)
+
+# Maps a vague type keyword → substring that must appear in the source-doc name.
+_VAGUE_TYPE_FILTER = {
+    "service agreement": "service agreement",
+    "shareholder agreement": "shareholder", "shareholders agreement": "shareholder",
+    "sha": "shareholder",
+    "nda": "nda", "non disclosure": "nda", "non-disclosure": "nda",
+    "non disclosure agreement": "nda", "non-disclosure agreement": "nda",
+    "joint venture": "joint venture", "joint venture agreement": "joint venture",
+    "jva": "joint venture",
+    "legal opinion": "legal opinion",
+    "court case": "court", "judgment": "judgment",
+}
+# Generic determiner+noun ("this agreement", "the document") — can't narrow by type.
+_GENERIC_VAGUE_WORDS = {"agreement", "document", "contract"}
+
 
 def _question_names_a_document(question: str, docs: list[str]) -> bool:
-    """Return True if the question contains a recognizable document reference.
+    """Return True if the question names a SPECIFIC document.
 
-    Matches patterns like 'service agreement 1', 'NDA 3', 'SA1', 'SHA 4',
-    and checks if any ingested document name contains that same number+type combo.
+    Checks:
+    1. Numbered pattern ("service agreement 1", "NDA 3", "SA1")
+    2. Entity name + doc type ("ReVolt JV Agreement", "Meridian service agreement"),
+       but NOT a determiner + type ("this NDA", "the agreement") — those are vague.
     """
-    match = _DOC_NAME_PATTERN.search(question)
-    if not match:
-        return False
-    # The question mentions a specific numbered document — that's enough
-    return True
+    if _DOC_NAME_PATTERN.search(question):
+        return True
+    m = _DOC_WITH_ENTITY_PATTERN.search(question)
+    if m:
+        entity = m.group(1).strip().lower()
+        last_word = entity.split()[-1] if entity else ""
+        # "this NDA" / "the service agreement" → vague, not a specific document
+        if last_word and last_word not in _NON_ENTITY_WORDS:
+            return True
+    return False
+
+
+# Tokens that are doc types / generic vocabulary, NOT distinctive entity names.
+_ENTITY_EXCLUDE = {
+    "nda", "sha", "jva", "jv", "sa", "tata", "agreement", "agreements", "service",
+    "shareholder", "shareholders", "joint", "venture", "court", "judgment",
+    "judgments", "legal", "opinion", "opinions", "case", "document", "documents",
+    "redacted", "test", "amendment", "summary", "final", "draft", "the", "and",
+    "for", "from", "with", "this", "that", "limited", "private", "company",
+}
+
+
+def _doc_identifier_part(title: str) -> str:
+    """Return the document-identifier portion of a page title.
+
+    Titles look like "Topic – SA-Meridian (Service Agreement)". The identifier is
+    the text AFTER ' – ' and BEFORE ' (' — e.g. "SA-Meridian", "JVReVolt",
+    "Yuvraj Kanther". Topic words (before the dash) are NOT included, so generic
+    legal vocabulary like "Confidential Information" is never treated as an entity.
+    """
+    dash = title.find(" – ")
+    if dash < 0:
+        return ""
+    rest = title[dash + 3:]
+    paren = rest.find(" (")
+    return (rest[:paren] if paren > 0 else rest).strip()
+
+
+def _extract_doc_entities(pages: dict) -> set[str]:
+    """Return the set of distinctive entity tokens drawn from document identifiers.
+
+    "SA-Meridian" → {"meridian"}, "JVReVolt" → {"revolt"},
+    "Yuvraj Kanther" → {"yuvraj kanther", "yuvraj", "kanther"}. Doc-type
+    abbreviations and generic words are excluded.
+    """
+    entities: set[str] = set()
+    for title in pages:
+        ident = _doc_identifier_part(title)
+        if not ident:
+            continue
+        # Strip a leading doc-type token / number prefix. Handles three forms:
+        #   "SA-Meridian"  → "Meridian"   (separator)
+        #   "JV3-SteelLoop"→ "SteelLoop"  (type + number + separator)
+        #   "JVReVolt"     → "ReVolt"     (camelCase, no separator)
+        core = re.sub(r'^(?:NDA|SHA|JVA?|SA)(?=[A-Z])', '', ident)               # camelCase
+        core = re.sub(r'^(?:nda|sha|jva?|sa)\d*[-\s]+', '', core, flags=re.IGNORECASE)
+        core = re.sub(r'^[\d\s-]+', '', core).strip(" -")
+        cl = core.lower()
+        if len(cl) >= 4 and cl not in _ENTITY_EXCLUDE:
+            entities.add(cl)
+        for w in re.findall(r"[A-Za-z]{4,}", core):
+            wl = w.lower()
+            if wl not in _ENTITY_EXCLUDE:
+                entities.add(wl)
+    return entities
+
+
+def _question_mentions_known_entity(question: str, pages: dict) -> bool:
+    """True if the question mentions a distinctive entity/party name from a
+    document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
+    q = question.lower()
+    return any(ent in q for ent in _extract_doc_entities(pages))
+
+
+def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
+    """Return page titles whose document identifier contains an entity name
+    mentioned in the question. Used to force-scope context to the right document."""
+    q = question.lower()
+    hits = {ent for ent in _extract_doc_entities(pages) if ent in q}
+    if not hits:
+        return []
+    result = []
+    for title in pages:
+        ident = _doc_identifier_part(title).lower()
+        if ident and any(h in ident for h in hits):
+            result.append(title)
+    return result
 
 
 def classify_query(question: str, session_id: str) -> dict:
@@ -1842,8 +2080,32 @@ def classify_query(question: str, session_id: str) -> dict:
     if len(docs) <= 1:
         return {"needs_disambiguation": False, "documents": docs}
 
+    # Vague singular reference ("this NDA", "the agreement") with multiple matching
+    # documents → ask which one. Narrow to the named type when possible.
+    vmatch = _VAGUE_DOC_PATTERN.search(question)
+    if vmatch and not _question_names_a_document(question, docs) \
+            and not _question_mentions_known_entity(question, pages):
+        vtype = re.sub(r'\s+', ' ', vmatch.group(1).lower().strip())
+        if vtype in _GENERIC_VAGUE_WORDS:
+            logger.info("Vague document reference '%s' → disambiguate (all docs)", vtype)
+            return {"needs_disambiguation": True, "documents": docs}
+        filt = _VAGUE_TYPE_FILTER.get(vtype)
+        if filt:
+            type_docs = [
+                d for d in docs
+                if filt in re.sub(r'^[a-f0-9-]{36}_', '', d).replace('_', ' ').lower()
+            ]
+            if len(type_docs) > 1:
+                logger.info("Vague '%s' reference → disambiguate among %d %s docs",
+                            vtype, len(type_docs), filt)
+                return {"needs_disambiguation": True, "documents": type_docs}
+
     # Skip if the question contains a recognizable document name pattern
     if _question_names_a_document(question, docs):
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # Skip if the question mentions a distinctive entity/party name from the wiki
+    if _question_mentions_known_entity(question, pages):
         return {"needs_disambiguation": False, "documents": docs}
 
     # Clean document names for display
@@ -1857,11 +2119,12 @@ def classify_query(question: str, session_id: str) -> dict:
         f"Question: {question}\n\n"
         "A question DOES NOT need disambiguation when:\n"
         "- It names or numbers a specific document (e.g. 'service agreement 1', 'NDA 3', 'the SHA')\n"
+        "- It mentions specific party names, entity names, or company names (e.g. 'the ReVolt JV Agreement', 'Meridian service agreement', 'agreement between Tata Motors and ReVolt')\n"
         "- It's a cross-document comparison or general legal question\n"
-        "- It mentions a document type with a number or identifier\n\n"
+        "- It mentions a document type with a number, identifier, or distinctive party/entity name\n\n"
         "A question NEEDS disambiguation ONLY when:\n"
         "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
-        "without ANY identifier or number\n\n"
+        "without ANY identifier, number, or party name\n\n"
         "When in doubt, choose false (no disambiguation needed).\n\n"
         "Respond with JSON only:\n"
         '{"needs_disambiguation": bool, "reason": "one sentence"}'
@@ -2005,9 +2268,21 @@ def _select_relevant_pages(
     # (e.g. "committed to Sessions Court", "Yogesh Kumar preserved").    #
     # Merging BM25 results fills that gap without an LLM call.           #
     # ------------------------------------------------------------------ #
+    if not config.USE_DATABASE:
+        logger.info(
+            "Hybrid retrieval unavailable: app is in FILE mode (DATABASE_URL not set). "
+            "pgvector search requires PostgreSQL — using BM25+LLM page selection."
+        )
     if config.USE_DATABASE and session_id:
         try:
             emb_count = _db.count_embeddings(session_id)
+            if emb_count == 0:
+                logger.info(
+                    "Hybrid retrieval skipped: 0 embeddings in DB for session %s "
+                    "(embeddings absent — likely failed/rate-limited at ingest). "
+                    "Using BM25+LLM. Run backfill_embeddings() to enable pgvector search.",
+                    session_id,
+                )
             if emb_count > 0:
                 from services import embedder as _embedder
                 q_embedding = _embedder.embed(question, is_query=True)
