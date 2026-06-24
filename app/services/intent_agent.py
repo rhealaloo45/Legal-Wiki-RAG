@@ -64,10 +64,11 @@ _RX_COMPARISON = re.compile(
 _RX_BETWEEN = re.compile(r'\bbetween\b.+\band\b', re.IGNORECASE)
 _RX_OBLIGATION = re.compile(
     r'(?:'
-    r'(?:what\s+are\s+(?:the|our)\s+)?obligations'  # "what are the obligations" or "obligations under"
+    r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
+    r'|(?:extract|identify|list)\s+(?:all\s+)?(?:the\s+)?(?:key\s+)?obligations'
     r'|our\s+(?:obligations|duties)'
     r'|list\s+(?:the\s+)?(?:obligations|duties|deadlines)'
-    r'|deadlines?\s+(?:to|we|under|in)'
+    r'|deadlines?\s+(?:to|we|under|in)\b'
     r'|comply\s+with|compliance\s+requirements'
     r'|required\s+to|must\s+we'
     r'|what\s+(?:do|must)\s+we\s+(?:do|provide)'
