@@ -64,6 +64,7 @@ MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full m
 MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
 MAX_TOKENS_DISAMBIGUATION    = 200   # Classify if query targets an unspecified document
 MAX_TOKENS_AMBIGUITY_CHECK   = 300   # Determine if query needs clarification
+MAX_TOKENS_INTENT_CLASSIFY   = 150   # Classify lawyer intent (factual/risk/comparison/obligation/drafting)
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
@@ -99,6 +100,7 @@ PROGRESS_STORE = {}
 
 # Conversational UX
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
+ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

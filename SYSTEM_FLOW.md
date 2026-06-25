@@ -196,37 +196,75 @@ Written to `data/logs/{session_id}_log.md`.
 ### Step 1 — Request
 
 ```
-POST /query  {question, session_id}
+POST /query  {question, session_id, target_doc?, is_followup?}
+→ Response is text/event-stream (Server-Sent Events)
+```
+
+### Step 1b — LangGraph orchestration (`intent_agent.py`)
+
+`app.py` stores the user message in `chat_messages`, then runs the query `StateGraph`
+via `intent_agent.run_query_stream()`. Each node emits a custom stage event; `app.py`
+relays them as SSE so the chat UI animates progress tiles.
+
+```
+START → classify_intent → disambiguation → clarification → retrieve → generate → validate → END
+                               │ needs            │ needs
+                               ▼                  ▼
+                              END                END
+
+1. classify_intent
+   - Regex fast-path (0 tokens): "compare/vs/differ" → comparison;
+     "draft/redline/suggest language" → drafting; assessment patterns → risk_assessment;
+     "obligation/deadline/comply" → obligation.
+   - Entity+doc-type regex: "ReVolt JV Agreement" → skips disambiguation.
+   - No regex match → fast LLM call (MAX_TOKENS_INTENT_CLASSIFY=150) → {intent, confidence}.
+   - Any failure → defaults to "factual".
+
+2. disambiguation (wiki.classify_query)
+   - Skipped if target_doc, is_followup, _question_names_a_document() matches,
+     or _question_mentions_known_entity() finds a known party/entity name in
+     page titles (e.g. "ReVolt", "Meridian", "Yuvraj Kanther").
+   - Fast LLM prompt now recognises party names as document identifiers.
+
+3. clarification (wiki.check_ambiguity)
+   - Skipped if is_followup, question names a doc, or ENABLE_CLARIFICATION=false.
+
+4. retrieve (wiki.get_context)
+   - Enhanced file detection: numbered doc-type patterns ("service agreement 3")
+     match against source docs via regex, even with UUID prefixes/paths.
+   - Entity-aware retrieval: when no source_doc filename matches but
+     _question_mentions_known_entity() finds entity names in page titles,
+     those pages are force-included (fixes the "ReVolt not covered" gap).
+   - Retrieval hints per intent (comparison widens small-wiki threshold to 30).
+
+5. generate (wiki.generate_answer) — intent selects prompt template.
+
+6. validate — format check per intent (logged, non-blocking).
 ```
 
 ### Step 2 — Page selection (`get_context`)
 
 Load all pages for the session from DB (`get_pages(session_id)`).
 
-**File mention check**: scan the question for known document names. If a specific document is mentioned, force all pages from that document into the selected set (regardless of vector/BM25 ranking).
+**Document detection** (three layers):
+1. Source filename matching (`_detect_mentioned_files`): exact match, stripped prefix, spacified, no-extension, numbered doc-type pattern
+2. Entity-name matching (`_question_mentions_known_entity`): extracts capitalized entity names from page titles and checks if any appear in the question
+3. Explicit `target_doc` parameter from disambiguation selection
 
-**For wikis with ≤20 pages**: use all pages (no selection needed).
+**For wikis with ≤20 pages** (or ≤30 for comparison intent): use all pages.
 
 **For wikis with >20 pages** → `_select_relevant_pages()`:
 
 ```
 Path 1 — Hybrid retrieval (primary):
   1. embed(question, is_query=True)  → "search_query:" prefix
-  2. pgvector cosine similarity:
-       SELECT title FROM page_embeddings
-       WHERE session_id = :sid
-       ORDER BY embedding <=> query_vector
-       LIMIT 15
-  3. BM25 keyword scoring over all page summaries → top 8
-  4. Merge: vector results first, BM25 appended if not already present
+  2. pgvector cosine similarity → top 15
+  3. BM25 keyword scoring → top 8 supplement
+  4. Merge: vector first, BM25 appended if not present
   → Up to 23 pages, 0 LLM calls
 
-Path 2 — BM25 + LLM (fallback, no embeddings):
-  1. BM25 keyword pre-filter → top 150 candidates
-  2. Full LLM call with {title: summary} index → JSON list of selected titles
-
-Path 3 — BM25 keyword-only (fallback, LLM failed):
-  → Top 25 pages by word-overlap score
+Path 2 — BM25 + LLM (fallback)
+Path 3 — BM25 keyword-only (fallback)
 ```
 
 ### Step 3 — Context building
@@ -242,56 +280,55 @@ if contradiction_flagged:
 Format: "## {title}\n{content}\n"
 ```
 
-Pages are joined into a single `wiki_content` string.
-
 ### Step 4 — Answer generation
 
-Single full-model LLM call with `ANSWER_PROMPT`:
+The classified intent selects one of five prompt templates:
 
-```
-Prompt structure:
-  [20 precision rules — ~826 tokens]
-  [wiki_content — capped pages, ~4,000-5,000 tokens]
-  [question — ~50 tokens]
-  Total: ~5,000-6,000 tokens
-```
+| Intent | Prompt | Output |
+|---|---|---|
+| `factual` | `ANSWER_PROMPT` | Direct answer, 20+ precision rules |
+| `risk_assessment` | `ASSESSMENT_PROMPT` | Reasoned judgment, risk classification |
+| `comparison` | `COMPARISON_PROMPT` | Side-by-side table + key differences |
+| `obligation` | `OBLIGATION_PROMPT` | Duty/deadline table |
+| `drafting` | `DRAFTING_PROMPT` | Aggressive/balanced/conservative clause formulations |
 
-Model must write:
-```xml
-<reasoning>
-  Step-by-step: what was found, what was missing, how it maps to the question.
-  CONFIDENCE_SCORE: 85
-  CONFIDENCE_REASON: Context directly addresses the question with specific holdings.
-</reasoning>
-[Final answer with IEEE citations [1], [2]...]
-
-References
-[1] FileName.pdf, Section | Quote: "verbatim excerpt"
-```
+All prompts include conversation history, document metadata, wiki context, and chain-of-thought `<reasoning>` block.
 
 ### Step 5 — Post-processing
 
 ```python
-# Extract confidence from reasoning block (regex — no extra LLM call)
-score = re.search(r'CONFIDENCE_SCORE:\s*(\d+)', reasoning_text)
-reason = re.search(r'CONFIDENCE_REASON:\s*(.+)', reasoning_text)
+# Tolerant regex handles unclosed tags, whitespace variants, unicode chars
+_REASON_OPEN = r'<\s*reasoning\s*>'
+_REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
 
-# Strip reasoning from user-facing answer
-answer = re.sub(r'<reasoning>.*?</reasoning>', '', raw_answer, flags=re.DOTALL)
+# Extract confidence from reasoning block
+reasoning_match = re.search(rf'{_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, re.DOTALL)
+# Fallback: grab everything after opening tag if no closing tag
+if not reasoning_match:
+    reasoning_match = re.search(rf'{_REASON_OPEN}(.*)', raw_answer, re.DOTALL)
+
+# Strip reasoning from user-facing answer (both closed and unclosed)
+answer = re.sub(rf'{_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, re.DOTALL)
+answer = re.sub(rf'{_REASON_OPEN}.*', '', answer, re.DOTALL)
 
 # Short "not covered" answer → force confidence to 0
 if "not covered" in answer.lower() and len(answer) < 150:
     confidence_score = 0
 ```
 
-### Step 6 — Logging and response
+### Step 6 — Chat storage and SSE response
 
 ```
-QUERY | Q: {first 60 chars} | BM25 Shortlist: {N} | Pages selected: {N} | Confidence: {score}
-TOKEN_USAGE | Total: {N} | answer_generation ({model}): {N} tokens
+1. Store assistant answer + intent in chat_messages
+   metadata={confidence_score, files_used, token_total, intent, intent_label}
+
+2. Log: QUERY + TOKEN_USAGE events to session log
+
+3. Emit final SSE event:
+   data: {type: "answer", wiki: {answer, intent, intent_label, confidence_score, ...}}
 ```
 
-Response JSON includes: `answer`, `pages_used`, `files_used`, `relations`, `confidence_score`, `confidence_reason`, `token_breakdown`, `token_total`.
+The SSE stream carries progress events followed by one terminal event of type `answer`, `disambiguation`, or `clarification`. The frontend renders stage tiles, then the answer card with intent tag.
 
 ---
 
@@ -381,19 +418,27 @@ User can submit refinement instructions. Each refinement: prior draft + instruct
 
 ```
 Upload
-  → Text extraction (reader.py)
+  → Text extraction with positions (reader.py → db.py: source_positions)
   → LLM synthesis (wiki.py + prompts.py)
+  → Auto-prefix page titles (_auto_prefix_title: SA1, NDA3, etc.)
   → Atomic merge (db.py: pages, variants, contradiction_flagged)
   → Metadata upsert (db.py: page_metadata)
   → FTS cross-reference (db.py: relations via content_tsv GIN)
   → Embedding (embedder.py → db.py: page_embeddings)
   → Compaction if due (wiki.py → db.py: reset + contradictions table)
 
-Query
-  → Hybrid retrieval (db.py: page_embeddings cosine + BM25 in-memory)
-  → Context building (wiki.py: page caps, contradiction warnings)
-  → Answer generation (llm.py: full model)
-  → Confidence extraction (wiki.py: regex from <reasoning>)
+Query (conversational, SSE-streamed via intent_agent LangGraph)
+  → Store user message (db.py: chat_messages)
+  → classify_intent (intent_agent.py: regex fast-path → llm fast fallback)  ──► SSE stage
+  → Disambiguation check (wiki.py → llm fast → chat_messages)               ──► SSE stage / early-exit
+  → Clarification check (wiki.py → llm fast → chat_messages)                ──► SSE stage / early-exit
+  → Entity-aware file detection + hybrid retrieval                           ──► SSE stage
+  → Context building (wiki.py: page caps, contradiction warnings, metadata block)
+  → Prompt selection by intent (ANSWER / ASSESSMENT / COMPARISON / OBLIGATION / DRAFTING)
+  → Answer generation (llm.py: full model)                                  ──► SSE stage
+  → Validate format per intent (intent_agent.py: logged, non-blocking)
+  → Confidence extraction (wiki.py: tolerant regex from <reasoning>)
+  → Store assistant answer + intent (db.py: chat_messages)                  ──► SSE terminal event
 
 Review
   → Metadata cache lookup (db.py: page_metadata)
