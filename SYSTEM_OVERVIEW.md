@@ -9,18 +9,27 @@ For component and pipeline diagrams, see `ARCHITECTURE.md` and `FLOWCHART.md`.
 
 ## 1. Architecture summary
 
-The system is a single-process Flask application backed by PostgreSQL + pgvector. There is no separate vector database, no message queue (yet), and no microservices. All intelligence lives in two services: `wiki.py` (ingest + query) and `advanced_modes.py` (Review/Compare/Draft).
+The system is a single-process Flask application backed by PostgreSQL + pgvector. There is no separate vector database, no message queue (yet), and no microservices. Intelligence lives in three services: `wiki.py` (ingest + query primitives), `intent_agent.py` (LangGraph query orchestration + intent classification), and `advanced_modes.py` (Review/Compare/Draft).
+
+The `/query` route is a LangGraph `StateGraph`. Each node streams a real-time stage event to the browser via Server-Sent Events; the chat UI turns these into animated progress tiles.
 
 ```
-Browser
+Browser (Chat UI)  ◄── Server-Sent Events (stage tiles + answer)
   └── Flask (app.py)
         ├── ThreadPoolExecutor  ──► wiki.ingest()        ──► LLM (full model)
         │                                                 ──► Embedder
         │                                                 ──► PostgreSQL
-        ├── /query              ──► wiki.get_context()   ──► pgvector + BM25
-        │                       ──► wiki.generate_answer()──► LLM (full model)
-        ├── /review, /compare   ──► advanced_modes       ──► LLM (fast model)
-        └── /draft              ──► advanced_modes        ──► LLM (full model)
+        ├── /query (SSE)  ──► intent_agent LangGraph:
+        │     classify_intent ─► LLM (fast) → 1 of 5 intents (regex fast-path first)
+        │     disambiguation  ─► wiki.classify_query()    ──► LLM (fast) → document chips
+        │     clarification   ─► wiki.check_ambiguity()   ──► LLM (fast) → clarifying question
+        │     retrieve        ─► wiki.get_context()       ──► pgvector + BM25 + entity matching
+        │     generate        ─► wiki.generate_answer()   ──► LLM (full: intent-specific prompt)
+        │     validate        ─► format check (logged, non-blocking)
+        ├── /messages           ──► chat_messages table   ──► conversation history
+        ├── /document/locate    ──► source_positions      ──► quote position lookup
+        ├── /review, /compare   ──► advanced_modes        ──► LLM (fast model)
+        └── /draft              ──► advanced_modes         ──► LLM (full model)
 
 PostgreSQL
   ├── pages              (title, content, summary, source_doc, append_count, char_count,
@@ -29,7 +38,9 @@ PostgreSQL
   ├── relations          (session_id, from_title, to_title, label)
   ├── page_metadata      (session_id, title, governing_law, jurisdiction, parties, ...)
   ├── contradictions     (session_id, page_title, claim, value_a, source_a, value_b, source_b)
-  └── ingest_progress    (session_id, total, current, message, status)
+  ├── ingest_progress    (session_id, total, current, message, status)
+  ├── chat_messages      (session_id, role, content, msg_type, metadata JSONB)
+  └── source_positions   (session_id, source_doc, page_num, char_start, char_end)
 ```
 
 ---
@@ -41,7 +52,7 @@ Two model tiers, one `ask()` function:
 | Tier | Azure config | OpenRouter config | Used for |
 |---|---|---|---|
 | **Full** | `AZURE_OPENAI_DEPLOYMENT` | `OPENROUTER_MODEL` | Ingest synthesis, answer generation, compaction, drafting, compare narrative |
-| **Fast** | `AZURE_FAST_DEPLOYMENT` | `OPENROUTER_FAST_MODEL` | Cell extraction (Review/Compare), JSON repair, contradiction pre-flight |
+| **Fast** | `AZURE_FAST_DEPLOYMENT` | `OPENROUTER_FAST_MODEL` | Cell extraction (Review/Compare), JSON repair, contradiction pre-flight, document disambiguation, query clarification, intent classification |
 
 All calls: `temperature=0.0` (deterministic). Explicit `max_tokens` cap on every call — no silent 4096-token defaults.
 
@@ -187,14 +198,48 @@ For each selected page:
 - Cached-answer pages (titles starting with `Q:`): capped at `MAX_QPAGE_CONTEXT_CHARS` (3,000 chars)
 - Pages with `contradiction_flagged = True`: prepend `[WARNING: This page contains conflicting claims...]`
 
-### 6.3 Answer generation
+### 6.3 LangGraph orchestration & intent classification
 
-Single LLM call (full model, 4,096 token budget) with `ANSWER_PROMPT` containing:
-- 20 precision rules covering: scope restriction, cross-document synthesis, thematic selectivity, no external knowledge, arithmetic prohibition, statute interpretation, legal standard precision, allegations vs findings, procedural stage precision, named-document completeness, cross-document source discipline, proper citations, chain-of-thought verification, and more
+The `/query` route is a LangGraph `StateGraph` (`intent_agent.py`) with six nodes and conditional edges:
+
+```
+classify_intent → disambiguation → clarification → retrieve → generate → validate
+                       │ (needs)        │ (needs)
+                       ▼                ▼
+                      END              END
+```
+
+1. **classify_intent** — classifies the query into one of five lawyer intents: `factual`, `risk_assessment`, `comparison`, `obligation`, `drafting`. Regex fast-path (0 tokens) handles obvious queries; ambiguous queries fall to a fast LLM call (`MAX_TOKENS_INTENT_CLASSIFY` = 150). Any failure defaults to `factual`.
+
+2. **disambiguation** — skips if the question names a document (numbered pattern, entity+doc-type pattern, or known entity from page titles via `_question_mentions_known_entity()`). Otherwise a fast LLM call checks for vague document references.
+
+3. **clarification** — fast LLM call determines if the question needs one clarifying question. Hard limit: 1 per turn.
+
+4. **retrieve** (`wiki.get_context()`) — hybrid page selection, tuned by per-intent `retrieval_hints`. Entity-aware retrieval: when the question mentions a distinctive entity/party name from page titles (e.g. "ReVolt"), those pages are force-included even if the source filename doesn't match. Numbered doc-type patterns ("service agreement 3") also match via enhanced `_detect_mentioned_files()`.
+
+5. **generate** (`wiki.generate_answer(intent=...)`) — selects the intent-specific prompt.
+
+6. **validate** — light format check (comparison → table present; obligation → list/table; drafting → clause formulations). Non-blocking.
+
+Each node emits a custom stage event via LangGraph's stream writer; `app.py` relays these as SSE.
+
+### 6.4 Answer generation — intent-specific prompts
+
+| Intent | Prompt | Output shape |
+|---|---|---|
+| `factual` | `ANSWER_PROMPT` | Direct answer, 20+ precision rules |
+| `risk_assessment` | `ASSESSMENT_PROMPT` | Reasoned judgment, risk classification, recommendation |
+| `comparison` | `COMPARISON_PROMPT` | Side-by-side table + key differences + who-it-favors |
+| `obligation` | `OBLIGATION_PROMPT` | Duty/deadline table (party · duty · trigger · consequence · clause) |
+| `drafting` | `DRAFTING_PROMPT` | Aggressive/balanced/conservative clause formulations with implications |
+
+All five prompts include:
+- **Conversation history** block (last 3-5 exchanges, max ~2000 chars)
+- **Document metadata** block (party names, governing law, effective dates from `page_metadata`)
 - Full wiki context (capped pages, contradiction warnings, source labels)
-- The user's question
+- Chain-of-thought `<reasoning>` block with confidence score — zero additional LLM calls
 
-The model writes a `<reasoning>` block first, including `CONFIDENCE_SCORE` and `CONFIDENCE_REASON` as the last two lines. The system extracts these with regex, then strips the reasoning block from the user-facing answer — zero additional LLM calls for confidence scoring.
+The reasoning-block extraction uses a tolerant regex that handles unclosed tags, whitespace variants, and unicode characters. The classified intent is returned in the answer payload and surfaced as a coloured tag on the answer card.
 
 ---
 
@@ -246,6 +291,9 @@ Cells run concurrently via `ThreadPoolExecutor`. Result exported to confidence-c
 | Answer generation | Full | 4,096 |
 | JSON repair | Fast | 2,048 |
 | Cell extraction (Review/Compare) | Fast | 300 |
+| Document disambiguation | Fast | 200 |
+| Query clarification | Fast | 300 |
+| Intent classification (LLM fallback) | Fast | 150 |
 | Page selection (BM25+LLM fallback) | Full | 1,000 |
 
 ---

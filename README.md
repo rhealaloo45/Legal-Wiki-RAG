@@ -28,10 +28,18 @@ Standard RAG retrieves raw document chunks at query time and asks the LLM to rea
 - **Page compaction**: pages that grow through repeated merges are re-synthesised by the LLM, keeping the wiki coherent at scale
 - **D3.js knowledge graph** visualisation of pages and relations
 
-### Query Mode (Ask)
-- Chain-of-thought reasoning with self-assessed confidence score (0–100) extracted from `<reasoning>` block — zero extra LLM calls
-- 20 precision rules in the answer prompt: procedural stage precision, legal standard precision, named-document completeness, cross-document source discipline, allegations vs findings, thematic selectivity, arithmetic prohibition, statute interpretation, and more
+### Query Mode (Ask) — Conversational Chat
+- **Chat interface** with persistent message history (PostgreSQL-backed). Full conversation thread with user messages, assistant answers, disambiguation prompts, and clarification questions
+- **Intent classifier agent** (LangGraph): every query is classified from a lawyer's perspective into one of five intents — **factual**, **risk_assessment**, **comparison**, **obligation**, **drafting** — which selects a tailored prompt template. Regex fast-path (0 tokens) handles obvious queries; a fast LLM call resolves ambiguous ones and falls back to `factual`. Controlled by `ENABLE_INTENT_CLASSIFIER`
+- **Streaming progress stages**: the `/query` endpoint streams Server-Sent Events as the LangGraph pipeline runs (classifying → intent identified → retrieving → pages retrieved → generating). The chat UI renders these as animated vertical stage tiles, then the answer card carries a coloured **intent tag** alongside the confidence badge
+- **Document disambiguation**: when a query targets an unspecified document, system asks user to pick from ingested docs or upload a new one. Skips automatically when the user names a specific document ("service agreement 1") or mentions a known entity/party name ("ReVolt JV Agreement")
+- **Follow-up clarification**: for ambiguous queries, system asks one clarifying question with suggested options before answering. Controlled by `ENABLE_CLARIFICATION` env var
+- **Five intent-specific prompt modes**: `ANSWER_PROMPT` (factual, 20 precision rules), `ASSESSMENT_PROMPT` (risk/go-no-go, reasoned judgment), `COMPARISON_PROMPT` (side-by-side table), `OBLIGATION_PROMPT` (duty/deadline checklist), `DRAFTING_PROMPT` (clause text with aggressive/balanced/conservative formulations) — all grounded in context
+- **Document metadata injection**: party names, governing law, effective dates from `page_metadata` are injected into the prompt so answers use actual party names instead of generic "Service Provider"
+- **Entity-aware retrieval**: when the question mentions a distinctive entity/party name from page titles (e.g. "ReVolt", "Meridian"), those pages are force-included in context even if the source filename doesn't match
+- Chain-of-thought reasoning with self-assessed confidence score (0–100) extracted from `<reasoning>` block — zero extra LLM calls. Tolerant regex handles unclosed tags and unicode variants
 - Per-page context cap (2,000 chars) prevents any single large merged page from crowding out others
+- **Improved citations**: references include PDF page numbers, verbatim quotes, and clause references. Citation clicks open the source PDF to the correct page with highlighted text
 
 ### Review Mode
 - User defines columns (e.g. "Governing Law", "Liability Cap"); system extracts values from all uploaded documents concurrently
@@ -49,11 +57,13 @@ Standard RAG retrieves raw document chunks at query time and asks the LLM to rea
 - Iterative refinement with DOCX export
 
 ### Infrastructure
-- **PostgreSQL + pgvector**: single managed store for pages, embeddings, metadata, progress, contradictions, relations
-- **Dual-model routing**: full model for synthesis/answers, fast model for contradiction checks/cell extraction/JSON repair
+- **PostgreSQL + pgvector**: single managed store for pages, embeddings, metadata, progress, contradictions, relations, chat messages, source positions
+- **Dual-model routing**: full model for synthesis/answers, fast model for contradiction checks/cell extraction/JSON repair/disambiguation/clarification/intent classification
+- **LangGraph query orchestration**: the Ask pipeline is a `StateGraph` with conditional edges; nodes stream real-time stage events to the browser via Server-Sent Events
 - **SQLAlchemy connection pool** (pool_size=10, max_overflow=20)
 - Per-session threading locks for race-free parallel ingest
 - OCR fallback via Tesseract for scanned PDFs
+- **Page-level position tracking**: PDF page numbers and character offsets stored at ingest for precise citation linking
 
 ---
 
@@ -151,6 +161,8 @@ When the app starts and `DATABASE_URL` is set, [`db.py`](app/services/db.py) aut
 | `ingest_progress` | Real-time ingest progress tracking per session |
 | `page_metadata` | Cached document-level metadata (governing law, jurisdiction, parties, etc.) |
 | `contradictions` | Structured contradiction records detected during compaction |
+| `chat_messages` | Persistent chat history per session (user, assistant, system messages with metadata) |
+| `source_positions` | PDF page-level character offsets for precise citation linking |
 
 3. Creates GIN index on `content_tsv` for full-text cross-referencing
 4. Creates HNSW index on embeddings for sub-5ms vector search (auto-skipped if embedding dimensions > 2000)
@@ -202,9 +214,10 @@ app/
 ├── services/
 │   ├── db.py                # PostgreSQL abstraction layer (SQLAlchemy)
 │   ├── wiki.py              # Ingest pipeline, query pipeline, compaction
+│   ├── intent_agent.py      # LangGraph query orchestration + 5-intent classifier
 │   ├── llm.py               # Dual-model LLM routing (Azure / OpenRouter)
 │   ├── embedder.py          # Embedding service (batch, query/doc mode prefixes)
-│   ├── prompts.py           # All prompt templates (ingest, answer, compaction)
+│   ├── prompts.py           # All prompt templates (ingest, answer, assessment, comparison, obligation, drafting, compaction)
 │   ├── advanced_modes.py    # Review, Compare, Draft shared logic + cell extraction
 │   └── reader.py            # PDF/DOCX text extraction with OCR fallback
 ├── data/
@@ -228,6 +241,11 @@ app/
 | `COMPACTION_APPEND_THRESHOLD` | 5 | Compaction trigger: number of appends |
 | `COMPACTION_CHAR_THRESHOLD` | 8,000 | Compaction trigger: char count (requires append_count ≥ 2) |
 | `WIKI_MAX_WORKERS` | 3 | Parallel ingest worker threads |
+| `ENABLE_CLARIFICATION` | true | Enable/disable follow-up clarification questions |
+| `ENABLE_INTENT_CLASSIFIER` | true | Enable LLM fallback for intent classification (regex fast-path always on) |
+| `MAX_TOKENS_DISAMBIGUATION` | 200 | Token budget for document disambiguation check |
+| `MAX_TOKENS_AMBIGUITY_CHECK` | 300 | Token budget for query clarification check |
+| `MAX_TOKENS_INTENT_CLASSIFY` | 150 | Token budget for lawyer-intent classification |
 
 ---
 
@@ -240,6 +258,8 @@ app/
 | 3 | Hybrid retrieval: pgvector cosine top-K + BM25 supplement | ✅ |
 | 4 | FTS cross-reference (GIN), page compaction (S3), NER contradiction pre-filter (C3), metadata cache (C7) | ✅ |
 | 4.5 | Answer quality hardening: page title disambiguation, source attribution in merges, 6 new answer-prompt precision rules | ✅ |
+| 4.6 | Conversational UX: chat interface, document disambiguation, clarification questions, assessment prompt mode, citation improvements, auto-prefix page titles | ✅ |
+| 4.7 | Intent classifier agent (LangGraph): 5 lawyer intents, intent-specific prompts, SSE streaming progress stages, intent tag on answers, entity-aware retrieval, reasoning-block fix | ✅ |
 | 5 | Celery job queue for production-scale ingest | ⬜ planned |
 | 6 | Multi-tenancy, PgBouncer, read replicas, audit logging | ⬜ planned |
 
