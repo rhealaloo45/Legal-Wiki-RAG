@@ -320,7 +320,9 @@ def generate_answer_node(state: QueryState) -> dict:
 
 _GROUNDING_PROMPT = """\
 You are a legal QA auditor. Compare the ANSWER against the CONTEXT and determine \
-how well the answer is grounded in the provided documents.
+how well the answer's FACTUAL CLAIMS are grounded in the provided documents.
+
+INTENT: {intent}
 
 CONTEXT (excerpts from source documents):
 {context}
@@ -333,33 +335,40 @@ ANSWER TO CHECK:
 {answer}
 
 ---
-TASK: Evaluate grounding. Respond with ONLY valid JSON, no other text:
+IMPORTANT DISTINCTION — only flag FACTUAL claims as ungrounded:
+- FACTUAL claims: clause numbers, party names, dates, amounts, obligations stated in the document.
+- PROFESSIONAL ANALYSIS: risk classifications, market-practice comparisons, gap identification, \
+suggested changes, negotiation advice. These are EXPECTED legal judgment, NOT ungrounded claims.
+For "risk_assessment" and "drafting" intents, the answer is supposed to go beyond the text with \
+professional analysis. Only penalize fabricated facts (wrong clause numbers, invented provisions, \
+incorrect party names), not analytical conclusions or recommendations.
+
+Respond with ONLY valid JSON, no other text:
 {{
   "grounding_score": <0-100>,
-  "ungrounded_claims": ["<claim not supported by context>", ...],
+  "ungrounded_claims": ["<fabricated fact not in context>", ...],
   "summary": "<one sentence assessment>"
 }}
 
 Scoring guide:
-- 90-100: All factual claims traceable to context
-- 70-89: Most claims grounded, minor extrapolations
-- 50-69: Some claims lack context support
-- 0-49: Significant unsupported claims"""
+- 90-100: All factual claims traceable to context; analysis is reasonable
+- 70-89: Most facts grounded, minor factual extrapolations
+- 50-69: Some factual claims lack context support
+- 0-49: Significant fabricated facts"""
 
 
-def _check_grounding(question: str, context: str, answer: str) -> dict:
+def _check_grounding(question: str, context: str, answer: str, intent: str = "factual") -> dict:
     """LLM-based grounding check — verifies answer claims against context."""
     if not context or not answer or len(answer) < 20:
         return {"grounding_score": None, "ungrounded_claims": [], "summary": "Skipped — insufficient content."}
 
-    # Pass full context so grounding check can verify all claims.
-    # Token cost is ~500 completion tokens on top of the context the answer model already saw.
     ctx = context
 
     prompt = _GROUNDING_PROMPT.format(
         context=ctx,
         question=question,
         answer=answer[:2000],
+        intent=intent,
     )
     try:
         raw, _usage = llm.ask(prompt, fast=False, max_tokens=config.MAX_TOKENS_GROUNDING_CHECK)
@@ -402,6 +411,7 @@ def validate_response_node(state: QueryState) -> dict:
             state["question"],
             state.get("wiki_context", ""),
             answer,
+            intent=intent,
         )
         logger.info("[AGENT] Grounding score: %s | %s", grounding.get("grounding_score"), grounding.get("summary"))
         _emit({"stage": "validating", "status": "done",
