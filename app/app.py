@@ -24,7 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import threading
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, Response, stream_with_context
 
 # Ensure project root is on the path so `import config` works
 sys.path.insert(0, os.path.dirname(__file__))
@@ -510,9 +510,27 @@ def _store_chat_msg(session_id, role, content, msg_type="text", metadata=None):
     return None
 
 
+def _update_session_history(session_id: str, question: str) -> None:
+    """Push a question to the session's history and auto-name new sessions."""
+    sessions = load_sessions()
+    if session_id in sessions:
+        if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
+            sessions[session_id].setdefault("history", []).insert(0, question)
+        sessions[session_id]["updated_at"] = time.time()
+        if len(sessions[session_id]["history"]) == 1 and sessions[session_id]["name"].startswith("Session "):
+            new_name = question[:30] + ("..." if len(question) > 30 else "")
+            sessions[session_id]["name"] = new_name
+        save_sessions(sessions)
+
+
 @app.route("/query", methods=["POST"])
 def query_route():
-    """Query the wiki pipeline with disambiguation and clarification support."""
+    """Query the wiki pipeline via the LangGraph intent agent.
+
+    Streams Server-Sent Events: progress stages (classifying, intent_identified,
+    retrieving, pages_retrieved, generating) followed by a terminal event of type
+    'answer', 'disambiguation', or 'clarification'.
+    """
     data = request.get_json(silent=True) or {}
     question = data.get("question", "").strip()
     session_id = data.get("session_id", "")
@@ -524,109 +542,90 @@ def query_route():
     if not session_id:
         return jsonify({"error": "No session_id provided"}), 400
 
-    t0 = time.time()
-
-    # Store user message in chat history
+    # Store user message in chat history (once, before streaming)
     _store_chat_msg(session_id, "user", question, "text")
 
-    # Pre-check: does the question already name a specific document?
-    _names_doc = wiki._question_names_a_document(question, [])
+    t0 = time.time()
 
-    # --- Step 0: Disambiguation check ---
-    if not target_doc and not is_followup and not _names_doc:
+    def _sse(event: dict) -> str:
+        return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    @stream_with_context
+    def generate():
+        from services import intent_agent
+        final_emitted = False
         try:
-            classify_result = wiki.classify_query(question, session_id)
-            if classify_result.get("needs_disambiguation"):
-                docs = classify_result["documents"]
-                import re as _re
-                clean_docs = [_re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
-                msg = "I'd like to help, but could you specify which document you're referring to? Please select one below, or upload a new document."
-                _store_chat_msg(session_id, "assistant", msg, "disambiguation",
-                               {"documents": clean_docs, "raw_documents": docs})
-                return jsonify({
-                    "type": "disambiguation",
-                    "message": msg,
-                    "documents": clean_docs,
-                    "raw_documents": docs,
-                    "total_elapsed_ms": round((time.time() - t0) * 1000),
-                })
+            for ev in intent_agent.run_query_stream(question, session_id, target_doc, is_followup):
+                etype = ev.get("type")
+                logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
+
+                if etype == "disambiguation":
+                    payload = ev.get("payload", {})
+                    _store_chat_msg(session_id, "assistant", payload.get("message", ""),
+                                    "disambiguation",
+                                    {"documents": payload.get("documents", []),
+                                     "raw_documents": payload.get("raw_documents", [])})
+                    final_emitted = True
+                    yield _sse({
+                        "type": "disambiguation",
+                        "message": payload.get("message", ""),
+                        "documents": payload.get("documents", []),
+                        "raw_documents": payload.get("raw_documents", []),
+                        "total_elapsed_ms": round((time.time() - t0) * 1000),
+                    })
+
+                elif etype == "clarification":
+                    payload = ev.get("payload", {})
+                    _store_chat_msg(session_id, "assistant", payload.get("message", ""),
+                                    "clarification",
+                                    {"options": payload.get("options", []),
+                                     "original_question": question})
+                    final_emitted = True
+                    yield _sse({
+                        "type": "clarification",
+                        "message": payload.get("message", ""),
+                        "options": payload.get("options", []),
+                        "total_elapsed_ms": round((time.time() - t0) * 1000),
+                    })
+
+                elif etype == "answer":
+                    wiki_result = ev.get("payload", {})
+                    wiki_result["elapsed_ms"] = round((time.time() - t0) * 1000)
+                    _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
+                                    "answer", {
+                                        "confidence_score": wiki_result.get("confidence_score", 0),
+                                        "files_used": wiki_result.get("files_used", []),
+                                        "token_total": wiki_result.get("token_total", {}),
+                                        "intent": wiki_result.get("intent", "factual"),
+                                        "intent_label": wiki_result.get("intent_label", ""),
+                                        "intent_confidence": wiki_result.get("intent_confidence", 0),
+                                    })
+                    _update_session_history(session_id, question)
+                    try:
+                        _log_rag_query(question, "", wiki_result.get("answer", ""))
+                    except Exception as log_err:
+                        logger.error("Failed to log RAG query: %s", log_err)
+                    final_emitted = True
+                    logger.info("SSE answer: intent=%s conf=%s%%",
+                                wiki_result.get("intent"), wiki_result.get("confidence_score"))
+                    yield _sse({
+                        "type": "answer",
+                        "wiki": wiki_result,
+                        "total_elapsed_ms": round((time.time() - t0) * 1000),
+                    })
+
+                else:
+                    yield _sse(ev)
+
         except Exception as e:
-            logger.error("Disambiguation check failed: %s", e)
+            logger.error("Query stream failed (%s): %s", type(e).__name__, e)
+            yield _sse({"type": "error", "error": f"{type(e).__name__}: {e}"})
 
-    # --- Step 0b: Ambiguity/clarification check ---
-    if not is_followup and not _names_doc and config.ENABLE_CLARIFICATION:
-        try:
-            conv_ctx = wiki.build_conversation_context(session_id)
-            ambiguity = wiki.check_ambiguity(question, session_id, conv_ctx)
-            if ambiguity.get("needs_clarification"):
-                clarif_q = ambiguity["question"]
-                options = ambiguity.get("options") or []
-                _store_chat_msg(session_id, "assistant", clarif_q, "clarification",
-                               {"options": options, "original_question": question})
-                return jsonify({
-                    "type": "clarification",
-                    "message": clarif_q,
-                    "options": options,
-                    "total_elapsed_ms": round((time.time() - t0) * 1000),
-                })
-        except Exception as e:
-            logger.error("Ambiguity check failed: %s", e)
+        if not final_emitted:
+            yield _sse({"type": "error", "error": "No answer was produced."})
 
-    # --- Step 1: Build conversation context ---
-    conversation_context = wiki.build_conversation_context(session_id)
-
-    # --- Step 2: Fetch wiki context ---
-    if target_doc:
-        wiki_ctx_res = wiki.get_context(question, session_id, target_doc=target_doc)
-    else:
-        wiki_ctx_res = wiki.get_context(question, session_id)
-
-    wiki_context = wiki_ctx_res.get("context", "")
-    selected_titles = wiki_ctx_res.get("selected_titles", [])
-    bm25_count = wiki_ctx_res.get("bm25_count", 0)
-    page_selection_usage = wiki_ctx_res.get("page_selection_usage", {})
-
-    # --- Step 3: Generate answer ---
-    wiki_t0 = time.time()
-    try:
-        wiki_result = wiki.generate_answer(
-            question, wiki_context, selected_titles, session_id,
-            bm25_count, page_selection_usage, conversation_context,
-        )
-    except Exception as e:
-        logger.error("Wiki generation error (%s): %s", type(e).__name__, e)
-        wiki_result = {"answer": f"Wiki error: {type(e).__name__}: {e}", "pages_used": []}
-    wiki_result["elapsed_ms"] = round((time.time() - wiki_t0) * 1000)
-
-    # Store assistant answer in chat history
-    _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""), "answer", {
-        "confidence_score": wiki_result.get("confidence_score", 0),
-        "files_used": wiki_result.get("files_used", []),
-        "token_total": wiki_result.get("token_total", {}),
-    })
-
-    # Update session history (backward compat)
-    sessions = load_sessions()
-    if session_id in sessions:
-        if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
-            sessions[session_id].setdefault("history", []).insert(0, question)
-        sessions[session_id]["updated_at"] = time.time()
-        if len(sessions[session_id]["history"]) == 1 and sessions[session_id]["name"].startswith("Session "):
-            new_name = question[:30] + ("..." if len(question) > 30 else "")
-            sessions[session_id]["name"] = new_name
-        save_sessions(sessions)
-
-    # Log query for audit
-    try:
-        _log_rag_query(question, wiki_context, wiki_result.get("answer", ""))
-    except Exception as log_err:
-        logger.error("Failed to log RAG query: %s", log_err)
-
-    return jsonify({
-        "type": "answer",
-        "wiki": wiki_result,
-        "total_elapsed_ms": round((time.time() - t0) * 1000),
-    })
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.route("/files")
@@ -699,6 +698,38 @@ def wiki_graph():
     if not session_id:
         return jsonify({"pages": {}, "relations": []})
     return jsonify(wiki.get_graph(session_id))
+
+
+@app.route("/wiki/backfill_embeddings", methods=["POST"])
+def wiki_backfill_embeddings():
+    """Generate embeddings for pages that lack them — enables pgvector hybrid
+    retrieval for sessions ingested before embeddings existed (or when the
+    embedding API was rate-limited). Safe to run repeatedly."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "") or request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    try:
+        result = wiki.backfill_embeddings(session_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Backfill embeddings failed: %s", e)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/wiki/backfill_source_docs", methods=["POST"])
+def wiki_backfill_source_docs():
+    """Populate empty source_doc fields from page title parentheses."""
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "") or request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    try:
+        result = wiki.backfill_source_docs(session_id)
+        return jsonify(result)
+    except Exception as e:
+        logger.error("Backfill source_docs failed: %s", e)
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.route("/wiki/pages")

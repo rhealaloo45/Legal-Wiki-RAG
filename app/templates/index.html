@@ -398,6 +398,25 @@
       40% { opacity: 1; transform: scale(1) }
     }
 
+    /* --- Query progress stage tiles (vertical stack) --- */
+    .query-stages { display:flex; flex-direction:column; gap:6px; width:100%; max-width:340px }
+    .stage-tile { display:flex; align-items:center; gap:9px; padding:8px 12px; background:var(--bg-surface); border:0.5px solid var(--border); border-left:2px solid var(--border); border-radius:var(--radius-md); font-size:12px; color:var(--text-muted); opacity:0; transform:translateY(4px); animation:stageSlideIn 0.22s ease forwards }
+    @keyframes stageSlideIn { to { opacity:1; transform:translateY(0) } }
+    .stage-tile.active { border-left-color:var(--accent); color:var(--text-primary) }
+    .stage-tile.done { border-left-color:var(--green); color:var(--text-secondary) }
+    .stage-icon { display:flex; align-items:center; justify-content:center; width:14px; height:14px; flex-shrink:0 }
+    .stage-tile.done .stage-icon { color:var(--green-text) }
+    .stage-spinner { width:12px; height:12px; border:1.5px solid var(--accent-border); border-top-color:var(--accent); border-radius:50%; animation:stageSpin 0.7s linear infinite }
+    @keyframes stageSpin { to { transform:rotate(360deg) } }
+    .stage-label { flex:1; line-height:1.3 }
+    /* --- Intent tag on answer card --- */
+    .tag-intent { font-size:10px; font-weight:600; letter-spacing:0.7px; padding:3px 9px; border-radius:4px; color:#fff; text-transform:uppercase }
+    .tag-intent-factual { background:#2563eb }
+    .tag-intent-risk_assessment { background:#dc2626 }
+    .tag-intent-comparison { background:#7c3aed }
+    .tag-intent-obligation { background:#ea580c }
+    .tag-intent-drafting { background:#0d9488 }
+
     .disambig-chips {
       display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
     }
@@ -3641,6 +3660,58 @@
       if (el) el.remove();
     }
 
+    // --- Query progress stage tiles ---
+    function appendProgressStages() {
+      removeProgressStages();
+      const div = document.createElement('div');
+      div.className = 'chat-msg chat-msg-assistant';
+      div.id = 'query-stages-wrap';
+      div.innerHTML = '<div class="query-stages" id="query-stages"></div>';
+      $chatThread.appendChild(div);
+      scrollChatToBottom();
+    }
+    function removeProgressStages() {
+      const el = document.getElementById('query-stages-wrap');
+      if (el) el.remove();
+    }
+    function ensureStagesContainer() {
+      let c = document.getElementById('query-stages');
+      if (!c) { appendProgressStages(); c = document.getElementById('query-stages'); }
+      return c;
+    }
+    const STAGE_TILE_MAP = {
+      classifying:'intent', intent_identified:'intent',
+      disambiguation:'disambiguation', clarification:'clarification',
+      retrieving:'retrieve', pages_retrieved:'retrieve',
+      generating:'generate',
+    };
+    function updateStage(ev) {
+      const tileId = STAGE_TILE_MAP[ev.stage];
+      if (!tileId) return;
+      const container = ensureStagesContainer();
+      let tile = container.querySelector(`[data-tile="${tileId}"]`);
+      if (!tile) {
+        tile = document.createElement('div');
+        tile.className = 'stage-tile';
+        tile.dataset.tile = tileId;
+        tile.innerHTML = '<div class="stage-icon"></div><div class="stage-label"></div>';
+        container.appendChild(tile);
+      }
+      const isDone = ev.status === 'done';
+      if (!isDone) {
+        container.querySelectorAll('.stage-tile.active').forEach(t => {
+          if (t !== tile) { t.classList.remove('active'); t.classList.add('done'); t.querySelector('.stage-icon').innerHTML = '<i class="ti ti-check"></i>'; }
+        });
+        tile.classList.add('active'); tile.classList.remove('done');
+        tile.querySelector('.stage-icon').innerHTML = '<span class="stage-spinner"></span>';
+      } else {
+        tile.classList.remove('active'); tile.classList.add('done');
+        tile.querySelector('.stage-icon').innerHTML = '<i class="ti ti-check"></i>';
+      }
+      tile.querySelector('.stage-label').textContent = ev.message || '';
+      scrollChatToBottom();
+    }
+
     function appendAnswerMsg(wikiResult) {
       const score = wikiResult.confidence_score || 0;
       let confDot = 'var(--green)';
@@ -3665,12 +3736,18 @@
       const tokens = (wikiResult.usage && wikiResult.usage.prompt_tokens) ?
         (wikiResult.usage.prompt_tokens + wikiResult.usage.completion_tokens) : 0;
 
+      const intent = wikiResult.intent || '';
+      const intentLabel = wikiResult.intent_label || (intent ? intent.replace(/_/g, ' ') : '');
+      const intentBadge = intentLabel
+        ? `<span class="tag-intent tag-intent-${intent}">${intentLabel}</span>` : '';
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
         <div class="answer-card" style="margin-bottom:0">
           <div class="answer-topbar">
             <div class="answer-tags">
+              ${intentBadge}
               <span class="tag-synth">SYNTHESIZED</span>
               <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>Confidence: ${score}%</span>
             </div>
@@ -3758,7 +3835,24 @@
 
     async function doQueryInternal(question, targetDoc, isFollowup) {
       $askBtn.disabled = true;
-      appendTypingIndicator();
+      appendProgressStages();
+
+      function handleStreamEvent(ev) {
+        const t = ev.type;
+        if (t === 'error') {
+          removeProgressStages(); appendSystemMsg('Error: ' + (ev.error || 'unknown'));
+        } else if (t === 'disambiguation') {
+          removeProgressStages();
+          appendDisambiguationMsg(ev.message, ev.documents, ev.raw_documents || ev.documents);
+        } else if (t === 'clarification') {
+          removeProgressStages(); _pendingQuestion = question;
+          appendClarificationMsg(ev.message, ev.options);
+        } else if (t === 'answer') {
+          removeProgressStages(); appendAnswerMsg(ev.wiki);
+        } else {
+          updateStage(ev);
+        }
+      }
 
       try {
         const payload = { question, session_id: SID };
@@ -3770,27 +3864,35 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
-        const d = await res.json();
-        removeTypingIndicator();
 
-        if (d.error) { appendSystemMsg('Error: ' + d.error); return; }
+        if (!res.ok || !res.body) {
+          let errText = 'Query failed (HTTP ' + res.status + ')';
+          try { const j = await res.json(); if (j.error) errText = j.error; } catch(e) {}
+          removeProgressStages(); appendSystemMsg('Error: ' + errText);
+          return;
+        }
 
-        if (d.type === 'disambiguation') {
-          appendDisambiguationMsg(d.message, d.documents, d.raw_documents || d.documents);
-        } else if (d.type === 'clarification') {
-          _pendingQuestion = question;
-          appendClarificationMsg(d.message, d.options);
-        } else if (d.type === 'answer' && d.wiki) {
-          appendAnswerMsg(d.wiki);
-        } else if (d.wiki && d.wiki.answer) {
-          appendAnswerMsg(d.wiki);
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let idx;
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const raw = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 2);
+            if (!raw.startsWith('data:')) continue;
+            const jsonStr = raw.slice(5).trim();
+            if (!jsonStr) continue;
+            try { handleStreamEvent(JSON.parse(jsonStr)); } catch(e) {}
+          }
         }
       } catch (e) {
-        removeTypingIndicator();
-        appendSystemMsg('Query failed: ' + e);
+        removeProgressStages(); appendSystemMsg('Query failed: ' + e);
       } finally {
-        $askBtn.disabled = false;
-        $qInput.focus();
+        $askBtn.disabled = false; $qInput.focus();
       }
     }
 
@@ -3813,6 +3915,8 @@
               token_total: meta.token_total || {},
               usage: {},
               elapsed_ms: 0,
+              intent: meta.intent || '',
+              intent_label: meta.intent_label || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
             const meta = msg.metadata || {};
