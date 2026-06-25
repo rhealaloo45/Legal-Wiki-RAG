@@ -657,6 +657,79 @@
       line-height: 1.7
     }
 
+    .answer-body {
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      overflow-x: auto;
+    }
+
+    .answer-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      table-layout: fixed;
+      word-wrap: break-word;
+    }
+
+    .answer-body table th,
+    .answer-body table td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+
+    .answer-body table th {
+      background: var(--bg-secondary);
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .answer-body table td {
+      color: var(--text-secondary);
+    }
+
+    .answer-body table tr:nth-child(even) {
+      background: var(--bg-secondary);
+    }
+
+    .answer-body pre {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px 16px;
+      overflow-x: auto;
+      margin: 12px 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .answer-body code {
+      font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    .answer-body :not(pre) > code {
+      background: var(--bg-secondary);
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .answer-body hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+
     .inline-cite {
       font-family: var(--font-sans);
       font-size: 10px;
@@ -3630,6 +3703,10 @@
 
     function renderMarkdown(text) {
       if (!text) return '';
+      // Strip ```text / ```markdown / ``` fences so clause drafts render
+      // as formatted prose instead of monospace code blocks.
+      text = text.replace(/```(?:text|markdown|plaintext)?\s*\n/g, '')
+                 .replace(/\n```\s*/g, '\n');
       try { return marked.parse(text, { breaks: true, gfm: true }); }
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
     }
@@ -3684,6 +3761,7 @@
       disambiguation:'disambiguation', clarification:'clarification',
       retrieving:'retrieve', pages_retrieved:'retrieve',
       generating:'generate',
+      validating:'validate',
     };
     function updateStage(ev) {
       const tileId = STAGE_TILE_MAP[ev.stage];
@@ -3741,6 +3819,19 @@
       const intentBadge = intentLabel
         ? `<span class="tag-intent tag-intent-${intent}">${intentLabel}</span>` : '';
 
+      // Grounding badge
+      const grounding = (wikiResult.validation && wikiResult.validation.grounding) || {};
+      const gScore = grounding.grounding_score;
+      let groundingBadge = '';
+      if (gScore != null) {
+        let gColor = 'var(--green)';
+        if (gScore < 50) gColor = 'var(--red)';
+        else if (gScore < 70) gColor = 'var(--amber)';
+        const gClaims = (grounding.ungrounded_claims || []);
+        const gTip = gClaims.length ? gClaims.join('; ') : (grounding.summary || '');
+        groundingBadge = `<span class="conf" title="${gTip.replace(/"/g,'&quot;')}"><span class="conf-dot" style="background:${gColor}"></span>Grounding: ${gScore}%</span>`;
+      }
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
@@ -3750,6 +3841,7 @@
               ${intentBadge}
               <span class="tag-synth">SYNTHESIZED</span>
               <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>Confidence: ${score}%</span>
+              ${groundingBadge}
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
