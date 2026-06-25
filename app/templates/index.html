@@ -2985,18 +2985,41 @@
       `;
       }
 
-      return `
-      <div class="referenced-sources-section" style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 16px 24px;">
-        <div class="referenced-sources-label" style="font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-          <i class="ti ti-bookmarks" style="font-size: 14px; color: var(--accent);"></i>
-          REFERENCED SOURCES (${entries.length})
-        </div>
-        <div class="referenced-sources-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;">
+      // Build collapsible References section (inline citations list)
+      let refsListHtml = '';
+      if (refs.length > 0) {
+        const deduped = [];
+        const seen = new Set();
+        for (const r of refs) {
+          const cleanDoc = r.docName.replace(/^[a-f0-9-]{36}_/, '').replace(/_/g, ' ').split('/').pop();
+          const key = cleanDoc + '|' + (r.location || '');
+          if (!seen.has(key)) { seen.add(key); deduped.push({ ...r, cleanDoc }); }
+        }
+        refsListHtml = `
+        <details class="answer-collapsible" style="border-top: 1px solid var(--border); padding: 12px 24px;">
+          <summary style="cursor:pointer; font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; user-select:none;">
+            <i class="ti ti-list" style="font-size: 13px; color: var(--accent);"></i>
+            REFERENCES (${deduped.length})
+          </summary>
+          <ol style="margin: 10px 0 0 4px; padding-left: 18px; font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
+            ${deduped.map(r => `<li><strong>${r.cleanDoc}</strong>${r.location ? ', ' + r.location : ''}${r.quote ? ' — <em>"' + r.quote.substring(0, 120) + (r.quote.length > 120 ? '…' : '') + '"</em>' : ''}</li>`).join('')}
+          </ol>
+        </details>`;
+      }
+
+      // Build collapsible Sources section (document buttons, deduplicated)
+      const sourcesHtml = `
+      <details class="answer-collapsible" open style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 12px 24px;">
+        <summary style="cursor:pointer; font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; user-select:none;">
+          <i class="ti ti-bookmarks" style="font-size: 13px; color: var(--accent);"></i>
+          SOURCES (${entries.length})
+        </summary>
+        <div class="referenced-sources-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px;">
           ${cardsHtml}
         </div>
-        ${evidenceHtml}
-      </div>
-    `;
+      </details>`;
+
+      return refsListHtml + sourcesHtml;
     }
 
     // Safe multi-highlight text
@@ -3799,8 +3822,24 @@
       const filesUsed = wikiResult.files_used || [];
       const parsed = extractReferencesSection(wikiResult.answer);
       let refs = parsed.refs;
-      if (refs.length === 0 && filesUsed.length > 0) {
-        refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+      if (refs.length === 0) {
+        // Build refs from selected_titles or pages_used — each title has "Topic (source_doc)"
+        const titleSource = (wikiResult.selected_titles && wikiResult.selected_titles.length > 0)
+          ? wikiResult.selected_titles
+          : (wikiResult.pages_used || []);
+        if (titleSource.length > 0) {
+          let idx = 0;
+          for (const p of titleSource) {
+            if (p.startsWith('Q:')) continue;
+            const parenIdx = p.lastIndexOf('(');
+            const topic = parenIdx > 0 ? p.substring(0, parenIdx).trim() : p;
+            const rawDoc = parenIdx > 0 ? p.substring(parenIdx + 1, p.lastIndexOf(')')) : '';
+            const docName = rawDoc || (filesUsed.length > 0 ? filesUsed[0] : 'Unknown');
+            refs.push({ num: ++idx, docName, location: topic });
+          }
+        } else if (filesUsed.length > 0) {
+          refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+        }
       }
       currentResultReferences = refs;
 

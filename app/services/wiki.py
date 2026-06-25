@@ -1939,6 +1939,25 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                     if cfile not in files_used:
                         files_used.append(cfile)
 
+    # Fallback: if no inline citations were found, populate files_used.
+    # Prefer the file(s) explicitly mentioned in the question; only fall back
+    # to all selected-page source docs when no file was detected.
+    if not files_used and selected_titles:
+        mentioned = _detect_mentioned_files(question, pages)
+        if mentioned:
+            files_used = sorted(mentioned)
+        else:
+            seen_files = set()
+            for t in selected_titles:
+                if t.startswith("Q:"):
+                    continue
+                page = pages.get(t)
+                if isinstance(page, dict):
+                    sd = page.get("source_doc", "")
+                    if sd and sd not in seen_files:
+                        seen_files.add(sd)
+                        files_used.append(sd)
+
     # Confidence is already extracted from the reasoning block above —
     # no second LLM call needed.
     confidence = {"score": confidence_score, "reason": confidence_reason}
@@ -2001,6 +2020,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "answer": answer,
         "pages_used": pages_used_dedup,
         "files_used": files_used,
+        "selected_titles": selected_titles,
         "relations": relations,
         "usage": usage,
         "confidence_score": confidence["score"],
@@ -2233,10 +2253,14 @@ def classify_query(question: str, session_id: str) -> dict:
         "- It mentions specific party names, entity names, or company names (e.g. 'the ReVolt JV Agreement', 'Meridian service agreement', 'agreement between Tata Motors and ReVolt')\n"
         "- It's a cross-document comparison or general legal question\n"
         "- It mentions a document type with a number, identifier, or distinctive party/entity name\n\n"
-        "A question NEEDS disambiguation ONLY when:\n"
+        "A question NEEDS disambiguation when:\n"
         "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
-        "without ANY identifier, number, or party name\n\n"
-        "When in doubt, choose false (no disambiguation needed).\n\n"
+        "without ANY identifier, number, or party name\n"
+        "- It refers to a specific clause, provision, or section (e.g. 'the indemnity clause', "
+        "'limitation of liability', 'termination provisions') without specifying WHICH document "
+        "contains that clause — and multiple documents in the list could have such a clause\n\n"
+        "A question does NOT need disambiguation when it is a cross-document comparison or "
+        "general legal question that intentionally spans all documents.\n\n"
         "Respond with JSON only:\n"
         '{"needs_disambiguation": bool, "reason": "one sentence"}'
     )
