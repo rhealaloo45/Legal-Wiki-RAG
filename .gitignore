@@ -233,6 +233,7 @@ package-lock.json
 # Scratch & Test Files
 check_errors.js
 test_*.py
+test_*.txt
 debug.log
 lexwiki_ui_v2.html
 
@@ -242,8 +243,9 @@ lexwiki_ui_v2.html
 # Windows reserved device names
 NUL
 
-# claude
+# claude / gemini / AI tooling
 .claude/
+.gemini/
 .vscode/
 
 
@@ -253,8 +255,13 @@ NUL
 /sa1_detail.txt
 /sa1_raw.json
 
-# Understanding
+# Understanding / auto-generated docs
 ARCHITECTURE.md
 PLAN.md
 FLOWCHART.md
+
 questions.txt
+
+# Debug output
+app/debug_raw_answer.txt
+app/test_output.txt
