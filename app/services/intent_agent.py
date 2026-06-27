@@ -318,6 +318,74 @@ def generate_answer_node(state: QueryState) -> dict:
     return {"answer_result": wr}
 
 
+_GROUNDING_PROMPT = """\
+You are a legal QA auditor. Compare the ANSWER against the CONTEXT and determine \
+how well the answer's FACTUAL CLAIMS are grounded in the provided documents.
+
+INTENT: {intent}
+
+CONTEXT (excerpts from source documents):
+{context}
+
+---
+QUESTION: {question}
+
+---
+ANSWER TO CHECK:
+{answer}
+
+---
+IMPORTANT DISTINCTION — only flag FACTUAL claims as ungrounded:
+- FACTUAL claims: clause numbers, party names, dates, amounts, obligations stated in the document.
+- PROFESSIONAL ANALYSIS: risk classifications, market-practice comparisons, gap identification, \
+suggested changes, negotiation advice. These are EXPECTED legal judgment, NOT ungrounded claims.
+For "risk_assessment" and "drafting" intents, the answer is supposed to go beyond the text with \
+professional analysis. Only penalize fabricated facts (wrong clause numbers, invented provisions, \
+incorrect party names), not analytical conclusions or recommendations.
+
+Respond with ONLY valid JSON, no other text:
+{{
+  "grounding_score": <0-100>,
+  "ungrounded_claims": ["<fabricated fact not in context>", ...],
+  "summary": "<one sentence assessment>"
+}}
+
+Scoring guide:
+- 90-100: All factual claims traceable to context; analysis is reasonable
+- 70-89: Most facts grounded, minor factual extrapolations
+- 50-69: Some factual claims lack context support
+- 0-49: Significant fabricated facts"""
+
+
+def _check_grounding(question: str, context: str, answer: str, intent: str = "factual") -> dict:
+    """LLM-based grounding check — verifies answer claims against context."""
+    if not context or not answer or len(answer) < 20:
+        return {"grounding_score": None, "ungrounded_claims": [], "summary": "Skipped — insufficient content."}
+
+    ctx = context
+
+    prompt = _GROUNDING_PROMPT.format(
+        context=ctx,
+        question=question,
+        answer=answer[:2000],
+        intent=intent,
+    )
+    try:
+        raw, _usage = llm.ask(prompt, fast=False, max_tokens=config.MAX_TOKENS_GROUNDING_CHECK)
+        import json as _json
+        start = raw.find("{")
+        end = raw.rfind("}") + 1
+        if start >= 0 and end > start:
+            result = _json.loads(raw[start:end])
+            score = result.get("grounding_score")
+            if isinstance(score, (int, float)):
+                result["grounding_score"] = max(0, min(100, int(score)))
+            return result
+    except Exception as e:
+        logger.warning("Grounding check failed: %s", e)
+    return {"grounding_score": None, "ungrounded_claims": [], "summary": "Check failed."}
+
+
 def validate_response_node(state: QueryState) -> dict:
     logger.info("[AGENT] validate_response_node: intent=%s", state.get("intent"))
     wr = state.get("answer_result") or {}
@@ -335,10 +403,25 @@ def validate_response_node(state: QueryState) -> dict:
     if warning:
         logger.info("Intent validation warning: %s", warning)
 
-    wr["validation"] = {"valid": valid, "warning": warning}
+    # LLM grounding check — verifies factual claims against context
+    grounding = {"grounding_score": None, "ungrounded_claims": [], "summary": "Disabled."}
+    if config.ENABLE_ANSWER_VALIDATION:
+        _emit({"stage": "validating", "status": "active", "message": "Checking answer grounding…"})
+        grounding = _check_grounding(
+            state["question"],
+            state.get("wiki_context", ""),
+            answer,
+            intent=intent,
+        )
+        logger.info("[AGENT] Grounding score: %s | %s", grounding.get("grounding_score"), grounding.get("summary"))
+        _emit({"stage": "validating", "status": "done",
+               "grounding_score": grounding.get("grounding_score"),
+               "message": f"Grounding: {grounding.get('grounding_score', '?')}%"})
+
+    wr["validation"] = {"valid": valid, "warning": warning, "grounding": grounding}
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
-    return {"answer_result": wr, "validation": {"valid": valid, "warning": warning}}
+    return {"answer_result": wr, "validation": {"valid": valid, "warning": warning, "grounding": grounding}}
 
 
 # ---------------------------------------------------------------------------

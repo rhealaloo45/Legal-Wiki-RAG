@@ -1397,7 +1397,7 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
     if num_match:
         doc_num = num_match.group(1)
         type_match = re.search(
-            r'(service\s+agreement|shareholder\s+agreement|nda|joint\s+venture|'
+            r'(services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
             r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)',
             question, re.IGNORECASE,
         )
@@ -1563,6 +1563,15 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     _PAGE_CAP  = config.MAX_PAGE_CONTEXT_CHARS
 
     wiki_parts = []
+    # When retrieval is file-focused, prepend a header so the LLM knows which
+    # document the pages come from (handles "Services Agreement" vs "Service Agreement").
+    if file_pages and mentioned_files:
+        doc_names = [re.sub(r'\b(redacted|Redacted|_)\b', ' ', os.path.splitext(
+            d.replace("\\", "/").rsplit("/", 1)[-1])[0]).strip()
+            for d in mentioned_files]
+        doc_names = [re.sub(r'\s+', ' ', d) for d in doc_names]
+        wiki_parts.append(f"[The following pages are from: {', '.join(doc_names)}]\n")
+
     for title in selected_titles:
         if title in pages:
             page = pages[title]
@@ -1576,7 +1585,32 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             elif len(content) > _PAGE_CAP:
                 content = content[:_PAGE_CAP] + "\n[...truncated]"
 
-            wiki_parts.append(f"## {title}\n{content}\n")
+            # Clean the title for LLM context: strip UUID prefix and path noise
+            # "Topic (uuid_Legal AI Tool - Group_Type_Name_redacted.pdf)"
+            #   → "Topic – Service Agreement 4"
+            display_title = title
+            paren = title.rfind("(")
+            if paren > 0:
+                topic = title[:paren].strip()
+                raw_path = title[paren + 1:title.rfind(")")].strip() if ")" in title else ""
+                clean_path = re.sub(r'^[a-f0-9-]{36}_', '', raw_path)
+                clean_file = clean_path.replace("\\", "/").rsplit("/", 1)[-1]
+                clean_file = os.path.splitext(clean_file)[0]
+                clean_file = clean_file.replace("_", " ").strip()
+                clean_file = re.sub(r'\b(redacted|Redacted)\b', '', clean_file).strip()
+                # Extract just the doc name: last meaningful segment
+                # "Legal AI Tool - Tata Group Service Agreement Service Agreement 4"
+                #   → "Service Agreement 4"
+                for prefix in ["Legal AI Tool - Tata Group ", "Legal AI Tool - "]:
+                    if clean_file.startswith(prefix):
+                        clean_file = clean_file[len(prefix):]
+                # Remove repeated type prefix: "Service Agreement Service Agreement 4" → "Service Agreement 4"
+                parts = clean_file.split()
+                mid = len(parts) // 2
+                if mid >= 2 and parts[:mid] == parts[mid:2*mid]:
+                    clean_file = " ".join(parts[mid:])
+                display_title = f"{topic} – {clean_file}" if clean_file else topic
+            wiki_parts.append(f"## {display_title}\n{content}\n")
     wiki_content = "\n".join(wiki_parts)
 
     return {
@@ -1768,7 +1802,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     )
 
     usage = {}
-    confidence_score = 75   # conservative default if extraction fails
+    confidence_score = 75
     confidence_reason = "Default — could not parse confidence from reasoning block."
 
     try:
@@ -1905,6 +1939,25 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                     if cfile not in files_used:
                         files_used.append(cfile)
 
+    # Fallback: if no inline citations were found, populate files_used.
+    # Prefer the file(s) explicitly mentioned in the question; only fall back
+    # to all selected-page source docs when no file was detected.
+    if not files_used and selected_titles:
+        mentioned = _detect_mentioned_files(question, pages)
+        if mentioned:
+            files_used = sorted(mentioned)
+        else:
+            seen_files = set()
+            for t in selected_titles:
+                if t.startswith("Q:"):
+                    continue
+                page = pages.get(t)
+                if isinstance(page, dict):
+                    sd = page.get("source_doc", "")
+                    if sd and sd not in seen_files:
+                        seen_files.add(sd)
+                        files_used.append(sd)
+
     # Confidence is already extracted from the reasoning block above —
     # no second LLM call needed.
     confidence = {"score": confidence_score, "reason": confidence_reason}
@@ -1967,6 +2020,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "answer": answer,
         "pages_used": pages_used_dedup,
         "files_used": files_used,
+        "selected_titles": selected_titles,
         "relations": relations,
         "usage": usage,
         "confidence_score": confidence["score"],
@@ -1981,7 +2035,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 # ---------------------------------------------------------------------------
 
 _DOC_NAME_PATTERN = re.compile(
-    r'(?:service\s+agreement|shareholder\s+agreement|nda|joint\s+venture|'
+    r'(?:services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
     r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)\s*'
     r'(?:#?\s*)?(\d+)',
     re.IGNORECASE,
@@ -1991,8 +2045,8 @@ _DOC_NAME_PATTERN = re.compile(
 # or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement").
 _DOC_WITH_ENTITY_PATTERN = re.compile(
     r'(?:the\s+)?([A-Za-z]+(?:\s+[A-Za-z]+)*)\s+'
-    r'(?:jv\s+agreement|jva|joint\s+venture|service\s+agreement|nda|'
-    r'shareholder\s+agreement|sha|court\s+case|judgment|legal\s+opinion)',
+    r'(?:jv\s+agreement|jva|joint\s+venture|services?\s+agreement|nda|'
+    r'shareholders?\s+agreement|sha|court\s+case|judgment|legal\s+opinion)',
     re.IGNORECASE,
 )
 
@@ -2012,7 +2066,7 @@ _NON_ENTITY_WORDS = {
 # among multiple documents of the same type.
 _VAGUE_DOC_PATTERN = re.compile(
     r'\b(?:this|that|the|a|an)\s+'
-    r'(service\s+agreement|shareholders?\s+agreement|nda|'
+    r'(services?\s+agreement|shareholders?\s+agreement|nda|'
     r'non[-\s]?disclosure(?:\s+agreement)?|joint\s+venture(?:\s+agreement)?|'
     r'jva|sha|legal\s+opinion|court\s+case|judgment|agreement|document|contract)'
     r'\b(?!\s*#?\s*\d)',
@@ -2021,7 +2075,7 @@ _VAGUE_DOC_PATTERN = re.compile(
 
 # Maps a vague type keyword → substring that must appear in the source-doc name.
 _VAGUE_TYPE_FILTER = {
-    "service agreement": "service agreement",
+    "service agreement": "service agreement", "services agreement": "service agreement",
     "shareholder agreement": "shareholder", "shareholders agreement": "shareholder",
     "sha": "shareholder",
     "nda": "nda", "non disclosure": "nda", "non-disclosure": "nda",
@@ -2199,10 +2253,14 @@ def classify_query(question: str, session_id: str) -> dict:
         "- It mentions specific party names, entity names, or company names (e.g. 'the ReVolt JV Agreement', 'Meridian service agreement', 'agreement between Tata Motors and ReVolt')\n"
         "- It's a cross-document comparison or general legal question\n"
         "- It mentions a document type with a number, identifier, or distinctive party/entity name\n\n"
-        "A question NEEDS disambiguation ONLY when:\n"
+        "A question NEEDS disambiguation when:\n"
         "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
-        "without ANY identifier, number, or party name\n\n"
-        "When in doubt, choose false (no disambiguation needed).\n\n"
+        "without ANY identifier, number, or party name\n"
+        "- It refers to a specific clause, provision, or section (e.g. 'the indemnity clause', "
+        "'limitation of liability', 'termination provisions') without specifying WHICH document "
+        "contains that clause — and multiple documents in the list could have such a clause\n\n"
+        "A question does NOT need disambiguation when it is a cross-document comparison or "
+        "general legal question that intentionally spans all documents.\n\n"
         "Respond with JSON only:\n"
         '{"needs_disambiguation": bool, "reason": "one sentence"}'
     )
