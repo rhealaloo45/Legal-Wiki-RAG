@@ -101,6 +101,8 @@ PROGRESS_STORE = {}
 # Conversational UX
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
+ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
+MAX_TOKENS_GROUNDING_CHECK = 500
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

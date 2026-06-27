@@ -657,6 +657,79 @@
       line-height: 1.7
     }
 
+    .answer-body {
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      overflow-x: auto;
+    }
+
+    .answer-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 14px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      table-layout: fixed;
+      word-wrap: break-word;
+    }
+
+    .answer-body table th,
+    .answer-body table td {
+      border: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+    }
+
+    .answer-body table th {
+      background: var(--bg-secondary);
+      font-weight: 600;
+      color: var(--text-primary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .answer-body table td {
+      color: var(--text-secondary);
+    }
+
+    .answer-body table tr:nth-child(even) {
+      background: var(--bg-secondary);
+    }
+
+    .answer-body pre {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px 16px;
+      overflow-x: auto;
+      margin: 12px 0;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+
+    .answer-body code {
+      font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+      font-size: 12px;
+      color: var(--text-primary);
+    }
+
+    .answer-body :not(pre) > code {
+      background: var(--bg-secondary);
+      padding: 2px 5px;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+
+    .answer-body hr {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 16px 0;
+    }
+
     .inline-cite {
       font-family: var(--font-sans);
       font-size: 10px;
@@ -2912,18 +2985,41 @@
       `;
       }
 
-      return `
-      <div class="referenced-sources-section" style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 16px 24px;">
-        <div class="referenced-sources-label" style="font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; margin-bottom: 12px; display: flex; align-items: center; gap: 6px;">
-          <i class="ti ti-bookmarks" style="font-size: 14px; color: var(--accent);"></i>
-          REFERENCED SOURCES (${entries.length})
-        </div>
-        <div class="referenced-sources-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px;">
+      // Build collapsible References section (inline citations list)
+      let refsListHtml = '';
+      if (refs.length > 0) {
+        const deduped = [];
+        const seen = new Set();
+        for (const r of refs) {
+          const cleanDoc = r.docName.replace(/^[a-f0-9-]{36}_/, '').replace(/_/g, ' ').split('/').pop();
+          const key = cleanDoc + '|' + (r.location || '');
+          if (!seen.has(key)) { seen.add(key); deduped.push({ ...r, cleanDoc }); }
+        }
+        refsListHtml = `
+        <details class="answer-collapsible" style="border-top: 1px solid var(--border); padding: 12px 24px;">
+          <summary style="cursor:pointer; font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; user-select:none;">
+            <i class="ti ti-list" style="font-size: 13px; color: var(--accent);"></i>
+            REFERENCES (${deduped.length})
+          </summary>
+          <ol style="margin: 10px 0 0 4px; padding-left: 18px; font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
+            ${deduped.map(r => `<li><strong>${r.cleanDoc}</strong>${r.location ? ', ' + r.location : ''}${r.quote ? ' — <em>"' + r.quote.substring(0, 120) + (r.quote.length > 120 ? '…' : '') + '"</em>' : ''}</li>`).join('')}
+          </ol>
+        </details>`;
+      }
+
+      // Build collapsible Sources section (document buttons, deduplicated)
+      const sourcesHtml = `
+      <details class="answer-collapsible" open style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 12px 24px;">
+        <summary style="cursor:pointer; font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; user-select:none;">
+          <i class="ti ti-bookmarks" style="font-size: 13px; color: var(--accent);"></i>
+          SOURCES (${entries.length})
+        </summary>
+        <div class="referenced-sources-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; margin-top: 10px;">
           ${cardsHtml}
         </div>
-        ${evidenceHtml}
-      </div>
-    `;
+      </details>`;
+
+      return refsListHtml + sourcesHtml;
     }
 
     // Safe multi-highlight text
@@ -3630,6 +3726,10 @@
 
     function renderMarkdown(text) {
       if (!text) return '';
+      // Strip ```text / ```markdown / ``` fences so clause drafts render
+      // as formatted prose instead of monospace code blocks.
+      text = text.replace(/```(?:text|markdown|plaintext)?\s*\n/g, '')
+                 .replace(/\n```\s*/g, '\n');
       try { return marked.parse(text, { breaks: true, gfm: true }); }
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
     }
@@ -3684,6 +3784,7 @@
       disambiguation:'disambiguation', clarification:'clarification',
       retrieving:'retrieve', pages_retrieved:'retrieve',
       generating:'generate',
+      validating:'validate',
     };
     function updateStage(ev) {
       const tileId = STAGE_TILE_MAP[ev.stage];
@@ -3721,8 +3822,24 @@
       const filesUsed = wikiResult.files_used || [];
       const parsed = extractReferencesSection(wikiResult.answer);
       let refs = parsed.refs;
-      if (refs.length === 0 && filesUsed.length > 0) {
-        refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+      if (refs.length === 0) {
+        // Build refs from selected_titles or pages_used — each title has "Topic (source_doc)"
+        const titleSource = (wikiResult.selected_titles && wikiResult.selected_titles.length > 0)
+          ? wikiResult.selected_titles
+          : (wikiResult.pages_used || []);
+        if (titleSource.length > 0) {
+          let idx = 0;
+          for (const p of titleSource) {
+            if (p.startsWith('Q:')) continue;
+            const parenIdx = p.lastIndexOf('(');
+            const topic = parenIdx > 0 ? p.substring(0, parenIdx).trim() : p;
+            const rawDoc = parenIdx > 0 ? p.substring(parenIdx + 1, p.lastIndexOf(')')) : '';
+            const docName = rawDoc || (filesUsed.length > 0 ? filesUsed[0] : 'Unknown');
+            refs.push({ num: ++idx, docName, location: topic });
+          }
+        } else if (filesUsed.length > 0) {
+          refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+        }
       }
       currentResultReferences = refs;
 
@@ -3741,6 +3858,19 @@
       const intentBadge = intentLabel
         ? `<span class="tag-intent tag-intent-${intent}">${intentLabel}</span>` : '';
 
+      // Grounding badge
+      const grounding = (wikiResult.validation && wikiResult.validation.grounding) || {};
+      const gScore = grounding.grounding_score;
+      let groundingBadge = '';
+      if (gScore != null) {
+        let gColor = 'var(--green)';
+        if (gScore < 50) gColor = 'var(--red)';
+        else if (gScore < 70) gColor = 'var(--amber)';
+        const gClaims = (grounding.ungrounded_claims || []);
+        const gTip = gClaims.length ? gClaims.join('; ') : (grounding.summary || '');
+        groundingBadge = `<span class="conf" title="${gTip.replace(/"/g,'&quot;')}"><span class="conf-dot" style="background:${gColor}"></span>Grounding: ${gScore}%</span>`;
+      }
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
@@ -3750,6 +3880,7 @@
               ${intentBadge}
               <span class="tag-synth">SYNTHESIZED</span>
               <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>Confidence: ${score}%</span>
+              ${groundingBadge}
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
