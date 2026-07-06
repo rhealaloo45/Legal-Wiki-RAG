@@ -154,6 +154,10 @@
       color: var(--accent);
     }
 
+    .provider-option.active[data-val="nvidia"] i {
+      color: #76B900;
+    }
+
     .icon-btn {
       width: 30px;
       height: 30px;
@@ -1981,6 +1985,9 @@
           <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
             <i class="ti ti-router"></i> OpenRouter
           </div>
+          <div class="provider-option" data-val="nvidia" onclick="setProvider('nvidia')">
+            <i class="ti ti-bolt"></i> NVIDIA
+          </div>
         </div>
         <span style="font-size:11px;font-weight:600;margin-right:-5px;margin-left:2px;color:var(--text-muted)">Embed:</span>
         <div class="provider-toggle" id="embeddingToggle" style="margin-right: 10px;">
@@ -1989,6 +1996,9 @@
           </div>
           <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
             <i class="ti ti-router"></i> OpenRouter
+          </div>
+          <div class="provider-option" data-val="nvidia" onclick="setEmbeddingProvider('nvidia')">
+            <i class="ti ti-bolt"></i> NVIDIA
           </div>
         </div>
         <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
@@ -2618,7 +2628,7 @@
       })
       .then(r => r.json())
       .then(data => {
-        showToast("LLM Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+        showToast("LLM Provider set to " + providerLabel(val));
       })
       .catch(err => {
         console.error(err);
@@ -2637,12 +2647,16 @@
       })
       .then(r => r.json())
       .then(data => {
-        showToast("Embedding Provider set to " + (val === 'azure' ? "Azure" : "OpenRouter"));
+        showToast("Embedding Provider set to " + providerLabel(val));
       })
       .catch(err => {
         console.error(err);
         showToast("Failed to switch Embedding provider", "error");
       });
+    }
+
+    function providerLabel(val) {
+      return { azure: "Azure", openrouter: "OpenRouter", nvidia: "NVIDIA" }[val] || val;
     }
 
     // Load initial providers

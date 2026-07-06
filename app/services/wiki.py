@@ -254,6 +254,12 @@ _SHARED_PAGE_PATTERNS = re.compile(
     r'Code\s+of\s+Civil\s+Procedure|CPC|CrPC|IPC)',
     re.IGNORECASE,
 )
+# A bare doc-type abbreviation ("Equity Split – JVA", "Notices – NDA") is NOT a
+# real per-document prefix — it's identical for every document of that type and
+# will silently collide across documents in the DB (each ingest overwrites the
+# previous one's source_doc + loses that document's own facts). Only a prefix
+# like "– JVA-HeliosAether" or "– SA-Meridian" actually disambiguates.
+_BARE_TYPE_SUFFIX = re.compile(r'^(?:JVA|NDA|SA|SHA|LO|CCD|J|TBJ)\.?$', re.IGNORECASE)
 
 
 def _make_doc_identifier(doc_name: str) -> str:
@@ -301,14 +307,26 @@ def _make_doc_identifier(doc_name: str) -> str:
 def _auto_prefix_title(title: str, doc_id: str) -> str:
     """Add document identifier prefix to unprefixed contract/agreement pages.
 
-    Pages that already have a ' – ' prefix or are shared legal concepts are left unchanged.
-    Only pages whose doc-type parenthetical matches a contract type get prefixed.
+    Pages that already have a genuine per-document ' – ' prefix (e.g. "SA-Meridian")
+    or that are shared legal concepts are left unchanged. Only pages whose doc-type
+    parenthetical matches a contract type get prefixed. A bare doc-type abbreviation
+    used as a would-be prefix ("Equity Split – JVA") does NOT count as prefixed —
+    it's substituted with the real doc_id so it stops colliding across documents.
     """
     if not doc_id or doc_id == "Doc":
         return title
-    # Already has a prefix (contains " – " before the parenthetical)
-    if ' – ' in title.split('(')[0]:
+
+    pre_paren = title.split('(')[0]
+    dash_idx = pre_paren.rfind(' – ')
+    if dash_idx >= 0:
+        base_title = pre_paren[:dash_idx].strip()
+        suffix = pre_paren[dash_idx + 3:].strip()
+        if _BARE_TYPE_SUFFIX.match(suffix) and not _SHARED_PAGE_PATTERNS.match(base_title):
+            rest = title[len(pre_paren):]  # preserve any trailing "(...)" untouched
+            return f"{base_title} – {doc_id}{rest}"
+        # Genuine per-document prefix already present (e.g. "– JVA-HeliosAether")
         return title
+
     # Check if this is a contract-type page
     paren_match = re.search(r'\(([^)]+)\)\s*$', title)
     if not paren_match:
@@ -364,6 +382,17 @@ def _merge_wiki(existing: dict, new_data: dict, doc_name: str = "Unknown") -> tu
         if new_quotes:
             quote_text = "\n\n**Supporting Quotes:**\n" + "\n".join(f"> {q}" for q in new_quotes)
             new_content += quote_text
+
+        # Guard against title collisions between DIFFERENT source documents
+        # (see matching comment in _atomic_merge_db). Only doc-specific pages
+        # (contract-type parenthetical) need this — shared concept/statute
+        # pages are meant to merge across documents.
+        if title in pages:
+            _existing_doc = pages[title].get("source_doc") if isinstance(pages[title], dict) else None
+            if _existing_doc not in (None, "", doc_name):
+                _paren = re.search(r'\(([^)]+)\)\s*$', title)
+                if _paren and _CONTRACT_DOC_TYPES.search(_paren.group(1)):
+                    title = f"{title} #{_doc_id}"
 
         if title in pages:
             # Existing page — append content, keep better summary
@@ -541,7 +570,8 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
     "parties": "Comma-separated list of party names or null",
     "auto_renewal": "Auto-renewal clause verbatim or null",
     "notice_period": "General notice period for communications or null",
-    "payment_terms": "Payment due date / terms (e.g. 'Net 30') or null"
+    "payment_terms": "Payment due date / terms (e.g. 'Net 30') or null",
+    "matter_reference": "Matter/case/docket/reference number printed in the document header or caption, verbatim, or null"
   }},
   "pages": {{
     "Descriptive Page Title (Inferred Doc Type)": {{
@@ -961,6 +991,23 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             title = _auto_prefix_title(title, _doc_id)
 
             existing = _db.get_page(session_id, title)
+
+            # Guard against title collisions between DIFFERENT source documents.
+            # The ingest LLM sometimes invents the same entity-derived identifier
+            # for two unrelated documents (e.g. two JVAs both involving parties
+            # named "Aether"/"Helios" both get titled "... – JVA-HeliosAether").
+            # _auto_prefix_title can't catch this — it looks like a real per-doc
+            # prefix. Only a doc-specific page (has a contract-type parenthetical)
+            # needs this guard; shared concept/statute pages are meant to merge
+            # across documents. Without this, the second document's ingest
+            # silently overwrites source_doc and clobbers the first document's
+            # own numbers (dollar figures, equity splits, venue clauses, etc.)
+            # under a shared row.
+            if existing and existing.get("source_doc") not in (None, "", doc_name):
+                _paren = re.search(r'\(([^)]+)\)\s*$', title)
+                if _paren and _CONTRACT_DOC_TYPES.search(_paren.group(1)):
+                    title = f"{title} #{_doc_id}"
+                    existing = _db.get_page(session_id, title)
 
             if existing:
                 existing_content = existing["content"]
@@ -1392,6 +1439,27 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
     q = " " + re.sub(r'\s+', ' ', question.lower()).strip() + " "
     matched: set[str] = set()
 
+    # 0. Raw filename mention (e.g. "Test_JVA_01.txt") — basename match.
+    # Bypasses _norm_doc_name's underscore-to-space and "test"-word stripping,
+    # which otherwise turns "Test_JVA_01.txt" into "jva 01" and never matches
+    # the literal underscore-joined filename text the user pasted.
+    #
+    # Uses endswith rather than exact equality: the website uploader flattens
+    # the original folder path into the saved filename with underscores (e.g.
+    # source_doc = "<session-uuid>_Joint Venture Agreements_Test_JVA_01.txt"),
+    # so stripping only the leading UUID still leaves a folder-name prefix
+    # ("Joint Venture Agreements_") in front of the real filename.
+    raw_mentions = re.findall(r'\b([\w\-]+\.(?:txt|pdf|docx))\b', question, re.IGNORECASE)
+    if raw_mentions:
+        mentions_lower = [m.lower() for m in raw_mentions]
+        for sd in src_docs:
+            basename = re.sub(r'^[a-f0-9-]{36}_', '', sd.replace("\\", "/").rsplit("/", 1)[-1]).lower()
+            if any(basename.endswith(m) for m in mentions_lower):
+                matched.add(sd)
+        if matched:
+            logger.info("Detected file mention (raw filename): %s", matched)
+            return matched
+
     # 1. Numbered type pattern — precise per-document scoping
     num_match = _DOC_NAME_PATTERN.search(question)
     if num_match:
@@ -1524,9 +1592,21 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # Kanther") and force-include those pages so the answer is correctly scoped.
         if not file_pages:
             matched_titles = _pages_matching_question_entity(question, pages)
-            if matched_titles:
+            # A distinctive entity ("ReVolt", "Yuvraj Kanther") should only match a
+            # handful of pages. If it matches a huge slice of the wiki, the "entity"
+            # is actually a common party name reused across many unrelated documents
+            # (e.g. "Aether"/"Helios" appearing in most of a synthetic test corpus) —
+            # forcing all of them in would blow the context budget. Fall through to
+            # normal hybrid vector/BM25 selection instead.
+            if matched_titles and len(matched_titles) <= config.ENTITY_MATCH_MAX_PAGES:
                 file_pages = matched_titles
                 logger.info("Entity-matched %d pages from question", len(file_pages))
+            elif matched_titles:
+                logger.warning(
+                    "Entity match found %d pages (> %d cap) — treating as too broad, "
+                    "falling back to normal page selection",
+                    len(matched_titles), config.ENTITY_MATCH_MAX_PAGES,
+                )
 
     bm25_count = 0
     pages_for_llm = pages
@@ -1543,7 +1623,38 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             # Large wiki: file pages + vector/LLM-selected supplementary pages
             llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
             seen = set(file_pages)
-            supplementary = [t for t in llm_selected if t not in seen]
+
+            # Guard against same-named-entity collisions across UNRELATED documents
+            # (e.g. two different test JVAs both naming their JV "SolarNexus ...
+            # LLC" with different parties/numbers). If a supplementary page covers
+            # the same clause topic ("Equity Split", "Formation and Capital
+            # Contributions", ...) as one already force-included from the named
+            # document, but belongs to a DIFFERENT source document, drop it —
+            # otherwise its numbers get blended into the requested document's
+            # answer and misattributed to it.
+            def _topic_of(title: str) -> str:
+                dash = title.find(" – ")
+                return title[:dash].strip() if dash > 0 else title
+
+            file_doc_set = {
+                pages[t].get("source_doc", "")
+                for t in file_pages
+                if isinstance(pages.get(t), dict) and pages[t].get("source_doc")
+            }
+            file_topics = {_topic_of(t) for t in file_pages}
+
+            supplementary = []
+            for t in llm_selected:
+                if t in seen:
+                    continue
+                p = pages.get(t)
+                sd = p.get("source_doc", "") if isinstance(p, dict) else ""
+                if _topic_of(t) in file_topics and sd and sd not in file_doc_set:
+                    logger.info("Dropping supplementary page %r — same topic as forced "
+                                "document but from a different source_doc (%s)", t, sd)
+                    continue
+                supplementary.append(t)
+
             selected_titles = file_pages + supplementary
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
                      len(file_pages), len(selected_titles))
@@ -1572,8 +1683,16 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         doc_names = [re.sub(r'\s+', ' ', d) for d in doc_names]
         wiki_parts.append(f"[The following pages are from: {', '.join(doc_names)}]\n")
 
+    _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
+    total_chars = sum(len(p) for p in wiki_parts)
+    pages_omitted = 0
+
     for title in selected_titles:
         if title in pages:
+            if total_chars >= _TOTAL_CAP:
+                pages_omitted += 1
+                continue
+
             page = pages[title]
             content = page.get("content", "") if isinstance(page, dict) else page
 
@@ -1610,7 +1729,20 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 if mid >= 2 and parts[:mid] == parts[mid:2*mid]:
                     clean_file = " ".join(parts[mid:])
                 display_title = f"{topic} – {clean_file}" if clean_file else topic
-            wiki_parts.append(f"## {display_title}\n{content}\n")
+            part = f"## {display_title}\n{content}\n"
+            wiki_parts.append(part)
+            total_chars += len(part)
+
+    if pages_omitted:
+        wiki_parts.append(
+            f"\n[NOTE: {pages_omitted} additional matching page(s) were omitted from this "
+            f"context to stay within the model's token limit. The answer below is based only "
+            f"on the pages shown above.]"
+        )
+        logger.warning(
+            "generate_answer: omitted %d/%d selected pages — total context exceeded %d chars",
+            pages_omitted, len(selected_titles), _TOTAL_CAP,
+        )
     wiki_content = "\n".join(wiki_parts)
 
     return {
@@ -1720,6 +1852,8 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
                         parts.append(f"Termination Notice: {meta['termination_notice']}")
                     if meta.get("payment_terms"):
                         parts.append(f"Payment Terms: {meta['payment_terms']}")
+                    if meta.get("matter_reference"):
+                        parts.append(f"Matter Reference: {meta['matter_reference']}")
                     if len(parts) > 1:
                         metadata_lines.append(" | ".join(parts))
             except Exception:
@@ -1805,11 +1939,20 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     confidence_score = 75
     confidence_reason = "Default — could not parse confidence from reasoning block."
 
+    # Comparison/risk/obligation answers synthesize across many more sources
+    # (tables + key-differences + full reference lists) and were getting cut
+    # off mid-sentence under the narrow-factual budget.
+    _answer_token_budget = (
+        config.MAX_TOKENS_ANSWER_BROAD
+        if intent in ("comparison", "risk_assessment", "obligation")
+        else config.MAX_TOKENS_ANSWER
+    )
+
     try:
         raw_answer, usage = llm.ask(
             prompt,
             pipeline="wiki",
-            max_tokens=config.MAX_TOKENS_ANSWER,
+            max_tokens=_answer_token_budget,
         )
 
         # --- Extract confidence from reasoning BEFORE stripping the block ---
@@ -2042,9 +2185,16 @@ _DOC_NAME_PATTERN = re.compile(
 )
 
 # Matches when a question names a document type together with a distinctive entity
-# or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement").
+# or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement"). The
+# entity capture is capped at 3 words — real entity names are short ("Yuvraj
+# Kanther", "SolarNexus"), never a full clause. Uncapped, this pattern used to
+# swallow an entire preceding sentence whenever a doc-type word appeared
+# incidentally in ordinary prose (e.g. "...source code from joint venture
+# servers..." has nothing to do with naming a Joint Venture Agreement document),
+# which made _question_names_a_document wrongly report "yes" and skip
+# disambiguation entirely.
 _DOC_WITH_ENTITY_PATTERN = re.compile(
-    r'(?:the\s+)?([A-Za-z]+(?:\s+[A-Za-z]+)*)\s+'
+    r'(?:the\s+)?([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+'
     r'(?:jv\s+agreement|jva|joint\s+venture|services?\s+agreement|nda|'
     r'shareholders?\s+agreement|sha|court\s+case|judgment|legal\s+opinion)',
     re.IGNORECASE,
@@ -2059,6 +2209,8 @@ _NON_ENTITY_WORDS = {
     "is", "are", "was", "were", "review", "summarize", "summarise", "analyze",
     "analyse", "explain", "describe", "identify", "assess", "evaluate", "draft",
     "compare", "in", "of", "for", "on", "about", "regarding", "tata", "given",
+    "from", "with", "and", "or", "to", "by", "under", "between", "during", "at",
+    "into", "onto", "over", "after", "before", "against", "across", "within",
 }
 
 # Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
@@ -2068,7 +2220,10 @@ _VAGUE_DOC_PATTERN = re.compile(
     r'\b(?:this|that|the|a|an)\s+'
     r'(services?\s+agreement|shareholders?\s+agreement|nda|'
     r'non[-\s]?disclosure(?:\s+agreement)?|joint\s+venture(?:\s+agreement)?|'
-    r'jva|sha|legal\s+opinion|court\s+case|judgment|agreement|document|contract)'
+    r'jva|sha|legal\s+opinion|court\s+case|judgment|'
+    r'motion(?:\s+to\s+\w+)?|complaint|stipulation|affidavit|opposition|pleading|'
+    r'settlement\s+agreement|'
+    r'agreement|document|contract)'
     r'\b(?!\s*#?\s*\d)',
     re.IGNORECASE,
 )
@@ -2087,6 +2242,52 @@ _VAGUE_TYPE_FILTER = {
 }
 # Generic determiner+noun ("this agreement", "the document") — can't narrow by type.
 _GENERIC_VAGUE_WORDS = {"agreement", "document", "contract"}
+
+# Litigation-filing types whose raw filenames (Test_CCD_08.txt, Test_Judgment_26.txt)
+# don't encode the filing type the way JVA/NDA/SHA/SA filenames do — a "motion" or
+# "complaint" can only be identified by looking at each page's stored doc-type
+# parenthetical ("Facts – Vanguard (Motion to Dismiss)", "Parties – Aether
+# (Verified Complaint)"). These must be resolved via _source_docs_by_title_type,
+# not _VAGUE_TYPE_FILTER (which matches against the raw filename).
+_VAGUE_TITLE_TYPE_WORDS = {
+    "motion", "complaint", "stipulation", "affidavit", "opposition", "pleading",
+    "settlement agreement",
+}
+
+
+def _title_prefix(title: str) -> str:
+    """Return the doc-type label from a page title's trailing parenthetical.
+
+    Stored titles look like "Facts – HASG (Motion to Dismiss)" or "Notice
+    Provision – Test-CCD35(Motion)" — the doc-type label is the text inside the
+    LAST parenthetical group. (The comma-prefixed "Motion, Facts – ..." form is
+    a display-layer relabeling get_context does at query time — it is never the
+    stored title, so matching on a leading comma here always returns nothing.)
+    """
+    m = re.search(r'\(([^)]+)\)\s*$', title)
+    return m.group(1).strip().lower() if m else ""
+
+
+def _source_docs_by_title_type(pages: dict, vtype: str) -> list[str]:
+    """Return distinct source_docs whose pages carry a title-prefix matching vtype.
+
+    Matches "motion" against prefixes like "motion", "motion to dismiss", "motion
+    for summary judgment" (startswith), and "complaint" against "complaint",
+    "verified complaint", "amended complaint" (substring), etc.
+    """
+    base = vtype.split()[0]  # "motion to compel" → "motion"; "settlement agreement" stays multi-word below
+    if vtype == "settlement agreement":
+        base = vtype
+    found: set[str] = set()
+    for title, page in pages.items():
+        if not isinstance(page, dict):
+            continue
+        prefix = _title_prefix(title)
+        if base in prefix:
+            sd = page.get("source_doc", "")
+            if sd:
+                found.add(sd)
+    return list(found)
 
 
 def _question_names_a_document(question: str, docs: list[str]) -> bool:
@@ -2116,6 +2317,14 @@ _ENTITY_EXCLUDE = {
     "judgments", "legal", "opinion", "opinions", "case", "document", "documents",
     "redacted", "test", "amendment", "summary", "final", "draft", "the", "and",
     "for", "from", "with", "this", "that", "limited", "private", "company",
+    # Generic legal/procedural vocabulary that occasionally ends up standing in
+    # for a proper short document identifier at ingest time (e.g. "Source Code
+    # Analysis", "MSA Ownership of Work Product") — these are descriptive
+    # phrases, not distinctive party/entity names, and treating them as entities
+    # made ordinary questions containing these common words falsely match a
+    # "known entity" and skip disambiguation.
+    "source", "code", "product", "products", "ownership", "analysis", "technical",
+    "evidence", "civil", "procedure", "procedural", "questionnaire", "motion",
 }
 
 
@@ -2123,16 +2332,29 @@ def _doc_identifier_part(title: str) -> str:
     """Return the document-identifier portion of a page title.
 
     Titles look like "Topic – SA-Meridian (Service Agreement)". The identifier is
-    the text AFTER ' – ' and BEFORE ' (' — e.g. "SA-Meridian", "JVReVolt",
-    "Yuvraj Kanther". Topic words (before the dash) are NOT included, so generic
-    legal vocabulary like "Confidential Information" is never treated as an entity.
+    the text AFTER ' – ' and BEFORE the trailing '(...)' — e.g. "SA-Meridian",
+    "JVReVolt", "Yuvraj Kanther". Topic words (before the dash) are NOT included,
+    so generic legal vocabulary like "Confidential Information" is never treated
+    as an entity.
+
+    Strips the parenthetical with a regex rather than a literal " (" search:
+    some ingested titles omit the space before the paren (e.g.
+    "Test-CCD35(Motion)"), and a literal-space search silently leaves the
+    doc-type word ("Motion", "Source Code Escrow Agreement", ...) attached to
+    the identifier — which then leaks generic words like "motion"/"source"/
+    "code"/"product" into the entity set as if they were distinctive party
+    names, causing ordinary questions to be misdetected as "mentions a known
+    entity" and skip disambiguation/clarification.
     """
-    dash = title.find(" – ")
+    # Use the LAST " – " (closest to the trailing parenthetical), not the first —
+    # some titles have a dash-separated topic too ("Holding – Motion to Dismiss –
+    # HASG (Court Judgment)"), where only "HASG" is the actual document identifier.
+    dash = title.rfind(" – ")
     if dash < 0:
         return ""
     rest = title[dash + 3:]
-    paren = rest.find(" (")
-    return (rest[:paren] if paren > 0 else rest).strip()
+    rest = re.sub(r'\s*\([^)]*\)\s*$', '', rest)
+    return rest.strip()
 
 
 def _extract_doc_entities(pages: dict) -> set[str]:
@@ -2229,6 +2451,14 @@ def classify_query(question: str, session_id: str) -> dict:
             if len(type_docs) > 1:
                 logger.info("Vague '%s' reference → disambiguate among %d %s docs",
                             vtype, len(type_docs), filt)
+                return {"needs_disambiguation": True, "documents": type_docs}
+        elif vtype.split()[0] in _VAGUE_TITLE_TYPE_WORDS or vtype in _VAGUE_TITLE_TYPE_WORDS:
+            # Litigation-filing types (Motion, Complaint, Stipulation, ...) aren't
+            # encoded in the raw filename — resolve via page-title prefixes instead.
+            type_docs = _source_docs_by_title_type(pages, vtype)
+            if len(type_docs) > 1:
+                logger.info("Vague '%s' reference → disambiguate among %d filings",
+                            vtype, len(type_docs))
                 return {"needs_disambiguation": True, "documents": type_docs}
 
     # Skip if the question contains a recognizable document name pattern

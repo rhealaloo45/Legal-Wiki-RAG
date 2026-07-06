@@ -10,7 +10,7 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 USE_DATABASE = bool(DATABASE_URL)
 
-# Global Providers (azure or openrouter)
+# Global Providers (azure / openrouter / nvidia)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 
@@ -31,6 +31,8 @@ def get_embedding_dimensions() -> int:
     """Return the vector dimension for the currently active embedding provider."""
     if EMBEDDING_PROVIDER == "openrouter":
         return OPENROUTER_EMBEDDING_DIMENSIONS
+    if EMBEDDING_PROVIDER == "nvidia":
+        return NVIDIA_EMBEDDING_DIMENSIONS
     return EMBEDDING_DIMENSIONS
 
 # OpenRouter Config
@@ -44,6 +46,14 @@ OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "nvidia/lla
 AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", "gpt-5.4-mini")
 OPENROUTER_FAST_MODEL = os.getenv("OPENROUTER_FAST_MODEL", "google/gemma-4-27b-it")
 
+# NVIDIA NIM Config
+NVIDIA_API_KEY              = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_ENDPOINT             = os.getenv("NVIDIA_ENDPOINT", "https://integrate.api.nvidia.com/v1")
+NVIDIA_MODEL                = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
+NVIDIA_FAST_MODEL           = os.getenv("NVIDIA_FAST_MODEL", "openai/gpt-oss-20b")
+NVIDIA_EMBEDDING_MODEL      = os.getenv("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
+NVIDIA_EMBEDDING_DIMENSIONS = int(os.getenv("NVIDIA_EMBEDDING_DIMENSIONS", "4096"))
+
 # ---------------------------------------------------------------------------
 # Token budget constants — one source of truth for every llm.ask() call.
 # Keeping these explicit prevents silently burning 4096-token defaults on
@@ -51,9 +61,9 @@ OPENROUTER_FAST_MODEL = os.getenv("OPENROUTER_FAST_MODEL", "google/gemma-4-27b-i
 # ---------------------------------------------------------------------------
 
 # Ingest pipeline
-MAX_TOKENS_INGEST_SINGLE   = 4096   # Single-call short-doc synthesis (10-30 pages)
-MAX_TOKENS_INGEST_OVERVIEW = 1500   # Phase-1 overview + topic list
-MAX_TOKENS_INGEST_DETAIL   = 3500   # Phase-2 per-segment detail extraction
+MAX_TOKENS_INGEST_SINGLE   = 16000  # Single-call short-doc synthesis (10-30 pages)
+MAX_TOKENS_INGEST_OVERVIEW = 2000   # Phase-1 overview + topic list
+MAX_TOKENS_INGEST_DETAIL   = 8000   # Phase-2 per-segment detail extraction
 
 # Merge / maintenance  (cheap model)
 MAX_TOKENS_CONTRADICTION   = 300    # Pairwise contradiction pre-flight
@@ -61,13 +71,16 @@ MAX_TOKENS_JSON_REPAIR     = 2048   # LLM JSON repair (bounded by input)
 
 # Query pipeline
 MAX_TOKENS_PAGE_SELECTION    = 1000  # JSON list of up to 25 page titles (full model)
-MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations
+MAX_TOKENS_ANSWER            = 4096  # Full legal synthesis with CoT + citations (single-document / narrow factual)
+MAX_TOKENS_ANSWER_BROAD      = 8192  # Comparison/risk/obligation intents span many sources — reasoning + table + refs need more room
 MAX_TOKENS_DISAMBIGUATION    = 200   # Classify if query targets an unspecified document
 MAX_TOKENS_AMBIGUITY_CHECK   = 300   # Determine if query needs clarification
 MAX_TOKENS_INTENT_CLASSIFY   = 150   # Classify lawyer intent (factual/risk/comparison/obligation/drafting)
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
+MAX_TOTAL_CONTEXT_CHARS      = 60_000 # Cap on the combined wiki_content sent per LLM call (prevents context-window overflow on broad queries that match many similar documents)
+ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too common (reused across many docs) to force-scope the query to it
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
 VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
 HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector results (hybrid retrieval)
