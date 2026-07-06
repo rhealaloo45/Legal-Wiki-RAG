@@ -1,10 +1,10 @@
 """
-LLM abstraction — supports Azure OpenAI and OpenRouter.
+LLM abstraction — supports Azure OpenAI, OpenRouter, and NVIDIA NIM.
 Entry point: ask(prompt, pipeline) -> tuple[str, dict]
 """
 
 import logging
-from openai import AzureOpenAI, OpenAI
+from openai import OpenAI, RateLimitError
 import config
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,8 @@ _client = None
 _fast_client = None
 _or_client = None
 _or_fast_client = None
+_nv_client = None
+_nv_fast_client = None
 
 def get_openrouter_client() -> OpenAI:
     global _or_client
@@ -37,27 +39,47 @@ def _get_fast_openrouter_client() -> OpenAI:
         )
     return _or_fast_client
 
-def get_client() -> AzureOpenAI:
+def _get_nvidia_client() -> OpenAI:
+    global _nv_client
+    if _nv_client is None:
+        _nv_client = OpenAI(
+            api_key=config.NVIDIA_API_KEY,
+            base_url=config.NVIDIA_ENDPOINT,
+            timeout=300.0,
+            max_retries=1
+        )
+    return _nv_client
+
+def _get_nvidia_fast_client() -> OpenAI:
+    global _nv_fast_client
+    if _nv_fast_client is None:
+        _nv_fast_client = OpenAI(
+            api_key=config.NVIDIA_API_KEY,
+            base_url=config.NVIDIA_ENDPOINT,
+            timeout=120.0,
+            max_retries=1
+        )
+    return _nv_fast_client
+
+def get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = AzureOpenAI(
+        _client = OpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
-            api_version=config.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-            timeout=120.0,       # 2-minute timeout for normal calls
+            base_url=f"{config.AZURE_OPENAI_ENDPOINT}/openai/v1",
+            timeout=120.0,
             max_retries=2
         )
     return _client
 
-def _get_fast_client() -> AzureOpenAI:
+def _get_fast_client() -> OpenAI:
     """Client with aggressive timeout for bulk cell extraction tasks."""
     global _fast_client
     if _fast_client is None:
-        _fast_client = AzureOpenAI(
+        _fast_client = OpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
-            api_version=config.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
-            timeout=45.0,        # 45-second timeout for fast extraction
+            base_url=f"{config.AZURE_OPENAI_ENDPOINT}/openai/v1",
+            timeout=45.0,
             max_retries=1
         )
     return _fast_client
@@ -67,6 +89,8 @@ def active_model(fast: bool = False) -> str:
     Useful for labelling token-usage log entries."""
     if config.LLM_PROVIDER == "openrouter":
         return config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
+    if config.LLM_PROVIDER == "nvidia":
+        return config.NVIDIA_FAST_MODEL if fast else config.NVIDIA_MODEL
     return config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
 
@@ -86,6 +110,9 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
     if config.LLM_PROVIDER == "openrouter":
         client = get_openrouter_client()
         model_name = config.OPENROUTER_FAST_MODEL if fast else config.OPENROUTER_MODEL
+    elif config.LLM_PROVIDER == "nvidia":
+        client = _get_nvidia_client()
+        model_name = config.NVIDIA_FAST_MODEL if fast else config.NVIDIA_MODEL
     else:
         client = get_client()
         model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
@@ -97,7 +124,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
             "temperature": 0.0
         }
         if max_tokens is not None:
-            kwargs["max_completion_tokens"] = max_tokens
+            kwargs["max_tokens"] = max_tokens
             
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
@@ -106,6 +133,8 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
         }
         return content, usage
+    except RateLimitError:
+        raise  # bubble up — callers must stop on 429, not silently skip
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         raise RuntimeError(f"LLM unavailable: {e}") from e
@@ -120,17 +149,20 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
     """
     if config.LLM_PROVIDER == "openrouter":
         client = _get_fast_openrouter_client()
-        model_name = config.OPENROUTER_FAST_MODEL   # cheap model
+        model_name = config.OPENROUTER_FAST_MODEL
+    elif config.LLM_PROVIDER == "nvidia":
+        client = _get_nvidia_fast_client()
+        model_name = config.NVIDIA_FAST_MODEL
     else:
         client = _get_fast_client()
-        model_name = config.AZURE_FAST_DEPLOYMENT   # cheap model
+        model_name = config.AZURE_FAST_DEPLOYMENT
 
     try:
         response = client.chat.completions.create(
             model=model_name,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
-            max_completion_tokens=max_tokens
+            max_tokens=max_tokens
         )
         content = response.choices[0].message.content or ""
         usage = {
@@ -138,6 +170,8 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
         }
         return content, usage
+    except RateLimitError:
+        raise
     except Exception as e:
         logger.error(f"Fast LLM call failed: {e}")
         raise RuntimeError(f"LLM unavailable (fast): {e}") from e
