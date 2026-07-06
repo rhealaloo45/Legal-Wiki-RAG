@@ -184,9 +184,20 @@ def _init_schema(engine) -> None:
                 auto_renewal       TEXT,
                 notice_period      TEXT,
                 payment_terms      TEXT,
+                matter_reference   TEXT,
                 PRIMARY KEY (session_id, title)
             )
         """))
+
+        # Existing DBs created before matter_reference was added won't get it
+        # from CREATE TABLE IF NOT EXISTS above — add it explicitly.
+        try:
+            conn.execute(text("""
+                ALTER TABLE page_metadata
+                ADD COLUMN IF NOT EXISTS matter_reference TEXT
+            """))
+        except Exception as _matter_ref_err:
+            logger.warning("Could not add matter_reference column (may already exist): %s", _matter_ref_err)
 
         # S2: FTS column + GIN index for O(log N) cross-reference (Phase 4)
         # Add generated tsvector column to pages if it doesn't exist yet.
@@ -783,7 +794,7 @@ def upsert_contradiction(
 _METADATA_COLUMNS = (
     "governing_law", "jurisdiction", "effective_date", "termination_notice",
     "liability_cap", "ip_ownership", "parties", "auto_renewal",
-    "notice_period", "payment_terms",
+    "notice_period", "payment_terms", "matter_reference",
 )
 
 
