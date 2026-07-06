@@ -22,20 +22,31 @@ _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0  # seconds — doubles each attempt: 2s, 4s, 8s
 
-# Lazy-loaded Azure client
+# Lazy-loaded clients
 _azure_client = None
+_nvidia_client = None
 
 
 def _get_azure_client():
     global _azure_client
     if _azure_client is None:
-        from openai import AzureOpenAI
-        _azure_client = AzureOpenAI(
+        from openai import OpenAI
+        _azure_client = OpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
-            api_version=config.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT,
+            base_url=f"{config.AZURE_OPENAI_ENDPOINT}/openai/v1",
         )
     return _azure_client
+
+
+def _get_nvidia_client():
+    global _nvidia_client
+    if _nvidia_client is None:
+        from openai import OpenAI
+        _nvidia_client = OpenAI(
+            api_key=config.NVIDIA_API_KEY,
+            base_url=config.NVIDIA_ENDPOINT,
+        )
+    return _nvidia_client
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +137,27 @@ def _embed_openrouter(texts: list[str]) -> list[list[float]]:
 
 
 # ---------------------------------------------------------------------------
+# NVIDIA NIM
+# ---------------------------------------------------------------------------
+
+def _embed_nvidia(texts: list[str], is_query: bool = False) -> list[list[float]]:
+    client = _get_nvidia_client()
+    input_type = "query" if is_query else "passage"
+    all_embeddings: list[list[float]] = []
+    batch_size = 16
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
+        response = client.embeddings.create(
+            input=batch,
+            model=config.NVIDIA_EMBEDDING_MODEL,
+            encoding_format="float",
+            extra_body={"input_type": input_type, "truncate": "NONE"},
+        )
+        all_embeddings.extend([d.embedding for d in response.data])
+    return all_embeddings
+
+
+# ---------------------------------------------------------------------------
 # Azure OpenAI
 # ---------------------------------------------------------------------------
 
@@ -149,13 +181,15 @@ def _embed_azure(texts: list[str]) -> list[list[float]]:
 
 def embed(text: str, is_query: bool = True) -> list[float]:
     """Generate an embedding vector for a single text."""
+    if config.EMBEDDING_PROVIDER == "nvidia":
+        return _embed_nvidia([text], is_query=is_query)[0]
+
     prefix = "search_query: " if is_query else "search_document: "
     prefixed = text if text.startswith(prefix) else f"{prefix}{text}"
 
     if config.EMBEDDING_PROVIDER == "openrouter":
         return _embed_openrouter([prefixed])[0]
-    else:
-        return _embed_azure([prefixed])[0]
+    return _embed_azure([prefixed])[0]
 
 
 def embed_batch(texts: list[str], is_query: bool = False) -> list[list[float]]:
@@ -163,16 +197,16 @@ def embed_batch(texts: list[str], is_query: bool = False) -> list[list[float]]:
     if not texts:
         return []
 
+    if config.EMBEDDING_PROVIDER == "nvidia":
+        return _embed_nvidia(texts, is_query=is_query)
+
     prefix = "search_query: " if is_query else "search_document: "
     prefixed = [t if t.startswith(prefix) else f"{prefix}{t}" for t in texts]
 
     if config.EMBEDDING_PROVIDER == "openrouter":
-        # OpenRouter has no documented batch limit — send in chunks of 16 to
-        # stay safe with rate limits.
         all_embeddings: list[list[float]] = []
         batch_size = 16
         for i in range(0, len(prefixed), batch_size):
             all_embeddings.extend(_embed_openrouter(prefixed[i : i + batch_size]))
         return all_embeddings
-    else:
-        return _embed_azure(prefixed)
+    return _embed_azure(prefixed)
