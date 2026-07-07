@@ -76,6 +76,7 @@ MAX_TOKENS_ANSWER_BROAD      = 8192  # Comparison/risk/obligation intents span m
 MAX_TOKENS_DISAMBIGUATION    = 200   # Classify if query targets an unspecified document
 MAX_TOKENS_AMBIGUITY_CHECK   = 300   # Determine if query needs clarification
 MAX_TOKENS_INTENT_CLASSIFY   = 150   # Classify lawyer intent (factual/risk/comparison/obligation/drafting)
+MAX_TOKENS_MATTER_REFERENCE  = 60    # One-off backfill: extract matter/case/docket reference string, or "null"
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
