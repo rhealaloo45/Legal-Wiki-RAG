@@ -483,6 +483,14 @@
     .disambig-chip:hover {
       background: var(--btn-primary); border-color: var(--btn-primary); color: #fff
     }
+    .disambig-browse-btn {
+      display: inline-flex; align-items: center; padding: 8px 16px; border-radius: var(--radius-md);
+      font-size: 12px; font-weight: 500; background: var(--btn-primary); color: #fff;
+      border: none; cursor: pointer; margin-top: 2px; transition: opacity 0.15s
+    }
+    .disambig-browse-btn:hover {
+      opacity: 0.85
+    }
     .clarif-options {
       display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
     }
@@ -1146,6 +1154,99 @@
       display: flex;
       align-items: center;
       gap: 6px
+    }
+
+    /* FILE PICKER MODAL */
+    .fp-modal {
+      width: 520px;
+      max-height: 70vh;
+    }
+
+    .fp-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-bottom: 0.5px solid var(--border);
+    }
+
+    .fp-toolbar-btn {
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--accent);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 4px;
+    }
+
+    .fp-toolbar-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .fp-count {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .fp-tree {
+      overflow-y: auto;
+      padding: 8px 16px;
+      flex: 1;
+      font-size: 13px;
+    }
+
+    .fp-dir-children {
+      padding-left: 18px;
+    }
+
+    .fp-dir-row, .fp-file-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 4px;
+      border-radius: 4px;
+      cursor: default;
+    }
+
+    .fp-dir-row:hover, .fp-file-row:hover {
+      background: var(--bg-hover);
+    }
+
+    .fp-dir-row {
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .fp-dir-row::-webkit-details-marker {
+      display: none;
+    }
+
+    .fp-icon {
+      font-size: 14px;
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
+    .fp-dir > summary .fp-icon {
+      color: var(--accent);
+    }
+
+    .fp-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-primary);
+    }
+
+    .fp-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      padding: 12px 16px;
+      border-top: 0.5px solid var(--border);
     }
 
     .log-body {
@@ -2801,6 +2902,44 @@
         </div>
       </div>
 
+      <!-- FILE PICKER MODAL -->
+      <div id="file-picker-overlay" class="log-overlay" style="display:none" onclick="if(event.target===this)closeFilePickerModal()">
+        <div class="log-modal fp-modal" onclick="event.stopPropagation()">
+          <div class="log-modal-top">
+            <span class="log-modal-title"><i class="ti ti-folder-open"
+                style="font-size:14px;color:var(--accent)"></i>Select files to ingest</span>
+            <div class="close-btn" onclick="closeFilePickerModal()"><i class="ti ti-x"></i></div>
+          </div>
+          <div class="fp-toolbar">
+            <button class="fp-toolbar-btn" onclick="fpSelectAll(true)">Select all</button>
+            <button class="fp-toolbar-btn" onclick="fpSelectAll(false)">Deselect all</button>
+            <span class="fp-count" id="fp-count">0 selected</span>
+          </div>
+          <div class="fp-tree" id="fp-tree"></div>
+          <div class="fp-footer">
+            <button class="upl-btn" onclick="closeFilePickerModal()">Cancel</button>
+            <button class="upl-btn" id="fp-confirm-btn"
+              style="background:var(--btn-primary);color:#fff;border:none" onclick="confirmFilePicker()">Add files</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- DISAMBIGUATION FOLDER PICKER MODAL -->
+      <div id="disambig-picker-overlay" class="log-overlay" style="display:none" onclick="if(event.target===this)closeDisambigPicker()">
+        <div class="log-modal fp-modal" onclick="event.stopPropagation()">
+          <div class="log-modal-top">
+            <span class="log-modal-title"><i class="ti ti-folder-open"
+                style="font-size:14px;color:var(--accent)"></i>Which document?</span>
+            <div class="close-btn" onclick="closeDisambigPicker()"><i class="ti ti-x"></i></div>
+          </div>
+          <div class="ftree" id="disambig-picker-tree" style="margin:0;border:none;border-radius:0;max-height:60vh"></div>
+          <div class="fp-footer">
+            <button class="upl-btn" onclick="document.querySelector('[data-tab=ingest]').click();closeDisambigPicker()">Upload new file</button>
+            <button class="upl-btn" onclick="closeDisambigPicker()">Cancel</button>
+          </div>
+        </div>
+      </div>
+
       <!-- RULES PANEL -->
       <div id="rules-overlay" class="rules-overlay" style="display:none" onclick="if(event.target===this)toggleRules()">
         <div class="rules-panel" onclick="event.stopPropagation()">
@@ -3885,7 +4024,7 @@
           <div class="s-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
             <div style="min-width:0;flex:1">
               <div class="s-title" data-name="${safeName}">${s.name || 'Unnamed Session'}</div>
-              <div class="s-meta">${date}</div>
+              <div class="s-meta">${s.files} docs · ${date}</div>
             </div>
             <div class="s-item-actions">
               <button class="rename-btn" onclick="startRenameSession(event, '${s.id}')" title="Rename"><i class="ti ti-pencil"></i></button>
@@ -3993,11 +4132,11 @@
         }
       }
       await Promise.all(promises);
-      processValidFiles(collected);
+      openFilePickerModal(collected);
     });
 
-    $file.addEventListener('change', () => processValidFiles(Array.from($file.files).map(f => ({ file: f, relativePath: f.name }))));
-    $folder.addEventListener('change', () => processValidFiles(Array.from($folder.files).map(f => ({ file: f, relativePath: f.webkitRelativePath || f.name }))));
+    $file.addEventListener('change', () => openFilePickerModal(Array.from($file.files).map(f => ({ file: f, relativePath: f.name }))));
+    $folder.addEventListener('change', () => openFilePickerModal(Array.from($folder.files).map(f => ({ file: f, relativePath: f.webkitRelativePath || f.name }))));
 
     function walkEntry(entry, basePath, collected) {
       return new Promise(resolve => {
@@ -4015,6 +4154,128 @@
           readAll();
         } else resolve();
       });
+    }
+
+    // ============================================================
+    // File Picker Modal — folder-tree review before staging
+    // ============================================================
+    let fpCollected = [];
+
+    function openFilePickerModal(collected) {
+      const valid = collected.filter(e => {
+        const ext = e.file.name.split('.').pop().toLowerCase();
+        return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100 * 1024 * 1024;
+      });
+      if (!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+
+      fpCollected = valid;
+      const tree = fpBuildTree(valid);
+      document.getElementById('fp-tree').innerHTML = fpRenderNode(tree, '');
+      document.getElementById('file-picker-overlay').style.display = 'flex';
+      fpUpdateCount();
+    }
+
+    function closeFilePickerModal() {
+      document.getElementById('file-picker-overlay').style.display = 'none';
+      fpCollected = [];
+    }
+
+    function confirmFilePicker() {
+      const checkedIdx = new Set(
+        Array.from(document.querySelectorAll('#fp-tree .fp-file-check:checked')).map(c => parseInt(c.dataset.idx, 10))
+      );
+      const selected = fpCollected.filter((_, i) => checkedIdx.has(i));
+      closeFilePickerModal();
+      if (selected.length) processValidFiles(selected);
+      else showToast('No files selected', 'error');
+    }
+
+    function fpBuildTree(collected) {
+      const root = { name: '', type: 'dir', children: {} };
+      collected.forEach((entry, idx) => {
+        const parts = entry.relativePath.split('/');
+        let node = root;
+        for (let i = 0; i < parts.length - 1; i++) {
+          const part = parts[i];
+          if (!node.children[part]) node.children[part] = { name: part, type: 'dir', children: {} };
+          node = node.children[part];
+        }
+        const fname = parts[parts.length - 1];
+        node.children[fname] = { name: fname, type: 'file', idx };
+      });
+      return root;
+    }
+
+    function fpRenderNode(node, path) {
+      const entries = Object.values(node.children).sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'dir' ? -1 : 1;
+        return a.name.localeCompare(b.name);
+      });
+      return entries.map(child => {
+        const childPath = path ? path + '/' + child.name : child.name;
+        if (child.type === 'dir') {
+          return `
+            <details class="fp-dir" open>
+              <summary class="fp-dir-row">
+                <input type="checkbox" class="fp-dir-check" checked onclick="event.stopPropagation()" onchange="fpToggleDir(this)">
+                <i class="ti ti-folder-filled fp-icon"></i>
+                <span class="fp-name">${child.name}</span>
+              </summary>
+              <div class="fp-dir-children">${fpRenderNode(child, childPath)}</div>
+            </details>`;
+        }
+        return `
+            <div class="fp-file-row">
+              <input type="checkbox" class="fp-file-check" checked data-idx="${child.idx}" onchange="fpFileChanged(this)">
+              <i class="ti ti-file-text fp-icon"></i>
+              <span class="fp-name">${child.name}</span>
+            </div>`;
+      }).join('');
+    }
+
+    function fpUpdateAncestorsFrom(childrenContainer) {
+      let container = childrenContainer;
+      while (container) {
+        const detailsEl = container.parentElement;
+        const ownCheck = detailsEl.querySelector(':scope > summary > .fp-dir-check');
+        const fileChecks = container.querySelectorAll('.fp-file-check');
+        const checkedCount = Array.from(fileChecks).filter(c => c.checked).length;
+        if (checkedCount === 0) { ownCheck.checked = false; ownCheck.indeterminate = false; }
+        else if (checkedCount === fileChecks.length) { ownCheck.checked = true; ownCheck.indeterminate = false; }
+        else { ownCheck.checked = false; ownCheck.indeterminate = true; }
+        container = detailsEl.parentElement ? detailsEl.parentElement.closest('.fp-dir-children') : null;
+      }
+    }
+
+    function fpFileChanged(cb) {
+      const container = cb.closest('.fp-dir-children');
+      if (container) fpUpdateAncestorsFrom(container);
+      fpUpdateCount();
+    }
+
+    function fpToggleDir(cb) {
+      const details = cb.closest('.fp-dir');
+      const checked = cb.checked;
+      cb.indeterminate = false;
+      details.querySelectorAll('.fp-file-check').forEach(fc => fc.checked = checked);
+      details.querySelectorAll('.fp-dir-check').forEach(dc => { dc.checked = checked; dc.indeterminate = false; });
+      const parentChildren = details.parentElement ? details.parentElement.closest('.fp-dir-children') : null;
+      if (parentChildren) fpUpdateAncestorsFrom(parentChildren);
+      fpUpdateCount();
+    }
+
+    function fpSelectAll(state) {
+      document.querySelectorAll('#fp-tree .fp-file-check').forEach(c => c.checked = state);
+      document.querySelectorAll('#fp-tree .fp-dir-check').forEach(c => { c.checked = state; c.indeterminate = false; });
+      fpUpdateCount();
+    }
+
+    function fpUpdateCount() {
+      const total = document.querySelectorAll('#fp-tree .fp-file-check').length;
+      const checked = document.querySelectorAll('#fp-tree .fp-file-check:checked').length;
+      document.getElementById('fp-count').textContent = `${checked} of ${total} selected`;
+      document.getElementById('fp-confirm-btn').disabled = checked === 0;
+      document.getElementById('fp-confirm-btn').textContent = checked ? `Add ${checked} file(s)` : 'Add files';
     }
 
     function processValidFiles(collected) {
@@ -4401,23 +4662,135 @@
       scrollChatToBottom();
     }
 
+    // Candidates for the currently-open disambiguation prompt — set each time
+    // appendDisambiguationMsg runs, read by openDisambigPicker().
+    let _disambigDocuments = [];
+    let _disambigRawDocuments = [];
+
     function appendDisambiguationMsg(message, documents, rawDocuments) {
+      _disambigDocuments = documents;
+      _disambigRawDocuments = rawDocuments;
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-system';
-      const chips = documents.map((doc, i) => {
-        const rawDoc = rawDocuments[i] || doc;
-        const cleanName = doc.replace(/^[a-f0-9-]{36}_/, '').replace(/\.[^.]+$/, '').replace(/_/g, ' ');
-        return `<div class="disambig-chip" onclick="selectDisambigDoc('${rawDoc.replace(/'/g, "\\'")}', '${cleanName.replace(/'/g, "\\'")}')">${cleanName}</div>`;
-      }).join('');
-
       div.innerHTML = `<div class="chat-bubble">
-        <div style="margin-bottom:4px">${message}</div>
-        <div class="disambig-chips">${chips}
-          <div class="disambig-chip" onclick="document.querySelector('[data-tab=ingest]').click()" style="border-style:dashed"><i class="ti ti-upload" style="font-size:12px;margin-right:4px"></i>Upload new</div>
-        </div>
+        <div style="margin-bottom:8px">${message}</div>
+        <button class="disambig-browse-btn" onclick="openDisambigPicker()">
+          <i class="ti ti-folder-open" style="font-size:13px;margin-right:6px"></i>Browse documents (${documents.length})
+        </button>
       </div>`;
       $chatThread.appendChild(div);
       scrollChatToBottom();
+    }
+
+    // Folder-tree picker for disambiguation: reuses the real (relative_path-based)
+    // upload folder structure from /files instead of a flat, scattered chip list.
+    // Pruned down to only the candidate documents the backend flagged as ambiguous.
+    async function openDisambigPicker() {
+      const overlay = document.getElementById('disambig-picker-overlay');
+      const treeDiv = document.getElementById('disambig-picker-tree');
+      overlay.style.display = 'flex';
+      treeDiv.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text-muted);text-align:center">Loading…</div>';
+
+      const rawDocs = _disambigRawDocuments;
+      const cleanDocs = _disambigDocuments;
+
+      const renderFlatFallback = () => {
+        treeDiv.innerHTML = cleanDocs.map((doc, i) => {
+          const rawDoc = rawDocs[i] || doc;
+          const cleanName = doc.replace(/^[a-f0-9-]{36}_/, '').replace(/\.[^.]+$/, '').replace(/_/g, ' ');
+          return `<div class="ftree-row" onclick="selectDisambigDoc('${rawDoc.replace(/'/g, "\\'")}', '${cleanName.replace(/'/g, "\\'")}'); closeDisambigPicker()">
+            <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted)"></i>
+            <span class="ftree-name">${cleanName}</span>
+          </div>`;
+        }).join('');
+      };
+
+      try {
+        const res = await fetch(`/files?session_id=${SID}`);
+        const tree = await res.json();
+
+        // Match a tree leaf's full relative path back to a candidate rawDoc by
+        // mirroring the server's own upload-time flattening (folders joined with "_").
+        function matchLeaf(fullPath) {
+          const flat = fullPath.replace(/\//g, '_').toLowerCase();
+          for (let i = 0; i < rawDocs.length; i++) {
+            if ((rawDocs[i] || '').toLowerCase().endsWith(flat)) return i;
+          }
+          return -1;
+        }
+
+        // Prune the tree to only leaves matching a disambiguation candidate,
+        // dropping folders that end up empty.
+        function pruneTree(node, prefix) {
+          const out = {};
+          for (const k of Object.keys(node)) {
+            const path = prefix ? prefix + '/' + k : k;
+            if (node[k] === 'file') {
+              if (matchLeaf(path) !== -1) out[k] = 'file';
+            } else {
+              const child = pruneTree(node[k], path);
+              if (Object.keys(child).length) out[k] = child;
+            }
+          }
+          return out;
+        }
+
+        const pruned = pruneTree(tree, '');
+        if (!Object.keys(pruned).length) {
+          renderFlatFallback();
+          return;
+        }
+
+        function countFiles(node) {
+          let c = 0;
+          for (const k in node) c += (node[k] === 'file') ? 1 : countFiles(node[k]);
+          return c;
+        }
+
+        function renderNode(node, prefix, depth) {
+          let html = '';
+          const indent = depth * 18;
+          const keys = Object.keys(node).sort((a, b) => {
+            const aIsDir = node[a] !== 'file', bIsDir = node[b] !== 'file';
+            if (aIsDir && !bIsDir) return -1;
+            if (!aIsDir && bIsDir) return 1;
+            return a.localeCompare(b);
+          });
+          for (const k of keys) {
+            const path = prefix ? prefix + '/' + k : k;
+            if (node[k] === 'file') {
+              const idx = matchLeaf(path);
+              const rawDoc = rawDocs[idx] || path;
+              const ext = k.split('.').pop().toLowerCase();
+              const icon = ext === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text';
+              html += `<div class="ftree-row" style="padding-left:${14 + indent}px" onclick="selectDisambigDoc('${rawDoc.replace(/'/g, "\\'")}', '${k.replace(/'/g, "\\'")}'); closeDisambigPicker()">`
+                + `<i class="ti ${icon} ftree-icon" style="color:var(--text-muted)"></i>`
+                + `<span class="ftree-name">${k}</span>`
+                + `</div>`;
+            } else {
+              const childCount = countFiles(node[k]);
+              const folderId = 'dfold_' + Math.random().toString(36).slice(2, 8);
+              html += `<div class="ftree-row folder-row" style="padding-left:${14 + indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
+                + `<i class="ti ti-chevron-down ftree-icon fold-chevron" style="color:var(--accent)"></i>`
+                + `<span class="folder-name">${k}</span>`
+                + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
+                + `</div>`;
+              html += `<div id="${folderId}">${renderNode(node[k], path, depth + 1)}</div>`;
+            }
+          }
+          return html;
+        }
+
+        treeDiv.innerHTML = renderNode(pruned, '', 0);
+      } catch (e) {
+        console.error('openDisambigPicker error:', e);
+        renderFlatFallback();
+      }
+    }
+
+    function closeDisambigPicker() {
+      document.getElementById('disambig-picker-overlay').style.display = 'none';
     }
 
     function appendClarificationMsg(message, options) {
@@ -4447,7 +4820,12 @@
       appendUserMsg('Focus on: ' + cleanName);
       _pendingTargetDoc = rawDoc;
       _isFollowup = true;
-      doQueryInternal(_pendingQuestion, rawDoc, true);
+      // target_doc alone scopes retrieval, but the question text itself still says
+      // "this document" with nothing naming which one — the answer LLM then refuses
+      // ("does not specify which document") even though context was correctly scoped.
+      // Name the resolved document in the question text too, same as selectClarification does.
+      const enrichedQ = _pendingQuestion + ' (document: ' + cleanName + ')';
+      doQueryInternal(enrichedQ, rawDoc, true);
     };
 
     window.selectClarification = function(option) {
