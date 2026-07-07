@@ -259,13 +259,13 @@ NUL
 ARCHITECTURE.md
 PLAN.md
 FLOWCHART.md
+flow.png
+structure.md
+SYSTEM_FLOW.md
+SYSTEM_OVERVIEW.md
 
 questions.txt
 
 # Debug output
 app/debug_raw_answer.txt
 app/test_output.txt
-
-# One-off local utility scripts (not part of the app)
-app/ingest_remaining.py
-app/register_files.py

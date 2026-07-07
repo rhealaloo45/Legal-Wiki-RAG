@@ -9,17 +9,20 @@
   <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&family=DM+Sans:wght@400;500&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
     :root {
-      --font-heading: 'Outfit', sans-serif;
-      --font-sans: 'DM Sans', sans-serif;
-      --bg-base: #F4F3EF;
+      --font-heading: 'Inter', sans-serif;
+      --font-sans: 'Inter', sans-serif;
+      --bg-base: #F1F3F6;
       --bg-surface: #ffffff;
-      --bg-hover: #FAFAF8;
+      --bg-hover: #E7EAEF;
+      --bg-input: #FAFBFC;
+      --btn-primary: #1a1a1a;
       --accent: #2B5CE6;
       --accent-light: #EEF2FF;
       --accent-border: #C7D2FE;
+      --shadow-card: 0 1px 2px rgba(20, 20, 40, 0.04), 0 2px 10px rgba(20, 20, 40, 0.04);
       --green: #1D9E75;
       --green-light: #E1F5EE;
       --green-border: #9FE1CB;
@@ -30,8 +33,9 @@
       --red: #A32D2D;
       --red-light: #FCEBEB;
       --red-border: #F7C1C1;
-      --border: rgba(0, 0, 0, 0.08);
-      --text-primary: #1a1a2e;
+      --border: rgba(0, 0, 0, 0.06);
+      --border-strong: rgba(0, 0, 0, 0.12);
+      --text-primary: #1a1a1a;
       --text-secondary: #6B7280;
       --text-muted: #9CA3AF;
       --radius-sm: 6px;
@@ -47,7 +51,7 @@
 
     body {
       background: var(--bg-base);
-      padding: 20px;
+      padding: 0;
       height: 100vh;
       overflow: hidden;
       font-family: var(--font-sans)
@@ -59,8 +63,6 @@
       height: 100%;
       display: flex;
       flex-direction: column;
-      border: 0.5px solid var(--border);
-      border-radius: var(--radius-lg);
       overflow: hidden;
       position: relative
     }
@@ -90,7 +92,7 @@
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: var(--accent);
+      background: var(--btn-primary);
       flex-shrink: 0
     }
 
@@ -117,7 +119,7 @@
       display: flex;
       background: var(--bg-hover);
       border: 0.5px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: 999px;
       padding: 3px;
       font-size: 11px;
       font-weight: 500;
@@ -126,13 +128,42 @@
 
     .provider-option {
       padding: 5px 12px;
-      border-radius: var(--radius-md);
+      border-radius: 999px;
       cursor: pointer;
       color: var(--text-secondary);
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       display: flex;
       align-items: center;
+      justify-content: center;
       gap: 6px;
+      flex: 1;
+    }
+
+    .provider-status-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: var(--bg-hover);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 5px 12px;
+      cursor: pointer;
+      margin-right: 10px
+    }
+
+    .provider-status-btn:hover {
+      background: var(--accent-light)
+    }
+
+    .provider-status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      flex-shrink: 0
     }
 
     .provider-option.active {
@@ -226,8 +257,8 @@
       border-radius: var(--radius-md);
       font-size: 12px;
       font-weight: 500;
-      color: var(--accent);
-      background: var(--accent-light);
+      color: #fff;
+      background: var(--btn-primary);
       cursor: pointer;
       border: none;
       width: 100%;
@@ -244,7 +275,7 @@
     }
 
     .s-item.active {
-      background: var(--accent-light)
+      background: var(--bg-hover)
     }
 
     .s-item:hover {
@@ -258,7 +289,8 @@
     }
 
     .s-item.active .s-title {
-      color: var(--accent)
+      color: var(--text-primary);
+      font-weight: 600
     }
 
     .s-meta {
@@ -267,12 +299,31 @@
       margin-top: 1px
     }
 
-    .del-btn {
+    .del-btn, .rename-btn {
       background: none;
       border: none;
       color: var(--text-muted);
       cursor: pointer;
       font-size: 12px;
+    }
+
+    .s-item-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+
+    .s-title-input {
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-primary);
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 1px 4px;
+      width: 100%;
+      font-family: inherit;
     }
 
     .main {
@@ -307,8 +358,8 @@
     }
 
     .tab.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent)
+      color: var(--text-primary);
+      border-bottom-color: var(--btn-primary)
     }
 
     .panel {
@@ -362,7 +413,7 @@
       word-break: break-word
     }
     .chat-msg-user .chat-bubble {
-      background: var(--accent);
+      background: var(--btn-primary);
       color: #fff;
       border-bottom-right-radius: 4px
     }
@@ -430,7 +481,7 @@
       color: var(--accent); cursor: pointer; transition: all 0.15s
     }
     .disambig-chip:hover {
-      background: var(--accent); color: #fff
+      background: var(--btn-primary); border-color: var(--btn-primary); color: #fff
     }
     .clarif-options {
       display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px
@@ -445,15 +496,21 @@
     }
 
     .ask-box {
-      background: var(--bg-surface);
+      background: var(--bg-input);
       border: 0.5px solid var(--border);
-      border-radius: var(--radius-lg);
-      padding: 12px 14px;
+      border-radius: 16px;
+      padding: 16px 18px;
       display: flex;
       align-items: flex-end;
       gap: 10px;
       flex-shrink: 0;
-      margin-top: 10px
+      margin-top: 10px;
+      transition: box-shadow .15s, border-color .15s
+    }
+
+    .ask-box:focus-within {
+      border-color: transparent;
+      box-shadow: 0 0 0 2px var(--border-strong), var(--shadow-card)
     }
 
     .ask-input {
@@ -461,7 +518,7 @@
       border: none;
       outline: none;
       font-family: var(--font-sans);
-      font-size: 13px;
+      font-size: 14px;
       color: var(--text-primary);
       background: transparent;
       resize: none;
@@ -469,7 +526,7 @@
     }
 
     .ask-submit {
-      background: var(--accent);
+      background: var(--btn-primary);
       color: #fff;
       border: none;
       border-radius: var(--radius-md);
@@ -491,7 +548,7 @@
     .answer-card {
       background: var(--bg-surface);
       border: 0.5px solid var(--border);
-      border-top: 2px solid var(--green);
+      border-top: 2px solid var(--btn-primary);
       border-radius: var(--radius-lg);
       overflow: hidden;
       margin-bottom: 20px
@@ -653,7 +710,7 @@
       border-left: 2px solid var(--accent-border);
       padding: 8px 12px;
       margin: 10px 0;
-      background: #F8F9FF;
+      background: var(--accent-light);
       border-radius: 0 var(--radius-md) var(--radius-md) 0;
       font-size: 12px;
       color: var(--text-secondary);
@@ -789,12 +846,13 @@
       gap: 7px;
       min-width: 140px;
       max-width: 200px;
+      box-shadow: var(--shadow-card);
       transition: border-color .15s, background .15s
     }
 
     .source-chip:hover {
       border-color: var(--accent-border);
-      background: #F8F9FF
+      background: var(--accent-light)
     }
 
     .source-icon {
@@ -1103,6 +1161,187 @@
       word-break: break-word
     }
 
+    /* Rules side panel — user-editable house-style rules applied to every answer */
+    .rules-overlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(15, 15, 30, 0.2);
+      z-index: 25;
+    }
+
+    .rules-panel {
+      position: absolute;
+      top: 0; right: 0; bottom: 0;
+      width: 340px;
+      max-width: 90%;
+      background: var(--bg-surface);
+      border-left: 0.5px solid var(--border);
+      box-shadow: var(--shadow-card);
+      display: flex;
+      flex-direction: column;
+      z-index: 26;
+    }
+
+    .rules-panel-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 0.5px solid var(--border);
+      flex-shrink: 0
+    }
+
+    .rules-panel-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 6px
+    }
+
+    .rules-panel-hint {
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 0 16px 10px;
+      line-height: 1.5
+    }
+
+    .rules-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px 16px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px
+    }
+
+    .rule-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      background: var(--bg-hover);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
+      transition: opacity .15s, box-shadow .15s
+    }
+
+    .rule-item.rule-disabled {
+      opacity: 0.5
+    }
+
+    .rule-item.rule-dragging {
+      opacity: 0.4
+    }
+
+    .rule-item.rule-drag-over {
+      box-shadow: 0 -2px 0 var(--btn-primary)
+    }
+
+    .rule-drag-handle {
+      cursor: grab;
+      color: var(--text-muted);
+      font-size: 13px;
+      flex-shrink: 0;
+      margin-top: 2px;
+      touch-action: none
+    }
+
+    .rule-item input[type="checkbox"] {
+      margin-top: 2px;
+      accent-color: var(--btn-primary);
+      cursor: pointer;
+      flex-shrink: 0
+    }
+
+    .rule-text {
+      flex: 1;
+      font-size: 12px;
+      color: var(--text-primary);
+      line-height: 1.5;
+      word-break: break-word;
+      border: none;
+      background: transparent;
+      resize: none;
+      overflow: hidden;
+      font-family: var(--font-sans);
+      padding: 0
+    }
+
+    .rule-text:focus {
+      outline: none
+    }
+
+    .rule-delete {
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 14px;
+      flex-shrink: 0;
+      transition: color .15s
+    }
+
+    .rule-delete:hover {
+      color: var(--red)
+    }
+
+    .rules-panel-footer {
+      padding: 10px 16px 14px;
+      border-top: 0.5px solid var(--border);
+      flex-shrink: 0
+    }
+
+    .rules-reset-btn {
+      width: 100%;
+      background: transparent;
+      border: 0.5px solid var(--border-strong);
+      color: var(--text-secondary);
+      border-radius: var(--radius-md);
+      padding: 7px 0;
+      font-size: 12px;
+      font-family: var(--font-sans);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background .15s
+    }
+
+    .rules-reset-btn:hover {
+      background: var(--bg-hover)
+    }
+
+    .rules-add-row {
+      padding: 12px 16px;
+      border-top: 0.5px solid var(--border);
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0
+    }
+
+    .rules-add-input {
+      flex: 1;
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 8px 10px;
+      font-size: 12px;
+      font-family: var(--font-sans);
+      resize: none;
+      min-height: 34px
+    }
+
+    .rules-add-btn {
+      background: var(--btn-primary);
+      color: #fff;
+      border: none;
+      border-radius: var(--radius-md);
+      padding: 0 14px;
+      font-size: 12px;
+      cursor: pointer;
+      flex-shrink: 0
+    }
+
     /* GRAPH OVERLAY */
     .graph-overlay {
       position: fixed;
@@ -1196,7 +1435,8 @@
       background: var(--bg-surface);
       border: 0.5px solid var(--border);
       border-radius: var(--radius-lg);
-      padding: 12px
+      padding: 12px;
+      box-shadow: var(--shadow-card)
     }
 
     .ctrl-title {
@@ -1257,7 +1497,7 @@
     }
 
     .add-btn-sm {
-      background: var(--accent);
+      background: var(--btn-primary);
       color: #fff;
       border: none;
       border-radius: var(--radius-md);
@@ -1268,7 +1508,7 @@
 
     .run-btn {
       width: 100%;
-      background: var(--accent);
+      background: var(--btn-primary);
       color: #fff;
       border: none;
       border-radius: var(--radius-md);
@@ -1534,18 +1774,18 @@
     }
 
     .upl-zone {
-      border: 2px dashed var(--accent-border);
+      border: 2px dashed var(--border-strong);
       border-radius: var(--radius-lg);
       padding: 40px 24px;
       text-align: center;
-      background: var(--accent-light);
+      background: var(--bg-hover);
       cursor: pointer;
       margin-bottom: 16px
     }
 
     .upl-zone.dragover {
-      border-color: var(--accent);
-      background: #E8ECFF
+      border-color: var(--btn-primary);
+      background: var(--bg-hover)
     }
 
     .upl-icon {
@@ -1848,8 +2088,8 @@
     }
 
     .pdf-modal-tab.active {
-      color: var(--accent);
-      border-bottom-color: var(--accent);
+      color: var(--text-primary);
+      border-bottom-color: var(--btn-primary);
     }
 
     .pdf-modal-tab:hover {
@@ -1913,6 +2153,7 @@
     .id-panel {
       background: var(--bg-surface); border: 0.5px solid var(--border);
       border-radius: var(--radius-md); padding: 11px 13px;
+      box-shadow: var(--shadow-card);
     }
     .id-panel-title {
       font-size: 9px; font-weight: 600; text-transform: uppercase;
@@ -1973,38 +2214,19 @@
     <div class="topbar">
       <div class="icon-btn" onclick="toggleSidebar()" style="margin-right: -4px" title="Toggle Sidebar"><i
           class="ti ti-menu-2"></i></div>
-      <div class="logo"><span class="logo-dot"></span>Lex<span style="color:var(--accent)">Wiki</span></div>
+      <div class="logo"><span class="logo-dot"></span>LexWiki</div>
       <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New
           Session</span></div>
       <div class="topbar-right">
-        <span style="font-size:11px;font-weight:600;margin-right:-5px;color:var(--text-muted)">LLM:</span>
-        <div class="provider-toggle" id="providerToggle" style="margin-right: 2px;">
-          <div class="provider-option active" data-val="azure" onclick="setProvider('azure')">
-            <i class="ti ti-cloud"></i> Azure
-          </div>
-          <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
-            <i class="ti ti-router"></i> OpenRouter
-          </div>
-          <div class="provider-option" data-val="nvidia" onclick="setProvider('nvidia')">
-            <i class="ti ti-bolt"></i> NVIDIA
-          </div>
-        </div>
-        <span style="font-size:11px;font-weight:600;margin-right:-5px;margin-left:2px;color:var(--text-muted)">Embed:</span>
-        <div class="provider-toggle" id="embeddingToggle" style="margin-right: 10px;">
-          <div class="provider-option active" data-val="azure" onclick="setEmbeddingProvider('azure')">
-            <i class="ti ti-cloud"></i> Azure
-          </div>
-          <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
-            <i class="ti ti-router"></i> OpenRouter
-          </div>
-          <div class="provider-option" data-val="nvidia" onclick="setEmbeddingProvider('nvidia')">
-            <i class="ti ti-bolt"></i> NVIDIA
-          </div>
+        <div class="provider-status-btn" onclick="toggleProviderModal()" title="LLM &amp; Embedding providers">
+          <span class="provider-status-dot"></span>Enabled
         </div>
         <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
             class="ti ti-file-description"></i></div>
+        <div class="icon-btn" aria-label="rules" onclick="toggleRules()" title="Instructions"><i
+            class="ti ti-list-check"></i></div>
       </div>
     </div>
 
@@ -2022,10 +2244,12 @@
         <div class="tabs d-none" id="modeTabs">
           <div class="tab active" data-target="ask" onclick="switchTab('ask',this)"><i class="ti ti-message-circle"
               style="font-size:13px"></i>Ask</div>
+          <!-- Review and Compare tabs commented out for now
           <div class="tab" data-target="review" onclick="switchTab('review',this)"><i class="ti ti-table"
               style="font-size:13px"></i>Review</div>
           <div class="tab" data-target="compare" onclick="switchTab('compare',this)"><i class="ti ti-columns"
               style="font-size:13px"></i>Compare</div>
+          -->
           <div class="tab" data-target="draft" onclick="switchTab('draft',this)"><i class="ti ti-writing"
               style="font-size:13px"></i>Draft</div>
           <div class="tab" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open"
@@ -2052,7 +2276,7 @@
               <button class="upl-btn" id="pick-files-btn"><i class="ti ti-file"></i>Choose Files</button>
               <button class="upl-btn" id="pick-folder-btn"><i class="ti ti-folder"></i>Choose Folder</button>
               <button class="upl-btn d-none" id="upload-btn"
-                style="background:var(--accent);color:#fff;border:none">Ingest Now</button>
+                style="background:var(--btn-primary);color:#fff;border:none">Ingest Now</button>
             </div>
 
             <!-- INGEST DASHBOARD — replaces old dual-pipeline bars -->
@@ -2128,8 +2352,8 @@
             <div class="chat-thread" id="chat-thread"></div>
             <div class="ask-box">
               <textarea class="ask-input" id="question-input" rows="2"
-                placeholder="Ask anything about your documents…"></textarea>
-              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Send</button>
+                placeholder="Ask LexWiki anything…"></textarea>
+              <button class="ask-submit" id="ask-btn"><i class="ti ti-arrow-up" style="font-size:13px"></i>Ask LexWiki</button>
             </div>
           </div>
         </div>
@@ -2577,6 +2801,68 @@
         </div>
       </div>
 
+      <!-- RULES PANEL -->
+      <div id="rules-overlay" class="rules-overlay" style="display:none" onclick="if(event.target===this)toggleRules()">
+        <div class="rules-panel" onclick="event.stopPropagation()">
+          <div class="rules-panel-top">
+            <span class="rules-panel-title"><i class="ti ti-list-check"
+                style="font-size:14px;color:var(--text-primary)"></i>Instructions</span>
+            <div class="close-btn" onclick="toggleRules()"><i class="ti ti-x"></i></div>
+          </div>
+          <div class="rules-panel-hint">Applied to every answer, on top of the built-in prompt rules. Drag to reorder, uncheck to disable without deleting.</div>
+          <div class="rules-list" id="rules-list"></div>
+          <div class="rules-add-row">
+            <textarea class="rules-add-input" id="rules-add-input" rows="1"
+              placeholder="e.g. Prefer British English spellings"></textarea>
+            <button class="rules-add-btn" onclick="addRuleUI()">Add</button>
+          </div>
+          <div class="rules-panel-footer">
+            <button class="rules-reset-btn" onclick="resetRulesUI()"><i class="ti ti-refresh" style="font-size:12px"></i>Reset defaults</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- PROVIDER MODAL -->
+      <div id="provider-overlay" class="log-overlay" style="display:none" onclick="if(event.target===this)toggleProviderModal()">
+        <div class="log-modal" style="width:420px" onclick="event.stopPropagation()">
+          <div class="log-modal-top">
+            <span class="log-modal-title"><i class="ti ti-plug-connected"
+                style="font-size:14px;color:var(--text-primary)"></i>Providers</span>
+            <div class="close-btn" onclick="toggleProviderModal()"><i class="ti ti-x"></i></div>
+          </div>
+          <div style="padding:16px;display:flex;flex-direction:column;gap:16px">
+            <div>
+              <div class="ctrl-title">LLM Provider</div>
+              <div class="provider-toggle" id="providerToggle" style="width:100%">
+                <div class="provider-option active" data-val="azure" onclick="setProvider('azure')">
+                  <i class="ti ti-cloud"></i> Azure
+                </div>
+                <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
+                  <i class="ti ti-router"></i> OpenRouter
+                </div>
+                <div class="provider-option" data-val="nvidia" onclick="setProvider('nvidia')">
+                  <i class="ti ti-bolt"></i> NVIDIA
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="ctrl-title">Embedding Provider</div>
+              <div class="provider-toggle" id="embeddingToggle" style="width:100%">
+                <div class="provider-option active" data-val="azure" onclick="setEmbeddingProvider('azure')">
+                  <i class="ti ti-cloud"></i> Azure
+                </div>
+                <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
+                  <i class="ti ti-router"></i> OpenRouter
+                </div>
+                <div class="provider-option" data-val="nvidia" onclick="setEmbeddingProvider('nvidia')">
+                  <i class="ti ti-bolt"></i> NVIDIA
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -2907,7 +3193,9 @@
       }
       if (bestScore >= 3 && bestDoc) return bestDoc;
 
-      return refDocName;
+      // No confident match to an actual uploaded file — caller should drop this ref
+      // rather than showing the raw reference text (e.g. "Statute", "Petition") as a fake source card.
+      return '';
     }
 
     // Build Referenced Sources cards grid
@@ -2917,6 +3205,7 @@
       const groupedRefs = {};
       for (const ref of refs) {
         const canonicalName = findCanonicalDocName(ref.docName);
+        if (!canonicalName) continue; // no confident match to an actual uploaded file — skip
         if (!groupedRefs[canonicalName]) {
           groupedRefs[canonicalName] = {
             canonicalName: canonicalName,
@@ -3023,7 +3312,7 @@
 
       // Build collapsible Sources section (document buttons, deduplicated)
       const sourcesHtml = `
-      <details class="answer-collapsible" open style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 12px 24px;">
+      <details class="answer-collapsible" style="border-top: 1px solid var(--border); background-color: var(--bg-hover); padding: 12px 24px;">
         <summary style="cursor:pointer; font-family: var(--font-heading); font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px; user-select:none;">
           <i class="ti ti-bookmarks" style="font-size: 13px; color: var(--accent);"></i>
           SOURCES (${entries.length})
@@ -3033,7 +3322,8 @@
         </div>
       </details>`;
 
-      return refsListHtml + sourcesHtml;
+      // Sources section commented out for now — leaving generation code above intact for re-enabling later.
+      return refsListHtml;
     }
 
     // Safe multi-highlight text
@@ -3416,6 +3706,161 @@
     }
 
     // ============================================================
+    // Answer rules (global house-style rules panel)
+    // ============================================================
+    function escapeHtmlRule(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function autoResizeRuleText(el) {
+      el.style.height = 'auto';
+      el.style.height = el.scrollHeight + 'px';
+    }
+
+    function renderRulesList(rules) {
+      const list = document.getElementById('rules-list');
+      if (!rules.length) {
+        list.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 2px">No rules yet.</div>';
+        return;
+      }
+      list.innerHTML = rules.map(r => `
+        <div class="rule-item ${r.enabled ? '' : 'rule-disabled'}" data-id="${r.id}" draggable="true"
+             ondragstart="onRuleDragStart(event, '${r.id}')" ondragover="onRuleDragOver(event, this)"
+             ondragleave="this.classList.remove('rule-drag-over')" ondrop="onRuleDrop(event, this)"
+             ondragend="onRuleDragEnd(event)">
+          <i class="ti ti-grip-vertical rule-drag-handle" title="Drag to reorder"></i>
+          <input type="checkbox" ${r.enabled ? 'checked' : ''} onchange="toggleRuleEnabled('${r.id}', this.checked)">
+          <textarea class="rule-text" rows="1" oninput="autoResizeRuleText(this)"
+            onchange="editRuleUI('${r.id}', this.value)">${escapeHtmlRule(r.text)}</textarea>
+          <i class="ti ti-trash rule-delete" title="Delete rule" onclick="deleteRuleUI('${r.id}')"></i>
+        </div>
+      `).join('');
+      list.querySelectorAll('.rule-text').forEach(autoResizeRuleText);
+    }
+
+    let _draggedRuleId = null;
+
+    function onRuleDragStart(e, id) {
+      _draggedRuleId = id;
+      e.currentTarget.classList.add('rule-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    }
+
+    function onRuleDragOver(e, el) {
+      e.preventDefault();
+      el.classList.add('rule-drag-over');
+    }
+
+    async function onRuleDrop(e, el) {
+      e.preventDefault();
+      el.classList.remove('rule-drag-over');
+      const targetId = el.dataset.id;
+      if (!_draggedRuleId || _draggedRuleId === targetId) return;
+      const list = document.getElementById('rules-list');
+      const items = Array.from(list.querySelectorAll('.rule-item'));
+      const order = items.map(i => i.dataset.id);
+      const fromIdx = order.indexOf(_draggedRuleId);
+      const toIdx = order.indexOf(targetId);
+      order.splice(fromIdx, 1);
+      order.splice(toIdx, 0, _draggedRuleId);
+      try {
+        const res = await fetch('/api/rules/reorder', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ order }),
+        });
+        const data = await res.json();
+        renderRulesList(data.rules || []);
+      } catch (e) {}
+    }
+
+    function onRuleDragEnd(e) {
+      e.currentTarget.classList.remove('rule-dragging');
+      _draggedRuleId = null;
+    }
+
+    async function loadRulesUI() {
+      const list = document.getElementById('rules-list');
+      list.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 2px">Loading…</div>';
+      try {
+        const res = await fetch('/api/rules');
+        const data = await res.json();
+        renderRulesList(data.rules || []);
+      } catch (e) {
+        list.innerHTML = '<div style="font-size:12px;color:var(--red)">Failed to load rules.</div>';
+      }
+    }
+
+    function toggleRules() {
+      const o = document.getElementById('rules-overlay');
+      if (o.style.display === 'none') {
+        o.style.display = 'block';
+        loadRulesUI();
+      } else {
+        o.style.display = 'none';
+      }
+    }
+
+    function toggleProviderModal() {
+      const o = document.getElementById('provider-overlay');
+      o.style.display = (o.style.display === 'none') ? 'flex' : 'none';
+    }
+
+    async function toggleRuleEnabled(id, enabled) {
+      try {
+        await fetch(`/api/rules/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled }),
+        });
+      } catch (e) {}
+      const item = document.querySelector(`.rule-item[data-id="${id}"]`);
+      if (item) item.classList.toggle('rule-disabled', !enabled);
+    }
+
+    async function deleteRuleUI(id) {
+      try {
+        await fetch(`/api/rules/${id}`, { method: 'DELETE' });
+      } catch (e) {}
+      loadRulesUI();
+    }
+
+    async function editRuleUI(id, text) {
+      try {
+        await fetch(`/api/rules/${id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+      } catch (e) {}
+    }
+
+    async function resetRulesUI() {
+      if (!confirm('Reset instructions to the default list? This removes any custom rules you added.')) return;
+      try {
+        await fetch('/api/rules/reset', { method: 'POST' });
+      } catch (e) {}
+      loadRulesUI();
+    }
+
+    async function addRuleUI() {
+      const input = document.getElementById('rules-add-input');
+      const text = input.value.trim();
+      if (!text) return;
+      try {
+        await fetch('/api/rules', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        input.value = '';
+        loadRulesUI();
+      } catch (e) {}
+    }
+
+    // ============================================================
     // Sessions
     // ============================================================
     function newSession() { location.reload(); }
@@ -3435,17 +3880,62 @@
         $list.innerHTML = sessions.map(s => {
           const date = new Date(s.created_at * 1000).toLocaleString();
           const isActive = s.id === SID ? 'active' : '';
+          const safeName = (s.name || 'Unnamed Session').replace(/"/g, '&quot;');
           return `
           <div class="s-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
-            <div>
-              <div class="s-title">${s.name || 'Unnamed Session'}</div>
-              <div class="s-meta">${s.files} docs · ${date}</div>
+            <div style="min-width:0;flex:1">
+              <div class="s-title" data-name="${safeName}">${s.name || 'Unnamed Session'}</div>
+              <div class="s-meta">${date}</div>
             </div>
-            <button class="del-btn" onclick="deleteSession(event, '${s.id}')" title="Delete"><i class="ti ti-trash"></i></button>
+            <div class="s-item-actions">
+              <button class="rename-btn" onclick="startRenameSession(event, '${s.id}')" title="Rename"><i class="ti ti-pencil"></i></button>
+              <button class="del-btn" onclick="deleteSession(event, '${s.id}')" title="Delete"><i class="ti ti-trash"></i></button>
+            </div>
           </div>
         `;
         }).join('');
       } catch (e) { }
+    }
+
+    function startRenameSession(e, id) {
+      e.stopPropagation();
+      const item = document.querySelector(`.s-item[data-id="${id}"]`);
+      if (!item) return;
+      const titleEl = item.querySelector('.s-title');
+      const currentName = titleEl.getAttribute('data-name') || '';
+
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 's-title-input';
+      input.value = currentName;
+      titleEl.replaceWith(input);
+      input.focus();
+      input.select();
+
+      let done = false;
+      const commit = async () => {
+        if (done) return;
+        done = true;
+        const newName = input.value.trim();
+        if (newName && newName !== currentName) {
+          try {
+            await fetch(`/session/${id}`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: newName }),
+            });
+          } catch (err) { }
+        }
+        loadSessions();
+      };
+
+      input.addEventListener('click', (ev) => ev.stopPropagation());
+      input.addEventListener('keydown', (ev) => {
+        ev.stopPropagation();
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+        else if (ev.key === 'Escape') { done = true; loadSessions(); }
+      });
+      input.addEventListener('blur', commit);
     }
 
     async function resumeSession(id) {
@@ -4824,10 +5314,10 @@
           .force('center', d3.forceCenter(w / 2, h / 2))
           .force('collision', d3.forceCollide(25));
 
-        const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#C7D2FE').attr('stroke-width', 1);
+        const link = g.selectAll('.link').data(links).join('line').attr('stroke', '#D9D9D9').attr('stroke-width', 1);
         const node = g.selectAll('.node').data(nodes).join('circle')
           .attr('r', d => 5 + Math.min((deg[d.id] || 0) * 2, 12))
-          .attr('fill', d => color(d.id)).attr('stroke', '#EEF2FF').attr('stroke-width', 1.5)
+          .attr('fill', d => color(d.id)).attr('stroke', '#F2F2F2').attr('stroke-width', 1.5)
           .style('cursor', 'pointer').call(d3.drag().on('start', (e, d) => { if (!e.active) sim.alphaTarget(.3).restart(); d.fx = d.x; d.fy = d.y; }).on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; }).on('end', (e, d) => { if (!e.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
 
         const label = g.selectAll('.label').data(nodes).join('text').text(d => d.id.length > 15 ? d.id.slice(0, 13) + '…' : d.id).attr('font-size', 9).attr('fill', '#6B7280').attr('text-anchor', 'middle').attr('dy', d => -(8 + Math.min((deg[d.id] || 0) * 2, 12)));

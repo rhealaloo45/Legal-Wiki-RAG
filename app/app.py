@@ -86,15 +86,16 @@ def _get_progress_lock(session_id: str) -> threading.Lock:
 def _update_doc_status(session_id: str, doc_name: str, status: str,
                         step: str = "", pages: int = 0) -> None:
     """Set a specific document's status in the docs_list of the progress dict."""
-    progress = _get_progress(session_id)
-    for doc in progress.get("docs_list", []):
-        if doc.get("name") == doc_name:
-            doc["status"] = status
-            doc["step"] = step
-            if pages:
-                doc["pages"] = pages
-            break
-    _set_progress(session_id, progress)
+    with _get_progress_lock(session_id):
+        progress = _get_progress(session_id)
+        for doc in progress.get("docs_list", []):
+            if doc.get("name") == doc_name:
+                doc["status"] = status
+                doc["step"] = step
+                if pages:
+                    doc["pages"] = pages
+                break
+        _set_progress(session_id, progress)
 
 
 def _refresh_wiki_stats(session_id: str) -> None:
@@ -108,12 +109,13 @@ def _refresh_wiki_stats(session_id: str) -> None:
             idx = wiki._load_index(session_id)
             pages = len(idx.get("pages", {}))
             rels = len(idx.get("relations", []))
-        progress = _get_progress(session_id)
-        wiki_prog = progress.get("wiki", {})
-        wiki_prog["pages_total"] = pages
-        wiki_prog["relations_total"] = rels
-        progress["wiki"] = wiki_prog
-        _set_progress(session_id, progress)
+        with _get_progress_lock(session_id):
+            progress = _get_progress(session_id)
+            wiki_prog = progress.get("wiki", {})
+            wiki_prog["pages_total"] = pages
+            wiki_prog["relations_total"] = rels
+            progress["wiki"] = wiki_prog
+            _set_progress(session_id, progress)
     except Exception as e:
         logger.error("Failed to refresh wiki stats: %s", e)
 
@@ -306,6 +308,50 @@ def set_llm_settings():
     config.LLM_PROVIDER = provider
     return jsonify({"status": "ok", "provider": provider})
 
+@app.route("/api/rules", methods=["GET"])
+def get_rules():
+    from services import rules as _rules
+    return jsonify({"rules": _rules.load_rules()})
+
+@app.route("/api/rules", methods=["POST"])
+def create_rule():
+    from services import rules as _rules
+    data = request.json or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+    rule = _rules.add_rule(text)
+    return jsonify({"rule": rule})
+
+@app.route("/api/rules/<rule_id>", methods=["PUT"])
+def edit_rule(rule_id):
+    from services import rules as _rules
+    data = request.json or {}
+    rule = _rules.update_rule(rule_id, text=data.get("text"), enabled=data.get("enabled"))
+    if rule is None:
+        return jsonify({"error": "rule not found"}), 404
+    return jsonify({"rule": rule})
+
+@app.route("/api/rules/<rule_id>", methods=["DELETE"])
+def remove_rule(rule_id):
+    from services import rules as _rules
+    if not _rules.delete_rule(rule_id):
+        return jsonify({"error": "rule not found"}), 404
+    return jsonify({"status": "ok"})
+
+@app.route("/api/rules/reorder", methods=["PUT"])
+def reorder_rules_route():
+    from services import rules as _rules
+    data = request.json or {}
+    ordered_ids = data.get("order") or []
+    return jsonify({"rules": _rules.reorder_rules(ordered_ids)})
+
+@app.route("/api/rules/reset", methods=["POST"])
+def reset_rules_route():
+    from services import rules as _rules
+    return jsonify({"rules": _rules.reset_rules()})
+
+
 @app.route("/api/settings/embedding", methods=["GET"])
 def get_embedding_settings():
     return jsonify({"provider": getattr(config, "EMBEDDING_PROVIDER", "azure")})
@@ -429,11 +475,12 @@ def _ingest_single_doc_rag(file_path: str, session_id: str, meta: dict = None):
     except Exception as e:
         logger.error("RAG ingest failed for %s: %s", file_path, e)
     finally:
-        progress = _get_progress(session_id)
-        docs = progress.get("docs", {})
-        docs["rag_done"] = docs.get("rag_done", 0) + 1
-        progress["docs"] = docs
-        _set_progress(session_id, progress)
+        with _get_progress_lock(session_id):
+            progress = _get_progress(session_id)
+            docs = progress.get("docs", {})
+            docs["rag_done"] = docs.get("rag_done", 0) + 1
+            progress["docs"] = docs
+            _set_progress(session_id, progress)
         _check_completion(session_id)
 
 
@@ -460,13 +507,14 @@ def _ingest_single_doc_wiki(file_path: str, session_id: str):
 
 def _check_completion(session_id: str):
     """Mark phase as complete when all documents finish both pipelines."""
-    progress = _get_progress(session_id)
-    docs = progress.get("docs", {})
-    total = docs.get("total", 0)
-    # if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
-    if total > 0 and docs.get("wiki_done", 0) >= total:
-        progress["phase"] = "complete"
-        _set_progress(session_id, progress)
+    with _get_progress_lock(session_id):
+        progress = _get_progress(session_id)
+        docs = progress.get("docs", {})
+        total = docs.get("total", 0)
+        # if total > 0 and docs.get("rag_done", 0) >= total and docs.get("wiki_done", 0) >= total:
+        if total > 0 and docs.get("wiki_done", 0) >= total:
+            progress["phase"] = "complete"
+            _set_progress(session_id, progress)
 
 
 @app.route("/messages")
