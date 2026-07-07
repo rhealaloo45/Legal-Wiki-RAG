@@ -4024,7 +4024,7 @@
           <div class="s-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
             <div style="min-width:0;flex:1">
               <div class="s-title" data-name="${safeName}">${s.name || 'Unnamed Session'}</div>
-              <div class="s-meta">${date}</div>
+              <div class="s-meta">${s.files} docs · ${date}</div>
             </div>
             <div class="s-item-actions">
               <button class="rename-btn" onclick="startRenameSession(event, '${s.id}')" title="Rename"><i class="ti ti-pencil"></i></button>
