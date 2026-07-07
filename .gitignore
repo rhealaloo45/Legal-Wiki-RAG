@@ -269,3 +269,5 @@ questions.txt
 # Debug output
 app/debug_raw_answer.txt
 app/test_output.txt
+app/ingest_remaining.py
+app/register_files.py
