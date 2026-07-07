@@ -62,6 +62,18 @@ _RX_COMPARISON = re.compile(
     re.IGNORECASE,
 )
 _RX_BETWEEN = re.compile(r'\bbetween\b.+\band\b', re.IGNORECASE)
+# _RX_BETWEEN alone is too broad: legal writing routinely phrases a SINGLE-
+# document pleading/analysis question as "the distinction/difference between
+# X and Y" (e.g. "how is the legal distinction between the manufacturer and
+# the independent dealership pleaded?") — that's asking how one document
+# argues a distinction, not requesting a cross-document comparison. Suppress
+# the _RX_BETWEEN-only trigger for that shape; _RX_COMPARISON's own keywords
+# (compare/differ/versus/contrast) still fire normally regardless.
+_RX_BETWEEN_EXCLUDE = re.compile(
+    r'\bhow\s+(?:is|are)\b.{0,20}\b(?:distinction|difference)\b.{0,10}between\b.{0,100}'
+    r'\b(?:pleaded|argued|established|asserted|drawn|treated|addressed|framed|structured)\b',
+    re.IGNORECASE,
+)
 _RX_OBLIGATION = re.compile(
     r'(?:'
     r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
@@ -110,7 +122,9 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
 
     if _RX_DRAFTING.search(q):
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
-    if _RX_COMPARISON.search(q) or _RX_BETWEEN.search(q):
+    if _RX_COMPARISON.search(q):
+        return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
+    if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_RISK.search(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
@@ -364,10 +378,14 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
 
     ctx = context
 
+    # NOTE: previously truncated to answer[:2000] — long comparison/obligation
+    # answers put their References/quotes section (the exact content this check
+    # exists to catch fabrication in) near the END of the answer, past 2000
+    # chars, so the checker never even saw it. Check the full answer.
     prompt = _GROUNDING_PROMPT.format(
         context=ctx,
         question=question,
-        answer=answer[:2000],
+        answer=answer,
         intent=intent,
     )
     try:
