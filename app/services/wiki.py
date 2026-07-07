@@ -1919,7 +1919,20 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # Matches quoted spans of at least 15 chars, straight or curly quote marks.
 # 15 chars filters out trivial quoted words/labels that aren't meant as verbatim
 # source citations.
-_QUOTE_SPAN_RE = re.compile(r'["“]([^"”]{15,500})["”]')
+#
+# Content uses a GREEDY "." (not an exclusion class like [^"”]) so a quote is
+# matched to the LAST quote character in the window, not the very next one.
+# Legal citations legitimately contain nested quotes (e.g. `by and among: 1.
+# AETHER TECHNOLOGIES INC. ("Depositor"); 2. ...`) — with an exclusion class,
+# the regex naively pairs up quote characters two at a time: a short nested
+# quote below the 15-char floor gets skipped, but its closing mark then gets
+# reused as the OPENING delimiter for the next scan, producing garbled
+# fragments like `") is dated ... ("` that fail verbatim verification even
+# though the real, full quote is genuine. Greedy matching consumes through
+# nested quotes and backtracks from the end, capturing the true outer span.
+# "." doesn't cross newlines, so this still can't merge two unrelated quotes
+# in different paragraphs — only ones on the same line/run of text.
+_QUOTE_SPAN_RE = re.compile(r'["“](.{15,500})["”]')
 
 # Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
 # splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
@@ -1932,6 +1945,22 @@ _ELLIPSIS_SPLIT_RE = re.compile(r'\s*(?:\.\.\.|…)\s*')
 
 def _quote_segments(q: str) -> list[str]:
     return [s.strip() for s in _ELLIPSIS_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+
+
+# Splits a quote on internal straight-quote characters — the counterpart to
+# _quote_segments' ellipsis handling. The greedy _QUOTE_SPAN_RE above fixes
+# nested-quote citations (one long quote containing "sub-quotes") by matching
+# the full outer span, but that same greediness can merge two SEPARATE short
+# genuine quotes that happen to sit on the same line (e.g. `"X" from "Y"`)
+# into one span that fails whole-string verification. Splitting on internal
+# quote marks and checking each piece independently — same as the ellipsis
+# fallback — recovers both cases without reopening the fabrication-detection
+# hole the greedy regex was built to close in the first place.
+_INTERNAL_QUOTE_SPLIT_RE = re.compile(r'["“”]')
+
+
+def _quote_inner_segments(q: str) -> list[str]:
+    return [s.strip() for s in _INTERNAL_QUOTE_SPLIT_RE.split(q) if len(s.strip()) >= 8]
 
 
 def _known_page_titles(context: str) -> set[str]:
@@ -1984,6 +2013,9 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
             continue
         segments = _quote_segments(q)
         if segments and all(_norm(seg) in ctx_norm for seg in segments):
+            continue
+        inner_segments = _quote_inner_segments(q)
+        if inner_segments and all(_norm(seg) in ctx_norm for seg in inner_segments):
             continue
         unverified.append(q.strip())
     return unverified
@@ -2043,6 +2075,16 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
                 block_title = next(
                     (title for title, body in norm_blocks
                      if all(_norm(seg) in body for seg in segments)),
+                    None,
+                )
+        if not block_title:
+            # Nested/adjacent-quote span (see _QUOTE_SPAN_RE) — find the block
+            # containing every quote-split inner piece instead of the whole string.
+            inner_segments = _quote_inner_segments(quote)
+            if inner_segments:
+                block_title = next(
+                    (title for title, body in norm_blocks
+                     if all(_norm(seg) in body for seg in inner_segments)),
                     None,
                 )
         if not block_title:
@@ -2752,7 +2794,7 @@ def classify_query(question: str, session_id: str) -> dict:
         vtype = re.sub(r'\s+', ' ', vmatch.group(1).lower().strip())
         if vtype in _GENERIC_VAGUE_WORDS:
             logger.info("Vague document reference '%s' → disambiguate (all docs)", vtype)
-            return {"needs_disambiguation": True, "documents": docs}
+            return {"needs_disambiguation": True, "documents": _diversify_doc_order(docs)}
         filt = _VAGUE_TYPE_FILTER.get(vtype)
         if filt:
             type_docs = [
@@ -2809,11 +2851,71 @@ def classify_query(question: str, session_id: str) -> dict:
         raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_DISAMBIGUATION)
         parsed = _parse_json_safe(raw)
         if parsed and parsed.get("needs_disambiguation"):
-            return {"needs_disambiguation": True, "documents": docs}
+            return {"needs_disambiguation": True, "documents": _diversify_doc_order(docs)}
     except Exception as e:
         logger.error("classify_query failed: %s", e)
 
     return {"needs_disambiguation": False, "documents": docs}
+
+
+def _bucket_docs_by_type(docs: list[str]) -> list[list[str]]:
+    """Group source_doc filenames into buckets by known document type keywords
+    (reusing _VAGUE_TYPE_FILTER's canonical types; anything unmatched goes in
+    "other"). Pure string matching — no DB round-trips — so it stays cheap even
+    at tens of thousands of documents.
+    """
+    buckets: dict[str, list[str]] = {}
+    for d in docs:
+        norm = re.sub(r'^[a-f0-9-]{36}_', '', d).replace('_', ' ').lower()
+        bucket_key = next((v for k, v in _VAGUE_TYPE_FILTER.items() if k in norm), "other")
+        buckets.setdefault(bucket_key, []).append(d)
+    return list(buckets.values())
+
+
+def _round_robin_buckets(bucket_lists: list[list[str]], limit: int | None = None) -> list[str]:
+    """Interleave a list of buckets round-robin so the result spans every
+    bucket early on, instead of exhausting one bucket before the next starts.
+    """
+    if not bucket_lists:
+        return []
+    result: list[str] = []
+    idx = 0
+    max_len = max(len(bl) for bl in bucket_lists)
+    while idx < max_len and (limit is None or len(result) < limit):
+        for bl in bucket_lists:
+            if idx < len(bl):
+                result.append(bl[idx])
+                if limit is not None and len(result) >= limit:
+                    break
+        idx += 1
+    return result
+
+
+def _diverse_doc_sample(docs: list[str], limit: int) -> list[str]:
+    """Sample up to `limit` docs spread across distinct document types.
+
+    A raw docs[:N] head-slice is unrepresentative at scale: if the corpus is
+    loaded/ordered by folder (as batch ingests typically are), a head slice can
+    be dozens of the same document type, giving the ambiguity-check LLM a
+    skewed sense of what's actually in the corpus — a genuinely ambiguous
+    question touching document types outside that slice would never trigger
+    clarification. Buckets by type and round-robins across buckets instead, so
+    the sample spans the real variety of the corpus regardless of ingest order.
+    """
+    if len(docs) <= limit:
+        return docs
+    return _round_robin_buckets(_bucket_docs_by_type(docs), limit)
+
+
+def _diversify_doc_order(docs: list[str]) -> list[str]:
+    """Reorder (never drops) a full document list so distinct types appear
+    early, instead of clustering by ingest order (e.g. 25 "Court Case
+    Documents" in a row before any NDA/SHA/Service Agreement appears). Used
+    for disambiguation chip lists, where every document must still be shown —
+    only the order changes, so a user isn't stuck scrolling through one type
+    to find another.
+    """
+    return _round_robin_buckets(_bucket_docs_by_type(docs))
 
 
 def check_ambiguity(question: str, session_id: str, conversation_context: str = "") -> dict:
@@ -2834,7 +2936,8 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
             p.get("source_doc", "") for p in pages.values()
             if isinstance(p, dict) and p.get("source_doc")
         })
-    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs[:20]]
+    sampled_docs = _diverse_doc_sample(docs, config.AMBIGUITY_DOC_SAMPLE_CAP)
+    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in sampled_docs]
 
     conv_snippet = ""
     if conversation_context:
@@ -2854,7 +2957,7 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
         "- The intent is obvious from context or conversation history\n"
         "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n\n"
         "When in doubt, answer directly — do NOT ask for clarification.\n\n"
-        f"Available documents: {', '.join(clean_docs[:10])}\n"
+        f"Available documents: {', '.join(clean_docs)}\n"
         f"{conv_snippet}\n"
         f"Question: {question}\n\n"
         "Respond with JSON only:\n"
