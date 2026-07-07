@@ -839,6 +839,43 @@ def ingest(file_path: str, session_id: str) -> dict:
     return {"pages_updated": total_pages, "relations": total_rels}
 
 
+def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
+    """Drop any 'quotes' entries that aren't actually verbatim substrings of the
+    raw source text the ingest LLM was given.
+
+    The ingest schema's "quotes" field is documented as "Exact verbatim quote
+    from the text" — but the ingest LLM sometimes fills it with its own
+    descriptive narration instead (e.g. "The petition cites this Act to
+    demonstrate that the commercial court has jurisdiction over the matter").
+    That narration then gets appended into the stored page content under a
+    "**Supporting Quotes:**" heading, and the answer-generation LLM has no way
+    to tell it apart from genuine document language — it ends up presented in
+    quotation marks as if verbatim. This is the only point in the pipeline
+    where the true original text is still available to check against, so
+    filtering happens here, before the quote ever reaches storage.
+    """
+    def _norm(s: str) -> str:
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    src_norm = _norm(source_text)
+    pages = parsed.get("pages", {})
+    for title, page in pages.items():
+        if not isinstance(page, dict):
+            continue
+        quotes = page.get("quotes", [])
+        if not quotes:
+            continue
+        verified = [q for q in quotes if _norm(q) in src_norm]
+        dropped = len(quotes) - len(verified)
+        if dropped:
+            logger.warning(
+                "Ingest quote verification: dropped %d/%d unverifiable quote(s) for page '%s'",
+                dropped, len(quotes), title,
+            )
+        page["quotes"] = verified
+    return parsed
+
+
 def _ingest_single_call(text: str, doc_name: str) -> dict:
     """Process a short document in one LLM call."""
     prompt = INGEST_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
@@ -857,7 +894,7 @@ def _ingest_single_call(text: str, doc_name: str) -> dict:
     if "relations" not in parsed:
         parsed["relations"] = []
 
-    return parsed
+    return _filter_verified_quotes(parsed, text)
 
 
 def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
@@ -915,7 +952,7 @@ def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type
     if "relations" not in parsed:
         parsed["relations"] = []
 
-    return parsed
+    return _filter_verified_quotes(parsed, text)
 
 
 def _split_segments(text: str) -> list[str]:
@@ -1875,6 +1912,134 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
     return "\nDOCUMENT METADATA:\n" + "\n".join(metadata_lines) + "\n"
 
 
+# Matches quoted spans of at least 15 chars, straight or curly quote marks.
+# 15 chars filters out trivial quoted words/labels that aren't meant as verbatim
+# source citations.
+_QUOTE_SPAN_RE = re.compile(r'["“]([^"”]{15,500})["”]')
+
+# Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
+# splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
+# the aforesaid shall be referred to as a 'Party'"), so requiring the WHOLE
+# spliced string to be one continuous substring of the source produces false
+# positives on genuinely verbatim quotes — each segment must independently be
+# verbatim instead.
+_ELLIPSIS_SPLIT_RE = re.compile(r'\s*(?:\.\.\.|…)\s*')
+
+
+def _quote_segments(q: str) -> list[str]:
+    return [s.strip() for s in _ELLIPSIS_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+
+
+def _verify_answer_citations(answer: str, context: str) -> list[str]:
+    """Deterministically verify every quoted span in the answer is actually
+    present (whitespace/case-insensitive) in the retrieved context.
+
+    Catches a real, confirmed failure mode: the answer LLM presenting a
+    paraphrase as if it were a verbatim quote (e.g. "The definition is broad,
+    capturing oral, written, electronic, and physical disclosures" when the
+    source actually reads "...whether orally, in writing, or in electronic or
+    physical form..."). This is a substring check against the exact context the
+    model was given — not another LLM's opinion — so it can't be fooled the same
+    way the holistic grounding check can.
+
+    Does NOT catch quotes that are verbatim-accurate but mislabeled with a wrong
+    section number, or facts that were already wrong in the stored wiki page at
+    ingest time — both are real but require comparing against the ORIGINAL
+    source document, not the retrieved context, which is a separate check.
+    """
+    if not answer or not context:
+        return []
+
+    def _norm(s: str) -> str:
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    ctx_norm = _norm(context)
+    unverified = []
+    for q in _QUOTE_SPAN_RE.findall(answer):
+        qn = _norm(q)
+        if qn in ctx_norm:
+            continue
+        segments = _quote_segments(q)
+        if segments and all(_norm(seg) in ctx_norm for seg in segments):
+            continue
+        unverified.append(q.strip())
+    return unverified
+
+
+# Page blocks in wiki_content look like "## Some Topic – DocID (DocType)\n<content>".
+_PAGE_BLOCK_RE = re.compile(r'^##\s+(.+?)\s*\n(.*?)(?=^##\s+|\Z)', re.MULTILINE | re.DOTALL)
+
+# Document-number tokens like "CCD08", "CCD-21", "JVA 01" — used to compare what
+# a citation CLAIMS against what document the quote is ACTUALLY found in.
+# Uses a negative lookbehind for a preceding letter (not \b) for the leading
+# boundary: "_" counts as a word character in regex, so \b never fires before
+# "CCD" in underscore-joined filenames like "Test_CCD_08.txt".
+_DOC_NUM_RE = re.compile(r'(?<![A-Za-z])(jva|nda|sha|sa|ccd|judgment|opinion|msa)[-_\s]?0*(\d{1,3})\b', re.IGNORECASE)
+
+
+def _extract_doc_number_tokens(text: str) -> set[tuple[str, str]]:
+    return {(t.lower(), n) for t, n in _DOC_NUM_RE.findall(text)}
+
+
+def _verify_citation_attribution(answer: str, context: str) -> list[str]:
+    """Deterministically check whether a cited quote is attributed to the right
+    document — catches the confirmed CCD_08 bug where a genuinely real quote
+    (correctly found in context) was attributed to the wrong source file (e.g.
+    a quote that actually lives under a "...Test-CCD35..." page block was cited
+    in the answer as "[1] Test_CCD_08.txt, ...").
+
+    Only fires when both the citation's claimed doc-number token and the quote's
+    actual source-block doc-number token share the same TYPE (e.g. both "ccd")
+    but a DIFFERENT number — this keeps false positives low since it never
+    flags citations it can't confidently compare.
+    """
+    if not answer or not context:
+        return []
+
+    def _norm(s: str) -> str:
+        return re.sub(r'\s+', ' ', s).strip().lower()
+
+    blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
+    if not blocks:
+        return []
+    norm_blocks = [(title, _norm(body)) for title, body in blocks]
+
+    mismatches = []
+    for m in _QUOTE_SPAN_RE.finditer(answer):
+        quote = m.group(1)
+        qn = _norm(quote)
+        block_title = next((title for title, body in norm_blocks if qn in body), None)
+        if not block_title:
+            # Ellipsis-spliced quote ("BETWEEN: ... Each of the aforesaid...") —
+            # find the block containing every segment instead of the whole string.
+            segments = _quote_segments(quote)
+            if segments:
+                block_title = next(
+                    (title for title, body in norm_blocks
+                     if all(_norm(seg) in body for seg in segments)),
+                    None,
+                )
+        if not block_title:
+            continue  # not found at all — already caught by _verify_answer_citations
+
+        label_start = max(0, m.start() - 150)
+        label = answer[label_start:m.start()]
+        claimed = _extract_doc_number_tokens(label)
+        actual = _extract_doc_number_tokens(block_title)
+        if not claimed or not actual:
+            continue
+
+        shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
+        if shared_types and not (claimed & actual):
+            claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
+            actual_str = ", ".join(f"{t.upper()}{n}" for t, n in actual)
+            mismatches.append(
+                f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
+                f'"{block_title}" ({actual_str})'
+            )
+    return mismatches
+
+
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
@@ -1919,6 +2084,11 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Build metadata block with party names from ingested documents
     metadata_block = _build_metadata_block(session_id, selected_titles, pages)
 
+    # User-editable global house-style rules ("use a formal tone", "say clause
+    # not section", ...) — appended on top of the fixed per-intent rules above.
+    from services import rules as _rules
+    house_rules_block = _rules.enabled_rules_block()
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -1933,6 +2103,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         question=question,
         conversation_block=conv_block,
         metadata_block=metadata_block,
+        house_rules_block=house_rules_block,
     )
 
     usage = {}
@@ -2055,6 +2226,33 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         answer = f"⚠️ LLM error: {e}"
         confidence_score = 0
         confidence_reason = "LLM call failed."
+
+    # Deterministic citation-integrity check: flag any quoted span the model
+    # presented as verbatim that doesn't actually appear in the retrieved
+    # context (paraphrase dressed up as an exact quote). Appended visibly
+    # rather than silently dropped — the substantive answer may still be
+    # correct even when a quote is fabricated.
+    _unverified_quotes = _verify_answer_citations(answer, wiki_content)
+    if _unverified_quotes:
+        logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
+                        len(_unverified_quotes))
+        _preview = "; ".join(
+            f'"{q[:80]}..."' if len(q) > 80 else f'"{q}"' for q in _unverified_quotes[:3]
+        )
+        answer += (
+            f"\n\n[CITATION WARNING: {len(_unverified_quotes)} quoted passage(s) above could not "
+            f"be verified verbatim against the retrieved source text — treat as paraphrase, not "
+            f"exact quote: {_preview}]"
+        )
+
+    _misattributed = _verify_citation_attribution(answer, wiki_content)
+    if _misattributed:
+        logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
+                        len(_misattributed), _misattributed)
+        answer += (
+            f"\n\n[ATTRIBUTION WARNING: {len(_misattributed)} quote(s) above appear to be attributed "
+            f"to the wrong document — {'; '.join(_misattributed[:2])}]"
+        )
 
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
@@ -2376,6 +2574,14 @@ def _extract_doc_entities(pages: dict) -> set[str]:
         core = re.sub(r'^(?:NDA|SHA|JVA?|SA)(?=[A-Z])', '', ident)               # camelCase
         core = re.sub(r'^(?:nda|sha|jva?|sa)\d*[-\s]+', '', core, flags=re.IGNORECASE)
         core = re.sub(r'^[\d\s-]+', '', core).strip(" -")
+        # A well-formed identifier is SHORT (the ingest prompt asks for 2-4 words
+        # max). Longer, sentence-like "identifiers" (e.g. a stray Questionnaire
+        # page titled "... - Tata Power Solar Imposter Domains") are descriptive
+        # phrases, not distinctive party names — mining them for words leaks
+        # ordinary vocabulary ("solar", "domains") into the global entity set,
+        # which then false-matches unrelated documents via substring containment.
+        if len(core.split()) > 4:
+            continue
         cl = core.lower()
         if len(cl) >= 4 and cl not in _ENTITY_EXCLUDE:
             entities.add(cl)
@@ -2395,17 +2601,32 @@ def _question_mentions_known_entity(question: str, pages: dict) -> bool:
 
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     """Return page titles whose document identifier contains an entity name
-    mentioned in the question. Used to force-scope context to the right document."""
+    mentioned in the question. Used to force-scope context to the right document.
+
+    Prefers identifiers matching the MOST distinct hit tokens over identifiers
+    matching just one. A question naming a party pair ("the Zephyr-Solaris NDA")
+    yields two hit tokens ("zephyr", "solaris"); each name alone is common across
+    a large synthetic corpus (100+ matches), but the *pair* together identifies
+    one specific document precisely. Without this, a single-name flood (e.g.
+    "zephyr" alone hitting 242 pages) buries the compound match and can push the
+    total past ENTITY_MATCH_MAX_PAGES, abandoning force-include entirely.
+    """
     q = question.lower()
     hits = {ent for ent in _extract_doc_entities(pages) if ent in q}
     if not hits:
         return []
-    result = []
+    by_match_count: dict[int, list[str]] = {}
     for title in pages:
         ident = _doc_identifier_part(title).lower()
-        if ident and any(h in ident for h in hits):
-            result.append(title)
-    return result
+        if not ident:
+            continue
+        n = sum(1 for h in hits if h in ident)
+        if n > 0:
+            by_match_count.setdefault(n, []).append(title)
+    if not by_match_count:
+        return []
+    best = max(by_match_count)
+    return by_match_count[best]
 
 
 def classify_query(question: str, session_id: str) -> dict:
