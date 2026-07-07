@@ -81,6 +81,7 @@ MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in contex
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
 MAX_TOTAL_CONTEXT_CHARS      = 60_000 # Cap on the combined wiki_content sent per LLM call (prevents context-window overflow on broad queries that match many similar documents)
 ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too common (reused across many docs) to force-scope the query to it
+AMBIGUITY_DOC_SAMPLE_CAP     = 40    # Doc sample size shown to the check_ambiguity() LLM prompt — type-diverse, not a raw head-slice
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
 VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
 HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector results (hybrid retrieval)
