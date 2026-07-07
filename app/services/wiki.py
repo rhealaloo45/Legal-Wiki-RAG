@@ -1651,37 +1651,32 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
 
     # --- Step 1: Select relevant pages ---
     if file_pages:
-        # File explicitly mentioned — force those pages in
-        if len(pages) <= 20:
-            # Small wiki: file pages first, then everything else
-            other = [t for t in pages if t not in file_pages]
-            selected_titles = file_pages + other
-        else:
-            # Large wiki: file pages + vector/LLM-selected supplementary pages
-            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
-            seen = set(file_pages)
+        # File explicitly mentioned — force those pages in.
+        #
+        # Guard against same-named-entity/topic collisions across UNRELATED documents
+        # (e.g. two different test JVAs both naming their JV "SolarNexus ... LLC" with
+        # different parties/numbers, or a small test session where every ingested doc
+        # shares generic clause topics like "Intellectual Property"). If a candidate
+        # supplementary page covers the same clause topic as one already force-included
+        # from the named document, but belongs to a DIFFERENT source document, drop it —
+        # otherwise its numbers get blended into the requested document's answer and
+        # misattributed to it. Applied regardless of wiki size — small test sessions are
+        # exactly where this contamination is most visible (few pages, generic topics).
+        def _topic_of(title: str) -> str:
+            dash = title.find(" – ")
+            return title[:dash].strip() if dash > 0 else title
 
-            # Guard against same-named-entity collisions across UNRELATED documents
-            # (e.g. two different test JVAs both naming their JV "SolarNexus ...
-            # LLC" with different parties/numbers). If a supplementary page covers
-            # the same clause topic ("Equity Split", "Formation and Capital
-            # Contributions", ...) as one already force-included from the named
-            # document, but belongs to a DIFFERENT source document, drop it —
-            # otherwise its numbers get blended into the requested document's
-            # answer and misattributed to it.
-            def _topic_of(title: str) -> str:
-                dash = title.find(" – ")
-                return title[:dash].strip() if dash > 0 else title
+        file_doc_set = {
+            pages[t].get("source_doc", "")
+            for t in file_pages
+            if isinstance(pages.get(t), dict) and pages[t].get("source_doc")
+        }
+        file_topics = {_topic_of(t) for t in file_pages}
+        seen = set(file_pages)
 
-            file_doc_set = {
-                pages[t].get("source_doc", "")
-                for t in file_pages
-                if isinstance(pages.get(t), dict) and pages[t].get("source_doc")
-            }
-            file_topics = {_topic_of(t) for t in file_pages}
-
-            supplementary = []
-            for t in llm_selected:
+        def _drop_colliding(candidates: list[str]) -> list[str]:
+            kept = []
+            for t in candidates:
                 if t in seen:
                     continue
                 p = pages.get(t)
@@ -1690,8 +1685,17 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                     logger.info("Dropping supplementary page %r — same topic as forced "
                                 "document but from a different source_doc (%s)", t, sd)
                     continue
-                supplementary.append(t)
+                kept.append(t)
+            return kept
 
+        if len(pages) <= 20:
+            # Small wiki: file pages first, then everything else minus collisions
+            other = _drop_colliding(list(pages.keys()))
+            selected_titles = file_pages + other
+        else:
+            # Large wiki: file pages + vector/LLM-selected supplementary pages
+            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
+            supplementary = _drop_colliding(llm_selected)
             selected_titles = file_pages + supplementary
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
                      len(file_pages), len(selected_titles))
