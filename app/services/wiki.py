@@ -1934,6 +1934,22 @@ def _quote_segments(q: str) -> list[str]:
     return [s.strip() for s in _ELLIPSIS_SPLIT_RE.split(q) if len(s.strip()) >= 8]
 
 
+def _known_page_titles(context: str) -> set[str]:
+    """Normalized page titles present in the context (from '## Title' headers).
+
+    Used to exclude citation labels like `[1] "Commercial Courts Act, 2015 –
+    Statute" – the Act establishes...` from quote verification — the model is
+    quoting the PAGE TITLE as a citation label (a normal, correct citation
+    format), not claiming that string is a verbatim excerpt from the source
+    text. Without this, the quote-verification regex treats any quoted span as
+    a content-verbatim claim and flags the title itself as unverifiable.
+    """
+    return {
+        re.sub(r'\s+', ' ', title).strip().lower()
+        for title, _ in _PAGE_BLOCK_RE.findall(context)
+    }
+
+
 def _verify_answer_citations(answer: str, context: str) -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -1958,9 +1974,12 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
         return re.sub(r'\s+', ' ', s).strip().lower()
 
     ctx_norm = _norm(context)
+    known_titles = _known_page_titles(context)
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
         qn = _norm(q)
+        if qn in known_titles:
+            continue  # citation label (page title in quotes), not a content quote
         if qn in ctx_norm:
             continue
         segments = _quote_segments(q)
@@ -2007,11 +2026,14 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     if not blocks:
         return []
     norm_blocks = [(title, _norm(body)) for title, body in blocks]
+    known_titles = _known_page_titles(context)
 
     mismatches = []
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
         qn = _norm(quote)
+        if qn in known_titles:
+            continue  # citation label (page title in quotes), not a content quote
         block_title = next((title for title, body in norm_blocks if qn in body), None)
         if not block_title:
             # Ellipsis-spliced quote ("BETWEEN: ... Each of the aforesaid...") —
@@ -2042,6 +2064,23 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
                 f'"{block_title}" ({actual_str})'
             )
     return mismatches
+
+
+# Appended to the original prompt for a one-shot corrective retry when
+# citation verification flags quotes as unverifiable or misattributed —
+# rather than just warning the user after the fact, give the model one
+# chance to fix it before falling back to a warning.
+_CITATION_RETRY_ADDENDUM = """
+
+---
+IMPORTANT CORRECTION NEEDED: Your previous answer to this question included quoted \
+passages that could not be verified against the CONTEXT above (they were paraphrased, \
+not exact, or attributed to the wrong document). The flagged passages were:
+{flagged}
+
+Write the answer again. For each flagged passage: either copy the exact verbatim text \
+from CONTEXT into quotation marks, or if no exact verbatim sentence exists, describe \
+the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
 
 
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
@@ -2123,120 +2162,168 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else config.MAX_TOKENS_ANSWER
     )
 
-    try:
-        raw_answer, usage = llm.ask(
-            prompt,
-            pipeline="wiki",
-            max_tokens=_answer_token_budget,
-        )
+    # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
+    _REASON_OPEN = r'<\s*reasoning\s*>'
+    _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
+    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
 
-        # --- Extract confidence from reasoning BEFORE stripping the block ---
-        # The ANSWER_PROMPT instructs the model to append two structured lines
-        # at the end of <reasoning>:
-        #   CONFIDENCE_SCORE: [int]
-        #   CONFIDENCE_REASON: [sentence]
-        # Extracting here avoids a second LLM call for _evaluate_confidence().
-        # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
-        _REASON_OPEN = r'<\s*reasoning\s*>'
-        _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
-        reasoning_match = re.search(
-            rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
-        )
-        # Fallback: if no closing tag, grab everything after the opening tag
-        if not reasoning_match:
+    def _run_generation_pass(gen_prompt: str) -> tuple[str, dict, int, str]:
+        """Run one LLM answer-generation call and parse out answer text + confidence.
+
+        Factored out of the main body so the corrective citation retry below can
+        reuse the exact same parsing/fallback logic as the primary pass.
+        """
+        pass_usage: dict = {}
+        pass_score = 75
+        pass_reason = "Default — could not parse confidence from reasoning block."
+        try:
+            raw_answer, pass_usage = llm.ask(
+                gen_prompt,
+                pipeline="wiki",
+                max_tokens=_answer_token_budget,
+            )
+
+            # --- Extract confidence from reasoning BEFORE stripping the block ---
+            # The ANSWER_PROMPT instructs the model to append two structured lines
+            # at the end of <reasoning>:
+            #   CONFIDENCE_SCORE: [int]
+            #   CONFIDENCE_REASON: [sentence]
+            # Extracting here avoids a second LLM call for _evaluate_confidence().
             reasoning_match = re.search(
-                rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
+                rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
             )
-        if reasoning_match:
-            reasoning_text = reasoning_match.group(1)
-            score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
-            reason_match = re.search(
-                r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
-            )
-            if score_match:
-                try:
-                    confidence_score = min(100, max(0, int(score_match.group(1))))
-                except ValueError:
-                    pass
-            if reason_match:
-                confidence_reason = reason_match.group(1).strip()
-
-        # Strip reasoning tags for the user-facing answer (all variants)
-        answer = re.sub(
-            rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
-        ).strip()
-        # Also strip unclosed reasoning block (model wrote opening tag but no closing)
-        answer = re.sub(
-            rf'(?i){_REASON_OPEN}.*', '', answer, flags=re.DOTALL
-        ).strip()
-
-        # Fallback: if stripping left an empty/trivial answer but reasoning had
-        # real content, the model put the answer inside the reasoning block.
-        # Recover by stripping tags, confidence lines, and reasoning preamble.
-        _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
-        if len(answer) <= 10 and reasoning_match:
-            reasoning_body = reasoning_match.group(1)
-            recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
-            # Strip reasoning preamble: numbered analysis steps before the
-            # actual content (e.g. "1. Identify the core language...\n2. Add...")
-            # Heuristic: find the first markdown heading, divider, or
-            # numbered formulation header — everything before is preamble.
-            content_start = re.search(
-                r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
-                recovered,
-            )
-            if content_start and content_start.start() > 20:
-                recovered = recovered[content_start.start():].strip()
-            # Re-extract confidence from recovered text if main extraction got default
-            if confidence_score == 75:
-                re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
-                if re_score:
+            # Fallback: if no closing tag, grab everything after the opening tag
+            if not reasoning_match:
+                reasoning_match = re.search(
+                    rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
+                )
+            if reasoning_match:
+                reasoning_text = reasoning_match.group(1)
+                score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
+                reason_match = re.search(
+                    r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
+                )
+                if score_match:
                     try:
-                        confidence_score = min(100, max(0, int(re_score.group(1))))
+                        pass_score = min(100, max(0, int(score_match.group(1))))
                     except ValueError:
                         pass
-                re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
-                if re_reason:
-                    confidence_reason = re_reason.group(1).strip()
-            if len(recovered) > len(answer):
-                logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
-                answer = recovered
+                if reason_match:
+                    pass_reason = reason_match.group(1).strip()
 
-        # Always strip any stray CONFIDENCE lines that leaked into the answer
-        answer = re.sub(_CONFIDENCE_LINE_RE, '', answer).strip()
+            # Strip reasoning tags for the user-facing answer (all variants)
+            pass_answer = re.sub(
+                rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
+            ).strip()
+            # Also strip unclosed reasoning block (model wrote opening tag but no closing)
+            pass_answer = re.sub(
+                rf'(?i){_REASON_OPEN}.*', '', pass_answer, flags=re.DOTALL
+            ).strip()
 
-        # --- Fallback confidence when model skipped the reasoning block ---
-        # A short "Not covered" answer means the context had nothing relevant —
-        # confidence should be 0, not the generic 75 default.
-        if confidence_score == 75 and confidence_reason.startswith("Default"):
-            if len(answer) < 150:
-                _not_covered = re.search(
-                    r'not covered|no information|not contain|no relevant|'
-                    r'does not contain|not found|not available',
-                    answer, flags=re.IGNORECASE
+            # Fallback: if stripping left an empty/trivial answer but reasoning had
+            # real content, the model put the answer inside the reasoning block.
+            # Recover by stripping tags, confidence lines, and reasoning preamble.
+            if len(pass_answer) <= 10 and reasoning_match:
+                reasoning_body = reasoning_match.group(1)
+                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
+                # Strip reasoning preamble: numbered analysis steps before the
+                # actual content (e.g. "1. Identify the core language...\n2. Add...")
+                # Heuristic: find the first markdown heading, divider, or
+                # numbered formulation header — everything before is preamble.
+                content_start = re.search(
+                    r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
+                    recovered,
                 )
-                if _not_covered:
-                    confidence_score = 0
-                    confidence_reason = "Model found no relevant context for this question."
+                if content_start and content_start.start() > 20:
+                    recovered = recovered[content_start.start():].strip()
+                # Re-extract confidence from recovered text if main extraction got default
+                if pass_score == 75:
+                    re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
+                    if re_score:
+                        try:
+                            pass_score = min(100, max(0, int(re_score.group(1))))
+                        except ValueError:
+                            pass
+                    re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
+                    if re_reason:
+                        pass_reason = re_reason.group(1).strip()
+                if len(recovered) > len(pass_answer):
+                    logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
+                    pass_answer = recovered
+
+            # Always strip any stray CONFIDENCE lines that leaked into the answer
+            pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', pass_answer).strip()
+
+            # --- Fallback confidence when model skipped the reasoning block ---
+            # A short "Not covered" answer means the context had nothing relevant —
+            # confidence should be 0, not the generic 75 default.
+            if pass_score == 75 and pass_reason.startswith("Default"):
+                if len(pass_answer) < 150:
+                    _not_covered = re.search(
+                        r'not covered|no information|not contain|no relevant|'
+                        r'does not contain|not found|not available',
+                        pass_answer, flags=re.IGNORECASE
+                    )
+                    if _not_covered:
+                        pass_score = 0
+                        pass_reason = "Model found no relevant context for this question."
+                    else:
+                        pass_score = 50
+                        pass_reason = "Very short answer; limited context."
                 else:
-                    confidence_score = 50
-                    confidence_reason = "Very short answer; limited context."
-            else:
-                # Substantial answer but no reasoning block — model answered directly
-                confidence_score = 72
-                confidence_reason = "Model answered without reasoning block; score estimated."
+                    # Substantial answer but no reasoning block — model answered directly
+                    pass_score = 72
+                    pass_reason = "Model answered without reasoning block; score estimated."
 
-    except RuntimeError as e:
-        answer = f"⚠️ LLM error: {e}"
-        confidence_score = 0
-        confidence_reason = "LLM call failed."
+        except RuntimeError as e:
+            pass_answer = f"⚠️ LLM error: {e}"
+            pass_score = 0
+            pass_reason = "LLM call failed."
 
-    # Deterministic citation-integrity check: flag any quoted span the model
+        return pass_answer, pass_usage, pass_score, pass_reason
+
+    answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
+
+    # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
-    # context (paraphrase dressed up as an exact quote). Appended visibly
-    # rather than silently dropped — the substantive answer may still be
-    # correct even when a quote is fabricated.
+    # context (paraphrase dressed up as an exact quote), and any quote
+    # attributed to the wrong document.
     _unverified_quotes = _verify_answer_citations(answer, wiki_content)
+    _misattributed = _verify_citation_attribution(answer, wiki_content)
+
+    # Corrective retry: give the model one chance to fix flagged quotes — either
+    # match them verbatim to context or drop the quotation marks — instead of
+    # just warning the user after the fact. Only retried once; if the retry
+    # doesn't measurably improve things, the original answer is kept and a
+    # warning is appended as before.
+    if _unverified_quotes or _misattributed:
+        _flagged = list(_unverified_quotes) + list(_misattributed)
+        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(
+            flagged="\n".join(f"- {f[:200]}" for f in _flagged[:6])
+        )
+        retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
+        retry_unverified = _verify_answer_citations(retry_answer, wiki_content)
+        retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
+
+        token_breakdown.append({
+            "call": "citation_retry",
+            "model": llm.active_model(fast=False),
+            "prompt_tokens": retry_usage.get("prompt_tokens", 0),
+            "completion_tokens": retry_usage.get("completion_tokens", 0),
+            "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+        })
+
+        if len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed):
+            logger.info(
+                "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed",
+                len(_unverified_quotes), len(retry_unverified),
+                len(_misattributed), len(retry_misattributed),
+            )
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+            _unverified_quotes, _misattributed = retry_unverified, retry_misattributed
+        else:
+            logger.info("Citation retry did not improve verification — keeping original answer")
+
     if _unverified_quotes:
         logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
                         len(_unverified_quotes))
@@ -2249,7 +2336,6 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"exact quote: {_preview}]"
         )
 
-    _misattributed = _verify_citation_attribution(answer, wiki_content)
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
                         len(_misattributed), _misattributed)
