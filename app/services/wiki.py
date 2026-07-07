@@ -1651,37 +1651,32 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
 
     # --- Step 1: Select relevant pages ---
     if file_pages:
-        # File explicitly mentioned — force those pages in
-        if len(pages) <= 20:
-            # Small wiki: file pages first, then everything else
-            other = [t for t in pages if t not in file_pages]
-            selected_titles = file_pages + other
-        else:
-            # Large wiki: file pages + vector/LLM-selected supplementary pages
-            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
-            seen = set(file_pages)
+        # File explicitly mentioned — force those pages in.
+        #
+        # Guard against same-named-entity/topic collisions across UNRELATED documents
+        # (e.g. two different test JVAs both naming their JV "SolarNexus ... LLC" with
+        # different parties/numbers, or a small test session where every ingested doc
+        # shares generic clause topics like "Intellectual Property"). If a candidate
+        # supplementary page covers the same clause topic as one already force-included
+        # from the named document, but belongs to a DIFFERENT source document, drop it —
+        # otherwise its numbers get blended into the requested document's answer and
+        # misattributed to it. Applied regardless of wiki size — small test sessions are
+        # exactly where this contamination is most visible (few pages, generic topics).
+        def _topic_of(title: str) -> str:
+            dash = title.find(" – ")
+            return title[:dash].strip() if dash > 0 else title
 
-            # Guard against same-named-entity collisions across UNRELATED documents
-            # (e.g. two different test JVAs both naming their JV "SolarNexus ...
-            # LLC" with different parties/numbers). If a supplementary page covers
-            # the same clause topic ("Equity Split", "Formation and Capital
-            # Contributions", ...) as one already force-included from the named
-            # document, but belongs to a DIFFERENT source document, drop it —
-            # otherwise its numbers get blended into the requested document's
-            # answer and misattributed to it.
-            def _topic_of(title: str) -> str:
-                dash = title.find(" – ")
-                return title[:dash].strip() if dash > 0 else title
+        file_doc_set = {
+            pages[t].get("source_doc", "")
+            for t in file_pages
+            if isinstance(pages.get(t), dict) and pages[t].get("source_doc")
+        }
+        file_topics = {_topic_of(t) for t in file_pages}
+        seen = set(file_pages)
 
-            file_doc_set = {
-                pages[t].get("source_doc", "")
-                for t in file_pages
-                if isinstance(pages.get(t), dict) and pages[t].get("source_doc")
-            }
-            file_topics = {_topic_of(t) for t in file_pages}
-
-            supplementary = []
-            for t in llm_selected:
+        def _drop_colliding(candidates: list[str]) -> list[str]:
+            kept = []
+            for t in candidates:
                 if t in seen:
                     continue
                 p = pages.get(t)
@@ -1690,8 +1685,17 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                     logger.info("Dropping supplementary page %r — same topic as forced "
                                 "document but from a different source_doc (%s)", t, sd)
                     continue
-                supplementary.append(t)
+                kept.append(t)
+            return kept
 
+        if len(pages) <= 20:
+            # Small wiki: file pages first, then everything else minus collisions
+            other = _drop_colliding(list(pages.keys()))
+            selected_titles = file_pages + other
+        else:
+            # Large wiki: file pages + vector/LLM-selected supplementary pages
+            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
+            supplementary = _drop_colliding(llm_selected)
             selected_titles = file_pages + supplementary
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
                      len(file_pages), len(selected_titles))
@@ -1915,7 +1919,29 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # Matches quoted spans of at least 15 chars, straight or curly quote marks.
 # 15 chars filters out trivial quoted words/labels that aren't meant as verbatim
 # source citations.
-_QUOTE_SPAN_RE = re.compile(r'["“]([^"”]{15,500})["”]')
+#
+# Content uses a GREEDY "." (not an exclusion class like [^"”]) so a quote is
+# matched to the LAST quote character in the window, not the very next one.
+# Legal citations legitimately contain nested quotes (e.g. `by and among: 1.
+# AETHER TECHNOLOGIES INC. ("Depositor"); 2. ...`) — with an exclusion class,
+# the regex naively pairs up quote characters two at a time: a short nested
+# quote below the 15-char floor gets skipped, but its closing mark then gets
+# reused as the OPENING delimiter for the next scan, producing garbled
+# fragments like `") is dated ... ("` that fail verbatim verification even
+# though the real, full quote is genuine. Greedy matching consumes through
+# nested quotes and backtracks from the end, capturing the true outer span.
+# "." doesn't cross newlines, so this can't merge two unrelated quotes in
+# different paragraphs — but a markdown table renders each row on its own
+# line with multiple short quotes across cells (e.g. a risk-assessment
+# table's "Verbatim Text" column), and greedy "." WILL span across pipe-
+# delimited cells on the SAME line, merging one row's quote with another
+# row's quote plus the non-verbatim table markup between them — which then
+# fails even the inner-segment fallback, since row labels/pipes aren't
+# source text. "|" is excluded from content for exactly this reason: a
+# real legal quote essentially never contains a literal pipe character, so
+# this bounds greedy matching to one table cell without narrowing anything
+# that matters.
+_QUOTE_SPAN_RE = re.compile(r'["“]([^|\n]{15,500})["”]')
 
 # Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
 # splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
@@ -1928,6 +1954,69 @@ _ELLIPSIS_SPLIT_RE = re.compile(r'\s*(?:\.\.\.|…)\s*')
 
 def _quote_segments(q: str) -> list[str]:
     return [s.strip() for s in _ELLIPSIS_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+
+
+# Splits a quote on internal straight-quote characters — the counterpart to
+# _quote_segments' ellipsis handling. The greedy _QUOTE_SPAN_RE above fixes
+# nested-quote citations (one long quote containing "sub-quotes") by matching
+# the full outer span, but that same greediness can merge two SEPARATE short
+# genuine quotes that happen to sit on the same line (e.g. `"X" from "Y"`)
+# into one span that fails whole-string verification. Splitting on internal
+# quote marks and checking each piece independently — same as the ellipsis
+# fallback — recovers both cases without reopening the fabrication-detection
+# hole the greedy regex was built to close in the first place.
+_INTERNAL_QUOTE_SPLIT_RE = re.compile(r'["“”]')
+
+
+def _quote_inner_segments(q: str) -> list[str]:
+    return [s.strip() for s in _INTERNAL_QUOTE_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+
+
+def _known_page_titles(context: str) -> set[str]:
+    """Normalized page titles present in the context (from '## Title' headers).
+
+    Used to exclude citation labels like `[1] "Commercial Courts Act, 2015 –
+    Statute" – the Act establishes...` from quote verification — the model is
+    quoting the PAGE TITLE as a citation label (a normal, correct citation
+    format), not claiming that string is a verbatim excerpt from the source
+    text. Without this, the quote-verification regex treats any quoted span as
+    a content-verbatim claim and flags the title itself as unverifiable.
+    """
+    return {
+        re.sub(r'\s+', ' ', title).strip().lower()
+        for title, _ in _PAGE_BLOCK_RE.findall(context)
+    }
+
+
+# Ingest appends "\n\n**Supporting Quotes:**\n> quote 1\n> quote 2" to a page's
+# content (see _atomic_merge_db etc.) — those quotes already passed
+# _filter_verified_quotes at ingest time, i.e. they're confirmed verbatim
+# against the ORIGINAL source document, not just this session's context. The
+# rest of a page's body is LLM-synthesized descriptive prose (a paraphrase),
+# not a verbatim source excerpt, even when it happens to read naturally.
+_SUPPORTING_QUOTES_RE = re.compile(r'\*\*Supporting Quotes:\*\*\s*\n((?:^>.*(?:\n|$))+)', re.MULTILINE)
+
+
+def _block_verification_text(body: str) -> str:
+    """Text used to verify quotes against a single page block — restricted to
+    its Supporting Quotes section when present (the ingest-time-verified
+    portion), falling back to the full body only for pages that don't have
+    this heading at all (e.g. cached 'Q:' answer pages, older-format pages)
+    so those aren't spuriously flagged wholesale for lacking the structure.
+    """
+    sq_matches = _SUPPORTING_QUOTES_RE.findall(body)
+    return '\n'.join(sq_matches) if sq_matches else body
+
+
+def _strict_verification_corpus(context: str) -> str:
+    """Build the citation-verification text corpus, restricted to Supporting
+    Quotes blocks per page (see _block_verification_text). Falls back to the
+    raw context unchanged if no '## Title' page blocks are found at all.
+    """
+    blocks = _PAGE_BLOCK_RE.findall(context)
+    if not blocks:
+        return context
+    return '\n'.join(_block_verification_text(body) for _, body in blocks)
 
 
 def _verify_answer_citations(answer: str, context: str) -> list[str]:
@@ -1953,14 +2042,20 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
     def _norm(s: str) -> str:
         return re.sub(r'\s+', ' ', s).strip().lower()
 
-    ctx_norm = _norm(context)
+    ctx_norm = _norm(_strict_verification_corpus(context))
+    known_titles = _known_page_titles(context)
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
         qn = _norm(q)
+        if qn in known_titles:
+            continue  # citation label (page title in quotes), not a content quote
         if qn in ctx_norm:
             continue
         segments = _quote_segments(q)
         if segments and all(_norm(seg) in ctx_norm for seg in segments):
+            continue
+        inner_segments = _quote_inner_segments(q)
+        if inner_segments and all(_norm(seg) in ctx_norm for seg in inner_segments):
             continue
         unverified.append(q.strip())
     return unverified
@@ -2002,12 +2097,15 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
     if not blocks:
         return []
-    norm_blocks = [(title, _norm(body)) for title, body in blocks]
+    norm_blocks = [(title, _norm(_block_verification_text(body))) for title, body in blocks]
+    known_titles = _known_page_titles(context)
 
     mismatches = []
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
         qn = _norm(quote)
+        if qn in known_titles:
+            continue  # citation label (page title in quotes), not a content quote
         block_title = next((title for title, body in norm_blocks if qn in body), None)
         if not block_title:
             # Ellipsis-spliced quote ("BETWEEN: ... Each of the aforesaid...") —
@@ -2017,6 +2115,16 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
                 block_title = next(
                     (title for title, body in norm_blocks
                      if all(_norm(seg) in body for seg in segments)),
+                    None,
+                )
+        if not block_title:
+            # Nested/adjacent-quote span (see _QUOTE_SPAN_RE) — find the block
+            # containing every quote-split inner piece instead of the whole string.
+            inner_segments = _quote_inner_segments(quote)
+            if inner_segments:
+                block_title = next(
+                    (title for title, body in norm_blocks
+                     if all(_norm(seg) in body for seg in inner_segments)),
                     None,
                 )
         if not block_title:
@@ -2038,6 +2146,23 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
                 f'"{block_title}" ({actual_str})'
             )
     return mismatches
+
+
+# Appended to the original prompt for a one-shot corrective retry when
+# citation verification flags quotes as unverifiable or misattributed —
+# rather than just warning the user after the fact, give the model one
+# chance to fix it before falling back to a warning.
+_CITATION_RETRY_ADDENDUM = """
+
+---
+IMPORTANT CORRECTION NEEDED: Your previous answer to this question included quoted \
+passages that could not be verified against the CONTEXT above (they were paraphrased, \
+not exact, or attributed to the wrong document). The flagged passages were:
+{flagged}
+
+Write the answer again. For each flagged passage: either copy the exact verbatim text \
+from CONTEXT into quotation marks, or if no exact verbatim sentence exists, describe \
+the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
 
 
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
@@ -2119,120 +2244,168 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else config.MAX_TOKENS_ANSWER
     )
 
-    try:
-        raw_answer, usage = llm.ask(
-            prompt,
-            pipeline="wiki",
-            max_tokens=_answer_token_budget,
-        )
+    # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
+    _REASON_OPEN = r'<\s*reasoning\s*>'
+    _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
+    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
 
-        # --- Extract confidence from reasoning BEFORE stripping the block ---
-        # The ANSWER_PROMPT instructs the model to append two structured lines
-        # at the end of <reasoning>:
-        #   CONFIDENCE_SCORE: [int]
-        #   CONFIDENCE_REASON: [sentence]
-        # Extracting here avoids a second LLM call for _evaluate_confidence().
-        # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
-        _REASON_OPEN = r'<\s*reasoning\s*>'
-        _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
-        reasoning_match = re.search(
-            rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
-        )
-        # Fallback: if no closing tag, grab everything after the opening tag
-        if not reasoning_match:
+    def _run_generation_pass(gen_prompt: str) -> tuple[str, dict, int, str]:
+        """Run one LLM answer-generation call and parse out answer text + confidence.
+
+        Factored out of the main body so the corrective citation retry below can
+        reuse the exact same parsing/fallback logic as the primary pass.
+        """
+        pass_usage: dict = {}
+        pass_score = 75
+        pass_reason = "Default — could not parse confidence from reasoning block."
+        try:
+            raw_answer, pass_usage = llm.ask(
+                gen_prompt,
+                pipeline="wiki",
+                max_tokens=_answer_token_budget,
+            )
+
+            # --- Extract confidence from reasoning BEFORE stripping the block ---
+            # The ANSWER_PROMPT instructs the model to append two structured lines
+            # at the end of <reasoning>:
+            #   CONFIDENCE_SCORE: [int]
+            #   CONFIDENCE_REASON: [sentence]
+            # Extracting here avoids a second LLM call for _evaluate_confidence().
             reasoning_match = re.search(
-                rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
+                rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
             )
-        if reasoning_match:
-            reasoning_text = reasoning_match.group(1)
-            score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
-            reason_match = re.search(
-                r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
-            )
-            if score_match:
-                try:
-                    confidence_score = min(100, max(0, int(score_match.group(1))))
-                except ValueError:
-                    pass
-            if reason_match:
-                confidence_reason = reason_match.group(1).strip()
-
-        # Strip reasoning tags for the user-facing answer (all variants)
-        answer = re.sub(
-            rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
-        ).strip()
-        # Also strip unclosed reasoning block (model wrote opening tag but no closing)
-        answer = re.sub(
-            rf'(?i){_REASON_OPEN}.*', '', answer, flags=re.DOTALL
-        ).strip()
-
-        # Fallback: if stripping left an empty/trivial answer but reasoning had
-        # real content, the model put the answer inside the reasoning block.
-        # Recover by stripping tags, confidence lines, and reasoning preamble.
-        _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
-        if len(answer) <= 10 and reasoning_match:
-            reasoning_body = reasoning_match.group(1)
-            recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
-            # Strip reasoning preamble: numbered analysis steps before the
-            # actual content (e.g. "1. Identify the core language...\n2. Add...")
-            # Heuristic: find the first markdown heading, divider, or
-            # numbered formulation header — everything before is preamble.
-            content_start = re.search(
-                r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
-                recovered,
-            )
-            if content_start and content_start.start() > 20:
-                recovered = recovered[content_start.start():].strip()
-            # Re-extract confidence from recovered text if main extraction got default
-            if confidence_score == 75:
-                re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
-                if re_score:
+            # Fallback: if no closing tag, grab everything after the opening tag
+            if not reasoning_match:
+                reasoning_match = re.search(
+                    rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
+                )
+            if reasoning_match:
+                reasoning_text = reasoning_match.group(1)
+                score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
+                reason_match = re.search(
+                    r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
+                )
+                if score_match:
                     try:
-                        confidence_score = min(100, max(0, int(re_score.group(1))))
+                        pass_score = min(100, max(0, int(score_match.group(1))))
                     except ValueError:
                         pass
-                re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
-                if re_reason:
-                    confidence_reason = re_reason.group(1).strip()
-            if len(recovered) > len(answer):
-                logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
-                answer = recovered
+                if reason_match:
+                    pass_reason = reason_match.group(1).strip()
 
-        # Always strip any stray CONFIDENCE lines that leaked into the answer
-        answer = re.sub(_CONFIDENCE_LINE_RE, '', answer).strip()
+            # Strip reasoning tags for the user-facing answer (all variants)
+            pass_answer = re.sub(
+                rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
+            ).strip()
+            # Also strip unclosed reasoning block (model wrote opening tag but no closing)
+            pass_answer = re.sub(
+                rf'(?i){_REASON_OPEN}.*', '', pass_answer, flags=re.DOTALL
+            ).strip()
 
-        # --- Fallback confidence when model skipped the reasoning block ---
-        # A short "Not covered" answer means the context had nothing relevant —
-        # confidence should be 0, not the generic 75 default.
-        if confidence_score == 75 and confidence_reason.startswith("Default"):
-            if len(answer) < 150:
-                _not_covered = re.search(
-                    r'not covered|no information|not contain|no relevant|'
-                    r'does not contain|not found|not available',
-                    answer, flags=re.IGNORECASE
+            # Fallback: if stripping left an empty/trivial answer but reasoning had
+            # real content, the model put the answer inside the reasoning block.
+            # Recover by stripping tags, confidence lines, and reasoning preamble.
+            if len(pass_answer) <= 10 and reasoning_match:
+                reasoning_body = reasoning_match.group(1)
+                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
+                # Strip reasoning preamble: numbered analysis steps before the
+                # actual content (e.g. "1. Identify the core language...\n2. Add...")
+                # Heuristic: find the first markdown heading, divider, or
+                # numbered formulation header — everything before is preamble.
+                content_start = re.search(
+                    r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
+                    recovered,
                 )
-                if _not_covered:
-                    confidence_score = 0
-                    confidence_reason = "Model found no relevant context for this question."
+                if content_start and content_start.start() > 20:
+                    recovered = recovered[content_start.start():].strip()
+                # Re-extract confidence from recovered text if main extraction got default
+                if pass_score == 75:
+                    re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
+                    if re_score:
+                        try:
+                            pass_score = min(100, max(0, int(re_score.group(1))))
+                        except ValueError:
+                            pass
+                    re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
+                    if re_reason:
+                        pass_reason = re_reason.group(1).strip()
+                if len(recovered) > len(pass_answer):
+                    logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
+                    pass_answer = recovered
+
+            # Always strip any stray CONFIDENCE lines that leaked into the answer
+            pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', pass_answer).strip()
+
+            # --- Fallback confidence when model skipped the reasoning block ---
+            # A short "Not covered" answer means the context had nothing relevant —
+            # confidence should be 0, not the generic 75 default.
+            if pass_score == 75 and pass_reason.startswith("Default"):
+                if len(pass_answer) < 150:
+                    _not_covered = re.search(
+                        r'not covered|no information|not contain|no relevant|'
+                        r'does not contain|not found|not available',
+                        pass_answer, flags=re.IGNORECASE
+                    )
+                    if _not_covered:
+                        pass_score = 0
+                        pass_reason = "Model found no relevant context for this question."
+                    else:
+                        pass_score = 50
+                        pass_reason = "Very short answer; limited context."
                 else:
-                    confidence_score = 50
-                    confidence_reason = "Very short answer; limited context."
-            else:
-                # Substantial answer but no reasoning block — model answered directly
-                confidence_score = 72
-                confidence_reason = "Model answered without reasoning block; score estimated."
+                    # Substantial answer but no reasoning block — model answered directly
+                    pass_score = 72
+                    pass_reason = "Model answered without reasoning block; score estimated."
 
-    except RuntimeError as e:
-        answer = f"⚠️ LLM error: {e}"
-        confidence_score = 0
-        confidence_reason = "LLM call failed."
+        except RuntimeError as e:
+            pass_answer = f"⚠️ LLM error: {e}"
+            pass_score = 0
+            pass_reason = "LLM call failed."
 
-    # Deterministic citation-integrity check: flag any quoted span the model
+        return pass_answer, pass_usage, pass_score, pass_reason
+
+    answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
+
+    # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
-    # context (paraphrase dressed up as an exact quote). Appended visibly
-    # rather than silently dropped — the substantive answer may still be
-    # correct even when a quote is fabricated.
+    # context (paraphrase dressed up as an exact quote), and any quote
+    # attributed to the wrong document.
     _unverified_quotes = _verify_answer_citations(answer, wiki_content)
+    _misattributed = _verify_citation_attribution(answer, wiki_content)
+
+    # Corrective retry: give the model one chance to fix flagged quotes — either
+    # match them verbatim to context or drop the quotation marks — instead of
+    # just warning the user after the fact. Only retried once; if the retry
+    # doesn't measurably improve things, the original answer is kept and a
+    # warning is appended as before.
+    if _unverified_quotes or _misattributed:
+        _flagged = list(_unverified_quotes) + list(_misattributed)
+        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(
+            flagged="\n".join(f"- {f[:200]}" for f in _flagged[:6])
+        )
+        retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
+        retry_unverified = _verify_answer_citations(retry_answer, wiki_content)
+        retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
+
+        token_breakdown.append({
+            "call": "citation_retry",
+            "model": llm.active_model(fast=False),
+            "prompt_tokens": retry_usage.get("prompt_tokens", 0),
+            "completion_tokens": retry_usage.get("completion_tokens", 0),
+            "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+        })
+
+        if len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed):
+            logger.info(
+                "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed",
+                len(_unverified_quotes), len(retry_unverified),
+                len(_misattributed), len(retry_misattributed),
+            )
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+            _unverified_quotes, _misattributed = retry_unverified, retry_misattributed
+        else:
+            logger.info("Citation retry did not improve verification — keeping original answer")
+
     if _unverified_quotes:
         logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
                         len(_unverified_quotes))
@@ -2245,7 +2418,6 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"exact quote: {_preview}]"
         )
 
-    _misattributed = _verify_citation_attribution(answer, wiki_content)
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
                         len(_misattributed), _misattributed)
@@ -2523,6 +2695,16 @@ _ENTITY_EXCLUDE = {
     # "known entity" and skip disambiguation.
     "source", "code", "product", "products", "ownership", "analysis", "technical",
     "evidence", "civil", "procedure", "procedural", "questionnaire", "motion",
+    # Same failure mode via a different cause: a handful of ingested titles have
+    # their "{Topic} – {DocID}" order swapped (e.g. "TLA-Aether – No Third-Party
+    # Beneficiaries" instead of "No Third-Party Beneficiaries – TLA-Aether"),
+    # so _doc_identifier_part() — which correctly trusts the title convention —
+    # pulls a descriptive clause-topic phrase out as if it were the identifier.
+    # Blocklisting the individual words is the same mitigation already used
+    # above for other leaked generic vocabulary, not a fix to the title order
+    # itself (that's an ingest-time data-quality issue, not a matching bug).
+    "party", "parties", "confidential", "confidentiality", "beneficiary",
+    "beneficiaries", "definition", "definitions", "information", "third",
 }
 
 
@@ -2662,7 +2844,7 @@ def classify_query(question: str, session_id: str) -> dict:
         vtype = re.sub(r'\s+', ' ', vmatch.group(1).lower().strip())
         if vtype in _GENERIC_VAGUE_WORDS:
             logger.info("Vague document reference '%s' → disambiguate (all docs)", vtype)
-            return {"needs_disambiguation": True, "documents": docs}
+            return {"needs_disambiguation": True, "documents": _diversify_doc_order(docs)}
         filt = _VAGUE_TYPE_FILTER.get(vtype)
         if filt:
             type_docs = [
@@ -2719,11 +2901,71 @@ def classify_query(question: str, session_id: str) -> dict:
         raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_DISAMBIGUATION)
         parsed = _parse_json_safe(raw)
         if parsed and parsed.get("needs_disambiguation"):
-            return {"needs_disambiguation": True, "documents": docs}
+            return {"needs_disambiguation": True, "documents": _diversify_doc_order(docs)}
     except Exception as e:
         logger.error("classify_query failed: %s", e)
 
     return {"needs_disambiguation": False, "documents": docs}
+
+
+def _bucket_docs_by_type(docs: list[str]) -> list[list[str]]:
+    """Group source_doc filenames into buckets by known document type keywords
+    (reusing _VAGUE_TYPE_FILTER's canonical types; anything unmatched goes in
+    "other"). Pure string matching — no DB round-trips — so it stays cheap even
+    at tens of thousands of documents.
+    """
+    buckets: dict[str, list[str]] = {}
+    for d in docs:
+        norm = re.sub(r'^[a-f0-9-]{36}_', '', d).replace('_', ' ').lower()
+        bucket_key = next((v for k, v in _VAGUE_TYPE_FILTER.items() if k in norm), "other")
+        buckets.setdefault(bucket_key, []).append(d)
+    return list(buckets.values())
+
+
+def _round_robin_buckets(bucket_lists: list[list[str]], limit: int | None = None) -> list[str]:
+    """Interleave a list of buckets round-robin so the result spans every
+    bucket early on, instead of exhausting one bucket before the next starts.
+    """
+    if not bucket_lists:
+        return []
+    result: list[str] = []
+    idx = 0
+    max_len = max(len(bl) for bl in bucket_lists)
+    while idx < max_len and (limit is None or len(result) < limit):
+        for bl in bucket_lists:
+            if idx < len(bl):
+                result.append(bl[idx])
+                if limit is not None and len(result) >= limit:
+                    break
+        idx += 1
+    return result
+
+
+def _diverse_doc_sample(docs: list[str], limit: int) -> list[str]:
+    """Sample up to `limit` docs spread across distinct document types.
+
+    A raw docs[:N] head-slice is unrepresentative at scale: if the corpus is
+    loaded/ordered by folder (as batch ingests typically are), a head slice can
+    be dozens of the same document type, giving the ambiguity-check LLM a
+    skewed sense of what's actually in the corpus — a genuinely ambiguous
+    question touching document types outside that slice would never trigger
+    clarification. Buckets by type and round-robins across buckets instead, so
+    the sample spans the real variety of the corpus regardless of ingest order.
+    """
+    if len(docs) <= limit:
+        return docs
+    return _round_robin_buckets(_bucket_docs_by_type(docs), limit)
+
+
+def _diversify_doc_order(docs: list[str]) -> list[str]:
+    """Reorder (never drops) a full document list so distinct types appear
+    early, instead of clustering by ingest order (e.g. 25 "Court Case
+    Documents" in a row before any NDA/SHA/Service Agreement appears). Used
+    for disambiguation chip lists, where every document must still be shown —
+    only the order changes, so a user isn't stuck scrolling through one type
+    to find another.
+    """
+    return _round_robin_buckets(_bucket_docs_by_type(docs))
 
 
 def check_ambiguity(question: str, session_id: str, conversation_context: str = "") -> dict:
@@ -2744,7 +2986,8 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
             p.get("source_doc", "") for p in pages.values()
             if isinstance(p, dict) and p.get("source_doc")
         })
-    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs[:20]]
+    sampled_docs = _diverse_doc_sample(docs, config.AMBIGUITY_DOC_SAMPLE_CAP)
+    clean_docs = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in sampled_docs]
 
     conv_snippet = ""
     if conversation_context:
@@ -2764,7 +3007,7 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
         "- The intent is obvious from context or conversation history\n"
         "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n\n"
         "When in doubt, answer directly — do NOT ask for clarification.\n\n"
-        f"Available documents: {', '.join(clean_docs[:10])}\n"
+        f"Available documents: {', '.join(clean_docs)}\n"
         f"{conv_snippet}\n"
         f"Question: {question}\n\n"
         "Respond with JSON only:\n"
