@@ -1930,9 +1930,18 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # fragments like `") is dated ... ("` that fail verbatim verification even
 # though the real, full quote is genuine. Greedy matching consumes through
 # nested quotes and backtracks from the end, capturing the true outer span.
-# "." doesn't cross newlines, so this still can't merge two unrelated quotes
-# in different paragraphs — only ones on the same line/run of text.
-_QUOTE_SPAN_RE = re.compile(r'["“](.{15,500})["”]')
+# "." doesn't cross newlines, so this can't merge two unrelated quotes in
+# different paragraphs — but a markdown table renders each row on its own
+# line with multiple short quotes across cells (e.g. a risk-assessment
+# table's "Verbatim Text" column), and greedy "." WILL span across pipe-
+# delimited cells on the SAME line, merging one row's quote with another
+# row's quote plus the non-verbatim table markup between them — which then
+# fails even the inner-segment fallback, since row labels/pipes aren't
+# source text. "|" is excluded from content for exactly this reason: a
+# real legal quote essentially never contains a literal pipe character, so
+# this bounds greedy matching to one table cell without narrowing anything
+# that matters.
+_QUOTE_SPAN_RE = re.compile(r'["“]([^|\n]{15,500})["”]')
 
 # Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
 # splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
@@ -1979,6 +1988,37 @@ def _known_page_titles(context: str) -> set[str]:
     }
 
 
+# Ingest appends "\n\n**Supporting Quotes:**\n> quote 1\n> quote 2" to a page's
+# content (see _atomic_merge_db etc.) — those quotes already passed
+# _filter_verified_quotes at ingest time, i.e. they're confirmed verbatim
+# against the ORIGINAL source document, not just this session's context. The
+# rest of a page's body is LLM-synthesized descriptive prose (a paraphrase),
+# not a verbatim source excerpt, even when it happens to read naturally.
+_SUPPORTING_QUOTES_RE = re.compile(r'\*\*Supporting Quotes:\*\*\s*\n((?:^>.*(?:\n|$))+)', re.MULTILINE)
+
+
+def _block_verification_text(body: str) -> str:
+    """Text used to verify quotes against a single page block — restricted to
+    its Supporting Quotes section when present (the ingest-time-verified
+    portion), falling back to the full body only for pages that don't have
+    this heading at all (e.g. cached 'Q:' answer pages, older-format pages)
+    so those aren't spuriously flagged wholesale for lacking the structure.
+    """
+    sq_matches = _SUPPORTING_QUOTES_RE.findall(body)
+    return '\n'.join(sq_matches) if sq_matches else body
+
+
+def _strict_verification_corpus(context: str) -> str:
+    """Build the citation-verification text corpus, restricted to Supporting
+    Quotes blocks per page (see _block_verification_text). Falls back to the
+    raw context unchanged if no '## Title' page blocks are found at all.
+    """
+    blocks = _PAGE_BLOCK_RE.findall(context)
+    if not blocks:
+        return context
+    return '\n'.join(_block_verification_text(body) for _, body in blocks)
+
+
 def _verify_answer_citations(answer: str, context: str) -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -2002,7 +2042,7 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
     def _norm(s: str) -> str:
         return re.sub(r'\s+', ' ', s).strip().lower()
 
-    ctx_norm = _norm(context)
+    ctx_norm = _norm(_strict_verification_corpus(context))
     known_titles = _known_page_titles(context)
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
@@ -2057,7 +2097,7 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
     if not blocks:
         return []
-    norm_blocks = [(title, _norm(body)) for title, body in blocks]
+    norm_blocks = [(title, _norm(_block_verification_text(body))) for title, body in blocks]
     known_titles = _known_page_titles(context)
 
     mismatches = []
@@ -2655,6 +2695,16 @@ _ENTITY_EXCLUDE = {
     # "known entity" and skip disambiguation.
     "source", "code", "product", "products", "ownership", "analysis", "technical",
     "evidence", "civil", "procedure", "procedural", "questionnaire", "motion",
+    # Same failure mode via a different cause: a handful of ingested titles have
+    # their "{Topic} – {DocID}" order swapped (e.g. "TLA-Aether – No Third-Party
+    # Beneficiaries" instead of "No Third-Party Beneficiaries – TLA-Aether"),
+    # so _doc_identifier_part() — which correctly trusts the title convention —
+    # pulls a descriptive clause-topic phrase out as if it were the identifier.
+    # Blocklisting the individual words is the same mitigation already used
+    # above for other leaked generic vocabulary, not a fix to the title order
+    # itself (that's an ingest-time data-quality issue, not a matching bug).
+    "party", "parties", "confidential", "confidentiality", "beneficiary",
+    "beneficiaries", "definition", "definitions", "information", "third",
 }
 
 
