@@ -839,6 +839,25 @@ def ingest(file_path: str, session_id: str) -> dict:
     return {"pages_updated": total_pages, "relations": total_rels}
 
 
+# Unicode hyphen/dash variants the answer LLM sometimes emits for compound
+# terms (e.g. "field‑of‑use", "NDA‑Tata") that are NOT the plain ASCII
+# hyphen used in stored page titles / source text. A visually-identical string
+# fails a naive lower+whitespace-only normalization if one side uses U+2011
+# (non-breaking hyphen) and the other uses U+002D (ASCII "-") — found live
+# testing a citation-label false positive where the LLM's restated label
+# ("Obligations of Receiving Party – NDA‑Tata – NDA") didn't match the
+# real title ("...NDA-Tata...") only because of this character difference.
+_HYPHEN_VARIANTS_RE = re.compile('[‐‑‒–—−]')
+
+
+def _norm_for_match(s: str) -> str:
+    """Shared normalization for all quote/title verification comparisons:
+    collapse whitespace, lowercase, and fold unicode hyphen/dash variants to
+    a plain ASCII "-" so visually-identical strings compare equal."""
+    s = _HYPHEN_VARIANTS_RE.sub('-', s)
+    return re.sub(r'\s+', ' ', s).strip().lower()
+
+
 def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
     """Drop any 'quotes' entries that aren't actually verbatim substrings of the
     raw source text the ingest LLM was given.
@@ -855,7 +874,7 @@ def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
     filtering happens here, before the quote ever reaches storage.
     """
     def _norm(s: str) -> str:
-        return re.sub(r'\s+', ' ', s).strip().lower()
+        return _norm_for_match(s)
 
     src_norm = _norm(source_text)
     pages = parsed.get("pages", {})
@@ -1595,15 +1614,25 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
-def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None) -> tuple[str, list]:
+def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
+                 exclude_cached_answers: bool = False) -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
     all pages originating from that file are force-included so the answer stays
     grounded in the correct document.
+
+    exclude_cached_answers: when True, drops cached "Q:" answer pages (see
+    generate_answer()'s answer-filing step) from consideration entirely, so a
+    question isn't answered by echoing a previous answer to the same/similar
+    question. Intended for QA/testing repeat-asks — a real user benefits from
+    the cache, but retesting the same question after a fix needs a guaranteed
+    fresh generation to actually observe whether behavior changed.
     """
     index = _load_index(session_id)
     pages = index.get("pages", {})
+    if exclude_cached_answers:
+        pages = {t: p for t, p in pages.items() if not t.startswith("Q:")}
 
     if not pages:
         return {"context": "", "selected_titles": [], "bm25_count": 0}
@@ -1983,7 +2012,7 @@ def _known_page_titles(context: str) -> set[str]:
     a content-verbatim claim and flags the title itself as unverifiable.
     """
     return {
-        re.sub(r'\s+', ' ', title).strip().lower()
+        _norm_for_match(title)
         for title, _ in _PAGE_BLOCK_RE.findall(context)
     }
 
@@ -1997,15 +2026,28 @@ def _known_page_titles(context: str) -> set[str]:
 _SUPPORTING_QUOTES_RE = re.compile(r'\*\*Supporting Quotes:\*\*\s*\n((?:^>.*(?:\n|$))+)', re.MULTILINE)
 
 
-def _block_verification_text(body: str) -> str:
+def _block_verification_text(title: str, body: str) -> str:
     """Text used to verify quotes against a single page block — restricted to
     its Supporting Quotes section when present (the ingest-time-verified
-    portion), falling back to the full body only for pages that don't have
-    this heading at all (e.g. cached 'Q:' answer pages, older-format pages)
-    so those aren't spuriously flagged wholesale for lacking the structure.
+    portion).
+
+    Falls back to the full body ONLY for cached 'Q:' answer pages (which
+    never go through the quotes pipeline at all — no heading is expected).
+    For a regular document-derived page with NO Supporting Quotes heading,
+    that means ingest-time verification (_filter_verified_quotes) proposed
+    quotes for this page and found NONE of them verbatim-verifiable — falling
+    back to its descriptive prose would let the answer LLM lift a sentence
+    from that unverified prose, wrap it in quotation marks, and have it pass
+    as if it were a genuine excerpt (confirmed live: NDA_08's "Confidential
+    Information" page has no Supporting Quotes section, and the answer LLM
+    quoted its prose sentence verbatim as if it were sourced from the
+    original document). Such a page has no verifiable quotable content, so
+    it contributes nothing here — any quote attributed to it correctly fails.
     """
+    if title.startswith("Q:"):
+        return body
     sq_matches = _SUPPORTING_QUOTES_RE.findall(body)
-    return '\n'.join(sq_matches) if sq_matches else body
+    return '\n'.join(sq_matches) if sq_matches else ""
 
 
 def _strict_verification_corpus(context: str) -> str:
@@ -2016,7 +2058,7 @@ def _strict_verification_corpus(context: str) -> str:
     blocks = _PAGE_BLOCK_RE.findall(context)
     if not blocks:
         return context
-    return '\n'.join(_block_verification_text(body) for _, body in blocks)
+    return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
 
 
 def _verify_answer_citations(answer: str, context: str) -> list[str]:
@@ -2040,7 +2082,7 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
         return []
 
     def _norm(s: str) -> str:
-        return re.sub(r'\s+', ' ', s).strip().lower()
+        return _norm_for_match(s)
 
     ctx_norm = _norm(_strict_verification_corpus(context))
     known_titles = _known_page_titles(context)
@@ -2092,12 +2134,12 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
         return []
 
     def _norm(s: str) -> str:
-        return re.sub(r'\s+', ' ', s).strip().lower()
+        return _norm_for_match(s)
 
     blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
     if not blocks:
         return []
-    norm_blocks = [(title, _norm(_block_verification_text(body))) for title, body in blocks]
+    norm_blocks = [(title, _norm(_block_verification_text(title, body))) for title, body in blocks]
     known_titles = _known_page_titles(context)
 
     mismatches = []
@@ -2134,17 +2176,40 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
         label = answer[label_start:m.start()]
         claimed = _extract_doc_number_tokens(label)
         actual = _extract_doc_number_tokens(block_title)
-        if not claimed or not actual:
+
+        if claimed and actual:
+            shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
+            if shared_types and not (claimed & actual):
+                claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
+                actual_str = ", ".join(f"{t.upper()}{n}" for t, n in actual)
+                mismatches.append(
+                    f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
+                    f'"{block_title}" ({actual_str})'
+                )
             continue
 
-        shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
-        if shared_types and not (claimed & actual):
-            claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
-            actual_str = ", ".join(f"{t.upper()}{n}" for t, n in actual)
-            mismatches.append(
-                f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
-                f'"{block_title}" ({actual_str})'
-            )
+        if claimed and not actual:
+            # The real source page's title has no numbered identifier at all (e.g.
+            # "NDA-Tata" — a party-name identifier, not "NDA37") — the type/number
+            # comparison above can't run. But if the citation confidently names a
+            # specific numbered document (e.g. "Test_NDA_37.txt") and that exact
+            # token doesn't appear anywhere in the real source title, the citation
+            # is still almost certainly misattributed — a correctly-cited page
+            # nearly always echoes its own identifier somewhere in its title.
+            # Confirmed live: a genuine, verbatim "Supporting Quotes" quote from
+            # "Required Legal Disclosures – NDA-Tata (NDA)" (NDA 3_Redacted.pdf)
+            # was cited in the answer as "Test_NDA_37.txt" — a different,
+            # unrelated NDA — and slipped through undetected because the true
+            # source page had no digit token to compare against.
+            block_title_norm = block_title.lower()
+            if not any(f"{t}{n}" in block_title_norm.replace("-", "").replace(" ", "").replace("_", "")
+                       for t, n in claimed):
+                claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
+                mismatches.append(
+                    f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
+                    f'"{block_title}" (no matching identifier in the real source title)'
+                )
+            continue
     return mismatches
 
 
@@ -2478,8 +2543,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Log query
     _log_event(session_id, "QUERY", f"Q: {question[:60]}... | BM25 Shortlist: {bm25_count} | Pages selected: {len(selected_titles)} | Confidence: {confidence['score']}")
 
-    # Answer filing back to wiki
-    if confidence["score"] >= 80:
+    # Answer filing back to wiki — skip if citation checks flagged anything, even
+    # after the corrective retry above. Cached "Q:" pages are treated as fully
+    # trusted context for future questions (see _block_verification_text), so
+    # caching a still-flagged answer would let a fabricated/misattributed quote
+    # entrench itself: the next time the same question is asked, the answer LLM
+    # would re-quote its own cached past self, and that quote would "verify"
+    # against the cache even though the underlying content was never trustworthy.
+    # Confirmed live: this exact loop happened with a paraphrased NDA_08 quote.
+    if confidence["score"] >= 80 and not _unverified_quotes and not _misattributed:
         q_title_prefix = f"Q: {question[:50]}"
         existing_titles = [t for t in pages if t.startswith("Q: ")]
         
@@ -2705,6 +2777,14 @@ _ENTITY_EXCLUDE = {
     # itself (that's an ingest-time data-quality issue, not a matching bug).
     "party", "parties", "confidential", "confidentiality", "beneficiary",
     "beneficiaries", "definition", "definitions", "information", "third",
+    # Found live-testing a SolarNexus-JVA equity-split question: these leaked
+    # in as if they were distinctive entity names, inflating the compound-match
+    # bucket with unrelated documents (a Shareholder Agreement, an NDA, a court
+    # order) that happen to share generic legal/business vocabulary with the
+    # question, pushing the match count past ENTITY_MATCH_MAX_PAGES and
+    # abandoning force-include entirely.
+    "capital", "equity", "obligations", "power", "structure", "technologies",
+    "solar", "nexus", "joint venture agreement",
 }
 
 

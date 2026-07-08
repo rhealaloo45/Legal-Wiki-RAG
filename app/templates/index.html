@@ -2451,6 +2451,10 @@
         <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow:hidden">
           <div class="ask-wrap">
             <div class="chat-thread" id="chat-thread"></div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-3, #888);margin:0 0 6px 4px;cursor:pointer;user-select:none">
+              <input type="checkbox" id="no-cache-toggle" style="margin:0">
+              Testing mode: ignore cached answers (forces a fresh generation, no caching)
+            </label>
             <div class="ask-box">
               <textarea class="ask-input" id="question-input" rows="2"
                 placeholder="Ask LexWiki anything…"></textarea>
@@ -4871,6 +4875,8 @@
         const payload = { question, session_id: SID };
         if (targetDoc) payload.target_doc = targetDoc;
         if (isFollowup) payload.is_followup = true;
+        const noCacheToggle = document.getElementById('no-cache-toggle');
+        if (noCacheToggle && noCacheToggle.checked) payload.exclude_cached_answers = true;
 
         const res = await fetch('/query', {
           method: 'POST',
