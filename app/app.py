@@ -584,6 +584,7 @@ def query_route():
     session_id = data.get("session_id", "")
     target_doc = data.get("target_doc", "").strip()
     is_followup = data.get("is_followup", False)
+    exclude_cached_answers = bool(data.get("exclude_cached_answers", False))
 
     if not question:
         return jsonify({"error": "No question provided"}), 400
@@ -603,7 +604,8 @@ def query_route():
         from services import intent_agent
         final_emitted = False
         try:
-            for ev in intent_agent.run_query_stream(question, session_id, target_doc, is_followup):
+            for ev in intent_agent.run_query_stream(question, session_id, target_doc, is_followup,
+                                                     exclude_cached_answers):
                 etype = ev.get("type")
                 logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
 

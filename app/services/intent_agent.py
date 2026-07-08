@@ -173,6 +173,7 @@ class QueryState(TypedDict, total=False):
     session_id: str
     target_doc: str
     is_followup: bool
+    exclude_cached_answers: bool
     # Classification
     intent: str
     intent_confidence: float
@@ -289,6 +290,7 @@ def retrieve_context_node(state: QueryState) -> dict:
     res = wiki.get_context(
         state["question"], state["session_id"],
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
+        exclude_cached_answers=state.get("exclude_cached_answers", False),
     )
     titles = res.get("selected_titles", [])
     _emit({"stage": "pages_retrieved", "status": "done",
@@ -486,12 +488,14 @@ def get_query_graph():
 
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
-                     is_followup: bool = False):
+                     is_followup: bool = False, exclude_cached_answers: bool = False):
     """Run the query graph and yield stage event dicts in real time.
 
     Each yielded dict is a custom stage event emitted by a node. The terminal
     'complete' / 'disambiguation' / 'clarification' event carries the payload
     the frontend renders. app.py wraps each dict as a Server-Sent Event.
+
+    exclude_cached_answers: QA/testing option — see wiki.get_context().
     """
     graph = get_query_graph()
     state: QueryState = {
@@ -499,6 +503,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "session_id": session_id,
         "target_doc": target_doc or "",
         "is_followup": bool(is_followup),
+        "exclude_cached_answers": bool(exclude_cached_answers),
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
