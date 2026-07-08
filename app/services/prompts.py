@@ -25,6 +25,7 @@ RULES:
 - RECOMMENDATIONS: Provide concrete, actionable recommendations (accept / reject / negotiate specific changes).
 - NO HALLUCINATED FACTS: Do not invent provisions, figures, or dates not in the context. Your analysis may go beyond the text; your facts may not.
 - PROPER CITATIONS (CRITICAL): Cite inline with IEEE format [1], [2]. End with a "References" section: "[X] FileName.pdf, Page N, Clause/Section | Quote: <verbatim quote>".
+- VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks must be copied character-for-character from the CONTEXT — never your own paraphrase dressed in quotes. BANNED: `"Section 3.3 assigns ownership of all work product... to HASG LLC"` (this is a summary, not the clause's own words). Either quote the clause's actual wording, or state it plainly with no quotation marks.
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End the reasoning block with:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
@@ -76,6 +77,8 @@ RULES:
 - RESPONSE LENGTH: Narrow factual questions → 2-4 sentences. Doctrinal/comparative questions → structured analysis. For thematic synthesis, state a principle once then list which cases exemplify it — do not repeat the same point per case.
 - PROPER CITATIONS (CRITICAL): Cite inline with IEEE format [1], [2]. End with a "References" section: "[X] FileName.pdf, Page N, Clause/Section | Quote: <verbatim quote>". Always include the page number if the context mentions it.
 - VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks must be copied character-for-character from the CONTEXT. Never paraphrase, summarize, or reword inside quotation marks — if you cannot locate an exact verbatim sentence, describe the provision in your own words without quotation marks instead. Section/clause numbers in citations must be copied exactly as they appear in the context text — never infer, renumber, or guess a section number. PREFER text that appears under a "**Supporting Quotes:**" heading when quoting — that is the verified-verbatim portion of a page. Descriptive prose elsewhere in a page (the synthesized summary) may accurately describe the document but is not the document's own words — do not put it in quotation marks.
+  BANNED PATTERN (do NOT do this) — writing your own meta-description of a clause and dressing it up in quotation marks as if it were the source's wording: `[1] Test_SA_01.txt, Clause 3.3 – "Section 3.3 assigns ownership of all work product created specifically for HASG LLC under any SOW to HASG LLC..."` — this is YOUR paraphrase of what the clause does, not a verbatim quote, even though it is factually accurate.
+  CORRECT instead — either quote the clause's own exact words: `[1] Test_SA_01.txt, Clause 3.3 – "All Work Product created under this SOW shall vest in and be owned exclusively by Client upon creation."`, or describe it with no quotation marks at all: `[1] Test_SA_01.txt, Clause 3.3 assigns ownership of all work product to HASG LLC.` If the exact source wording isn't available in context, use the no-quotes description — never invent a quote-shaped sentence.
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End the reasoning block with:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
@@ -114,6 +117,7 @@ RULES:
 - NO EXTERNAL KNOWLEDGE: Only compare what is explicitly present.
 - PROPER CITATIONS (CRITICAL): Cite inline with IEEE format [1], [2]. End with a "References" section: "[X] FileName.pdf, Page N, Clause/Section | Quote: <verbatim quote>".
 - VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks must be copied character-for-character from the CONTEXT. Never paraphrase inside quotation marks. Section/clause numbers must be copied exactly as they appear — never inferred or renumbered. PREFER text under a "**Supporting Quotes:**" heading when quoting — that is the verified-verbatim portion; descriptive prose elsewhere is a synthesized summary, not the document's own words.
+  BANNED PATTERN — do not write your own summary of a clause and wrap it in quotes: `[1] Test_SA_01.txt, Clause 3.3 – "Section 3.3 assigns ownership of all work product... to HASG LLC"` is paraphrase, not a verbatim quote. Either quote the clause's actual wording, or state it plainly with no quotation marks: `Clause 3.3 assigns ownership of all work product to HASG LLC.`
 - DISTINCT-SOURCE ATTRIBUTION (CRITICAL): Never merge facts from two different named documents/parties into a single narrative voice (e.g. "the Court held..."). If a legal principle is illustrated by more than one case, name each case separately and attribute its own facts to it individually.
 - INSTRUMENT-TYPE DISCIPLINE (CRITICAL): Only compare documents of the instrument type the question asks about. Do not place a document of a different instrument type (e.g. an Investor Rights Agreement / IRA against Shareholder Agreements) into the same comparison table as if equivalent — if referenced at all, isolate it under an explicit "Different instrument type" note.
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End with:
@@ -155,6 +159,7 @@ RULES:
 - AFTER THE TABLE: Add a "Priority Deadlines" note listing time-sensitive obligations chronologically.
 - NO EXTERNAL KNOWLEDGE.
 - PROPER CITATIONS (CRITICAL): IEEE format [1], [2] with References section.
+- VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks must be copied character-for-character from the CONTEXT — never your own paraphrase dressed in quotes. BANNED: `"Section 3.3 assigns ownership of all work product... to HASG LLC"` (this is a summary, not the clause's own words). Either quote the clause's actual wording, or state it plainly with no quotation marks.
 - CHAIN OF THOUGHT (CRITICAL): <reasoning> tags with CONFIDENCE_SCORE and CONFIDENCE_REASON.
 
 CONTEXT:
@@ -188,6 +193,7 @@ RULES:
 - NO HALLUCINATED REFERENCES (CRITICAL): Do not reference clause numbers or defined terms not in context. Use "[Clause __]" for needed but absent references.
 - FLAG ASSUMPTIONS: State any assumption about client's role or intent.
 - PROPER CITATIONS (CRITICAL): IEEE format [1], [2] with References section.
+- VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks in the "Source Clauses" citations must be copied character-for-character from the CONTEXT — never your own paraphrase dressed in quotes. Either quote the clause's actual wording, or state it plainly with no quotation marks.
 - CHAIN OF THOUGHT (CRITICAL): <reasoning> tags with CONFIDENCE_SCORE and CONFIDENCE_REASON.
 
 CONTEXT:
