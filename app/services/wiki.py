@@ -1679,8 +1679,22 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     page_selection_usage: dict = {}
 
     # --- Step 1: Select relevant pages ---
-    if file_pages:
-        # File explicitly mentioned — force those pages in.
+    if file_pages and target_doc:
+        # Explicit single-document scope (UI-pinned: the "summarise this document"
+        # flow and the disambiguation folder-picker both pass target_doc). The user
+        # pinned exactly ONE document, so supplementary cross-document pages are pure
+        # contamination here: an isolation test on the Test_JVA_05 summary showed the
+        # supplementary pass dragged in ~30 boilerplate clause pages from an unrelated
+        # Source Code Escrow Agreement, which the answer LLM then variably cited AS
+        # JVA5 — both a correctness bug (misattribution) and the primary driver of the
+        # run-to-run citation-warning non-determinism. Scope strictly to the pinned
+        # document's own pages; skip supplementary retrieval entirely.
+        selected_titles = file_pages
+        logger.info("Explicit target_doc=%r: scoped to %d page(s), supplementary retrieval skipped",
+                     target_doc, len(file_pages))
+    elif file_pages:
+        # File mention detected from the question text (not an explicit UI pin) — force
+        # those pages in, then add topic-collision-filtered supplementary pages.
         #
         # Guard against same-named-entity/topic collisions across UNRELATED documents
         # (e.g. two different test JVAs both naming their JV "SolarNexus ... LLC" with
@@ -1801,11 +1815,27 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                     clean_file = " ".join(parts[mid:])
                 display_title = f"{topic} – {clean_file}" if clean_file else topic
                 source_label = clean_file or topic
+            # Prefer the real source_doc FILENAME for the [From:] label. A page's
+            # display title carries its instrument-type label (e.g. "Source Code
+            # Escrow Agreement"), which can differ from the file's own identifier
+            # (e.g. Test_JVA_05.txt whose content is actually an escrow agreement).
+            # The citation-attribution check compares a cited filename identifier
+            # (e.g. "JVA5") against this label — matching it against the type-label
+            # instead of the filename produced false "misattribution" warnings for
+            # quotes that were correctly attributed to their own file. Emitting the
+            # filename here gives the checker the right token to match against.
+            src_doc = page.get("source_doc", "") if isinstance(page, dict) else ""
+            src_file = ""
+            if src_doc:
+                src_file = re.sub(r'^[a-f0-9-]{36}_', '', src_doc.replace("\\", "/").rsplit("/", 1)[-1])
+                src_file = os.path.splitext(src_file)[0]
+            from_label = src_file or source_label
             # Real "---" separator + "[From: ...]" label per source block so the
             # answer prompts' SCOPE / CROSS-DOCUMENT / DISTINCT-SOURCE rules bind
             # to markers that actually exist in the context (previously they
-            # referenced separators/labels that were never emitted).
-            part = f"\n---\n[From: {source_label}]\n## {display_title}\n{content}\n"
+            # referenced separators/labels that were never emitted). The label sits
+            # under the "##" header so it falls inside this block for _PAGE_BLOCK_RE.
+            part = f"\n---\n## {display_title}\n[From: {from_label}]\n{content}\n"
             wiki_parts.append(part)
             total_chars += len(part)
 
@@ -2148,6 +2178,16 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     norm_blocks = [(title, _norm(_block_verification_text(title, body))) for title, body in blocks]
     known_titles = _known_page_titles(context)
 
+    # Map each block title to its "[From: <filename>]" label (emitted by
+    # get_context). The filename carries the file's own identifier (e.g.
+    # "Test_JVA_05"), which the display title may not — fold it into the
+    # "actual source" identifier so a quote cited by its correct filename isn't
+    # falsely flagged just because the page's type-label differs from the file.
+    def _from_label(body: str) -> str:
+        m = re.search(r'^\[From:\s*(.+?)\]\s*$', body, re.MULTILINE)
+        return m.group(1) if m else ""
+    from_by_title = {title.strip(): _from_label(body) for title, body in blocks}
+
     mismatches = []
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
@@ -2181,7 +2221,11 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
         label_start = max(0, m.start() - 150)
         label = answer[label_start:m.start()]
         claimed = _extract_doc_number_tokens(label)
-        actual = _extract_doc_number_tokens(block_title)
+        # "actual source" = block title PLUS its [From: <filename>] label, so a
+        # quote cited by its correct filename identifier matches even when the
+        # page's display title uses a different instrument-type label.
+        actual_text = f"{block_title} {from_by_title.get(block_title, '')}"
+        actual = _extract_doc_number_tokens(actual_text)
 
         if claimed and actual:
             shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
@@ -2207,7 +2251,7 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
             # was cited in the answer as "Test_NDA_37.txt" — a different,
             # unrelated NDA — and slipped through undetected because the true
             # source page had no digit token to compare against.
-            block_title_norm = block_title.lower()
+            block_title_norm = actual_text.lower()
             if not any(f"{t}{n}" in block_title_norm.replace("-", "").replace(" ", "").replace("_", "")
                        for t, n in claimed):
                 claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
