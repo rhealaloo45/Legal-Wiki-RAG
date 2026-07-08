@@ -2097,7 +2097,7 @@ def _strict_verification_corpus(context: str) -> str:
     return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
 
 
-def _verify_answer_citations(answer: str, context: str) -> list[str]:
+def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
 
@@ -2113,6 +2113,13 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
     section number, or facts that were already wrong in the stored wiki page at
     ingest time — both are real but require comparing against the ORIGINAL
     source document, not the retrieved context, which is a separate check.
+
+    question: when a question invents a term/name that doesn't exist in the
+    corpus (a "trap" — e.g. asking about a fabricated project name), a correct
+    answer quotes that invented term back to say it ISN'T real ("the excerpt
+    does not mention 'Shadow-WaveSync'"). That's the model correctly refusing
+    to hallucinate, not a fabricated source citation — exclude quotes that
+    substantially echo the question's own text from this check.
     """
     if not answer or not context:
         return []
@@ -2122,6 +2129,7 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
 
     ctx_norm = _norm(_strict_verification_corpus(context))
     known_titles = _known_page_titles(context)
+    question_norm = _norm(question) if question else ""
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
         qn = _norm(q)
@@ -2129,11 +2137,18 @@ def _verify_answer_citations(answer: str, context: str) -> list[str]:
             continue  # citation label (page title in quotes), not a content quote
         if qn in ctx_norm:
             continue
+        if question_norm and qn in question_norm:
+            continue  # quoting the question's own (possibly invented) term back
+
+        def _seg_ok(seg: str) -> bool:
+            sn = _norm(seg)
+            return sn in ctx_norm or (bool(question_norm) and sn in question_norm)
+
         segments = _quote_segments(q)
-        if segments and all(_norm(seg) in ctx_norm for seg in segments):
+        if segments and all(_seg_ok(seg) for seg in segments):
             continue
         inner_segments = _quote_inner_segments(q)
-        if inner_segments and all(_norm(seg) in ctx_norm for seg in inner_segments):
+        if inner_segments and all(_seg_ok(seg) for seg in inner_segments):
             continue
         unverified.append(q.strip())
     return unverified
@@ -2194,72 +2209,92 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
         qn = _norm(quote)
         if qn in known_titles:
             continue  # citation label (page title in quotes), not a content quote
-        block_title = next((title for title, body in norm_blocks if qn in body), None)
-        if not block_title:
+        candidate_titles = [title for title, body in norm_blocks if qn in body]
+        if not candidate_titles:
             # Ellipsis-spliced quote ("BETWEEN: ... Each of the aforesaid...") —
-            # find the block containing every segment instead of the whole string.
+            # find blocks containing every segment instead of the whole string.
             segments = _quote_segments(quote)
             if segments:
-                block_title = next(
-                    (title for title, body in norm_blocks
-                     if all(_norm(seg) in body for seg in segments)),
-                    None,
-                )
-        if not block_title:
-            # Nested/adjacent-quote span (see _QUOTE_SPAN_RE) — find the block
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in segments)]
+        if not candidate_titles:
+            # Nested/adjacent-quote span (see _QUOTE_SPAN_RE) — find blocks
             # containing every quote-split inner piece instead of the whole string.
             inner_segments = _quote_inner_segments(quote)
             if inner_segments:
-                block_title = next(
-                    (title for title, body in norm_blocks
-                     if all(_norm(seg) in body for seg in inner_segments)),
-                    None,
-                )
-        if not block_title:
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in inner_segments)]
+        if not candidate_titles:
             continue  # not found at all — already caught by _verify_answer_citations
 
         label_start = max(0, m.start() - 150)
         label = answer[label_start:m.start()]
         claimed = _extract_doc_number_tokens(label)
-        # "actual source" = block title PLUS its [From: <filename>] label, so a
-        # quote cited by its correct filename identifier matches even when the
-        # page's display title uses a different instrument-type label.
-        actual_text = f"{block_title} {from_by_title.get(block_title, '')}"
-        actual = _extract_doc_number_tokens(actual_text)
+        if not claimed:
+            continue  # nothing to compare against
 
-        if claimed and actual:
-            shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
-            if shared_types and not (claimed & actual):
-                claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
-                actual_str = ", ".join(f"{t.upper()}{n}" for t, n in actual)
+        # A citation is only flagged if it mismatches EVERY block that contains
+        # this quote — not just the first one found. Shared boilerplate (e.g. an
+        # identical Section 15.8 "Court of Chancery" forum clause repeated
+        # verbatim across dozens of JVAs/SHAs/NDAs/MSAs in the same context)
+        # legitimately lives under many documents at once; checking only the
+        # first match produced false positives whenever the model cited a
+        # DIFFERENT document that also genuinely contains the same shared text.
+        # Confirmed live: a dispute-resolution question citing identical
+        # Chancery-clause text as JVA1/SHA10/JVA26 was flagged as misattributed
+        # to "JVA14" purely because that was the first of 7 blocks in context
+        # sharing the exact same sentence — JVA1 and SHA10 also genuinely had it.
+        # any_match: a candidate confirms the citation is correct.
+        # any_confident_mismatch: at least one candidate was confidently
+        # COMPARABLE (shared type, or a numbered claim vs. an unnumbered title)
+        # and did NOT match — a type-incomparable candidate (e.g. an SHA block
+        # when the claim is a JVA number) is skipped entirely rather than
+        # treated as either a match or a mismatch, so one ambiguous candidate
+        # can't mask a confident mismatch found against a different candidate.
+        any_match = False
+        any_confident_mismatch = False
+        rep_title, rep_actual_str, rep_kind = candidate_titles[0], None, None
+        for block_title in candidate_titles:
+            actual_text = f"{block_title} {from_by_title.get(block_title, '')}"
+            actual = _extract_doc_number_tokens(actual_text)
+            if actual:
+                shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
+                if not shared_types:
+                    continue  # can't confidently compare this candidate — skip it
+                if claimed & actual:
+                    any_match = True
+                    break
+                any_confident_mismatch = True
+                if rep_actual_str is None:
+                    rep_title = block_title
+                    rep_actual_str = ", ".join(f"{t.upper()}{n}" for t, n in actual)
+                    rep_kind = "type"
+            else:
+                # The real source page's title has no numbered identifier at all
+                # (e.g. "NDA-Tata" — a party-name identifier, not "NDA37"). If the
+                # citation's claimed identifier appears anywhere in this
+                # candidate's title/filename, treat it as a match.
+                block_norm = actual_text.lower().replace("-", "").replace(" ", "").replace("_", "")
+                if any(f"{t}{n}" in block_norm for t, n in claimed):
+                    any_match = True
+                    break
+                any_confident_mismatch = True
+                if rep_actual_str is None:
+                    rep_title = block_title
+                    rep_kind = "noid"
+
+        if not any_match and any_confident_mismatch:
+            claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
+            if rep_kind == "type":
                 mismatches.append(
                     f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
-                    f'"{block_title}" ({actual_str})'
+                    f'"{rep_title}" ({rep_actual_str})'
                 )
-            continue
-
-        if claimed and not actual:
-            # The real source page's title has no numbered identifier at all (e.g.
-            # "NDA-Tata" — a party-name identifier, not "NDA37") — the type/number
-            # comparison above can't run. But if the citation confidently names a
-            # specific numbered document (e.g. "Test_NDA_37.txt") and that exact
-            # token doesn't appear anywhere in the real source title, the citation
-            # is still almost certainly misattributed — a correctly-cited page
-            # nearly always echoes its own identifier somewhere in its title.
-            # Confirmed live: a genuine, verbatim "Supporting Quotes" quote from
-            # "Required Legal Disclosures – NDA-Tata (NDA)" (NDA 3_Redacted.pdf)
-            # was cited in the answer as "Test_NDA_37.txt" — a different,
-            # unrelated NDA — and slipped through undetected because the true
-            # source page had no digit token to compare against.
-            block_title_norm = actual_text.lower()
-            if not any(f"{t}{n}" in block_title_norm.replace("-", "").replace(" ", "").replace("_", "")
-                       for t, n in claimed):
-                claimed_str = ", ".join(f"{t.upper()}{n}" for t, n in claimed)
+            else:
                 mismatches.append(
                     f'Quote "{quote[:80]}..." cited as {claimed_str} but actually found under '
-                    f'"{block_title}" (no matching identifier in the real source title)'
+                    f'"{rep_title}" (no matching identifier in the real source title)'
                 )
-            continue
     return mismatches
 
 
@@ -2485,7 +2520,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # presented as verbatim that doesn't actually appear in the retrieved
     # context (paraphrase dressed up as an exact quote), and any quote
     # attributed to the wrong document.
-    _unverified_quotes = _verify_answer_citations(answer, wiki_content)
+    _unverified_quotes = _verify_answer_citations(answer, wiki_content, question)
     _misattributed = _verify_citation_attribution(answer, wiki_content)
 
     # Corrective retry: give the model one chance to fix flagged quotes — either
@@ -2499,7 +2534,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             flagged="\n".join(f"- {f[:200]}" for f in _flagged[:6])
         )
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
-        retry_unverified = _verify_answer_citations(retry_answer, wiki_content)
+        retry_unverified = _verify_answer_citations(retry_answer, wiki_content, question)
         retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
 
         token_breakdown.append({
