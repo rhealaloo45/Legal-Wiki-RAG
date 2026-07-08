@@ -1778,6 +1778,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             # "Topic (uuid_Legal AI Tool - Group_Type_Name_redacted.pdf)"
             #   → "Topic – Service Agreement 4"
             display_title = title
+            source_label = title
             paren = title.rfind("(")
             if paren > 0:
                 topic = title[:paren].strip()
@@ -1799,7 +1800,12 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 if mid >= 2 and parts[:mid] == parts[mid:2*mid]:
                     clean_file = " ".join(parts[mid:])
                 display_title = f"{topic} – {clean_file}" if clean_file else topic
-            part = f"## {display_title}\n{content}\n"
+                source_label = clean_file or topic
+            # Real "---" separator + "[From: ...]" label per source block so the
+            # answer prompts' SCOPE / CROSS-DOCUMENT / DISTINCT-SOURCE rules bind
+            # to markers that actually exist in the context (previously they
+            # referenced separators/labels that were never emitted).
+            part = f"\n---\n[From: {source_label}]\n## {display_title}\n{content}\n"
             wiki_parts.append(part)
             total_chars += len(part)
 
