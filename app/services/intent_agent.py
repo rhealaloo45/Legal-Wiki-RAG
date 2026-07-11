@@ -358,6 +358,15 @@ suggested changes, negotiation advice. These are EXPECTED legal judgment, NOT un
 For "risk_assessment" and "drafting" intents, the answer is supposed to go beyond the text with \
 professional analysis. Only penalize fabricated facts (wrong clause numbers, invented provisions, \
 incorrect party names), not analytical conclusions or recommendations.
+- ABSENCE/NEGATIVE FINDINGS ARE NOT UNGROUNDED CLAIMS (CRITICAL): When the answer states that a \
+clause, right, or topic is "not covered", "not addressed", "not present", "not stated", or similar in \
+the provided excerpts, that is the CORRECT, expected behavior when the context genuinely lacks the \
+information — do NOT flag the absence-statement itself as an unverifiable or ungrounded fact. An \
+honest "the excerpts do not contain X" is high-grounding behavior (it's not claiming X is true or \
+false about the real document — only that X isn't in the retrieved excerpts), never a fabrication. \
+Only flag it as ungrounded if the answer goes further and asserts something affirmative not supported \
+by context (e.g. inventing a reason FOR the absence, or claiming the document was fully reviewed when \
+it wasn't).
 
 Respond with ONLY valid JSON, no other text:
 {{
