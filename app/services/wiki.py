@@ -852,10 +852,21 @@ _HYPHEN_VARIANTS_RE = re.compile('[‐‑‒–—−]')
 
 def _norm_for_match(s: str) -> str:
     """Shared normalization for all quote/title verification comparisons:
-    collapse whitespace, lowercase, and fold unicode hyphen/dash variants to
-    a plain ASCII "-" so visually-identical strings compare equal."""
+    collapse whitespace, lowercase, fold unicode hyphen/dash variants to a
+    plain ASCII "-", and strip trailing/leading sentence punctuation (a
+    citation label quoted mid-sentence often picks up a trailing comma or
+    period from the surrounding prose, e.g. '"...Service Agreement,"' — that
+    punctuation isn't part of the real page title, so leaving it in broke the
+    exact-match lookup in _known_page_titles() and caused the label itself to
+    be flagged as an unverifiable content quote instead of recognized as a
+    citation label). Safe for quote-content matching too: stripping trailing
+    punctuation from a short extracted span before a substring-containment
+    check against the full corpus can only make a match MORE likely to be
+    found, never mask a genuine mismatch.
+    """
     s = _HYPHEN_VARIANTS_RE.sub('-', s)
-    return re.sub(r'\s+', ' ', s).strip().lower()
+    s = re.sub(r'\s+', ' ', s).strip().lower()
+    return s.strip('.,;:')
 
 
 def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
@@ -2578,14 +2589,30 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
-    
-    # Get all canonical doc names from pages
+
+    # Get all canonical doc names from pages. Some pages have a malformed
+    # trailing parenthetical that's just the bare instrument TYPE (e.g. "(Service
+    # Agreement)", "(Agreement)", "(NDA)") instead of a real filename — an
+    # ingest-time data-quality gap, not a real per-document identifier. Skip
+    # these: since "agreement"/"NDA" are common words in any legal answer, a
+    # bare type-word can spuriously substring-match citation text and pollute
+    # files_used with a fake "document" that isn't an actual file. Confirmed
+    # live: 6 such generic entries in one session's canonical_files, and
+    # "Service Agreement"/"Agreement" showing up as bogus reference cards.
+    _GENERIC_CANONICAL_EXCLUDE = {
+        "agreement", "nda", "sha", "jva", "sa", "ccd", "msa",
+        "service agreement", "shareholder agreement", "joint venture agreement",
+        "non-disclosure agreement", "master services agreement",
+    }
     canonical_files = set()
     for title in pages.keys():
         match = re.search(r'\(([^)]+)\)\s*$', title.strip())
         if match:
-            canonical_files.add(match.group(1))
-            
+            cfile = match.group(1)
+            if cfile.strip().lower() in _GENERIC_CANONICAL_EXCLUDE:
+                continue
+            canonical_files.add(cfile)
+
     pages_used_dedup = []
     files_used = []
     seen = set()
