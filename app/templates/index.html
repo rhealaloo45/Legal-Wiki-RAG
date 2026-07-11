@@ -4592,22 +4592,32 @@
       const parsed = extractReferencesSection(wikiResult.answer);
       let refs = parsed.refs;
       if (refs.length === 0) {
-        // Build refs from selected_titles or pages_used — each title has "Topic (source_doc)"
-        const titleSource = (wikiResult.selected_titles && wikiResult.selected_titles.length > 0)
-          ? wikiResult.selected_titles
-          : (wikiResult.pages_used || []);
-        if (titleSource.length > 0) {
-          let idx = 0;
-          for (const p of titleSource) {
-            if (p.startsWith('Q:')) continue;
-            const parenIdx = p.lastIndexOf('(');
-            const topic = parenIdx > 0 ? p.substring(0, parenIdx).trim() : p;
-            const rawDoc = parenIdx > 0 ? p.substring(parenIdx + 1, p.lastIndexOf(')')) : '';
-            const docName = rawDoc || (filesUsed.length > 0 ? filesUsed[0] : 'Unknown');
-            refs.push({ num: ++idx, docName, location: topic });
-          }
-        } else if (filesUsed.length > 0) {
+        // Prefer files_used — a short, deduped list of the documents actually
+        // relevant to the answer (from inline citations, mentioned filenames, or
+        // selected pages' own source_doc). Only fall back to dumping every
+        // selected_titles entry (the FULL retrieved-context page list, often
+        // 30-40+ pages) if files_used is empty — previously selected_titles was
+        // checked first and almost always non-empty, so thin/"not addressed"
+        // answers with no parseable References section rendered a huge noisy
+        // list of mostly-irrelevant retrieved pages instead of a short one.
+        if (filesUsed.length > 0) {
           refs = filesUsed.map((f, idx) => ({ num: idx + 1, docName: f, location: '' }));
+        } else {
+          // Build refs from selected_titles or pages_used — each title has "Topic (source_doc)"
+          const titleSource = (wikiResult.selected_titles && wikiResult.selected_titles.length > 0)
+            ? wikiResult.selected_titles
+            : (wikiResult.pages_used || []);
+          if (titleSource.length > 0) {
+            let idx = 0;
+            for (const p of titleSource) {
+              if (p.startsWith('Q:')) continue;
+              const parenIdx = p.lastIndexOf('(');
+              const topic = parenIdx > 0 ? p.substring(0, parenIdx).trim() : p;
+              const rawDoc = parenIdx > 0 ? p.substring(parenIdx + 1, p.lastIndexOf(')')) : '';
+              const docName = rawDoc || 'Unknown';
+              refs.push({ num: ++idx, docName, location: topic });
+            }
+          }
         }
       }
       currentResultReferences = refs;
