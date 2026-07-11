@@ -2604,7 +2604,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
-    # to all selected-page source docs when no file was detected.
+    # to selected-page source docs when no file was detected — and cap that
+    # last-resort list, since deduping every distinct source_doc across all
+    # selected_titles produces one entry per RETRIEVED document (often
+    # 15+, mostly supplementary/irrelevant context, not what the answer is
+    # actually about) rather than anything the answer specifically relied on.
+    # Confirmed live: a short "not covered" answer with zero [N] citations and
+    # no filename match rendered 15 unrelated SHA/Judgment/Service-Agreement
+    # references under a single-document question.
+    _FILES_USED_FALLBACK_CAP = 3
     if not files_used and selected_titles:
         mentioned = _detect_mentioned_files(question, pages)
         if mentioned:
@@ -2612,6 +2620,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else:
             seen_files = set()
             for t in selected_titles:
+                if len(files_used) >= _FILES_USED_FALLBACK_CAP:
+                    break
                 if t.startswith("Q:"):
                     continue
                 page = pages.get(t)
