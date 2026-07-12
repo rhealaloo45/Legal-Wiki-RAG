@@ -640,6 +640,10 @@ def query_route():
 
                 elif etype == "answer":
                     wiki_result = ev.get("payload", {})
+                    # Pop before anything touches wiki_result further — never send the
+                    # raw retrieved context over SSE to the frontend, only use it locally
+                    # for the RAG query log.
+                    debug_context = wiki_result.pop("_debug_context", "")
                     wiki_result["elapsed_ms"] = round((time.time() - t0) * 1000)
                     _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
                                     "answer", {
@@ -652,7 +656,7 @@ def query_route():
                                     })
                     _update_session_history(session_id, question)
                     try:
-                        _log_rag_query(question, "", wiki_result.get("answer", ""))
+                        _log_rag_query(question, debug_context, wiki_result.get("answer", ""))
                     except Exception as log_err:
                         logger.error("Failed to log RAG query: %s", log_err)
                     final_emitted = True

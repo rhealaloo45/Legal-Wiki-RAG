@@ -227,9 +227,17 @@ def classify_intent_node(state: QueryState) -> dict:
 
 def check_disambiguation_node(state: QueryState) -> dict:
     logger.info("[AGENT] check_disambiguation_node")
-    if state.get("target_doc") or state.get("is_followup") \
-            or wiki._question_names_a_document(state["question"], []):
-        logger.info("[AGENT] disambiguation skipped (doc named or followup)")
+    # Deliberately does NOT bypass on is_followup: classify_query() already has
+    # deterministic vague-reference detection (_VAGUE_DOC_PATTERN catches "this
+    # document"/"the agreement" etc.) that must still run even mid-conversation —
+    # skipping it for every follow-up meant a vague "this document" question
+    # silently resolved to whatever document conversation history implied,
+    # without ever confirming with the user (confirmed live: a "top 10 risks in
+    # this document" follow-up silently answered about a document from several
+    # questions earlier, no disambiguation prompt shown). Named-document and
+    # known-entity mentions still skip via the checks inside classify_query().
+    if state.get("target_doc") or wiki._question_names_a_document(state["question"], []):
+        logger.info("[AGENT] disambiguation skipped (doc named)")
         return {"needs_disambiguation": False}
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
@@ -331,6 +339,15 @@ def generate_answer_node(state: QueryState) -> dict:
     wr["intent_label"] = label
     wr["intent_confidence"] = state.get("intent_confidence", 0.0)
     wr["intent_method"] = state.get("intent_method", "")
+    # Private key, not part of the public answer shape — app.py pops this off
+    # before the SSE payload reaches the frontend. Exists only so the RAG query
+    # log (_log_rag_query) can record what was actually retrieved; previously
+    # app.py had no access to the raw context at all and hardcoded "" there,
+    # silently making the logged "contexts" field meaningless for every query
+    # through this streaming path (confirmed: 354/446 logged records showed 0
+    # contexts, including substantive multi-page answers where retrieval had
+    # genuinely pulled real content).
+    wr["_debug_context"] = state.get("wiki_context", "")
     return {"answer_result": wr}
 
 
