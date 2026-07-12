@@ -537,15 +537,20 @@ PRINCIPLES:
 
 PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
 DOCUMENT-SPECIFIC PAGES (CRITICAL): Most pages describe provisions unique to THIS specific \
-document and must NOT merge with pages from other documents of the same type. You MUST prefix \
-the title with a SHORT DOCUMENT IDENTIFIER derived from the document: \
+document and must NOT merge with pages from other documents of the same type. You MUST attach \
+a SHORT DOCUMENT IDENTIFIER derived from the document. \
+TITLE ORDER (STRICT — never deviate): "{{Topic}} – {{Document Identifier}} ({{Document Type}})". \
+The topic ALWAYS comes first, then a dash, then the document identifier, then the type in \
+parentheses — the identifier NEVER comes before the topic. \
+Wrong: "SA1-Crayons – Term and Termination (Service Agreement)". \
+Right: "Term and Termination – SA1-Crayons (Service Agreement)". \
   For court judgments: use first party's last name (e.g. "Yuvraj Kanther") \
   For contracts/agreements: use a short identifier from filename or parties that distinguishes \
   this document from others of the same type. Derive it from the counterparty name, the \
   filename, or a unique label (e.g. "SA1-Crayons" for Service Agreement 1 with Crayons, \
   "NDA-Acme" for an NDA with Acme Corp, "SHA3-Meridian" for Shareholder Agreement 3 with Meridian). \
   Keep identifier SHORT (2-4 words max). \
-Examples of DOCUMENT-SPECIFIC pages that MUST have the prefix: \
+Examples of DOCUMENT-SPECIFIC pages that MUST have the identifier in this order: \
   - Court judgments: Facts, Procedural History, Charges, Holding, Contentions, Relief, Costs \
     → "Facts – Yuvraj Kanther (Court Judgment)" \
   - Contracts: Term, Termination, Payment, Fees, Indemnity, Liability, Scope of Services, \
@@ -668,13 +673,17 @@ RULES:
   Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
   what each court decided and why. Never blend outcomes from different stages.
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
-  DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics prefixed \
-  with a document identifier (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
-  without (e.g. "Section 319 CrPC", "Indian Arbitration Act"). Preserve these prefixes exactly \
-  when generating page titles. \
+  DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics with \
+  a document identifier attached (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
+  without (e.g. "Section 319 CrPC", "Indian Arbitration Act"). Preserve these exactly, IN THE \
+  SAME ORDER, when generating page titles. \
+  TITLE ORDER (STRICT — never deviate): the topic ALWAYS comes first, then a dash, then the \
+  document identifier — never the reverse. Wrong: "SA1-Crayons – Term". \
+  Right: "Term – SA1-Crayons". \
   If a document-specific topic (any clause, provision, obligation, term, or fact specific to \
-  THIS document) in the KNOWN TOPICS list lacks a prefix, add the document identifier. \
-  Shared legal concept pages (statutes, precedents, doctrines) must NOT have a prefix. \
+  THIS document) in the KNOWN TOPICS list has no identifier yet, add one AFTER the topic, in \
+  that same "{{Topic}} – {{Identifier}}" order. \
+  Shared legal concept pages (statutes, precedents, doctrines) must NOT have an identifier. \
   Examples: "Facts – Yuvraj Kanther ({doc_type})", "Term – SA1-Crayons ({doc_type})", \
   "Section 319 CrPC ({doc_type})", "Indian Arbitration Act ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
@@ -2428,6 +2437,30 @@ from CONTEXT into quotation marks, or if no exact verbatim sentence exists, desc
 the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
 
 
+# A line is "complete" if it ends with a terminal mark a truncated model
+# stream wouldn't leave dangling: sentence punctuation, a closing quote, a
+# closed markdown table row ("...|"), a closing code fence, or is blank.
+_COMPLETE_LINE_RE = re.compile(r'(^\s*$)|([.!?"\'`)\]|:])\s*$')
+
+
+def _truncate_to_last_complete_unit(text: str) -> str:
+    """Drop a dangling, truncated tail (e.g. a table row cut off mid-cell) so a
+    still-truncated retry ships a clean partial answer instead of a broken
+    fragment. Only trims from the end and only if most of the answer survives —
+    never used on an answer that already ends cleanly."""
+    stripped = text.rstrip()
+    if not stripped or _COMPLETE_LINE_RE.search(stripped):
+        return text
+    lines = stripped.split("\n")
+    for i in range(len(lines) - 2, -1, -1):
+        if _COMPLETE_LINE_RE.search(lines[i]):
+            kept = "\n".join(lines[: i + 1]).rstrip()
+            if len(kept) >= 0.4 * len(stripped):
+                return kept + "\n\n_[Response was cut off before completion — some entries may be missing.]_"
+            break
+    return text
+
+
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
@@ -2660,8 +2693,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         if retry_usage.get("finish_reason") != "length":
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
         else:
-            logger.warning("Truncation retry also hit the token limit — keeping it anyway (still better than the narrower pass)")
+            logger.warning("Truncation retry also hit the token limit — keeping it anyway, trimmed to its last complete unit")
+            retry_answer = _truncate_to_last_complete_unit(retry_answer)
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+    elif usage.get("finish_reason") == "length":
+        # Already generated at the broad budget and still truncated — no
+        # further retry available, so just trim the dangling tail.
+        logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
+        answer = _truncate_to_last_complete_unit(answer)
 
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
@@ -3121,17 +3160,28 @@ def _doc_identifier_part(title: str) -> str:
     return rest
 
 
-_DOC_ID_SHAPE_RE = re.compile(r'^(?:sha|jva?|nda|sa|msa|ccd)\d*[-]', re.IGNORECASE)
+_DOC_ID_SHAPE_RE = re.compile(r'^(?:sha|jva?|nda|sa|msa|ccd)(?:\d*[-]|\d+$)', re.IGNORECASE)
+
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r'\b(?:private\s+limited|pvt\.?\s*ltd\.?|limited|ltd\.?|llp|llc|inc\.?|'
+    r'corp(?:oration)?|plc|gmbh|s\.?a\.?|pte\.?\s*ltd\.?)\s*$',
+    re.IGNORECASE,
+)
 
 
 def _looks_like_doc_id(s: str) -> bool:
     """True if a title segment looks like a real document identifier rather
-    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Meridian")
-    or a single camelCase word ("JVReVolt"), not generic multi-word prose.
+    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Meridian"),
+    a single camelCase word ("JVReVolt"), or a company-style name ending in a
+    corporate suffix ("Acme Holdings Private Limited") — not generic multi-word
+    legal/clause prose, which essentially never ends in a corporate suffix.
     """
     if not s:
         return False
     if _DOC_ID_SHAPE_RE.match(s):
+        return True
+    if _COMPANY_SUFFIX_RE.search(s):
         return True
     return " " not in s and bool(re.search(r'[a-z][A-Z]', s))
 

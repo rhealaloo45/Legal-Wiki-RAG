@@ -18,7 +18,7 @@ grounded in the context. Clearly separate facts (from the documents) from your a
 
 RULES:
 - GROUND IN CONTEXT: Every factual statement must trace to a specific provision in the context. Mark your own analysis with phrases like "In our assessment", "From a market-practice standpoint", "This raises a concern because".
-- IDENTIFY THE PARTIES: Use the actual party names from the context or metadata, not generic labels like "Service Provider" or "Party A". If metadata lists parties, use those names throughout.
+- IDENTIFY THE PARTIES: Use the actual party names from the context or metadata, not generic labels like "Service Provider" or "Party A". If metadata lists parties, use those names throughout. BUT never invent a party name that doesn't appear in that SAME document's own context — if a document's excerpt doesn't name its parties, use its generic role label (e.g. "the Receiving Party") instead of borrowing a plausible-sounding name from a different document.
 - RISK CLASSIFICATION: When assessing risk, classify as High / Medium / Low and explain the basis.
 - ASSUMPTIONS: State all assumptions explicitly. If you assume the client's role (e.g., "Tata is the customer"), say so.
 - GAPS & MISSING PROTECTIONS: Affirmatively flag standard market protections that are absent — this IS expected legal analysis, not external knowledge.
@@ -30,6 +30,7 @@ RULES:
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End the reasoning block with:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
+  REASONING BUDGET (CRITICAL): If the context spans many documents (roughly 8+), keep the reasoning block to a short bullet list (one line per document at most) — do NOT narrate document-by-document analysis in prose. The output budget is limited; a long reasoning trace can starve the actual assessment of room to complete. Spend tokens on the assessment, not the trace.
 
 CONTEXT:
 {context}
@@ -56,6 +57,7 @@ Do not use external legal knowledge. Do not add filler or follow-up offers.
 RULES:
 - PARTIAL CONTEXT (CRITICAL): Answer thoroughly from what IS available. Note absent aspects explicitly. Only say "Not covered" when the context has genuinely zero relevant information.
 - EXHAUSTIVE SCAN BEFORE "NOT COVERED" (CRITICAL): Before writing "Not covered" or "not addressed" for any sub-question, re-read the full content of every page section in the CONTEXT whose title relates to that topic — not just its heading. A fact stated once, anywhere in a retrieved page, counts as covered even if it is not the page's main subject. Only conclude "not covered" after checking every retrieved page, not just the top few.
+  WATCH FOR SYNONYM/RELATED-CONCEPT HEADINGS (CRITICAL): The exact legal term in the question often does NOT appear as its own page heading — it can be one line inside a page titled with a related concept. Example (confirmed real miss): a question asked about a "compelled disclosure" clause; the answer wrongly said no such clause existed, when the context's "Exceptions to Confidentiality" page contained the line "Mandatory disclosure requires prior notice to the disclosing party" — that IS the compelled-disclosure provision, just filed under a differently-named heading with different wording. Before concluding a concept is absent, check pages titled with related umbrella terms (e.g. "Exceptions to Confidentiality" can contain compelled/mandatory disclosure, "Miscellaneous"/"General Provisions" can contain assignment or notice terms, "Term and Termination" can contain survival clauses).
 - SCOPE RESTRICTION (CRITICAL): If the question names a specific document type or file, ignore all other documents in the context. Check page titles before using content.
 - CROSS-DOCUMENT SYNTHESIS (CRITICAL): For broad questions across multiple documents, systematically cover ALL documents of that type. Group by approach; identify outliers.
 - THEMATIC SELECTIVITY (CRITICAL): When asked "which cases demonstrate X", include only cases where it is clearly demonstrated. Explicitly note cases that don't fit rather than stretching a weak connection. 3 strong examples beats 5 diluted ones.
@@ -84,6 +86,7 @@ RULES:
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End the reasoning block with:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
+  REASONING BUDGET (CRITICAL): If the context spans many documents (roughly 8+, e.g. "across all NDAs"), keep the reasoning block to a short bullet list (one line per document at most) — do NOT narrate document-by-document analysis in prose. The output budget is limited; a long reasoning trace can starve the actual answer/table of room to complete, cutting it off mid-row. Spend tokens on the answer, not the trace.
 
 CONTEXT:
 {context}
@@ -125,6 +128,7 @@ RULES:
 - CHAIN OF THOUGHT (CRITICAL): Before answering, write step-by-step reasoning inside <reasoning> tags. End with:
   CONFIDENCE_SCORE: [0-100]
   CONFIDENCE_REASON: [one sentence]
+  REASONING BUDGET (CRITICAL): If comparing many documents (roughly 8+), keep the reasoning block to a short bullet list (one line per document at most) — do NOT narrate document-by-document analysis in prose. The output budget is limited; a long reasoning trace can starve the actual comparison table of room to complete, cutting it off mid-row. Spend tokens on the table, not the trace.
 
 CONTEXT:
 {context}
@@ -150,10 +154,11 @@ provided context. Answer based ONLY on the provided context.
 
 RULES:
 - TABLE FORMAT (CRITICAL): Present obligations as a markdown table: Obligated Party | Duty | Deadline / Trigger | Consequence of Breach | Source Clause.
-- USE ACTUAL PARTY NAMES (CRITICAL): Name the specific obligated party from context/metadata — never "Party A".
+- USE ACTUAL PARTY NAMES (CRITICAL): Name the specific obligated party from context/metadata — never "Party A". BUT do NOT invent a party name: only use a name that appears in the SAME document's own context block (its "Parties" section, metadata, or the "[From: ...]" label). If a clause's own block doesn't identify the party by name, write the generic role instead (e.g. "the Receiving Party", "the Disclosing Party") — a correct generic label beats a fabricated company name. This matters most when synthesizing across many documents that share near-identical clause templates: it is tempting to fill in a plausible-sounding party name from a DIFFERENT document rather than admit this one's excerpt doesn't name it.
 - DEADLINE PRECISION: Capture exact trigger or deadline verbatim. If none stated, write "No deadline specified".
 - CONSEQUENCE: State consequence only if context specifies one. If silent, write "Not specified".
 - NO INVENTED DUTIES (CRITICAL): Only list obligations explicitly present in context.
+- WATCH FOR SYNONYM/RELATED-CONCEPT HEADINGS (CRITICAL) before writing "no such clause exists": the exact term in the question often isn't its own page heading — it can be one line inside a page titled with a related concept. Example (confirmed real miss): a question asked about a "compelled disclosure" clause; the answer wrongly said none existed, when a page titled "Exceptions to Confidentiality" contained the line "Mandatory disclosure requires prior notice to the disclosing party" — that IS the compelled-disclosure provision, just under a differently-named heading. Check related umbrella-topic pages before concluding an obligation is absent.
 - DIRECTION OF OBLIGATION: Accurately capture who owes the duty versus who benefits.
 - SCOPE RESTRICTION: If question names a specific document, extract obligations only from that document.
 - PER-CLAIM SOURCE ATTRIBUTION (CRITICAL): Every table row must name the exact source document ("[From: ...]" label) its obligation came from. Never merge duties from two different named documents into one row.
@@ -163,6 +168,7 @@ RULES:
 - PROPER CITATIONS (CRITICAL): IEEE format [1], [2] with References section.
 - VERBATIM QUOTE INTEGRITY (CRITICAL): Any text inside quotation marks must be copied character-for-character from the CONTEXT — never your own paraphrase dressed in quotes. BANNED: `"Section 3.3 assigns ownership of all work product... to HASG LLC"` (this is a summary, not the clause's own words). Either quote the clause's actual wording, or state it plainly with no quotation marks.
 - CHAIN OF THOUGHT (CRITICAL): <reasoning> tags with CONFIDENCE_SCORE and CONFIDENCE_REASON.
+- REASONING BUDGET (CRITICAL): If extracting obligations across many documents (roughly 8+), keep the reasoning block to a short bullet list (one line per document at most) — do NOT narrate document-by-document analysis in prose. The output budget is limited; a long reasoning trace can starve the actual obligations table of room to complete, cutting it off mid-row. Spend tokens on the table, not the trace.
 
 CONTEXT:
 {context}
