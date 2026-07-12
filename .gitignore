@@ -261,10 +261,8 @@ PLAN.md
 FLOWCHART.md
 flow.png
 structure.md
-SYSTEM_FLOW.md
-SYSTEM_OVERVIEW.md
 checklist.md
-phases.md 
+phases.md
 questions.txt
 
 # Debug output
@@ -272,3 +270,14 @@ app/debug_raw_answer.txt
 app/test_output.txt
 app/ingest_remaining.py
 app/register_files.py
+
+# One-off diagnostic/scratch scripts (leading-underscore convention used for
+# throwaway repro/verify/trace scripts during live debugging sessions —
+# reusable utilities like reingest_missing_docs.py don't use this prefix)
+app/_*.py
+
+# OS / editor stray files
+Thumbs.db
+*.bak
+*.orig
+nohup.out
