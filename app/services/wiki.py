@@ -1483,6 +1483,16 @@ def _norm_doc_name(name: str) -> str:
     s = os.path.splitext(s)[0]                          # drop extension
     s = s.replace('_', ' ').lower()
     s = re.sub(r'\b(redacted|test|final|draft|copy|v\d+)\b', ' ', s)
+    # Browser/OS duplicate-download folder names get "(1)", "(2)" etc. appended
+    # (e.g. a folder re-downloaded as "Service Agreement (1)") — this parenthesized
+    # number is a filesystem artifact, not a document identifier, but every file
+    # in that folder inherits it into source_doc. Left in, "\b1\b" in the numbered-
+    # pattern matcher below spuriously matches this artifact on EVERY file in the
+    # folder (since "(" / ")" are non-word chars, "\b1\b" matches inside "(1)"),
+    # flooding "service agreement 1" to match all 67 docs in the folder instead of
+    # zero (confirmed live: a session with no real "Service Agreement 1" doc still
+    # matched every "Service Agreement (1)_..." file and pulled in ~995 pages).
+    s = re.sub(r'\(\d+\)', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 
@@ -2043,9 +2053,90 @@ def _quote_segments(q: str) -> list[str]:
 # hole the greedy regex was built to close in the first place.
 _INTERNAL_QUOTE_SPLIT_RE = re.compile(r'["“”]')
 
+# Common short words that appear as narration BETWEEN two separately-quoted
+# phrases in the same sentence (e.g. `**"quote one"** and that **"quote two"**`).
+# When two adjacent quotes are each individually bolded, the greedy quote-span
+# match merges them into one span with this connector prose caught in the
+# middle; _quote_inner_segments correctly splits it back into 3 pieces, but the
+# middle piece is markdown formatting + filler words, never meant to be a
+# verbatim quote itself — requiring it to independently match context (like
+# the two real quotes either side of it) dragged genuinely correct answers
+# down. A segment made ENTIRELY of these words (after stripping markdown
+# emphasis markers) is connector prose, not a quote fragment, and shouldn't be
+# required to verify. Confirmed live: "** and that **" between two genuine,
+# independently-verifiable quotes was the sole reason a fully-grounded answer
+# got flagged.
+_CONNECTOR_ONLY_WORDS = {
+    "and", "that", "but", "or", "which", "who", "the", "a", "an", "is", "are",
+    "was", "were", "states", "stating", "further", "also", "it", "its", "this",
+    "these", "those", "as", "to", "of", "in",
+}
+
+
+def _is_connector_only_segment(s: str) -> bool:
+    words = re.findall(r"[a-zA-Z']+", s.lower())
+    if not words:
+        return True  # pure punctuation/markdown noise, not a quote
+    return all(w in _CONNECTOR_ONLY_WORDS for w in words)
+
 
 def _quote_inner_segments(q: str) -> list[str]:
-    return [s.strip() for s in _INTERNAL_QUOTE_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+    segments = []
+    for s in _INTERNAL_QUOTE_SPLIT_RE.split(q):
+        s = s.strip()
+        if len(s) < 8:
+            continue
+        stripped_md = re.sub(r'[*_]+', '', s).strip()
+        if _is_connector_only_segment(stripped_md):
+            continue
+        segments.append(stripped_md or s)
+    return segments
+
+
+# Follow-up to the connector-word filter above: found on retest of the same
+# CCD6 question, two genuine quotes are sometimes separated by real narrative
+# words ("This distinction underpins the request for an...") rather than pure
+# filler ("and that") — _is_connector_only_segment correctly refuses to drop a
+# segment with real content, so that segment still has to independently
+# "verify" against context even though it was never a quote itself, just the
+# model's own connecting prose between two already-confirmed genuine quotes.
+# A word-list can't tell "model narration between two quotes" apart from
+# "genuine document text that itself contains internal punctuation" (the
+# nested-quote case, e.g. `("Depositor")`, where EVERY split piece — including
+# the short ones — really is part of one continuous verbatim excerpt and must
+# still independently verify). The distinguishing signal isn't the segment's
+# own words, it's its position: if a segment fails to verify but sits directly
+# between two segments that DO independently verify, it's excused as narration
+# bridging two confirmed real quotes rather than a free-standing unverifiable
+# claim. A segment with no verified neighbor on both sides (leading/trailing,
+# or next to another unverified segment) still must verify on its own — this
+# only excuses the specific "quote, narration, quote" shape.
+def _segments_effectively_verified(q: str, ctx_norm: str, question_norm: str) -> bool:
+    def _seg_norm_ok(seg: str) -> bool:
+        sn = _norm_for_match(seg)
+        return sn in ctx_norm or (bool(question_norm) and sn in question_norm)
+
+    parts = []
+    for s in _INTERNAL_QUOTE_SPLIT_RE.split(q):
+        stripped_md = re.sub(r'[*_]+', '', s.strip()).strip()
+        if len(stripped_md) < 8:
+            continue
+        parts.append((stripped_md, _seg_norm_ok(stripped_md)))
+
+    if not parts:
+        return True
+
+    for i, (seg, verified) in enumerate(parts):
+        if verified:
+            continue
+        if _is_connector_only_segment(seg):
+            continue
+        prev_ok = parts[i - 1][1] if i > 0 else False
+        next_ok = parts[i + 1][1] if i < len(parts) - 1 else False
+        if prev_ok and next_ok:
+            continue  # real narrative prose bridging two confirmed genuine quotes
+        return False
+    return True
 
 
 def _known_page_titles(context: str) -> set[str]:
@@ -2158,8 +2249,7 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
         segments = _quote_segments(q)
         if segments and all(_seg_ok(seg) for seg in segments):
             continue
-        inner_segments = _quote_inner_segments(q)
-        if inner_segments and all(_seg_ok(seg) for seg in inner_segments):
+        if _INTERNAL_QUOTE_SPLIT_RE.search(q) and _segments_effectively_verified(q, ctx_norm, question_norm):
             continue
         unverified.append(q.strip())
     return unverified
@@ -2201,7 +2291,19 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
     if not blocks:
         return []
-    norm_blocks = [(title, _norm(_block_verification_text(title, body))) for title, body in blocks]
+    # Candidate discovery uses each block's FULL body, not the Supporting-Quotes-
+    # restricted text _verify_answer_citations uses — that stricter scope exists to
+    # stop fabricated quotes from passing as genuine (a separate, still-strict check
+    # below in this same function's caller). Here the question is different: "is
+    # there ANY block that could confirm this citation is attributed correctly,"
+    # and using only the verified-quotes subset undercounts real candidates. Confirmed
+    # live: a shared risk-assessment sentence genuinely appears in both Opinion_37's
+    # Supporting Quotes section AND Opinion_41's ordinary prose (ingest-time filtering
+    # only kept it under Opinion_37's heading) — citing Opinion_41 is factually
+    # correct, but restricting candidate search to Supporting-Quotes-only meant
+    # Opinion_41 never appeared as a candidate, so the only candidate found (Opinion_37)
+    # didn't match the citation and it was wrongly flagged as misattributed.
+    norm_blocks = [(title, _norm(body)) for title, body in blocks]
     known_titles = _known_page_titles(context)
 
     # Map each block title to its "[From: <filename>]" label (emitted by
@@ -2345,7 +2447,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total_tokens": page_selection_usage.get("prompt_tokens", 0) + page_selection_usage.get("completion_tokens", 0),
         })
 
-    if not wiki_content:
+    # A retrieval failure (e.g. a transient embedding/DB hiccup) can leave
+    # wiki_content as a non-empty-but-pure-whitespace string — `if not
+    # wiki_content` alone doesn't catch that, so it silently reaches the LLM
+    # with a blank {context} slot. The model then correctly (from its own
+    # view) says "not covered", but the answer looks like a normal confident
+    # response instead of surfacing that retrieval actually returned nothing.
+    if not wiki_content or not wiki_content.strip():
         return {
             "answer": "The wiki is empty — no documents have been ingested yet.",
             "pages_used": [],
@@ -2410,7 +2518,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
     _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
 
-    def _run_generation_pass(gen_prompt: str) -> tuple[str, dict, int, str]:
+    def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
         """Run one LLM answer-generation call and parse out answer text + confidence.
 
         Factored out of the main body so the corrective citation retry below can
@@ -2423,7 +2531,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             raw_answer, pass_usage = llm.ask(
                 gen_prompt,
                 pipeline="wiki",
-                max_tokens=_answer_token_budget,
+                max_tokens=token_budget or _answer_token_budget,
             )
 
             # --- Extract confidence from reasoning BEFORE stripping the block ---
@@ -2526,6 +2634,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         return pass_answer, pass_usage, pass_score, pass_reason
 
     answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
+
+    # Truncation retry: a "factual"-intent question that's actually broad/cross-
+    # document in scope (e.g. "across all JVAs in the corpus...") can exhaust the
+    # narrower MAX_TOKENS_ANSWER budget before the model ever writes real content —
+    # confirmed live: a 25-page cross-document question got cut off at
+    # completion_tokens=4034 (against a 4096 cap), leaving only the model's own
+    # numbered reasoning/plan trace ("1. Identified... 5. Compiled the findings
+    # into a table.") with no actual table ever emitted. Unlike the citation
+    # retry below, a truncated response is unambiguously worse than a complete
+    # one, so this always keeps the retry — no comparison needed.
+    if usage.get("finish_reason") == "length" and _answer_token_budget < config.MAX_TOKENS_ANSWER_BROAD:
+        logger.warning("Answer generation truncated at %d tokens — retrying with broader budget",
+                       usage.get("completion_tokens", 0))
+        retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(
+            prompt, token_budget=config.MAX_TOKENS_ANSWER_BROAD
+        )
+        token_breakdown.append({
+            "call": "truncation_retry",
+            "model": llm.active_model(fast=False),
+            "prompt_tokens": retry_usage.get("prompt_tokens", 0),
+            "completion_tokens": retry_usage.get("completion_tokens", 0),
+            "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+        })
+        if retry_usage.get("finish_reason") != "length":
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+        else:
+            logger.warning("Truncation retry also hit the token limit — keeping it anyway (still better than the narrower pass)")
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
 
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
@@ -2907,6 +3043,22 @@ _ENTITY_EXCLUDE = {
     # abandoning force-include entirely.
     "capital", "equity", "obligations", "power", "structure", "technologies",
     "solar", "nexus", "joint venture agreement",
+    # Found live-testing "identify the top 10 legal and commercial risks in this
+    # document" — a vague, no-document-named question that should always
+    # disambiguate: "risk" and "commercial" leaked in as if they were distinctive
+    # document identifiers (from a malformed title like "Risk Assessment –
+    # Commercial (...)"), so _question_mentions_known_entity() falsely matched
+    # ordinary risk-assessment vocabulary and skipped disambiguation entirely.
+    "risk", "risks", "commercial",
+    # Found live-testing VoltMetric/SteelCircle SHA questions: "SHA-OmniRetail –
+    # Transfer Restrictions" has swapped Topic/DocID order, so these generic
+    # clause-topic words leaked in as if "Transfer Restrictions" were a
+    # distinctive identifier, out-competing the real single-token "voltmetric"
+    # entity match. Also needed as the trigger condition for the swapped-title
+    # detection in _doc_identifier_part() below (a last-segment made entirely
+    # of these words is treated as a topic phrase, not a real identifier).
+    "transfer", "transfers", "restriction", "restrictions", "specific",
+    "applicable", "analytics", "rofo", "rofr", "offer", "refusal",
 }
 
 
@@ -2935,8 +3087,53 @@ def _doc_identifier_part(title: str) -> str:
     if dash < 0:
         return ""
     rest = title[dash + 3:]
-    rest = re.sub(r'\s*\([^)]*\)\s*$', '', rest)
-    return rest.strip()
+    rest = re.sub(r'\s*\([^)]*\)\s*$', '', rest).strip()
+
+    # Root-cause fix for the recurring "swapped title order" failure mode
+    # (previously only patched one leaked word at a time via _ENTITY_EXCLUDE,
+    # e.g. "party"/"confidential"/"risk"/"commercial"/"transfer"/"restrictions"):
+    # some ingested titles have DocID-then-Topic order ("SHA-OmniRetail –
+    # Transfer Restrictions") instead of the expected Topic-then-DocID order
+    # ("Transfer Restrictions – SHA-OmniRetail"), so taking the last segment
+    # grabs the generic topic phrase as if it were the identifier. Confirmed
+    # live: this happened with BOTH "Transfer Restrictions" (VoltMetric case)
+    # and "Information Rights" (SteelCircle case) — two different generic
+    # phrases, same swap pattern — so a word-list can never fully close this;
+    # it needs a structural check instead. If the last segment doesn't look
+    # like a real document ID at all (no doc-type prefix, no camelCase — just
+    # ordinary multi-word prose) AND the alternate segment DOES look like one,
+    # use the alternate segment. A genuine multi-word party name with no
+    # prefix (e.g. "Meridian Portfolio Labs LLP") also fails the ID-shape check,
+    # but its alternate segment ("Recitals", a plain topic word) fails it too,
+    # so the original `rest` is correctly kept in that case — this only kicks
+    # in when exactly one of the two candidates looks ID-shaped.
+    if not _looks_like_doc_id(rest):
+        # Deliberately does NOT require first_dash != dash — the common case is
+        # a title with exactly ONE " – " separator, where both point to the same
+        # position; the multi-dash case ("Holding – Motion to Dismiss – HASG")
+        # is still handled safely since its naive first segment ("Holding")
+        # won't look like a real doc ID either, so it falls through unchanged.
+        first_dash = title.find(" – ")
+        if first_dash >= 0:
+            first_seg = title[:first_dash].strip()
+            if _looks_like_doc_id(first_seg):
+                return first_seg
+    return rest
+
+
+_DOC_ID_SHAPE_RE = re.compile(r'^(?:sha|jva?|nda|sa|msa|ccd)\d*[-]', re.IGNORECASE)
+
+
+def _looks_like_doc_id(s: str) -> bool:
+    """True if a title segment looks like a real document identifier rather
+    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Meridian")
+    or a single camelCase word ("JVReVolt"), not generic multi-word prose.
+    """
+    if not s:
+        return False
+    if _DOC_ID_SHAPE_RE.match(s):
+        return True
+    return " " not in s and bool(re.search(r'[a-z][A-Z]', s))
 
 
 def _extract_doc_entities(pages: dict) -> set[str]:
