@@ -418,6 +418,19 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
     )
     try:
         raw, _usage = llm.ask(prompt, fast=False, max_tokens=config.MAX_TOKENS_GROUNDING_CHECK)
+        # Same truncation failure mode as generate_answer's answer-generation
+        # pass (services/wiki.py): a large context/answer (e.g. a 35-row
+        # cross-document obligation table) can make the judge's own reasoning +
+        # JSON output exceed the token budget. Confirmed live in two different
+        # shapes — sometimes the whole budget goes to hidden reasoning and raw
+        # comes back completely empty, sometimes it writes ~900 chars of real
+        # JSON but still gets cut off mid-string before the closing brace. A
+        # truncated response can never be trusted to be valid JSON either way,
+        # so retry once with a larger budget whenever finish_reason == "length",
+        # regardless of whether the partial output looks empty or substantial.
+        if _usage.get("finish_reason") == "length":
+            logger.warning("Grounding check truncated (finish_reason=length) — retrying with larger budget")
+            raw, _usage = llm.ask(prompt, fast=False, max_tokens=config.MAX_TOKENS_GROUNDING_CHECK * 2)
         import json as _json
         start = raw.find("{")
         end = raw.rfind("}") + 1
