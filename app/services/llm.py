@@ -131,6 +131,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "finish_reason": getattr(response.choices[0], "finish_reason", None),
         }
         return content, usage
     except RateLimitError:
