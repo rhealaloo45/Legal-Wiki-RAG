@@ -90,6 +90,12 @@ BROAD_QUESTION_VECTOR_TOP_K  = 80    # Wider candidate pool for "across all X" q
 BROAD_QUESTION_PER_DOC_CAP   = 4     # Max pages any single document can contribute to a broad-question candidate list
 BROAD_QUESTION_TOTAL_CAP     = 60    # Final page budget for a broad question after diversification (vs. 15 for a normal question) — raised to fit a Parties page + clause page per document without starving document breadth
 
+# Reranking (Phase 3)
+RRF_K                        = 60    # Reciprocal Rank Fusion constant — standard default; larger = flatter weighting of rank position
+HYBRID_FUSION_TOP_K          = 23    # Final page budget after RRF fusion for a NON-broad hybrid query (≈ old VECTOR_SEARCH_TOP_K + HYBRID_BM25_SUPPLEMENT_N, preserves prior context size)
+RERANK_CANDIDATE_N           = 25    # Candidates sent to the optional LLM reranker (titles+summaries only)
+MAX_TOKENS_RERANK            = 2048  # Fast-model rerank: the gpt-oss reasoning model spends most of the budget on hidden reasoning, so a small cap (e.g. 400) returns EMPTY output — 2048 is the smallest that reliably emits the JSON ranking for ~25 candidates
+
 # Compaction thresholds (S3, Phase 4)
 COMPACTION_APPEND_THRESHOLD  = int(os.getenv("COMPACTION_APPEND_THRESHOLD", "5"))
 COMPACTION_CHAR_THRESHOLD    = int(os.getenv("COMPACTION_CHAR_THRESHOLD", "8000"))
@@ -121,6 +127,11 @@ ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "tru
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
 MAX_TOKENS_GROUNDING_CHECK = 900  # bumped from 500: full (untruncated) answers can surface more ungrounded_claims entries
+
+# Optional LLM reranking pass (Phase 3). RRF fusion is always on (free); this adds
+# a fast-model relevance rerank ON TOP, applied only to broad/family queries where
+# precision matters most. Off by default — enable to A/B its quality/latency cost.
+ENABLE_RERANK = os.getenv("ENABLE_RERANK", "false").lower() == "true"
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

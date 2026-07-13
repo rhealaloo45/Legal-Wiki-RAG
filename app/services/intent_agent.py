@@ -184,6 +184,7 @@ class QueryState(TypedDict, total=False):
     needs_clarification: bool
     clarification_data: dict
     unconfirmed_doc_reference: bool
+    scope_decision: dict
     # Retrieval / generation
     conversation_context: str
     wiki_context: str
@@ -333,15 +334,46 @@ def check_clarification_node(state: QueryState) -> dict:
     return {"needs_clarification": False, "conversation_context": conv}
 
 
+def resolve_scope_node(state: QueryState) -> dict:
+    """Resolve where retrieval is allowed to search (Phase 2) — single document,
+    a document family, or the whole corpus — in one place, before retrieval.
+
+    Fail-open: any internal error yields a default "corpus" decision so the
+    pipeline still answers exactly as it did pre-Phase-2.
+    """
+    logger.info("[AGENT] resolve_scope_node")
+    try:
+        decision = wiki.resolve_scope(state["question"], state["session_id"])
+    except Exception as e:
+        logger.error("resolve_scope failed, defaulting to corpus: %s", e)
+        decision = {"scope": "corpus", "target_docs": [], "target_family": None,
+                    "is_broad": False, "confidence": 0.0, "method": "error"}
+    logger.info("[AGENT] scope=%s family=%s broad=%s method=%s",
+                decision.get("scope"), decision.get("target_family"),
+                decision.get("is_broad"), decision.get("method"))
+    return {"scope_decision": decision}
+
+
 def retrieve_context_node(state: QueryState) -> dict:
     logger.info("[AGENT] retrieve_context_node: intent=%s", state.get("intent"))
     _emit({"stage": "retrieving", "status": "active", "message": "Retrieving relevant pages…"})
     conv = state.get("conversation_context") or wiki.build_conversation_context(state["session_id"])
     hints = get_query_strategy(state["intent"])
+    # Phase 2: forward the resolved scope's family filter + broad flag into
+    # retrieval. Only "family" scope narrows the vector search; everything else
+    # passes doc_family=None / force_broad as-decided, preserving prior behaviour.
+    scope = state.get("scope_decision") or {}
+    _fam = scope.get("target_family") if scope.get("scope") == "family" else None
+    _force_broad = bool(scope.get("is_broad"))
+    # single_doc scope resolved to concrete documents (e.g. a party-name content
+    # match) — pin retrieval to them so a topically-similar page from another
+    # agreement can't crowd out the document the user actually named.
+    _force_docs = scope.get("target_docs") if scope.get("scope") == "single_doc" else None
     res = wiki.get_context(
         state["question"], state["session_id"],
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
+        doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
     )
     titles = res.get("selected_titles", [])
     _emit({"stage": "pages_retrieved", "status": "done",
@@ -575,6 +607,7 @@ def build_query_graph():
     g.add_node("classify_intent", classify_intent_node)
     g.add_node("disambiguation", check_disambiguation_node)
     g.add_node("clarification", check_clarification_node)
+    g.add_node("resolve_scope", resolve_scope_node)
     g.add_node("retrieve", retrieve_context_node)
     g.add_node("generate", generate_answer_node)
     g.add_node("validate", validate_response_node)
@@ -584,7 +617,8 @@ def build_query_graph():
     g.add_conditional_edges("disambiguation", _route_after_disambiguation,
                             {"stop": END, "continue": "clarification"})
     g.add_conditional_edges("clarification", _route_after_clarification,
-                            {"stop": END, "continue": "retrieve"})
+                            {"stop": END, "continue": "resolve_scope"})
+    g.add_edge("resolve_scope", "retrieve")
     g.add_edge("retrieve", "generate")
     g.add_edge("generate", "validate")
     g.add_edge("validate", END)

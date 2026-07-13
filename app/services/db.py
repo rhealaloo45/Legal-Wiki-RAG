@@ -100,10 +100,10 @@ def _init_schema(engine) -> None:
                 session_id TEXT NOT NULL,
                 title      TEXT NOT NULL,
                 embedding  vector({_emb_dims}),
+                doc_family TEXT,
                 PRIMARY KEY (session_id, title)
             )
         """))
-
         # Dimension migration: if the table already exists but was created with
         # a different vector size (e.g. 1536 default before nemotron/2048 model),
         # drop and recreate.  Embeddings are always re-derivable, so this is safe.
@@ -132,11 +132,28 @@ def _init_schema(engine) -> None:
                         session_id TEXT NOT NULL,
                         title      TEXT NOT NULL,
                         embedding  vector({_emb_dims}),
+                        doc_family TEXT,
                         PRIMARY KEY (session_id, title)
                     )
                 """))
         except Exception as _dim_err:
             logger.warning("Could not check page_embeddings dimension: %s", _dim_err)
+
+        # doc_family (Phase 1) — added AFTER the dimension-migration block so the
+        # guard applies to the final table whether it was freshly created, an old
+        # pre-doc_family table, or just dropped+recreated above. Composite btree
+        # index makes the family pre-filter cheap before the HNSW ORDER BY.
+        try:
+            conn.execute(text("""
+                ALTER TABLE page_embeddings
+                ADD COLUMN IF NOT EXISTS doc_family TEXT
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS page_embeddings_family_idx
+                ON page_embeddings (session_id, doc_family)
+            """))
+        except Exception as _emb_fam_err:
+            logger.warning("Could not add page_embeddings.doc_family column/index (may already exist): %s", _emb_fam_err)
 
         # HNSW index for sub-5ms cosine similarity search at 140k+ pages.
         # pgvector ≤ 0.6 enforces a hard 2000-dimension limit on HNSW/IVFFlat.
@@ -185,6 +202,8 @@ def _init_schema(engine) -> None:
                 notice_period      TEXT,
                 payment_terms      TEXT,
                 matter_reference   TEXT,
+                doc_type           TEXT,
+                doc_family         TEXT,
                 PRIMARY KEY (session_id, title)
             )
         """))
@@ -198,6 +217,20 @@ def _init_schema(engine) -> None:
             """))
         except Exception as _matter_ref_err:
             logger.warning("Could not add matter_reference column (may already exist): %s", _matter_ref_err)
+
+        # doc_type / doc_family added later (Phase 0, 20k-doc scale work) — same
+        # migration guard so pre-existing session DBs pick up the columns.
+        try:
+            conn.execute(text("""
+                ALTER TABLE page_metadata
+                ADD COLUMN IF NOT EXISTS doc_type TEXT
+            """))
+            conn.execute(text("""
+                ALTER TABLE page_metadata
+                ADD COLUMN IF NOT EXISTS doc_family TEXT
+            """))
+        except Exception as _docfam_err:
+            logger.warning("Could not add doc_type/doc_family columns (may already exist): %s", _docfam_err)
 
         # S2: FTS column + GIN index for O(log N) cross-reference (Phase 4)
         # Add generated tsvector column to pages if it doesn't exist yet.
@@ -373,8 +406,15 @@ def count_relations(session_id: str) -> int:
 # Embeddings (Phase 3 — pgvector search)
 # ---------------------------------------------------------------------------
 
-def upsert_embedding(session_id: str, title: str, embedding: list[float]) -> None:
-    """Store or update a page embedding vector."""
+def upsert_embedding(session_id: str, title: str, embedding: list[float],
+                     doc_family: str | None = None) -> None:
+    """Store or update a page embedding vector.
+
+    doc_family (Phase 1) is denormalized onto the embedding row so
+    search_similar_pages can pre-filter by family without a join. Optional and
+    backward-compatible — existing callers that omit it store NULL, which the
+    unfiltered search path ignores.
+    """
     from sqlalchemy import text
     engine = get_engine()
     # Format as pgvector literal string: [x1,x2,...] then CAST to vector
@@ -382,39 +422,86 @@ def upsert_embedding(session_id: str, title: str, embedding: list[float]) -> Non
     with engine.connect() as conn:
         conn.execute(
             text("""
-                INSERT INTO page_embeddings (session_id, title, embedding)
-                VALUES (:sid, :title, CAST(:embedding AS vector))
+                INSERT INTO page_embeddings (session_id, title, embedding, doc_family)
+                VALUES (:sid, :title, CAST(:embedding AS vector), :fam)
                 ON CONFLICT (session_id, title) DO UPDATE SET
-                    embedding = EXCLUDED.embedding
+                    embedding  = EXCLUDED.embedding,
+                    doc_family = COALESCE(EXCLUDED.doc_family, page_embeddings.doc_family)
             """),
-            {"sid": session_id, "title": title, "embedding": emb_str},
+            {"sid": session_id, "title": title, "embedding": emb_str, "fam": doc_family},
         )
         conn.commit()
 
 
 def search_similar_pages(
-    session_id: str, query_embedding: list[float], limit: int = 25
+    session_id: str, query_embedding: list[float], limit: int = 25,
+    doc_family: "str | list[str] | None" = None,
 ) -> list[str]:
     """Return page titles ordered by cosine similarity to query_embedding.
 
     Uses the HNSW index for sub-5ms lookup even at 140k+ pages.
     Returns [] if no embeddings exist for this session.
+
+    doc_family (Phase 1): when provided (a single family or a list), the search
+    is pre-filtered to embedding rows in those families before the ANN ordering.
+    This narrows the candidate set for family-scoped questions ("across all
+    NDAs") at 20k-doc scale, cutting near-neighbour noise. None = search the
+    whole session (backward-compatible default).
     """
     from sqlalchemy import text
     engine = get_engine()
     emb_str = "[" + ",".join(f"{x:.8f}" for x in query_embedding) + "]"
+    params = {"sid": session_id, "embedding": emb_str, "limit": limit}
+    family_clause = ""
+    if doc_family:
+        families = [doc_family] if isinstance(doc_family, str) else list(doc_family)
+        if families:
+            family_clause = "AND doc_family = ANY(:families)"
+            params["families"] = families
     with engine.connect() as conn:
         rows = conn.execute(
-            text("""
+            text(f"""
                 SELECT title
                 FROM page_embeddings
                 WHERE session_id = :sid
+                {family_clause}
                 ORDER BY embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
             """),
-            {"sid": session_id, "embedding": emb_str, "limit": limit},
+            params,
         )
         return [row.title for row in rows]
+
+
+def backfill_embedding_families(session_id: str) -> int:
+    """Populate page_embeddings.doc_family from existing metadata, no re-embed.
+
+    Set-based UPDATE joining each embedding row → its page → that page's source
+    document → the document's doc_family (Phase 0 metadata). Lets an
+    already-embedded corpus gain family filtering without regenerating vectors —
+    used by backfill_embeddings.py and safe to run repeatedly. Returns the number
+    of rows updated.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                UPDATE page_embeddings pe
+                SET doc_family = pm.doc_family
+                FROM pages p
+                JOIN page_metadata pm
+                  ON pm.session_id = p.session_id AND pm.title = p.source_doc
+                WHERE pe.session_id = p.session_id
+                  AND pe.title = p.title
+                  AND pe.session_id = :sid
+                  AND pm.doc_family IS NOT NULL
+                  AND pe.doc_family IS DISTINCT FROM pm.doc_family
+            """),
+            {"sid": session_id},
+        )
+        conn.commit()
+        return result.rowcount or 0
 
 
 def count_embeddings(session_id: str) -> int:
@@ -693,6 +780,41 @@ def find_pages_mentioning_title(session_id: str, title: str) -> list[str]:
         return [row.title for row in rows]
 
 
+def find_source_docs_mentioning_phrase(
+    session_id: str, phrase: str, cap: int = 25
+) -> list[str]:
+    """Return the distinct source_docs whose page CONTENT mentions ``phrase``.
+
+    Used to resolve a document by a party name the user typed (e.g. "SteelLoop
+    Resource Recovery", "Cold Chain Energy Services") when that name lives only
+    in the document body — not in the filename, page-title identifier, or the
+    (often redaction-masked) parties metadata. Uses phraseto_tsquery so the
+    words must appear ADJACENTLY, which is what makes a multi-word party name
+    document-specific instead of matching every doc that happens to share a
+    common word. Cached "Q:" answer pages are excluded so a prior answer can't
+    masquerade as a source document. GIN-indexed (content_tsv) → O(log N).
+
+    Returns [] when the phrase yields no FTS tokens or matches nothing.
+    """
+    from sqlalchemy import text
+    if not phrase or not phrase.strip():
+        return []
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT source_doc FROM pages
+                WHERE session_id = :sid
+                  AND title NOT LIKE 'Q:%'
+                  AND source_doc IS NOT NULL
+                  AND content_tsv @@ phraseto_tsquery('english', :phrase)
+                LIMIT :cap
+            """),
+            {"sid": session_id, "phrase": phrase, "cap": cap},
+        )
+        return [row.source_doc for row in rows]
+
+
 # ---------------------------------------------------------------------------
 # S3: Page compaction helpers (Phase 4)
 # ---------------------------------------------------------------------------
@@ -795,6 +917,11 @@ _METADATA_COLUMNS = (
     "governing_law", "jurisdiction", "effective_date", "termination_notice",
     "liability_cap", "ip_ownership", "parties", "auto_renewal",
     "notice_period", "payment_terms", "matter_reference",
+    # doc_type: the LLM's inferred free-text type ("NDA", "Master Services Agreement").
+    # doc_family: doc_type normalized to a small controlled vocabulary (see
+    # wiki._normalize_doc_family) — the queryable grouping key for family-scoped
+    # retrieval ("across all NDAs") and metadata-filtered vector search (Phase 1).
+    "doc_type", "doc_family",
 )
 
 
@@ -1065,3 +1192,43 @@ def get_metadata(session_id: str, doc_name: str) -> dict:
         if row is None:
             return {}
         return {k: v for k, v in zip(_METADATA_COLUMNS, row) if v is not None}
+
+
+def get_documents_by_family(session_id: str, doc_family: str) -> list[str]:
+    """Return the doc_name (title) of every document in a given family.
+
+    Used by scope resolution (Phase 2) to answer family-scoped questions
+    ("across all NDAs") by resolving the family to its concrete member documents.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT title
+                FROM page_metadata
+                WHERE session_id = :sid AND doc_family = :fam
+            """),
+            {"sid": session_id, "fam": doc_family},
+        )
+        return [row.title for row in rows]
+
+
+def list_doc_families(session_id: str) -> list[str]:
+    """Return the distinct non-null doc_family values present in a session.
+
+    Lets scope resolution know which families actually exist before trying to
+    match a question's phrasing against one.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT doc_family
+                FROM page_metadata
+                WHERE session_id = :sid AND doc_family IS NOT NULL
+            """),
+            {"sid": session_id},
+        )
+        return [row.doc_family for row in rows]
