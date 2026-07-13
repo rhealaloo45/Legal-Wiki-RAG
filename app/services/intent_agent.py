@@ -183,6 +183,8 @@ class QueryState(TypedDict, total=False):
     disambiguation_data: dict
     needs_clarification: bool
     clarification_data: dict
+    unconfirmed_doc_reference: bool
+    scope_decision: dict
     # Retrieval / generation
     conversation_context: str
     wiki_context: str
@@ -227,10 +229,60 @@ def classify_intent_node(state: QueryState) -> dict:
 
 def check_disambiguation_node(state: QueryState) -> dict:
     logger.info("[AGENT] check_disambiguation_node")
-    if state.get("target_doc") or state.get("is_followup") \
-            or wiki._question_names_a_document(state["question"], []):
-        logger.info("[AGENT] disambiguation skipped (doc named or followup)")
+    # Deliberately does NOT bypass on is_followup: classify_query() already has
+    # deterministic vague-reference detection (_VAGUE_DOC_PATTERN catches "this
+    # document"/"the agreement" etc.) that must still run even mid-conversation —
+    # skipping it for every follow-up meant a vague "this document" question
+    # silently resolved to whatever document conversation history implied,
+    # without ever confirming with the user (confirmed live: a "top 10 risks in
+    # this document" follow-up silently answered about a document from several
+    # questions earlier, no disambiguation prompt shown). Named-document and
+    # known-entity mentions still skip via the checks inside classify_query().
+    if state.get("target_doc"):
+        logger.info("[AGENT] disambiguation skipped (doc named)")
         return {"needs_disambiguation": False}
+
+    if wiki._question_names_a_document(state["question"], []):
+        # _question_names_a_document is a pure pattern match ("type + number",
+        # e.g. "service agreement 1") — it has no way to check whether such a
+        # document actually exists in this corpus. Confirmed live: a nonexistent
+        # "service agreement 1" reference was treated as fully resolved every
+        # time on this signal alone, so disambiguation never ran; retrieval then
+        # fell through to generic semantic search and silently returned a
+        # different arbitrary document on every rephrasing of the same question
+        # (Test_SA_36, then Test_SA_44, then Test_SA_35 across one session),
+        # with the answer-generation model inventing its own "Service Agreement
+        # 1 (Test_SA_44)" identity label that retrieval never established.
+        # Cross-check against the real corpus before trusting the pattern match.
+        try:
+            index = wiki._load_index(state["session_id"])
+            pages = index.get("pages", {})
+            # _question_names_a_document's entity-pattern branch (as opposed to
+            # its numbered-pattern branch) captures at most 3 words before the
+            # doc-type phrase — for a longer real company name ("DriveConnect
+            # Experience Labs Private Limited joint venture agreement") it grabs
+            # a truncated fragment ("Labs Private Limited") that _detect_
+            # mentioned_files correctly can't find verbatim, even though the
+            # full real entity genuinely exists and gets found via the broader
+            # fuzzy entity matcher elsewhere in the pipeline. Confirmed live:
+            # this exact case was flagged "unconfirmed" despite both target
+            # documents being correctly retrieved and cited moments later.
+            # Accept that broader signal as confirmation too, not just an exact
+            # file-name/number match.
+            confirmed = bool(wiki._detect_mentioned_files(state["question"], pages)) \
+                or wiki._question_mentions_known_entity(state["question"], pages)
+        except Exception as e:
+            logger.error("Named-document confirmation check failed: %s", e)
+            confirmed = True  # fail open — don't block the pipeline on an internal error
+        if confirmed:
+            logger.info("[AGENT] disambiguation skipped (doc named and confirmed)")
+            return {"needs_disambiguation": False}
+        logger.warning(
+            "Question names a document by pattern but no matching document exists "
+            "in this session — flagging as unconfirmed instead of silently "
+            "answering from an arbitrary document: %r", state["question"][:80],
+        )
+        return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
@@ -282,15 +334,46 @@ def check_clarification_node(state: QueryState) -> dict:
     return {"needs_clarification": False, "conversation_context": conv}
 
 
+def resolve_scope_node(state: QueryState) -> dict:
+    """Resolve where retrieval is allowed to search (Phase 2) — single document,
+    a document family, or the whole corpus — in one place, before retrieval.
+
+    Fail-open: any internal error yields a default "corpus" decision so the
+    pipeline still answers exactly as it did pre-Phase-2.
+    """
+    logger.info("[AGENT] resolve_scope_node")
+    try:
+        decision = wiki.resolve_scope(state["question"], state["session_id"])
+    except Exception as e:
+        logger.error("resolve_scope failed, defaulting to corpus: %s", e)
+        decision = {"scope": "corpus", "target_docs": [], "target_family": None,
+                    "is_broad": False, "confidence": 0.0, "method": "error"}
+    logger.info("[AGENT] scope=%s family=%s broad=%s method=%s",
+                decision.get("scope"), decision.get("target_family"),
+                decision.get("is_broad"), decision.get("method"))
+    return {"scope_decision": decision}
+
+
 def retrieve_context_node(state: QueryState) -> dict:
     logger.info("[AGENT] retrieve_context_node: intent=%s", state.get("intent"))
     _emit({"stage": "retrieving", "status": "active", "message": "Retrieving relevant pages…"})
     conv = state.get("conversation_context") or wiki.build_conversation_context(state["session_id"])
     hints = get_query_strategy(state["intent"])
+    # Phase 2: forward the resolved scope's family filter + broad flag into
+    # retrieval. Only "family" scope narrows the vector search; everything else
+    # passes doc_family=None / force_broad as-decided, preserving prior behaviour.
+    scope = state.get("scope_decision") or {}
+    _fam = scope.get("target_family") if scope.get("scope") == "family" else None
+    _force_broad = bool(scope.get("is_broad"))
+    # single_doc scope resolved to concrete documents (e.g. a party-name content
+    # match) — pin retrieval to them so a topically-similar page from another
+    # agreement can't crowd out the document the user actually named.
+    _force_docs = scope.get("target_docs") if scope.get("scope") == "single_doc" else None
     res = wiki.get_context(
         state["question"], state["session_id"],
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
+        doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
     )
     titles = res.get("selected_titles", [])
     _emit({"stage": "pages_retrieved", "status": "done",
@@ -315,12 +398,23 @@ def generate_answer_node(state: QueryState) -> dict:
            "intent": intent, "prompt_type": intent,
            "message": f"Generating {label.lower()} answer…"})
     meta = state.get("retrieval_meta") or {}
+    # The question named a document by pattern ("service agreement 1") that
+    # check_disambiguation_node could not confirm exists in this corpus.
+    # Previously appended as a note to the question text itself — verified
+    # live that placement gets partial compliance at best (the {question}
+    # placeholder sits mid-prompt, right before a rigid REQUIRED OUTPUT FORMAT
+    # directive every per-intent template ends with, which the model follows
+    # very literally and which crowds out a free-form instruction competing
+    # for attention at that position). Passed through as its own parameter
+    # instead so wiki.generate_answer can inject it via house_rules_block,
+    # which every template substitutes at the TOP, before the RULES section.
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
             state.get("selected_titles", []), state["session_id"],
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
+            unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -331,6 +425,15 @@ def generate_answer_node(state: QueryState) -> dict:
     wr["intent_label"] = label
     wr["intent_confidence"] = state.get("intent_confidence", 0.0)
     wr["intent_method"] = state.get("intent_method", "")
+    # Private key, not part of the public answer shape — app.py pops this off
+    # before the SSE payload reaches the frontend. Exists only so the RAG query
+    # log (_log_rag_query) can record what was actually retrieved; previously
+    # app.py had no access to the raw context at all and hardcoded "" there,
+    # silently making the logged "contexts" field meaningless for every query
+    # through this streaming path (confirmed: 354/446 logged records showed 0
+    # contexts, including substantive multi-page answers where retrieval had
+    # genuinely pulled real content).
+    wr["_debug_context"] = state.get("wiki_context", "")
     return {"answer_result": wr}
 
 
@@ -368,7 +471,12 @@ Only flag it as ungrounded if the answer goes further and asserts something affi
 by context (e.g. inventing a reason FOR the absence, or claiming the document was fully reviewed when \
 it wasn't).
 
-Respond with ONLY valid JSON, no other text:
+Respond with ONLY valid JSON, no other text — no preamble, no step-by-step reasoning, no restating \
+the answer or context before the JSON. For a long, many-source answer, do not verify every claim \
+narratively in your head one by one before writing output — spot-check the most load-bearing claims \
+(specific numbers, dates, party names) and write the JSON directly. List at most 8 ungrounded_claims \
+even if more exist (the worst offenders are enough to make the point). Go straight to the JSON block \
+below as your first output:
 {{
   "grounding_score": <0-100>,
   "ungrounded_claims": ["<fabricated fact not in context>", ...],
@@ -401,6 +509,36 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
     )
     try:
         raw, _usage = llm.ask(prompt, fast=False, max_tokens=config.MAX_TOKENS_GROUNDING_CHECK)
+        # Same truncation failure mode as generate_answer's answer-generation
+        # pass (services/wiki.py): a large context/answer (e.g. a 35-row
+        # cross-document obligation table) can make the judge's own reasoning +
+        # JSON output exceed the token budget. Confirmed live in three
+        # different shapes — sometimes the whole budget goes to hidden
+        # reasoning and raw comes back completely empty, sometimes it writes
+        # ~900 chars of real JSON but still gets cut off mid-string before the
+        # closing brace, and for genuinely large broad-synthesis answers
+        # (15+ source documents, 14k+ char answer) even a single doubling
+        # still spends the entire retry budget on hidden reasoning with zero
+        # visible output — confirmed live that a 2x retry (1800 tokens) still
+        # truncated empty, but 4x (3600) succeeded cleanly with ~2400
+        # completion tokens used. A truncated response can never be trusted
+        # to be valid JSON either way, so keep escalating the budget (doubling
+        # each time, capped at 4 attempts total) whenever finish_reason ==
+        # "length", regardless of whether the partial output looks empty or
+        # substantial. Confirmed live on a 63-page/43.9k-char-context answer:
+        # 900/1800/3600 all came back raw_len=0 with completion_tokens exactly
+        # equal to the budget (the model spent 100% of it on hidden reasoning
+        # tokens with zero visible output) — only 7200 succeeded (finish_reason
+        # stop, 4226 completion tokens, 443 visible chars). One more doubling
+        # step than before is needed to reach that budget.
+        attempt_budget = config.MAX_TOKENS_GROUNDING_CHECK
+        attempts = 0
+        while _usage.get("finish_reason") == "length" and attempts < 3:
+            attempt_budget *= 2
+            attempts += 1
+            logger.warning("Grounding check truncated (finish_reason=length) — retrying with budget=%d (attempt %d)",
+                            attempt_budget, attempts)
+            raw, _usage = llm.ask(prompt, fast=False, max_tokens=attempt_budget)
         import json as _json
         start = raw.find("{")
         end = raw.rfind("}") + 1
@@ -469,6 +607,7 @@ def build_query_graph():
     g.add_node("classify_intent", classify_intent_node)
     g.add_node("disambiguation", check_disambiguation_node)
     g.add_node("clarification", check_clarification_node)
+    g.add_node("resolve_scope", resolve_scope_node)
     g.add_node("retrieve", retrieve_context_node)
     g.add_node("generate", generate_answer_node)
     g.add_node("validate", validate_response_node)
@@ -478,7 +617,8 @@ def build_query_graph():
     g.add_conditional_edges("disambiguation", _route_after_disambiguation,
                             {"stop": END, "continue": "clarification"})
     g.add_conditional_edges("clarification", _route_after_clarification,
-                            {"stop": END, "continue": "retrieve"})
+                            {"stop": END, "continue": "resolve_scope"})
+    g.add_edge("resolve_scope", "retrieve")
     g.add_edge("retrieve", "generate")
     g.add_edge("generate", "validate")
     g.add_edge("validate", END)
