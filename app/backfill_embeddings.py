@@ -144,6 +144,17 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> None:
 
         total_embedded += session_embedded
         total_skipped  += session_errors
+
+        # Phase 1: stamp doc_family onto the freshly-embedded rows from existing
+        # metadata (backfill path doesn't know each page's family at embed time),
+        # so family-filtered vector search works for backfilled corpora too.
+        try:
+            fam_updated = _db.backfill_embedding_families(session_id)
+            if fam_updated:
+                logger.info("  [%s] doc_family populated on %d embedding rows", session_id, fam_updated)
+        except Exception as _fam_err:
+            logger.warning("  [%s] doc_family backfill failed: %s", session_id, _fam_err)
+
         logger.info(
             "  [%s] complete — %d embedded, %d errors",
             session_id, session_embedded, session_errors,
