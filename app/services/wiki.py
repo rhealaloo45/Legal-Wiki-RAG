@@ -239,10 +239,10 @@ def _has_structural_conflict(text_a: str, text_b: str) -> bool:
 # ---------------------------------------------------------------------------
 # Doc types whose pages are document-specific and MUST be prefixed
 _CONTRACT_DOC_TYPES = re.compile(
-    r'\b(?:Master Service Agreement|Service Agreement|Service Level Agreement|'
+    r'\b(?:Master Services?\s+Agreement|Services?\s+Agreement|Service Level Agreement|'
     r'Professional Services Agreement|NDA|Non.?Disclosure|Shareholder.?s? Agreement|'
     r'Joint Venture|Share Purchase|Subscription Agreement|'
-    r'Master Service Agreement Amendment|Employment Agreement|'
+    r'Master Services?\s+Agreement Amendment|Employment Agreement|'
     r'Consulting Agreement|License Agreement|Supply Agreement)\b',
     re.IGNORECASE,
 )
@@ -1482,6 +1482,70 @@ def _distinct_source_docs(pages: dict) -> set[str]:
     return docs
 
 
+# Broad, cross-document question detector — used only to widen and diversify the
+# hybrid vector-search candidate pool. A flat top-K nearest-neighbour search has
+# no document-diversity awareness: for "across all Service Agreements" style
+# questions on a corpus with 7+ matching documents, the top-K can fill up with
+# pages from just 2-3 documents whose clauses happen to be lexically closest,
+# silently starving the rest even though they're all relevant. Confirmed live
+# (500-doc session): cross-SA liability-caps and cross-court-case digital-
+# evidence questions both synthesized only 2-3 of 7+ relevant documents.
+_BROAD_SCOPE_RE = re.compile(
+    r'\bacross all\b|\ball of the\b|\beach of the\b|\bacross the (corpus|documents)\b|'
+    r'\bevery (service agreement|shareholders? agreement|joint venture agreement|judgment|court case)\b',
+    re.IGNORECASE,
+)
+
+
+_PARTIES_TITLE_RE = re.compile(r'^parties\b', re.IGNORECASE)
+
+
+def _diversify_by_document(titles: list[str], pages: dict, per_doc_cap: int, total_cap: int) -> list[str]:
+    """Cap how many pages from any single source_doc can occupy the candidate
+    list, preserving similarity order, so a broad question's page budget gets
+    spread across documents instead of concentrating on the closest few.
+
+    Also force-includes each document's "Parties" identity page alongside its
+    semantically-closest clause page. Without this, a per-document cap of 1
+    page picks only whichever clause page matches the query topic (e.g.
+    "Limitation of Liability"), which never contains party names — the model
+    still produces correct party names (evidently carried over from earlier
+    turns in the same long session), but the grounding checker then flags
+    them as unsupported by *this* turn's context, since they genuinely aren't
+    in it. Confirmed live: spot-checked 3 "ungrounded" party pairings the
+    grounding check flagged, all 3 were factually exact — a retrieval gap,
+    not a fabrication.
+    """
+    parties_by_doc: dict[str, str] = {}
+    for t, p in pages.items():
+        if isinstance(p, dict) and _PARTIES_TITLE_RE.match(t):
+            sd = p.get("source_doc", "")
+            if sd and sd not in parties_by_doc:
+                parties_by_doc[sd] = t
+
+    per_doc_count: dict[str, int] = {}
+    result: list[str] = []
+    seen_docs: set[str] = set()
+    for t in titles:
+        page = pages.get(t)
+        sd = page.get("source_doc", "") if isinstance(page, dict) else ""
+
+        if sd not in seen_docs:
+            seen_docs.add(sd)
+            parties_title = parties_by_doc.get(sd)
+            if parties_title and parties_title != t and len(result) < total_cap:
+                result.append(parties_title)
+                per_doc_count[sd] = per_doc_count.get(sd, 0) + 1
+
+        if per_doc_count.get(sd, 0) >= per_doc_cap or t in result:
+            continue
+        result.append(t)
+        per_doc_count[sd] = per_doc_count.get(sd, 0) + 1
+        if len(result) >= total_cap:
+            break
+    return result
+
+
 def _norm_doc_name(name: str) -> str:
     """Normalise a source-doc path/filename to a comparable lowercase string.
 
@@ -2461,7 +2525,7 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False) -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -2516,6 +2580,37 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     from services import rules as _rules
     house_rules_block = _rules.enabled_rules_block()
 
+    # The question named a document by pattern ("service agreement 1") that
+    # check_disambiguation_node could not confirm exists in this corpus. Two
+    # placements were tried and verified live before this one: appended to
+    # `question` (embeds mid-prompt, right before a rigid REQUIRED OUTPUT
+    # FORMAT directive the model follows very literally — got partial
+    # compliance, stopped the false "Service Agreement 1 (Test_SA_44)" title
+    # but dropped the disclosure-first-sentence requirement); prepended to
+    # house_rules_block (substituted right after metadata_block, but
+    # metadata_block itself can be large — party names and matter references
+    # across every selected document — so the note still ends up hundreds of
+    # characters deep, diluting it the same way). Prepending directly onto the
+    # fully-composed prompt, before even the model's persona-setting opening
+    # sentence, is the most salient position available.
+    _unconfirmed_doc_note = (
+        "CRITICAL — UNCONFIRMED DOCUMENT REFERENCE: No document in this corpus "
+        "matches the specific document number/name referenced in the question "
+        "below. This does not override the required output structure below "
+        "(reasoning block first, if one is specified) — it constrains what "
+        "goes inside it. The FIRST LINE of your reasoning (or, if no reasoning "
+        "block is specified, the FIRST SENTENCE of your answer) MUST state "
+        "this plainly, e.g. \"No document matching '<name>' exists in this "
+        "corpus.\" The final answer itself must ALSO open with that same "
+        "disclosure as its first sentence, before any table or analysis. Do "
+        "NOT use the referenced name as a title or heading anywhere in the "
+        "answer (e.g. never write \"... in Service Agreement 1\" as a "
+        "heading). If related documents exist that the user may have meant, "
+        "name them by their REAL identifiers and offer them as likely "
+        "alternatives — but never answer as if the referenced document were "
+        "one of them.\n\n"
+    ) if unconfirmed_doc_reference else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -2525,7 +2620,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
-    prompt = prompt_template.format(
+    prompt = _unconfirmed_doc_note + prompt_template.format(
         context=wiki_content,
         question=question,
         conversation_block=conv_block,
@@ -2847,6 +2942,25 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Confidence is already extracted from the reasoning block above —
     # no second LLM call needed.
+    if unconfirmed_doc_reference and confidence_score > 45:
+        # Confidence is the model's own self-assessment of how well it answered
+        # from what it was given — it has no visibility into whether the
+        # document the question actually named was ever confirmed to exist.
+        # Confirmed live: answers built on an unconfirmed "service agreement 1"
+        # reference carried 92-96% self-reported confidence even while
+        # grounding (a separate, independent check) read as low as 20-55% —
+        # the two signals were never reconciled. Cap it deterministically here
+        # rather than trust the model to discount its own score for a fact it
+        # can't see; 45 sits below the >=80 threshold that gates auto-caching
+        # an answer as a trusted "Q:" page below, so an unconfirmed-reference
+        # answer can never entrench itself as future ground truth either.
+        confidence_reason = (
+            f"Capped at 45 (was {confidence_score}) — the question referenced a "
+            f"document this corpus could not confirm exists; the model's own "
+            f"confidence in its retrieval-independent reasoning cannot offset that. "
+            f"{confidence_reason}"
+        )
+        confidence_score = 45
     confidence = {"score": confidence_score, "reason": confidence_reason}
 
     # Log query
@@ -2962,6 +3076,11 @@ _NON_ENTITY_WORDS = {
     "compare", "in", "of", "for", "on", "about", "regarding", "tata", "given",
     "from", "with", "and", "or", "to", "by", "under", "between", "during", "at",
     "into", "onto", "over", "after", "before", "against", "across", "within",
+    # Quantifiers over the whole corpus ("across all Service Agreements") name
+    # NO specific document — confirmed live to false-trigger unconfirmed_doc_reference
+    # (and the resulting 45%-confidence cap) on a genuinely broad, correctly
+    # cross-document-synthesized answer.
+    "all", "both", "such", "these", "those", "various", "multiple", "several", "many",
 }
 
 # Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
@@ -3110,6 +3229,49 @@ _ENTITY_EXCLUDE = {
     # of these words is treated as a topic phrase, not a real identifier).
     "transfer", "transfers", "restriction", "restrictions", "specific",
     "applicable", "analytics", "rofo", "rofr", "offer", "refusal",
+    # Found live-testing "Summarize this document in 10 bullet points..." — a
+    # fully generic question with zero identifying information still skipped
+    # disambiguation. Root cause: malformed titles like "Definitions – General
+    # (Legal Opinion)" and "Right of First Offer – General (Shared)" use the
+    # bare word "General" (or a clause-topic phrase) as their identifier segment
+    # when ingest synthesis had no distinctive party name to put there, so these
+    # generic words leaked into the entity set the same way as the cases above.
+    # A pure frequency cap (_ENTITY_DOC_FREQ_CAP) can't catch this class — each
+    # of these words happened to appear in only 1-4 documents in this corpus,
+    # same as a genuine rare entity name, so raw occurrence count can't tell
+    # them apart from a real distinctive name. Only a vocabulary-level exclusion
+    # works here.
+    "general", "liability", "provision", "provisions", "obligation",
+    "statutory", "principle", "principles", "reasoning", "standard", "standards",
+    "types", "relief", "injunctive", "notice", "notices", "breach", "threshold",
+    "approval", "rules", "protection", "harm",
+    # Found live-testing a cross-document question naming an NDA, an Arbitration
+    # Notice, and a Section 9 Petition by role (no numbers given): "arbitration",
+    # "contractual", "alleged", "preservation", "contract", "work", "under"
+    # leaked in as entities from clause-topic identifiers. _pages_matching_
+    # question_entity()'s winner-take-all scoring (keep only the highest
+    # combined-hit-count group) means a document that happens to ALSO share one
+    # of these generic words outscores — and completely excludes — a document
+    # that only matches the genuinely distinctive party names. Confirmed live:
+    # the real NDA (1 hit: "nordforge") and the real Arbitration Notice (1 hit)
+    # were both dropped in favour of an unrelated Section 9 Petition that
+    # scored 2 by also matching leaked "arbitration" vocabulary in its own
+    # identifier — even though the question named all three documents by role.
+    "arbitration", "contractual", "alleged", "preservation", "contract", "work",
+    "under",
+    # Found live-testing a DriveConnect/VoltMetric cross-document question:
+    # "Definitions – Intellectual Property (Legal Opinion)" and "Miscellaneous
+    # – Governing Law and Forum (Legal Opinion)" use a generic clause-topic
+    # label as their identifier segment (same fallback-label failure mode as
+    # "General" above), inflating unrelated Legal Opinions to a 4-way compound
+    # match that buried the real "voltmetric" (1 hit) and "joint venture
+    # agreement 5" (1 hit) matches entirely. "data" is a different cause: it's
+    # a legitimate word inside a real company name ("Pinnacle Data Analytics
+    # LLC"), but extracting individual constituent words from a multi-word
+    # identifier leaks that word as if it were its own distinctive entity —
+    # excluding it loses only the ability to match on "data" alone, not the
+    # full "Pinnacle Data Analytics" name.
+    "intellectual", "property", "governing", "forum", "proper", "data",
 }
 
 
@@ -3198,15 +3360,28 @@ def _looks_like_doc_id(s: str) -> bool:
     return " " not in s and bool(re.search(r'[a-z][A-Z]', s))
 
 
+# A genuine party/entity name (Meridian, ReVolt) is specific to one deal, so it
+# should appear in identifiers from only a handful of source documents. A token
+# appearing across many distinct documents is generic vocabulary that leaked in
+# via a descriptive or swapped-order title, not a distinctive entity name — cap
+# it here since the hand-maintained _ENTITY_EXCLUDE stoplist can never keep up
+# with every corpus. Confirmed live: on a 499-doc corpus, "Summarize this
+# document" (zero real identifying information) matched "liability", "general",
+# "provisions", and "obligation" as if they were known entities, silently
+# skipping disambiguation on a fully ambiguous query.
+_ENTITY_DOC_FREQ_CAP = 4
+
+
 def _extract_doc_entities(pages: dict) -> set[str]:
     """Return the set of distinctive entity tokens drawn from document identifiers.
 
     "SA-Meridian" → {"meridian"}, "JVReVolt" → {"revolt"},
     "Yuvraj Kanther" → {"yuvraj kanther", "yuvraj", "kanther"}. Doc-type
-    abbreviations and generic words are excluded.
+    abbreviations, generic words, and tokens too common across distinct
+    documents to be a real entity name are excluded.
     """
-    entities: set[str] = set()
-    for title in pages:
+    token_docs: dict[str, set[str]] = {}
+    for title, page in pages.items():
         ident = _doc_identifier_part(title)
         if not ident:
             continue
@@ -3225,21 +3400,40 @@ def _extract_doc_entities(pages: dict) -> set[str]:
         # which then false-matches unrelated documents via substring containment.
         if len(core.split()) > 4:
             continue
+        sd = (page.get("source_doc") or title) if isinstance(page, dict) else title
+        candidates = set()
         cl = core.lower()
         if len(cl) >= 4 and cl not in _ENTITY_EXCLUDE:
-            entities.add(cl)
+            candidates.add(cl)
         for w in re.findall(r"[A-Za-z]{4,}", core):
             wl = w.lower()
             if wl not in _ENTITY_EXCLUDE:
-                entities.add(wl)
-    return entities
+                candidates.add(wl)
+        for c in candidates:
+            token_docs.setdefault(c, set()).add(sd)
+    return {tok for tok, docs in token_docs.items() if len(docs) <= _ENTITY_DOC_FREQ_CAP}
+
+
+def _contains_token(token: str, text: str) -> bool:
+    """Word-boundary-aware substring check: True if `token` appears in `text`
+    as a whole word/phrase, not merely as a run of characters inside a longer
+    word. Confirmed live: a plain `token in text` check let the entity "vice"
+    (extracted from a "Vice Chancellor" judicial-title identifier) match inside
+    "ser‑VICE‑agreement", so ANY question mentioning "service agreement" was
+    falsely treated as naming a known entity — this collision class (a short
+    entity string happening to be a substring of an unrelated common word) is
+    distinct from, and not fixable by, the vocabulary-stoplist approach used
+    elsewhere in this file, since the token itself ("vice") is a legitimate
+    entity fragment, just not present here as a standalone word.
+    """
+    return re.search(rf'\b{re.escape(token)}\b', text) is not None
 
 
 def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     """True if the question mentions a distinctive entity/party name from a
     document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
     q = question.lower()
-    return any(ent in q for ent in _extract_doc_entities(pages))
+    return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
 
 
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
@@ -3255,7 +3449,7 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     total past ENTITY_MATCH_MAX_PAGES, abandoning force-include entirely.
     """
     q = question.lower()
-    hits = {ent for ent in _extract_doc_entities(pages) if ent in q}
+    hits = {ent for ent in _extract_doc_entities(pages) if _contains_token(ent, q)}
     if not hits:
         return []
     by_match_count: dict[int, list[str]] = {}
@@ -3263,7 +3457,7 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
         ident = _doc_identifier_part(title).lower()
         if not ident:
             continue
-        n = sum(1 for h in hits if h in ident)
+        n = sum(1 for h in hits if _contains_token(h, ident))
         if n > 0:
             by_match_count.setdefault(n, []).append(title)
     if not by_match_count:
@@ -3576,12 +3770,24 @@ def _select_relevant_pages(
             if emb_count > 0:
                 from services import embedder as _embedder
                 q_embedding = _embedder.embed(question, is_query=True)
+                is_broad = bool(_BROAD_SCOPE_RE.search(question))
+                vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=config.VECTOR_SEARCH_TOP_K
+                    session_id, q_embedding, limit=vector_limit
                 )
                 # Validate titles against the in-memory pages dict (guards against
                 # stale embeddings pointing at deleted pages)
                 valid_vector = [t for t in vector_titles if t in pages]
+                if is_broad:
+                    valid_vector = _diversify_by_document(
+                        valid_vector, pages,
+                        config.BROAD_QUESTION_PER_DOC_CAP, config.BROAD_QUESTION_TOTAL_CAP,
+                    )
+                    logger.info(
+                        "Broad cross-document question detected — widened vector search to "
+                        "%d candidates, diversified to %d pages across documents",
+                        vector_limit, len(valid_vector),
+                    )
 
                 # BM25 supplement: add keyword-matched pages that vector missed.
                 # Vector results come first (better semantic rank); BM25 pages

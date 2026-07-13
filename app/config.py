@@ -86,6 +86,9 @@ AMBIGUITY_DOC_SAMPLE_CAP     = 40    # Doc sample size shown to the check_ambigu
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
 VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
 HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector results (hybrid retrieval)
+BROAD_QUESTION_VECTOR_TOP_K  = 80    # Wider candidate pool for "across all X" questions, before per-document diversification
+BROAD_QUESTION_PER_DOC_CAP   = 4     # Max pages any single document can contribute to a broad-question candidate list
+BROAD_QUESTION_TOTAL_CAP     = 60    # Final page budget for a broad question after diversification (vs. 15 for a normal question) — raised to fit a Parties page + clause page per document without starving document breadth
 
 # Compaction thresholds (S3, Phase 4)
 COMPACTION_APPEND_THRESHOLD  = int(os.getenv("COMPACTION_APPEND_THRESHOLD", "5"))
