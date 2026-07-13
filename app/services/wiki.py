@@ -3672,8 +3672,8 @@ _PARTY_NAME_RE = re.compile(
 )
 
 
-def _resolve_docs_by_party(question: str, session_id: str) -> set[str]:
-    """Resolve a specific document from a PARTY NAME typed in the question.
+def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
+    """Resolve the document(s) of a PARTY NAME typed in the question.
 
     Lawyers name an agreement by its counterparty ("the JV with Cold Chain
     Energy Services"), not by the filename ("JVA 4") the corpus stores it under.
@@ -3683,13 +3683,16 @@ def _resolve_docs_by_party(question: str, session_id: str) -> set[str]:
     ("[Redacted Logistics Infrastructure Partner]"). So resolve it by a full-text
     CONTENT search on the distinctive party phrase.
 
-    Only narrows scope when a candidate localises to EXACTLY ONE document —
-    picking the most distinctive party named (the one hitting the fewest docs).
-    An umbrella name like "Tata Steel Limited" hits many documents and is
-    correctly ignored; the specific counterparty ("SteelLoop Resource Recovery")
-    hits one. Returns an empty set on any ambiguity, so it can never wrongly
-    starve retrieval — it only ever ADDS a precise single-document match the
-    filename/entity detectors miss.
+    Returns the doc set of the MOST distinctive party named — the one hitting the
+    fewest documents — provided that set is small (<= max_docs). An umbrella name
+    like "Tata Steel Limited" hits many documents and is correctly ignored; the
+    specific counterparty resolves to one document ("SteelLoop Resource Recovery"
+    → JVA 3) or, when the same two parties share several instruments, to that
+    small cluster ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration
+    notice + Section 9 petition). The caller decides, from how many instruments
+    the question names, whether to pin the whole cluster or narrow to one. Returns
+    an empty set on ambiguity (no hit, or the smallest set exceeds max_docs), so
+    it only ever ADDS precise matches the filename/entity detectors miss.
     """
     if not config.USE_DATABASE:
         return set()
@@ -3701,17 +3704,57 @@ def _resolve_docs_by_party(question: str, session_id: str) -> set[str]:
     best_n = 1 << 30
     for name in candidates:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=6) if d]
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=max_docs + 2) if d]
         except Exception as e:
             logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
             continue
         if docs and len(docs) < best_n:
             best_n, best_docs = len(docs), set(docs)
-    if best_docs is not None and best_n == 1:
-        logger.info("Party-name content match → single document: %s",
-                    {_norm_doc_name(d) for d in best_docs})
+    if best_docs is not None and best_n <= max_docs:
+        logger.info("Party-name content match → %d document(s): %s",
+                    best_n, {_norm_doc_name(d) for d in best_docs})
         return best_docs
     return set()
+
+
+# Distinct legal-instrument categories a question may name. Counting how many
+# DIFFERENT categories appear tells scope resolution whether a question about a
+# named party wants ONE of its instruments (summarise "the NordForge NDA") or a
+# cross-instrument view of SEVERAL ("across the NDA, the arbitration notice, and
+# the Section 9 petition") — the difference between pinning one document and
+# pinning the whole party cluster.
+_INSTRUMENT_PATTERNS = [
+    ("nda",                re.compile(r'\bnda\b|non[-\s]?disclosure', re.I)),
+    ("arbitration_notice", re.compile(r'arbitration\s+notice|notice\s+of\s+arbitration|request\s+for\s+arbitration', re.I)),
+    ("petition",           re.compile(r'section\s*9\s*petition|\bpetition\b', re.I)),
+    ("sha",                re.compile(r'shareholders?\s+agreement|\bsha\b', re.I)),
+    ("service_agreement",  re.compile(r'services?\s+agreement|master\s+services|\bmsa\b', re.I)),
+    ("jva",                re.compile(r'joint\s+venture(?:\s+agreement)?|\bjva?\b', re.I)),
+    ("judgment",           re.compile(r'judg[e]?ment', re.I)),
+    ("opinion",            re.compile(r'legal\s+opinion', re.I)),
+    ("pleading",           re.compile(r'\bpleading\b|\bcomplaint\b', re.I)),
+]
+
+
+def _count_instrument_mentions(question: str) -> int:
+    """Number of DISTINCT legal-instrument categories the question names."""
+    return sum(1 for _, rx in _INSTRUMENT_PATTERNS if rx.search(question))
+
+
+def _docs_of_entity_pages(question: str, pages: dict) -> dict:
+    """Map entity-matched page titles to their source_docs with page counts.
+
+    Returns {source_doc: n_matched_pages}. Lets scope resolution pin the entity's
+    dominant document (whole-document summary → strict scope) or all of them
+    (multi-instrument question) instead of returning no concrete target at all.
+    """
+    counts: dict[str, int] = {}
+    for title in _pages_matching_question_entity(question, pages):
+        page = pages.get(title)
+        sd = page.get("source_doc", "") if isinstance(page, dict) else ""
+        if sd:
+            counts[sd] = counts.get(sd, 0) + 1
+    return counts
 
 
 def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
@@ -3766,10 +3809,47 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> 
         logger.error("resolve_scope: party resolution failed: %s", e)
         party_docs = set()
     if party_docs:
-        return {"scope": "single_doc", "target_docs": sorted(party_docs),
-                "target_family": None, "is_broad": False,
-                "confidence": 0.85, "method": "party"}
+        n_instr = _count_instrument_mentions(question)
+        if len(party_docs) == 1 or n_instr >= 2:
+            # One document, OR a multi-instrument question naming this party's
+            # several instruments ("across the NDA, the arbitration notice, and
+            # the Section 9 petition") — pin the whole resolved cluster so every
+            # named instrument is retrieved, not just the ones a single semantic
+            # pass happened to surface.
+            return {"scope": "single_doc", "target_docs": sorted(party_docs),
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.85 if len(party_docs) == 1 else 0.8,
+                    "method": "party" if len(party_docs) == 1 else "party-multi"}
+        # Party spans several documents but the question names only one instrument
+        # type — narrow to that family when it resolves cleanly, else fall through
+        # rather than guess.
+        try:
+            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+            fam = _detect_question_family(question, available)
+            fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+        except Exception:
+            fam_docs = set()
+        narrowed = party_docs & fam_docs
+        if len(narrowed) == 1:
+            return {"scope": "single_doc", "target_docs": sorted(narrowed),
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.8, "method": "party"}
     if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
+        # Resolve the concrete document(s) the entity points at so retrieval can
+        # scope STRICTLY to them. A single-instrument question (e.g. "summarise
+        # the NordForge NDA") pins the entity's dominant document — dropping the
+        # supplementary cross-document pages that otherwise dilute a whole-document
+        # summary into half "Not covered"; a multi-instrument question keeps all
+        # matched documents.
+        ent_counts = _docs_of_entity_pages(question, pages)
+        if ent_counts:
+            if _count_instrument_mentions(question) >= 2:
+                ent_targets = sorted(ent_counts)
+            else:
+                ent_targets = [max(ent_counts, key=ent_counts.get)]
+            return {"scope": "single_doc", "target_docs": ent_targets,
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.72, "method": "entity"}
         return {"scope": "single_doc", "target_docs": [],
                 "target_family": None, "is_broad": False,
                 "confidence": 0.7, "method": "entity"}
