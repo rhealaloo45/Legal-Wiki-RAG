@@ -183,6 +183,7 @@ class QueryState(TypedDict, total=False):
     disambiguation_data: dict
     needs_clarification: bool
     clarification_data: dict
+    unconfirmed_doc_reference: bool
     # Retrieval / generation
     conversation_context: str
     wiki_context: str
@@ -236,9 +237,51 @@ def check_disambiguation_node(state: QueryState) -> dict:
     # this document" follow-up silently answered about a document from several
     # questions earlier, no disambiguation prompt shown). Named-document and
     # known-entity mentions still skip via the checks inside classify_query().
-    if state.get("target_doc") or wiki._question_names_a_document(state["question"], []):
+    if state.get("target_doc"):
         logger.info("[AGENT] disambiguation skipped (doc named)")
         return {"needs_disambiguation": False}
+
+    if wiki._question_names_a_document(state["question"], []):
+        # _question_names_a_document is a pure pattern match ("type + number",
+        # e.g. "service agreement 1") — it has no way to check whether such a
+        # document actually exists in this corpus. Confirmed live: a nonexistent
+        # "service agreement 1" reference was treated as fully resolved every
+        # time on this signal alone, so disambiguation never ran; retrieval then
+        # fell through to generic semantic search and silently returned a
+        # different arbitrary document on every rephrasing of the same question
+        # (Test_SA_36, then Test_SA_44, then Test_SA_35 across one session),
+        # with the answer-generation model inventing its own "Service Agreement
+        # 1 (Test_SA_44)" identity label that retrieval never established.
+        # Cross-check against the real corpus before trusting the pattern match.
+        try:
+            index = wiki._load_index(state["session_id"])
+            pages = index.get("pages", {})
+            # _question_names_a_document's entity-pattern branch (as opposed to
+            # its numbered-pattern branch) captures at most 3 words before the
+            # doc-type phrase — for a longer real company name ("DriveConnect
+            # Experience Labs Private Limited joint venture agreement") it grabs
+            # a truncated fragment ("Labs Private Limited") that _detect_
+            # mentioned_files correctly can't find verbatim, even though the
+            # full real entity genuinely exists and gets found via the broader
+            # fuzzy entity matcher elsewhere in the pipeline. Confirmed live:
+            # this exact case was flagged "unconfirmed" despite both target
+            # documents being correctly retrieved and cited moments later.
+            # Accept that broader signal as confirmation too, not just an exact
+            # file-name/number match.
+            confirmed = bool(wiki._detect_mentioned_files(state["question"], pages)) \
+                or wiki._question_mentions_known_entity(state["question"], pages)
+        except Exception as e:
+            logger.error("Named-document confirmation check failed: %s", e)
+            confirmed = True  # fail open — don't block the pipeline on an internal error
+        if confirmed:
+            logger.info("[AGENT] disambiguation skipped (doc named and confirmed)")
+            return {"needs_disambiguation": False}
+        logger.warning(
+            "Question names a document by pattern but no matching document exists "
+            "in this session — flagging as unconfirmed instead of silently "
+            "answering from an arbitrary document: %r", state["question"][:80],
+        )
+        return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
@@ -323,12 +366,23 @@ def generate_answer_node(state: QueryState) -> dict:
            "intent": intent, "prompt_type": intent,
            "message": f"Generating {label.lower()} answer…"})
     meta = state.get("retrieval_meta") or {}
+    # The question named a document by pattern ("service agreement 1") that
+    # check_disambiguation_node could not confirm exists in this corpus.
+    # Previously appended as a note to the question text itself — verified
+    # live that placement gets partial compliance at best (the {question}
+    # placeholder sits mid-prompt, right before a rigid REQUIRED OUTPUT FORMAT
+    # directive every per-intent template ends with, which the model follows
+    # very literally and which crowds out a free-form instruction competing
+    # for attention at that position). Passed through as its own parameter
+    # instead so wiki.generate_answer can inject it via house_rules_block,
+    # which every template substitutes at the TOP, before the RULES section.
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
             state.get("selected_titles", []), state["session_id"],
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
+            unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -437,12 +491,17 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
         # truncated empty, but 4x (3600) succeeded cleanly with ~2400
         # completion tokens used. A truncated response can never be trusted
         # to be valid JSON either way, so keep escalating the budget (doubling
-        # each time, capped at 3 attempts total) whenever finish_reason ==
+        # each time, capped at 4 attempts total) whenever finish_reason ==
         # "length", regardless of whether the partial output looks empty or
-        # substantial.
+        # substantial. Confirmed live on a 63-page/43.9k-char-context answer:
+        # 900/1800/3600 all came back raw_len=0 with completion_tokens exactly
+        # equal to the budget (the model spent 100% of it on hidden reasoning
+        # tokens with zero visible output) — only 7200 succeeded (finish_reason
+        # stop, 4226 completion tokens, 443 visible chars). One more doubling
+        # step than before is needed to reach that budget.
         attempt_budget = config.MAX_TOKENS_GROUNDING_CHECK
         attempts = 0
-        while _usage.get("finish_reason") == "length" and attempts < 2:
+        while _usage.get("finish_reason") == "length" and attempts < 3:
             attempt_budget *= 2
             attempts += 1
             logger.warning("Grounding check truncated (finish_reason=length) — retrying with budget=%d (attempt %d)",
