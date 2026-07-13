@@ -304,6 +304,59 @@ def _make_doc_identifier(doc_name: str) -> str:
     return fallback if fallback else "Doc"
 
 
+# Ordered keyword → canonical-family rules. The ingest LLM's `doc_type` is free
+# text ("Non-Disclosure Agreement", "NDA", "Master Services Agreement", "Court
+# Judgment", ...), so we normalize to a small controlled vocabulary that scope
+# resolution (Phase 2) and metadata-filtered vector search (Phase 1) can group
+# and filter on. Rules are checked in order; the FIRST whose keyword appears in
+# the lowercased doc_type wins — so more specific families (e.g. "master services
+# agreement" → "Service Agreement" via the "service" keyword) must not be
+# shadowed by a broader rule listed earlier. Kept deliberately coarse: family is
+# for grouping ("all NDAs"), not fine-grained typing.
+_DOC_FAMILY_RULES = (
+    ("non-disclosure", "NDA"),
+    ("nondisclosure", "NDA"),
+    ("nda", "NDA"),
+    ("shareholder", "Shareholder Agreement"),
+    ("joint venture", "Joint Venture Agreement"),
+    ("jva", "Joint Venture Agreement"),
+    ("share purchase", "Share Purchase Agreement"),
+    ("subscription agreement", "Subscription Agreement"),
+    ("employment", "Employment Agreement"),
+    ("consulting", "Consulting Agreement"),
+    ("license", "License Agreement"),
+    ("licence", "License Agreement"),
+    ("supply", "Supply Agreement"),
+    ("service level", "Service Level Agreement"),
+    ("service", "Service Agreement"),   # covers "Master Services Agreement" too
+    ("legal opinion", "Legal Opinion"),
+    ("opinion", "Legal Opinion"),
+    ("judgment", "Court Judgment"),
+    ("judgement", "Court Judgment"),
+    ("court case", "Court Judgment"),
+    ("court", "Court Judgment"),
+    ("pleading", "Pleading"),
+    ("petition", "Pleading"),
+    ("plaint", "Pleading"),
+)
+
+
+def _normalize_doc_family(doc_type: str | None) -> str | None:
+    """Collapse the LLM's free-text doc_type to a canonical family label.
+
+    Returns None when doc_type is empty or matches no known family rule (callers
+    treat a None family as "ungrouped" — still retrievable, just not part of a
+    family-scoped query).
+    """
+    if not doc_type:
+        return None
+    dt = doc_type.lower()
+    for keyword, family in _DOC_FAMILY_RULES:
+        if keyword in dt:
+            return family
+    return None
+
+
 def _auto_prefix_title(title: str, doc_id: str) -> str:
     """Add document identifier prefix to unprefixed contract/agreement pages.
 
@@ -798,6 +851,11 @@ def ingest(file_path: str, session_id: str) -> dict:
 
         overview_text = text[:6000] + "\n\n[...]\n\n" + text[-3000:]
         doc_type, topics, overview_parsed = _ingest_overview(overview_text, doc_name)
+        # Carry the inferred doc_type into the merge so it gets persisted to
+        # page_metadata (Phase 0). The overview/detail prompts don't emit a
+        # top-level "doc_type" in their pages dict the way the single-call prompt
+        # does, so inject it here — this is the one place the long-doc path knows it.
+        overview_parsed["doc_type"] = doc_type
         _update_wiki_progress(session_id, {"current": 1, "total": total_steps,
                                             "message": f"Overview pass for {doc_name}..."})
 
@@ -1038,6 +1096,10 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
     # Collect (title, embed_text) pairs here; embed OUTSIDE the lock so HTTP
     # calls don't block other ingest threads waiting on the session lock.
     pages_to_embed: list[tuple[str, str]] = []
+    # All pages in one merge call come from `doc_name`, so they share one family
+    # (Phase 1) — resolved from doc_type in the metadata block below, then stamped
+    # onto every embedding row so vector search can pre-filter by family at scale.
+    doc_family_for_batch: str | None = None
 
     with lock:
         pages_updated = 0
@@ -1134,8 +1196,22 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             pages_updated += 1
 
         # -- C7: Persist document-level metadata extracted at ingest time --
+        # Fold the inferred doc_type + normalized doc_family in alongside the
+        # LLM-extracted metadata (Phase 0). doc_type is present on new_data for
+        # both the single-call path (top-level prompt field) and the long-doc
+        # path (injected in ingest() after the overview pass). Note the long-doc
+        # path emits NO "metadata" object at all, so start from {} and still
+        # persist doc_type/doc_family when that's all we have.
         metadata = new_data.get("metadata")
-        if metadata and isinstance(metadata, dict):
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        _doc_type = new_data.get("doc_type")
+        if _doc_type and isinstance(_doc_type, str):
+            metadata["doc_type"] = _doc_type
+            _fam = _normalize_doc_family(_doc_type)
+            if _fam:
+                metadata["doc_family"] = _fam
+                doc_family_for_batch = _fam
+        if metadata:
             try:
                 _db.upsert_metadata(session_id, doc_name, metadata)
             except Exception as _me:
@@ -1186,7 +1262,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
 
     # -- Embed pages OUTSIDE the lock (HTTP calls should not hold the session lock) --
-    _embed_pages_batch(session_id, pages_to_embed)
+    _embed_pages_batch(session_id, pages_to_embed, doc_family_for_batch)
 
     return pages_updated, new_rels_count, len(contradictions_found)
 
@@ -1194,7 +1270,8 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
 # ---------------------------------------------------------------------------
 # Embedding helper (Phase 3) — called OUTSIDE the session lock
 # ---------------------------------------------------------------------------
-def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -> None:
+def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
+                       doc_family: str | None = None) -> None:
     """Embed page summaries and store in page_embeddings table.
 
     Called AFTER the session lock is released so embedding HTTP calls don't
@@ -1205,6 +1282,10 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         pages_to_embed: list of (title, text_to_embed) where text_to_embed is
                         the page summary, or the first 400 chars of content
                         when no summary is available.
+        doc_family: normalized family for every page in this batch (all pages in
+                    a single merge come from one document), stamped onto each
+                    embedding row so vector search can pre-filter by family
+                    (Phase 1). None for documents whose type maps to no family.
     """
     if not config.USE_DATABASE or not pages_to_embed:
         return
@@ -1213,7 +1294,7 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         texts = [text for _, text in pages_to_embed]
         embeddings = _embedder.embed_batch(texts, is_query=False)
         for (title, _), embedding in zip(pages_to_embed, embeddings):
-            _db.upsert_embedding(session_id, title, embedding)
+            _db.upsert_embedding(session_id, title, embedding, doc_family)
         logger.info(
             "Embedded %d pages for session %s", len(pages_to_embed), session_id
         )
@@ -1622,11 +1703,20 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
         t = num_match.group(1).lower()
         t = re.sub(r'\s+', ' ', t).strip()
         doc_num = num_match.group(2)
-        # First word distinguishes the type in the filename ("service", "nda", ...)
-        type_core = {"jva": "joint", "sha": "shareholder", "sa": "service"}.get(t, t.split()[0])
+        # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
+        # NOT the first word, which for "legal opinion" is the non-distinctive
+        # "legal" that prefixes every source_doc.
+        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
+        # Match the number allowing zero-padding: the user types "service
+        # agreement 1" but redacted test files are saved zero-padded as
+        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
+        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
+        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
+        # keep it from bleeding into a different document number.
+        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
         for sd in src_docs:
             norm = _norm_doc_name(sd)
-            if re.search(rf'\b{re.escape(doc_num)}\b', norm) and (not type_core or type_core in norm):
+            if re.search(num_re, norm) and (not type_core or type_core in norm):
                 matched.add(sd)
     if matched:
         logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
@@ -1709,12 +1799,20 @@ QUESTION: {question}"""
 
 
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
-                 exclude_cached_answers: bool = False) -> tuple[str, list]:
+                 exclude_cached_answers: bool = False,
+                 doc_family: "str | list[str] | None" = None, force_broad: bool = False,
+                 force_docs: "list[str] | None" = None) -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
     all pages originating from that file are force-included so the answer stays
     grounded in the correct document.
+
+    doc_family / force_broad (Phase 2): forwarded from the resolved scope to the
+    hybrid page-selection path — doc_family pre-filters the pgvector search to a
+    document family, force_broad widens+diversifies the candidate pool. Both are
+    inert (None / False) for single-document and default corpus scopes, keeping
+    behaviour identical to before Phase 2 for those cases.
 
     exclude_cached_answers: when True, drops cached "Q:" answer pages (see
     generate_answer()'s answer-filing step) from consideration entirely, so a
@@ -1732,7 +1830,25 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         return {"context": "", "selected_titles": [], "bm25_count": 0}
 
     # --- Step 0: Detect file mentions in the question or use target_doc ---
-    if target_doc:
+    # Scope resolution (resolve_scope) may have already pinned specific documents
+    # by party-name content match — documents the in-question detectors below
+    # cannot find (party masked in metadata, filed under a bare type+number).
+    # Honour that pin first and scope STRICTLY to those documents' own pages
+    # (same strict, supplementary-free treatment as an explicit target_doc): the
+    # user named one specific agreement, so cross-document pages are contamination.
+    forced_set = {d for d in (force_docs or []) if d}
+    forced_pages = [
+        title for title, page in pages.items()
+        if isinstance(page, dict) and page.get("source_doc", "") in forced_set
+    ] if forced_set else []
+    strict_scope = False
+    if forced_pages:
+        mentioned_files = forced_set
+        file_pages = forced_pages
+        strict_scope = True
+        logger.info("Scope-pinned to %d document(s) by party match: %d page(s)",
+                    len(forced_set), len(file_pages))
+    elif target_doc:
         # Match by source_doc field (DB) or by title substring (file-based)
         file_pages = [
             title for title, page in pages.items()
@@ -1773,10 +1889,11 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     page_selection_usage: dict = {}
 
     # --- Step 1: Select relevant pages ---
-    if file_pages and target_doc:
-        # Explicit single-document scope (UI-pinned: the "summarise this document"
-        # flow and the disambiguation folder-picker both pass target_doc). The user
-        # pinned exactly ONE document, so supplementary cross-document pages are pure
+    if file_pages and (target_doc or strict_scope):
+        # Explicit single-document scope: either a UI pin (target_doc — the
+        # "summarise this document" flow and the disambiguation folder-picker) or
+        # a party-name content match resolved upstream (strict_scope). The user
+        # named exactly ONE document, so supplementary cross-document pages are pure
         # contamination here: an isolation test on the Test_JVA_05 summary showed the
         # supplementary pass dragged in ~30 boilerplate clause pages from an unrelated
         # Source Code Escrow Agreement, which the answer LLM then variably cited AS
@@ -1784,8 +1901,8 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # run-to-run citation-warning non-determinism. Scope strictly to the pinned
         # document's own pages; skip supplementary retrieval entirely.
         selected_titles = file_pages
-        logger.info("Explicit target_doc=%r: scoped to %d page(s), supplementary retrieval skipped",
-                     target_doc, len(file_pages))
+        logger.info("Single-document scope (%s): scoped to %d page(s), supplementary retrieval skipped",
+                     target_doc or f"party:{sorted(forced_set)}", len(file_pages))
     elif file_pages:
         # File mention detected from the question text (not an explicit UI pin) — force
         # those pages in, then add topic-collision-filtered supplementary pages.
@@ -1837,11 +1954,15 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
                      len(file_pages), len(selected_titles))
     else:
-        # No file mentioned — original behaviour
+        # No file mentioned — original behaviour, now with optional family
+        # pre-filter + broad-widen forwarded from the resolved scope (Phase 2).
         if len(pages) <= 20:
             selected_titles = list(pages.keys())
         else:
-            selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
+            selected_titles, page_selection_usage = _select_relevant_pages(
+                pages_for_llm, question, session_id,
+                doc_family=doc_family, force_broad=force_broad,
+            )
 
     # --- Step 2: Build context string from selected pages ---
     # Q: pages are cached prior answers — cap so they don't crowd out source content.
@@ -2641,9 +2762,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else config.MAX_TOKENS_ANSWER
     )
 
-    # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
-    _REASON_OPEN = r'<\s*reasoning\s*>'
-    _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
+    # Reasoning-block tags. The OPEN and CLOSE patterns are kept SEPARATE and the
+    # close pattern requires a real slash — a previous single pattern with an
+    # OPTIONAL slash (<\s*/?\s*reasoning\s*>) also matched the opening tag, which
+    # combined with regex-substituting the block out intermittently deleted the
+    # entire answer (confirmed live: the model correctly wrote <reasoning>plan
+    # </reasoning> + a 12k-char answer, but the strip ate the answer). Extraction
+    # below is positional (split on the close tag) rather than sub-based, so it is
+    # deterministic and model-agnostic — works whether the model reasons briefly,
+    # at length, or (like Azure GPT-5.x) keeps its native reasoning out of the
+    # content entirely.
+    _REASON_OPEN_RE = re.compile(r'<\s*reasoning\s*>', re.I)
+    _REASON_CLOSE_RE = re.compile(r'<\s*/\s*reasoning\s*>', re.I)
     _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
 
     def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
@@ -2662,22 +2792,32 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 max_tokens=token_budget or _answer_token_budget,
             )
 
-            # --- Extract confidence from reasoning BEFORE stripping the block ---
-            # The ANSWER_PROMPT instructs the model to append two structured lines
-            # at the end of <reasoning>:
-            #   CONFIDENCE_SCORE: [int]
-            #   CONFIDENCE_REASON: [sentence]
-            # Extracting here avoids a second LLM call for _evaluate_confidence().
-            reasoning_match = re.search(
-                rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
-            )
-            # Fallback: if no closing tag, grab everything after the opening tag
-            if not reasoning_match:
-                reasoning_match = re.search(
-                    rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
-                )
-            if reasoning_match:
-                reasoning_text = reasoning_match.group(1)
+            # --- Positional split: reasoning block vs. user-facing answer ---
+            # Contract: an optional <reasoning>…CONFIDENCE_SCORE…CONFIDENCE_REASON…
+            # </reasoning> block, then the answer. We locate the opening tag and
+            # its matching (real-slash) closing tag by POSITION:
+            #   reasoning_text = between the tags   (carries confidence)
+            #   pass_answer    = everything AFTER the close tag
+            # This is deterministic across models: brief reasoning, long reasoning,
+            # no block at all, or an unclosed block are each handled explicitly —
+            # and it never substitutes the block out, so it cannot eat the answer.
+            open_m = _REASON_OPEN_RE.search(raw_answer)
+            close_m = _REASON_CLOSE_RE.search(raw_answer, open_m.end()) if open_m else None
+            if open_m and close_m:
+                reasoning_text = raw_answer[open_m.end():close_m.start()]
+                pass_answer = raw_answer[close_m.end():].strip()
+            elif open_m:
+                # Opened but never closed — the whole tail is reasoning; the model
+                # left no separate answer section (recovered below).
+                reasoning_text = raw_answer[open_m.end():]
+                pass_answer = ""
+            else:
+                # No reasoning block — model answered directly (e.g. a model whose
+                # native reasoning never enters the content).
+                reasoning_text = ""
+                pass_answer = raw_answer.strip()
+
+            if reasoning_text:
                 score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
                 reason_match = re.search(
                     r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
@@ -2690,44 +2830,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 if reason_match:
                     pass_reason = reason_match.group(1).strip()
 
-            # Strip reasoning tags for the user-facing answer (all variants)
-            pass_answer = re.sub(
-                rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
-            ).strip()
-            # Also strip unclosed reasoning block (model wrote opening tag but no closing)
-            pass_answer = re.sub(
-                rf'(?i){_REASON_OPEN}.*', '', pass_answer, flags=re.DOTALL
-            ).strip()
-
-            # Fallback: if stripping left an empty/trivial answer but reasoning had
-            # real content, the model put the answer inside the reasoning block.
-            # Recover by stripping tags, confidence lines, and reasoning preamble.
-            if len(pass_answer) <= 10 and reasoning_match:
-                reasoning_body = reasoning_match.group(1)
-                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
-                # Strip reasoning preamble: numbered analysis steps before the
-                # actual content (e.g. "1. Identify the core language...\n2. Add...")
-                # Heuristic: find the first markdown heading, divider, or
-                # numbered formulation header — everything before is preamble.
-                content_start = re.search(
-                    r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
-                    recovered,
-                )
-                if content_start and content_start.start() > 20:
-                    recovered = recovered[content_start.start():].strip()
-                # Re-extract confidence from recovered text if main extraction got default
-                if pass_score == 75:
-                    re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
-                    if re_score:
-                        try:
-                            pass_score = min(100, max(0, int(re_score.group(1))))
-                        except ValueError:
-                            pass
-                    re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
-                    if re_reason:
-                        pass_reason = re_reason.group(1).strip()
+            # Recovery: the model put the whole answer INSIDE the reasoning block
+            # (nothing after the close tag). Recover the full reasoning body minus
+            # the confidence lines. Only drop a SHORT leading plan preamble if a
+            # clear content heading sits near the very start — never trim into the
+            # bulk of the content (the previous heuristic could discard ~90%).
+            if len(pass_answer) <= 10 and reasoning_text.strip():
+                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_text).strip()
+                cs = re.search(r'(?m)^\s*(#{1,3}\s|\*\*[A-Z][^\n]*\*\*\s*$|\|)', recovered)
+                if cs and 0 < cs.start() < len(recovered) * 0.3:
+                    recovered = recovered[cs.start():].strip()
                 if len(recovered) > len(pass_answer):
-                    logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
+                    logger.warning(
+                        "Answer empty after reasoning split — recovered %d chars from reasoning block",
+                        len(recovered),
+                    )
                     pass_answer = recovered
 
             # Always strip any stray CONFIDENCE lines that leaked into the answer
@@ -2826,7 +2943,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
 
-        if len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed):
+        _fewer_issues = len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed)
+        # A citation fix must not gut the answer. The retry sometimes comes back
+        # far shorter — e.g. only the reasoning plan, or a truncated table — which
+        # trivially has "fewer" unverified quotes simply because it has fewer
+        # quotes (or none). Confirmed live: a 9,974-char comparison answer was
+        # replaced by an 818-char plan-only answer that "passed" this check.
+        # Require the retry to retain most of the original's length to count.
+        _retained_length = len(retry_answer) >= 0.6 * len(answer)
+        if _fewer_issues and _retained_length:
             logger.info(
                 "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed",
                 len(_unverified_quotes), len(retry_unverified),
@@ -2834,6 +2959,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             )
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
             _unverified_quotes, _misattributed = retry_unverified, retry_misattributed
+        elif _fewer_issues and not _retained_length:
+            logger.info(
+                "Citation retry had fewer issues but was drastically shorter "
+                "(%d vs %d chars) — keeping fuller original answer",
+                len(retry_answer), len(answer),
+            )
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
 
@@ -3043,11 +3174,36 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 # ---------------------------------------------------------------------------
 
 _DOC_NAME_PATTERN = re.compile(
-    r'(services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
-    r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)\s*'
-    r'(?:#?\s*)?(\d+)',
+    # Type phrase, then the number. The number may be separated from the type by
+    # a filler word the corpus actually uses in filenames — "Court Case DOCUMENT
+    # 4", "Joint Venture AGREEMENT 4" — or by "#", "no.", "number". Without the
+    # optional filler, only "court case 4"/"joint venture 4" matched, so every
+    # multi-document question naming "Court Case Document N" / "Joint Venture
+    # Agreement N" silently force-included NONE of those docs (confirmed live:
+    # Q52 named 3 docs, only the one written "Judgment 6" matched).
+    r'(services?\s+agreement|shareholders?\s+agreement|nda|'
+    r'joint\s+venture(?:\s+agreement)?|legal\s+opinion|'
+    r'court\s+case(?:\s+document)?|judgment|jva|sha|sa)'
+    r'\s*(?:#|no\.?|number)?\s*(\d+)',
     re.IGNORECASE,
 )
+
+# Distinctive core token each matched type must ALSO appear as in a filename, to
+# stop a number from matching documents of the wrong type. Must NOT be the type's
+# first word when that word is non-distinctive: every source_doc here is prefixed
+# "Legal AI - Raja …", so "legal" (from "legal opinion") appears in EVERY filename
+# and would let "Legal Opinion 7" match every number-7 document of any type
+# (confirmed live: Q56 matched 9 docs). "opinion" is the distinctive token.
+_DOC_TYPE_CORE = {
+    "service agreement": "service", "services agreement": "service",
+    "shareholder agreement": "shareholder", "shareholders agreement": "shareholder",
+    "nda": "nda",
+    "joint venture": "venture", "joint venture agreement": "venture",
+    "legal opinion": "opinion",
+    "court case": "court", "court case document": "court",
+    "judgment": "judgment",
+    "jva": "venture", "sha": "shareholder", "sa": "service",
+}
 
 # Matches when a question names a document type together with a distinctive entity
 # or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement"). The
@@ -3466,6 +3622,190 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     return by_match_count[best]
 
 
+# Plural / collective family nouns that signal a question is asking ABOUT A SET
+# of documents ("compare the NDAs", "summarize the agreements") rather than one.
+# Combined with a family keyword (via _DOC_FAMILY_RULES) to resolve family scope.
+_PLURAL_FAMILY_HINT_RE = re.compile(
+    r'\b(ndas|agreements|judgments|judgements|opinions|pleadings|petitions|'
+    r'contracts|ventures|leases)\b',
+    re.IGNORECASE,
+)
+
+
+def _detect_question_family(question: str, available_families: set[str]) -> str | None:
+    """Return the single document family a question refers to, or None.
+
+    Reuses the same keyword→family rules as ingest-time normalization
+    (_DOC_FAMILY_RULES). Returns a family only when EXACTLY ONE known family is
+    referenced AND it actually exists in this session — a question naming two
+    families ("the service agreements and the NDAs") is cross-family, so it
+    stays unfiltered (None) rather than being wrongly narrowed to one.
+    """
+    if not available_families:
+        return None
+    q = question.lower()
+    matched: set[str] = set()
+    for keyword, family in _DOC_FAMILY_RULES:
+        if family not in available_families:
+            continue
+        # Plural-tolerant, word-boundary match: a collective family question uses
+        # the plural ("compare the NDAs", "the service agreements"), so allow an
+        # optional trailing 's' on the keyword's final word — without it "nda"
+        # would fail to match "NDAs" and silently drop the family.
+        if re.search(rf'\b{re.escape(keyword)}s?\b', q):
+            matched.add(family)
+    return next(iter(matched)) if len(matched) == 1 else None
+
+
+# A party the user names to identify an agreement almost always carries its
+# corporate form ("… Private Limited", "… GmbH"). Capturing the capitalised
+# words immediately BEFORE that suffix yields the distinctive party name
+# ("SteelLoop Resource Recovery", "Cold Chain Energy Services") without dragging
+# in surrounding prose — and the suffix gate keeps ordinary capitalised topic
+# phrases ("Reserved Matters", "Joint Venture Agreement") from ever qualifying.
+_CORP_SUFFIX_RE_STR = (
+    r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
+    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
+)
+_PARTY_NAME_RE = re.compile(
+    r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
+)
+
+
+def _resolve_docs_by_party(question: str, session_id: str) -> set[str]:
+    """Resolve a specific document from a PARTY NAME typed in the question.
+
+    Lawyers name an agreement by its counterparty ("the JV with Cold Chain
+    Energy Services"), not by the filename ("JVA 4") the corpus stores it under.
+    The party name often survives only in the document BODY — the filename is a
+    bare type+number, the page-title identifier can be an ingest-synthesised
+    short-name ("SunBridge-JV"), and the parties metadata may be redaction-masked
+    ("[Redacted Logistics Infrastructure Partner]"). So resolve it by a full-text
+    CONTENT search on the distinctive party phrase.
+
+    Only narrows scope when a candidate localises to EXACTLY ONE document —
+    picking the most distinctive party named (the one hitting the fewest docs).
+    An umbrella name like "Tata Steel Limited" hits many documents and is
+    correctly ignored; the specific counterparty ("SteelLoop Resource Recovery")
+    hits one. Returns an empty set on any ambiguity, so it can never wrongly
+    starve retrieval — it only ever ADDS a precise single-document match the
+    filename/entity detectors miss.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    candidates = [c for c in candidates if len(c) >= 4]
+    if not candidates:
+        return set()
+    best_docs: set[str] | None = None
+    best_n = 1 << 30
+    for name in candidates:
+        try:
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=6) if d]
+        except Exception as e:
+            logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
+            continue
+        if docs and len(docs) < best_n:
+            best_n, best_docs = len(docs), set(docs)
+    if best_docs is not None and best_n == 1:
+        logger.info("Party-name content match → single document: %s",
+                    {_norm_doc_name(d) for d in best_docs})
+        return best_docs
+    return set()
+
+
+def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
+    """Resolve the retrieval scope of a question in ONE place (Phase 2).
+
+    Consolidates the three previously-scattered scope signals — named-document
+    detection, known-entity matching, and broad/collective phrasing — into a
+    single decision object the retrieval node acts on, instead of each stage
+    re-deriving scope with its own regex.
+
+    Returns a dict:
+      scope         : "single_doc" | "family" | "corpus"
+      target_docs   : concrete source_doc names when known (single_doc/family)
+      target_family : canonical family label when scope == "family", else None
+      is_broad      : True for family / broad cross-document questions
+      confidence    : rough 0-1 confidence in the scope call
+      method        : which signal decided it ("file"/"entity"/"family"/"broad"/"default")
+
+    Deliberately deterministic (no LLM call) — it composes the existing
+    detectors, matching how the rest of this pipeline resolves scope, and stays
+    conservative: anything it isn't sure about falls through to "corpus"
+    (unfiltered whole-session search), which is the pre-Phase-2 behaviour and
+    can never wrongly starve retrieval of a relevant document.
+    """
+    if pages is None:
+        try:
+            pages = _load_index(session_id).get("pages", {})
+        except Exception as e:
+            logger.error("resolve_scope: could not load index: %s", e)
+            pages = {}
+
+    # 1. Single specific document — a named file or a distinctive known entity.
+    #    Mirrors get_context's own force-include logic; here it only records the
+    #    decision (get_context still does the actual page scoping for this case).
+    try:
+        mentioned = _detect_mentioned_files(question, pages)
+    except Exception:
+        mentioned = set()
+    if mentioned:
+        return {"scope": "single_doc", "target_docs": sorted(mentioned),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.9, "method": "file"}
+    # Party-name → document via full-text content match. Catches the case the
+    # filename/entity detectors miss: the user names the counterparty ("SteelLoop
+    # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
+    # document under a bare type+number and masks the party in metadata. Only
+    # fires on an unambiguous single-document hit, so it's safe to prefer over the
+    # weaker entity heuristic below (which resolves no concrete target_docs).
+    try:
+        party_docs = _resolve_docs_by_party(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party resolution failed: %s", e)
+        party_docs = set()
+    if party_docs:
+        return {"scope": "single_doc", "target_docs": sorted(party_docs),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.85, "method": "party"}
+    if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
+        return {"scope": "single_doc", "target_docs": [],
+                "target_family": None, "is_broad": False,
+                "confidence": 0.7, "method": "entity"}
+
+    # 2. Family scope — a COLLECTIVE reference to one document family that
+    #    actually exists in this session. Requires both a collective marker
+    #    (broad phrasing or a plural family noun) and a single resolved family,
+    #    so a narrow single-clause question is never wrongly filtered.
+    collective = bool(_BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question))
+    if collective:
+        try:
+            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+        except Exception as e:
+            logger.error("resolve_scope: list_doc_families failed: %s", e)
+            available = set()
+        family = _detect_question_family(question, available)
+        if family:
+            try:
+                docs = _db.get_documents_by_family(session_id, family)
+            except Exception as e:
+                logger.error("resolve_scope: get_documents_by_family failed: %s", e)
+                docs = []
+            return {"scope": "family", "target_docs": docs,
+                    "target_family": family, "is_broad": True,
+                    "confidence": 0.75, "method": "family"}
+
+    # 3. Broad cross-document question with no single resolvable family.
+    if _BROAD_SCOPE_RE.search(question):
+        return {"scope": "corpus", "target_docs": [], "target_family": None,
+                "is_broad": True, "confidence": 0.6, "method": "broad"}
+
+    # 4. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
+    return {"scope": "corpus", "target_docs": [], "target_family": None,
+            "is_broad": False, "confidence": 0.5, "method": "default"}
+
+
 def classify_query(question: str, session_id: str) -> dict:
     """Determine if the query targets a specific unnamed document.
 
@@ -3730,8 +4070,79 @@ def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str
     return [t for _, t in scored[:n]]
 
 
+def _rrf_fuse(rankings: list[list[str]], k: int = 60, limit: int | None = None) -> list[str]:
+    """Reciprocal Rank Fusion of several ranked title lists into one (Phase 3).
+
+    RRF score for a title = sum over each list of 1/(k + rank), rank 1-based. A
+    title ranked highly by EITHER retriever (vector OR BM25) rises; one ranked
+    well by both rises most. This properly merges the two hybrid rankings —
+    unlike the previous "all vector results, then BM25 appended" which buried a
+    strong keyword-only match below every semantic hit. Zero LLM calls. Ties
+    (same fused score) preserve first-seen order via a stable sort.
+    """
+    scores: dict[str, float] = {}
+    order: dict[str, int] = {}
+    seq = 0
+    for ranking in rankings:
+        for rank, title in enumerate(ranking, start=1):
+            scores[title] = scores.get(title, 0.0) + 1.0 / (k + rank)
+            if title not in order:
+                order[title] = seq
+                seq += 1
+    fused = sorted(scores, key=lambda t: (-scores[t], order[t]))
+    return fused[:limit] if limit else fused
+
+
+def _rerank_pages(question: str, candidate_titles: list[str], pages: dict,
+                  limit: int | None = None) -> list[str]:
+    """Optional fast-model relevance rerank of already-retrieved candidates.
+
+    Gated behind config.ENABLE_RERANK and only applied to broad/family queries
+    by the caller. Reuses the same compact "- title: summary" candidate index as
+    PAGE_SELECT_PROMPT, but asks the model to ORDER by relevance rather than
+    select a subset. Fail-safe: on any error or unparseable output, returns the
+    input order unchanged (never drops the pipeline into a worse state).
+    """
+    if not candidate_titles:
+        return candidate_titles
+    index_lines = []
+    for t in candidate_titles:
+        page = pages.get(t)
+        summary = page.get("summary", "") if isinstance(page, dict) else ""
+        index_lines.append(f"- {t}: {summary}" if summary else f"- {t}")
+    prompt = (
+        "Rank these legal wiki pages by how directly relevant each is to answering "
+        "the QUESTION. Respond with ONLY valid JSON, no other text:\n"
+        '{"ranking": ["<most relevant title>", "<next>", ...]}\n'
+        "Include every title exactly once, most relevant first.\n\n"
+        f"QUESTION: {question}\n\nPAGES:\n" + "\n".join(index_lines)
+    )
+    try:
+        raw, _usage = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_RERANK)
+        # The fast gpt-oss reasoning model can spend its whole budget on hidden
+        # reasoning and emit nothing when the cap is too low (same failure mode as
+        # the grounding check). One doubling retry recovers those cases before
+        # falling back to fusion order.
+        if _usage.get("finish_reason") == "length":
+            raw, _usage = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_RERANK * 2)
+        parsed = _parse_json_safe(raw)
+        ranking = parsed.get("ranking") if isinstance(parsed, dict) else None
+        if isinstance(ranking, list):
+            cand_set = set(candidate_titles)
+            valid = [t for t in ranking if t in cand_set]
+            # Append any titles the model dropped, preserving their prior order,
+            # so a lazy/truncated ranking never silently loses candidates.
+            seen = set(valid)
+            ranked = valid + [t for t in candidate_titles if t not in seen]
+            return ranked[:limit] if limit else ranked
+    except Exception as e:
+        logger.warning("LLM rerank failed, keeping fusion order: %s", e)
+    return candidate_titles[:limit] if limit else candidate_titles
+
+
 def _select_relevant_pages(
-    pages: dict, question: str, session_id: str | None = None
+    pages: dict, question: str, session_id: str | None = None,
+    doc_family: "str | list[str] | None" = None, force_broad: bool = False,
 ) -> tuple[list[str], dict]:
     """Select the most relevant pages for a question.
 
@@ -3739,6 +4150,16 @@ def _select_relevant_pages(
       1. pgvector cosine similarity search (DB mode only, Phase 3) — 0 LLM calls, ~5ms
       2. BM25 pre-filter + LLM selection (fallback or file mode)
       3. BM25 keyword-only (if LLM selection fails)
+
+    doc_family (Phase 1): when scope resolution (Phase 2) narrows a question to a
+    document family, it's passed here to pre-filter the pgvector search to that
+    family's embeddings. None = unfiltered whole-session search (default).
+
+    force_broad (Phase 2): when scope resolution classifies a question as family
+    or broad, force the wide+diversified candidate path even if the local
+    _BROAD_SCOPE_RE regex wouldn't have fired on the phrasing (e.g. "compare the
+    NDAs"). Only ever WIDENS — never narrows — so it can't regress existing broad
+    detection.
 
     Returns (selected_titles, usage_dict).
     usage_dict is empty when vector search is used (no LLM call made).
@@ -3770,45 +4191,61 @@ def _select_relevant_pages(
             if emb_count > 0:
                 from services import embedder as _embedder
                 q_embedding = _embedder.embed(question, is_query=True)
-                is_broad = bool(_BROAD_SCOPE_RE.search(question))
+                is_broad = force_broad or bool(_BROAD_SCOPE_RE.search(question))
                 vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=vector_limit
+                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family
                 )
                 # Validate titles against the in-memory pages dict (guards against
                 # stale embeddings pointing at deleted pages)
                 valid_vector = [t for t in vector_titles if t in pages]
+
+                # BM25 ranking for fusion — pull a comparable-length keyword list
+                # (not just the old small supplement) so RRF has two real rankings
+                # to merge, not one ranking plus a handful of extras.
+                bm25_ranking = [
+                    t for t in _keyword_fallback_pages(pages, question, n=vector_limit)
+                    if t in pages
+                ]
+
+                # Phase 3: Reciprocal Rank Fusion of the vector and BM25 rankings,
+                # replacing the previous "all vector, then BM25 appended" order —
+                # a strong keyword-only match now ranks on its own merit instead of
+                # sitting below every semantic hit. Zero LLM calls.
                 if is_broad:
-                    valid_vector = _diversify_by_document(
-                        valid_vector, pages,
+                    # Fuse first, THEN diversify: the per-document cap + Parties-page
+                    # force-include operate on a better-ordered base list, but the
+                    # breadth guarantee for "across all X" questions is unchanged.
+                    fused = _rrf_fuse([valid_vector, bm25_ranking], k=config.RRF_K)
+                    hybrid = _diversify_by_document(
+                        fused, pages,
                         config.BROAD_QUESTION_PER_DOC_CAP, config.BROAD_QUESTION_TOTAL_CAP,
                     )
                     logger.info(
-                        "Broad cross-document question detected — widened vector search to "
-                        "%d candidates, diversified to %d pages across documents",
-                        vector_limit, len(valid_vector),
+                        "Broad question — widened to %d vector candidates, RRF-fused with "
+                        "BM25, diversified to %d pages across documents",
+                        vector_limit, len(hybrid),
+                    )
+                else:
+                    hybrid = _rrf_fuse(
+                        [valid_vector, bm25_ranking],
+                        k=config.RRF_K, limit=config.HYBRID_FUSION_TOP_K,
                     )
 
-                # BM25 supplement: add keyword-matched pages that vector missed.
-                # Vector results come first (better semantic rank); BM25 pages
-                # are appended only if not already present.
-                bm25_supplement = _keyword_fallback_pages(
-                    pages, question, n=config.HYBRID_BM25_SUPPLEMENT_N
-                )
-                seen: set[str] = set(valid_vector)
-                hybrid: list[str] = list(valid_vector)
-                bm25_added = 0
-                for t in bm25_supplement:
-                    if t not in seen:
-                        hybrid.append(t)
-                        seen.add(t)
-                        bm25_added += 1
+                # Optional LLM rerank (off by default) — only for broad/family
+                # queries, where retrieval precision matters most and the extra
+                # fast-model call is worth its latency. RRF already gives a strong
+                # base order, so this is a refinement, not a dependency.
+                if hybrid and config.ENABLE_RERANK and is_broad:
+                    before = len(hybrid)
+                    hybrid = _rerank_pages(question, hybrid, pages, limit=before)
+                    logger.info("LLM rerank applied to %d broad-query candidates", before)
 
                 if hybrid:
                     logger.info(
-                        "Page selection: %d pages via hybrid "
-                        "(vector=%d, bm25_added=%d, embeddings_in_db=%d)",
-                        len(hybrid), len(valid_vector), bm25_added, emb_count,
+                        "Page selection: %d pages via hybrid RRF fusion "
+                        "(vector=%d, bm25=%d, embeddings_in_db=%d, broad=%s)",
+                        len(hybrid), len(valid_vector), len(bm25_ranking), emb_count, is_broad,
                     )
                     return hybrid, {}
 
