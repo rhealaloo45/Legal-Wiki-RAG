@@ -1546,27 +1546,27 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
             logger.info("Detected file mention (raw filename): %s", matched)
             return matched
 
-    # 1. Numbered type pattern — precise per-document scoping
-    num_match = _DOC_NAME_PATTERN.search(question)
-    if num_match:
-        doc_num = num_match.group(1)
-        type_match = re.search(
-            r'(services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
-            r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)',
-            question, re.IGNORECASE,
-        )
-        type_core = ""
-        if type_match:
-            t = type_match.group(1).lower()
-            # First word distinguishes the type in the filename ("service", "nda", ...)
-            type_core = {"jva": "joint", "sha": "shareholder", "sa": "service"}.get(t, t.split()[0])
+    # 1. Numbered type pattern — precise per-document scoping.
+    # A question can name MORE THAN ONE document this way (e.g. "compare Tata
+    # Brand Judgment 6 and Tata Brand Judgment 8") — iterate every match rather
+    # than just the first, and pair each number with its OWN adjacent type word
+    # rather than reusing whichever type happened to appear earliest in the
+    # question. Confirmed live: a question naming "Judgment 6" and "Judgment 8"
+    # only force-included Judgment 6 (the second document was silently dropped
+    # to generic retrieval, which pulled an unrelated document instead).
+    for num_match in _DOC_NAME_PATTERN.finditer(question):
+        t = num_match.group(1).lower()
+        t = re.sub(r'\s+', ' ', t).strip()
+        doc_num = num_match.group(2)
+        # First word distinguishes the type in the filename ("service", "nda", ...)
+        type_core = {"jva": "joint", "sha": "shareholder", "sa": "service"}.get(t, t.split()[0])
         for sd in src_docs:
             norm = _norm_doc_name(sd)
             if re.search(rf'\b{re.escape(doc_num)}\b', norm) and (not type_core or type_core in norm):
                 matched.add(sd)
-        if matched:
-            logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
-            return matched
+    if matched:
+        logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
+        return matched
 
     # 2. Distinctive full-name match (e.g. user pastes the exact doc name)
     for sd in src_docs:
@@ -2817,6 +2817,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     _FILES_USED_FALLBACK_CAP = 3
     if not files_used and selected_titles:
         mentioned = _detect_mentioned_files(question, pages)
+        if not mentioned:
+            # The question may not name the document explicitly (e.g. a rephrased,
+            # more generic version of a question that previously named it), but the
+            # ANSWER itself frequently does — especially when the model's own
+            # citation didn't use a bracketed [N] marker at all, so the referenced-
+            # bracket scan above never had a chance to resolve it via inline
+            # citations. Confirmed live: a rephrased SA2 question (no "(SA 2)")
+            # with a bolded-but-unbracketed citation fell all the way to the
+            # arbitrary "first 3 selected pages" last resort below and rendered
+            # unrelated documents, even though the answer text plainly named
+            # "Service Agreement 2" and its real filename throughout.
+            mentioned = _detect_mentioned_files(answer, pages)
         if mentioned:
             files_used = sorted(mentioned)
         else:
@@ -2917,7 +2929,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 # ---------------------------------------------------------------------------
 
 _DOC_NAME_PATTERN = re.compile(
-    r'(?:services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
+    r'(services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
     r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)\s*'
     r'(?:#?\s*)?(\d+)',
     re.IGNORECASE,

@@ -3234,6 +3234,24 @@
           rest = rest.slice(0, quoteMatch3.index).trim();
         }
 
+        // Defensive truncation regardless of whether a quote pattern matched above:
+        // the model doesn't always terminate the quote at the exact end of the line
+        // (e.g. trailing "| Quote reproduced verbatim." after the closing mark, or a
+        // multi-sentence quote) — when that happens quoteMatch1/2/3 all miss (they
+        // anchor to end-of-string) and the ENTIRE quote blob was falling through into
+        // "rest", corrupting docName with 300+ chars of clause text. That in turn
+        // poisoned findCanonicalDocName()'s fuzzy-match number extraction (grabbed the
+        // first digit anywhere in the blob — often the "(1)" folder-duplicate artifact
+        // from the shared upload-folder naming, not the real document number) and its
+        // word-overlap scoring (flooded with quote vocabulary), so it silently returned
+        // an arbitrary same-type document instead of the one actually cited. Confirmed
+        // live: SA5's own citation resolved to "Service Agreement 1" this way. Cut rest
+        // off at the first quote mark no matter what, so docName can never contain one.
+        const firstQuoteIdx = rest.search(/[""“]/);
+        if (firstQuoteIdx >= 0) {
+          rest = rest.slice(0, firstQuoteIdx).trim();
+        }
+
         // Remove trailing periods, "(Unspecified)" markers
         rest = rest.replace(/\s*\(Unspecified\)\s*/gi, '').replace(/[.,;:\s]+$/, '').trim();
 
@@ -3307,8 +3325,14 @@
       // Fuzzy match: extract key words from ref (e.g. "SA1-Tata (Service Agreement)" → "service agreement 1")
       // and match against doc paths
       const refWords = cleanRef.replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1);
-      // Extract number from ref (e.g. "SA1" → "1", "agreement 3" → "3")
-      const numMatch = cleanRef.match(/(\d+)/);
+      // Extract number from ref (e.g. "SA1" → "1", "agreement 3" → "3"). Strip
+      // parenthesized numbers first — these are folder-duplicate-download
+      // artifacts from the upload path (e.g. every file under a re-downloaded
+      // "Service Agreement (1)" folder), not the document's own number, and
+      // being first in the string they otherwise win over the real number
+      // (confirmed live: SA5's own citation resolved to "Service Agreement 1"
+      // because "(1)" preceded the real "5" in the raw reference text).
+      const numMatch = cleanRef.replace(/\(\d+\)/g, ' ').match(/(\d+)/);
       const refNum = numMatch ? numMatch[1] : '';
 
       let bestDoc = '';
