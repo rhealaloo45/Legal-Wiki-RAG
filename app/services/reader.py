@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 # treat it as a scanned/image page and attempt OCR.
 MIN_CHARS_PER_PAGE = 50
 
+# OCR hang protection: Tesseract can hang indefinitely on a malformed/complex
+# image, which — with no timeout — freezes the whole ingest worker thread and
+# is a primary cause of ingestion "getting stuck". Each Tesseract invocation is
+# capped at OCR_PAGE_TIMEOUT_SECS and retried up to OCR_MAX_ATTEMPTS times; if it
+# still fails, that OCR attempt is skipped and ingestion moves on to the next
+# PSM mode / page / document rather than blocking forever.
+OCR_PAGE_TIMEOUT_SECS = int(os.getenv("OCR_PAGE_TIMEOUT_SECS", "30"))
+OCR_MAX_ATTEMPTS = int(os.getenv("OCR_MAX_ATTEMPTS", "2"))
+
 # ---------------------------------------------------------------------------
 # OCR dependency check — done once at import time
 # ---------------------------------------------------------------------------
@@ -306,11 +315,39 @@ def _otsu_threshold(gray_img: "Image.Image") -> int:
     return best_thresh
 
 
+def _ocr_with_retry(img, psm: str) -> str:
+    """Run one Tesseract OCR pass with a hard timeout and bounded retries.
+
+    Tesseract with no timeout can hang forever on a bad image and freeze the
+    ingest worker. Each invocation is time-boxed to OCR_PAGE_TIMEOUT_SECS
+    (pytesseract raises RuntimeError on timeout) and retried up to
+    OCR_MAX_ATTEMPTS times; if every attempt times out or errors, returns ""
+    so the caller skips this pass and continues rather than blocking.
+    """
+    for attempt in range(1, OCR_MAX_ATTEMPTS + 1):
+        try:
+            return pytesseract.image_to_string(
+                img,
+                lang="eng",
+                config=f"--psm {psm}",
+                timeout=OCR_PAGE_TIMEOUT_SECS,
+            )
+        except Exception as e:
+            logger.warning(
+                "OCR attempt %d/%d (psm=%s) failed/timed out after %ds: %s",
+                attempt, OCR_MAX_ATTEMPTS, psm, OCR_PAGE_TIMEOUT_SECS, e,
+            )
+    logger.warning("OCR skipped for one page (psm=%s) after %d attempts", psm, OCR_MAX_ATTEMPTS)
+    return ""
+
+
 def _ocr_page(page) -> str:
     """Render a single pymupdf page to an image and OCR it with Tesseract.
 
     Uses 300 DPI for high accuracy on legal documents.  Tries multiple PSM
-    modes and picks the result with the most extracted text.
+    modes and picks the result with the most extracted text. Every Tesseract
+    call is time-boxed and retried (see _ocr_with_retry) so a page that Tesseract
+    hangs on is skipped instead of freezing the whole ingest.
     """
     # Render at 300 DPI (default PDF is 72 DPI)
     mat = fitz.Matrix(300 / 72, 300 / 72)
@@ -325,28 +362,14 @@ def _ocr_page(page) -> str:
     # Try multiple PSM modes and keep the best result
     best_text = ""
     for psm in ("6", "3", "4"):  # 6=uniform block, 3=auto, 4=single column
-        try:
-            text = pytesseract.image_to_string(
-                processed_img,
-                lang="eng",
-                config=f"--psm {psm}",
-            )
-            if len(text.strip()) > len(best_text.strip()):
-                best_text = text
-        except Exception:
-            continue
+        text = _ocr_with_retry(processed_img, psm)
+        if len(text.strip()) > len(best_text.strip()):
+            best_text = text
 
     # If preprocessed image gave poor results, try raw image as fallback
     if len(best_text.strip()) < MIN_CHARS_PER_PAGE:
-        try:
-            raw_text = pytesseract.image_to_string(
-                raw_img,
-                lang="eng",
-                config="--psm 6",
-            )
-            if len(raw_text.strip()) > len(best_text.strip()):
-                best_text = raw_text
-        except Exception:
-            pass
+        raw_text = _ocr_with_retry(raw_img, "6")
+        if len(raw_text.strip()) > len(best_text.strip()):
+            best_text = raw_text
 
     return best_text

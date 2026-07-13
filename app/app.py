@@ -101,10 +101,17 @@ def _update_doc_status(session_id: str, doc_name: str, status: str,
 def _refresh_wiki_stats(session_id: str) -> None:
     """Update pages_total and relations_total in the wiki progress block."""
     try:
+        docs_in_db = 0
         if config.USE_DATABASE:
             from services import db as _db
             pages = _db.count_pages(session_id)
             rels = _db.count_relations(session_id)
+            # Distinct documents actually persisted — used to reconcile the
+            # wiki_done counter below.
+            try:
+                docs_in_db = len(_db.get_source_docs(session_id))
+            except Exception:
+                docs_in_db = 0
         else:
             idx = wiki._load_index(session_id)
             pages = len(idx.get("pages", {}))
@@ -115,6 +122,19 @@ def _refresh_wiki_stats(session_id: str) -> None:
             wiki_prog["pages_total"] = pages
             wiki_prog["relations_total"] = rels
             progress["wiki"] = wiki_prog
+            # Reconcile the done-counter with reality: wiki_done is bumped in a
+            # worker's finally-block AFTER the doc's pages are written to the DB,
+            # so a worker killed mid-flight (e.g. by the Flask auto-reloader
+            # restarting the server) writes the doc but never increments the
+            # counter — leaving the UI showing fewer done than are actually in
+            # the DB. Floor the counter at the true distinct-doc count (never
+            # decrease it, never exceed total) so the display self-heals.
+            if docs_in_db:
+                docs = progress.get("docs", {})
+                total = docs.get("total", 0)
+                floor = min(docs_in_db, total) if total else docs_in_db
+                docs["wiki_done"] = max(docs.get("wiki_done", 0), floor)
+                progress["docs"] = docs
             _set_progress(session_id, progress)
     except Exception as e:
         logger.error("Failed to refresh wiki stats: %s", e)
@@ -640,6 +660,10 @@ def query_route():
 
                 elif etype == "answer":
                     wiki_result = ev.get("payload", {})
+                    # Pop before anything touches wiki_result further — never send the
+                    # raw retrieved context over SSE to the frontend, only use it locally
+                    # for the RAG query log.
+                    debug_context = wiki_result.pop("_debug_context", "")
                     wiki_result["elapsed_ms"] = round((time.time() - t0) * 1000)
                     _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
                                     "answer", {
@@ -652,7 +676,7 @@ def query_route():
                                     })
                     _update_session_history(session_id, question)
                     try:
-                        _log_rag_query(question, "", wiki_result.get("answer", ""))
+                        _log_rag_query(question, debug_context, wiki_result.get("answer", ""))
                     except Exception as log_err:
                         logger.error("Failed to log RAG query: %s", log_err)
                     final_emitted = True
@@ -1226,4 +1250,11 @@ def draft_export():
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5001))
-    app.run(debug=True, host="0.0.0.0", port=port)
+    # The Werkzeug auto-reloader restarts the whole process on any .py change,
+    # which KILLS in-flight ingest workers (docs already written to the DB but
+    # the wiki_done counter never bumped) and drops still-queued docs — a primary
+    # cause of ingestion "getting stuck" while editing code. Default the reloader
+    # OFF so long-running ingests survive file saves; set FLASK_USE_RELOADER=1
+    # to re-enable hot-reload for pure UI/code iteration when not ingesting.
+    use_reloader = os.environ.get("FLASK_USE_RELOADER", "0") == "1"
+    app.run(debug=True, host="0.0.0.0", port=port, use_reloader=use_reloader)

@@ -239,10 +239,10 @@ def _has_structural_conflict(text_a: str, text_b: str) -> bool:
 # ---------------------------------------------------------------------------
 # Doc types whose pages are document-specific and MUST be prefixed
 _CONTRACT_DOC_TYPES = re.compile(
-    r'\b(?:Master Service Agreement|Service Agreement|Service Level Agreement|'
+    r'\b(?:Master Services?\s+Agreement|Services?\s+Agreement|Service Level Agreement|'
     r'Professional Services Agreement|NDA|Non.?Disclosure|Shareholder.?s? Agreement|'
     r'Joint Venture|Share Purchase|Subscription Agreement|'
-    r'Master Service Agreement Amendment|Employment Agreement|'
+    r'Master Services?\s+Agreement Amendment|Employment Agreement|'
     r'Consulting Agreement|License Agreement|Supply Agreement)\b',
     re.IGNORECASE,
 )
@@ -302,6 +302,59 @@ def _make_doc_identifier(doc_name: str) -> str:
     # Fallback: use first 15 chars
     fallback = clean[:15].strip()
     return fallback if fallback else "Doc"
+
+
+# Ordered keyword → canonical-family rules. The ingest LLM's `doc_type` is free
+# text ("Non-Disclosure Agreement", "NDA", "Master Services Agreement", "Court
+# Judgment", ...), so we normalize to a small controlled vocabulary that scope
+# resolution (Phase 2) and metadata-filtered vector search (Phase 1) can group
+# and filter on. Rules are checked in order; the FIRST whose keyword appears in
+# the lowercased doc_type wins — so more specific families (e.g. "master services
+# agreement" → "Service Agreement" via the "service" keyword) must not be
+# shadowed by a broader rule listed earlier. Kept deliberately coarse: family is
+# for grouping ("all NDAs"), not fine-grained typing.
+_DOC_FAMILY_RULES = (
+    ("non-disclosure", "NDA"),
+    ("nondisclosure", "NDA"),
+    ("nda", "NDA"),
+    ("shareholder", "Shareholder Agreement"),
+    ("joint venture", "Joint Venture Agreement"),
+    ("jva", "Joint Venture Agreement"),
+    ("share purchase", "Share Purchase Agreement"),
+    ("subscription agreement", "Subscription Agreement"),
+    ("employment", "Employment Agreement"),
+    ("consulting", "Consulting Agreement"),
+    ("license", "License Agreement"),
+    ("licence", "License Agreement"),
+    ("supply", "Supply Agreement"),
+    ("service level", "Service Level Agreement"),
+    ("service", "Service Agreement"),   # covers "Master Services Agreement" too
+    ("legal opinion", "Legal Opinion"),
+    ("opinion", "Legal Opinion"),
+    ("judgment", "Court Judgment"),
+    ("judgement", "Court Judgment"),
+    ("court case", "Court Judgment"),
+    ("court", "Court Judgment"),
+    ("pleading", "Pleading"),
+    ("petition", "Pleading"),
+    ("plaint", "Pleading"),
+)
+
+
+def _normalize_doc_family(doc_type: str | None) -> str | None:
+    """Collapse the LLM's free-text doc_type to a canonical family label.
+
+    Returns None when doc_type is empty or matches no known family rule (callers
+    treat a None family as "ungrouped" — still retrievable, just not part of a
+    family-scoped query).
+    """
+    if not doc_type:
+        return None
+    dt = doc_type.lower()
+    for keyword, family in _DOC_FAMILY_RULES:
+        if keyword in dt:
+            return family
+    return None
 
 
 def _auto_prefix_title(title: str, doc_id: str) -> str:
@@ -537,15 +590,20 @@ PRINCIPLES:
 
 PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
 DOCUMENT-SPECIFIC PAGES (CRITICAL): Most pages describe provisions unique to THIS specific \
-document and must NOT merge with pages from other documents of the same type. You MUST prefix \
-the title with a SHORT DOCUMENT IDENTIFIER derived from the document: \
+document and must NOT merge with pages from other documents of the same type. You MUST attach \
+a SHORT DOCUMENT IDENTIFIER derived from the document. \
+TITLE ORDER (STRICT — never deviate): "{{Topic}} – {{Document Identifier}} ({{Document Type}})". \
+The topic ALWAYS comes first, then a dash, then the document identifier, then the type in \
+parentheses — the identifier NEVER comes before the topic. \
+Wrong: "SA1-Crayons – Term and Termination (Service Agreement)". \
+Right: "Term and Termination – SA1-Crayons (Service Agreement)". \
   For court judgments: use first party's last name (e.g. "Yuvraj Kanther") \
   For contracts/agreements: use a short identifier from filename or parties that distinguishes \
   this document from others of the same type. Derive it from the counterparty name, the \
   filename, or a unique label (e.g. "SA1-Crayons" for Service Agreement 1 with Crayons, \
   "NDA-Acme" for an NDA with Acme Corp, "SHA3-Meridian" for Shareholder Agreement 3 with Meridian). \
   Keep identifier SHORT (2-4 words max). \
-Examples of DOCUMENT-SPECIFIC pages that MUST have the prefix: \
+Examples of DOCUMENT-SPECIFIC pages that MUST have the identifier in this order: \
   - Court judgments: Facts, Procedural History, Charges, Holding, Contentions, Relief, Costs \
     → "Facts – Yuvraj Kanther (Court Judgment)" \
   - Contracts: Term, Termination, Payment, Fees, Indemnity, Liability, Scope of Services, \
@@ -668,13 +726,17 @@ RULES:
   Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
   what each court decided and why. Never blend outcomes from different stages.
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
-  DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics prefixed \
-  with a document identifier (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
-  without (e.g. "Section 319 CrPC", "Indian Arbitration Act"). Preserve these prefixes exactly \
-  when generating page titles. \
+  DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics with \
+  a document identifier attached (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
+  without (e.g. "Section 319 CrPC", "Indian Arbitration Act"). Preserve these exactly, IN THE \
+  SAME ORDER, when generating page titles. \
+  TITLE ORDER (STRICT — never deviate): the topic ALWAYS comes first, then a dash, then the \
+  document identifier — never the reverse. Wrong: "SA1-Crayons – Term". \
+  Right: "Term – SA1-Crayons". \
   If a document-specific topic (any clause, provision, obligation, term, or fact specific to \
-  THIS document) in the KNOWN TOPICS list lacks a prefix, add the document identifier. \
-  Shared legal concept pages (statutes, precedents, doctrines) must NOT have a prefix. \
+  THIS document) in the KNOWN TOPICS list has no identifier yet, add one AFTER the topic, in \
+  that same "{{Topic}} – {{Identifier}}" order. \
+  Shared legal concept pages (statutes, precedents, doctrines) must NOT have an identifier. \
   Examples: "Facts – Yuvraj Kanther ({doc_type})", "Term – SA1-Crayons ({doc_type})", \
   "Section 319 CrPC ({doc_type})", "Indian Arbitration Act ({doc_type})".
 - Each page should be 4-10 sentences of detailed synthesis.
@@ -789,6 +851,11 @@ def ingest(file_path: str, session_id: str) -> dict:
 
         overview_text = text[:6000] + "\n\n[...]\n\n" + text[-3000:]
         doc_type, topics, overview_parsed = _ingest_overview(overview_text, doc_name)
+        # Carry the inferred doc_type into the merge so it gets persisted to
+        # page_metadata (Phase 0). The overview/detail prompts don't emit a
+        # top-level "doc_type" in their pages dict the way the single-call prompt
+        # does, so inject it here — this is the one place the long-doc path knows it.
+        overview_parsed["doc_type"] = doc_type
         _update_wiki_progress(session_id, {"current": 1, "total": total_steps,
                                             "message": f"Overview pass for {doc_name}..."})
 
@@ -852,10 +919,21 @@ _HYPHEN_VARIANTS_RE = re.compile('[‐‑‒–—−]')
 
 def _norm_for_match(s: str) -> str:
     """Shared normalization for all quote/title verification comparisons:
-    collapse whitespace, lowercase, and fold unicode hyphen/dash variants to
-    a plain ASCII "-" so visually-identical strings compare equal."""
+    collapse whitespace, lowercase, fold unicode hyphen/dash variants to a
+    plain ASCII "-", and strip trailing/leading sentence punctuation (a
+    citation label quoted mid-sentence often picks up a trailing comma or
+    period from the surrounding prose, e.g. '"...Service Agreement,"' — that
+    punctuation isn't part of the real page title, so leaving it in broke the
+    exact-match lookup in _known_page_titles() and caused the label itself to
+    be flagged as an unverifiable content quote instead of recognized as a
+    citation label). Safe for quote-content matching too: stripping trailing
+    punctuation from a short extracted span before a substring-containment
+    check against the full corpus can only make a match MORE likely to be
+    found, never mask a genuine mismatch.
+    """
     s = _HYPHEN_VARIANTS_RE.sub('-', s)
-    return re.sub(r'\s+', ' ', s).strip().lower()
+    s = re.sub(r'\s+', ' ', s).strip().lower()
+    return s.strip('.,;:')
 
 
 def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
@@ -1018,6 +1096,10 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
     # Collect (title, embed_text) pairs here; embed OUTSIDE the lock so HTTP
     # calls don't block other ingest threads waiting on the session lock.
     pages_to_embed: list[tuple[str, str]] = []
+    # All pages in one merge call come from `doc_name`, so they share one family
+    # (Phase 1) — resolved from doc_type in the metadata block below, then stamped
+    # onto every embedding row so vector search can pre-filter by family at scale.
+    doc_family_for_batch: str | None = None
 
     with lock:
         pages_updated = 0
@@ -1114,8 +1196,22 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             pages_updated += 1
 
         # -- C7: Persist document-level metadata extracted at ingest time --
+        # Fold the inferred doc_type + normalized doc_family in alongside the
+        # LLM-extracted metadata (Phase 0). doc_type is present on new_data for
+        # both the single-call path (top-level prompt field) and the long-doc
+        # path (injected in ingest() after the overview pass). Note the long-doc
+        # path emits NO "metadata" object at all, so start from {} and still
+        # persist doc_type/doc_family when that's all we have.
         metadata = new_data.get("metadata")
-        if metadata and isinstance(metadata, dict):
+        metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        _doc_type = new_data.get("doc_type")
+        if _doc_type and isinstance(_doc_type, str):
+            metadata["doc_type"] = _doc_type
+            _fam = _normalize_doc_family(_doc_type)
+            if _fam:
+                metadata["doc_family"] = _fam
+                doc_family_for_batch = _fam
+        if metadata:
             try:
                 _db.upsert_metadata(session_id, doc_name, metadata)
             except Exception as _me:
@@ -1166,7 +1262,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
 
     # -- Embed pages OUTSIDE the lock (HTTP calls should not hold the session lock) --
-    _embed_pages_batch(session_id, pages_to_embed)
+    _embed_pages_batch(session_id, pages_to_embed, doc_family_for_batch)
 
     return pages_updated, new_rels_count, len(contradictions_found)
 
@@ -1174,7 +1270,8 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
 # ---------------------------------------------------------------------------
 # Embedding helper (Phase 3) — called OUTSIDE the session lock
 # ---------------------------------------------------------------------------
-def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -> None:
+def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
+                       doc_family: str | None = None) -> None:
     """Embed page summaries and store in page_embeddings table.
 
     Called AFTER the session lock is released so embedding HTTP calls don't
@@ -1185,6 +1282,10 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         pages_to_embed: list of (title, text_to_embed) where text_to_embed is
                         the page summary, or the first 400 chars of content
                         when no summary is available.
+        doc_family: normalized family for every page in this batch (all pages in
+                    a single merge come from one document), stamped onto each
+                    embedding row so vector search can pre-filter by family
+                    (Phase 1). None for documents whose type maps to no family.
     """
     if not config.USE_DATABASE or not pages_to_embed:
         return
@@ -1193,7 +1294,7 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]]) -
         texts = [text for _, text in pages_to_embed]
         embeddings = _embedder.embed_batch(texts, is_query=False)
         for (title, _), embedding in zip(pages_to_embed, embeddings):
-            _db.upsert_embedding(session_id, title, embedding)
+            _db.upsert_embedding(session_id, title, embedding, doc_family)
         logger.info(
             "Embedded %d pages for session %s", len(pages_to_embed), session_id
         )
@@ -1462,6 +1563,70 @@ def _distinct_source_docs(pages: dict) -> set[str]:
     return docs
 
 
+# Broad, cross-document question detector — used only to widen and diversify the
+# hybrid vector-search candidate pool. A flat top-K nearest-neighbour search has
+# no document-diversity awareness: for "across all Service Agreements" style
+# questions on a corpus with 7+ matching documents, the top-K can fill up with
+# pages from just 2-3 documents whose clauses happen to be lexically closest,
+# silently starving the rest even though they're all relevant. Confirmed live
+# (500-doc session): cross-SA liability-caps and cross-court-case digital-
+# evidence questions both synthesized only 2-3 of 7+ relevant documents.
+_BROAD_SCOPE_RE = re.compile(
+    r'\bacross all\b|\ball of the\b|\beach of the\b|\bacross the (corpus|documents)\b|'
+    r'\bevery (service agreement|shareholders? agreement|joint venture agreement|judgment|court case)\b',
+    re.IGNORECASE,
+)
+
+
+_PARTIES_TITLE_RE = re.compile(r'^parties\b', re.IGNORECASE)
+
+
+def _diversify_by_document(titles: list[str], pages: dict, per_doc_cap: int, total_cap: int) -> list[str]:
+    """Cap how many pages from any single source_doc can occupy the candidate
+    list, preserving similarity order, so a broad question's page budget gets
+    spread across documents instead of concentrating on the closest few.
+
+    Also force-includes each document's "Parties" identity page alongside its
+    semantically-closest clause page. Without this, a per-document cap of 1
+    page picks only whichever clause page matches the query topic (e.g.
+    "Limitation of Liability"), which never contains party names — the model
+    still produces correct party names (evidently carried over from earlier
+    turns in the same long session), but the grounding checker then flags
+    them as unsupported by *this* turn's context, since they genuinely aren't
+    in it. Confirmed live: spot-checked 3 "ungrounded" party pairings the
+    grounding check flagged, all 3 were factually exact — a retrieval gap,
+    not a fabrication.
+    """
+    parties_by_doc: dict[str, str] = {}
+    for t, p in pages.items():
+        if isinstance(p, dict) and _PARTIES_TITLE_RE.match(t):
+            sd = p.get("source_doc", "")
+            if sd and sd not in parties_by_doc:
+                parties_by_doc[sd] = t
+
+    per_doc_count: dict[str, int] = {}
+    result: list[str] = []
+    seen_docs: set[str] = set()
+    for t in titles:
+        page = pages.get(t)
+        sd = page.get("source_doc", "") if isinstance(page, dict) else ""
+
+        if sd not in seen_docs:
+            seen_docs.add(sd)
+            parties_title = parties_by_doc.get(sd)
+            if parties_title and parties_title != t and len(result) < total_cap:
+                result.append(parties_title)
+                per_doc_count[sd] = per_doc_count.get(sd, 0) + 1
+
+        if per_doc_count.get(sd, 0) >= per_doc_cap or t in result:
+            continue
+        result.append(t)
+        per_doc_count[sd] = per_doc_count.get(sd, 0) + 1
+        if len(result) >= total_cap:
+            break
+    return result
+
+
 def _norm_doc_name(name: str) -> str:
     """Normalise a source-doc path/filename to a comparable lowercase string.
 
@@ -1472,6 +1637,16 @@ def _norm_doc_name(name: str) -> str:
     s = os.path.splitext(s)[0]                          # drop extension
     s = s.replace('_', ' ').lower()
     s = re.sub(r'\b(redacted|test|final|draft|copy|v\d+)\b', ' ', s)
+    # Browser/OS duplicate-download folder names get "(1)", "(2)" etc. appended
+    # (e.g. a folder re-downloaded as "Service Agreement (1)") — this parenthesized
+    # number is a filesystem artifact, not a document identifier, but every file
+    # in that folder inherits it into source_doc. Left in, "\b1\b" in the numbered-
+    # pattern matcher below spuriously matches this artifact on EVERY file in the
+    # folder (since "(" / ")" are non-word chars, "\b1\b" matches inside "(1)"),
+    # flooding "service agreement 1" to match all 67 docs in the folder instead of
+    # zero (confirmed live: a session with no real "Service Agreement 1" doc still
+    # matched every "Service Agreement (1)_..." file and pulled in ~995 pages).
+    s = re.sub(r'\(\d+\)', ' ', s)
     return re.sub(r'\s+', ' ', s).strip()
 
 
@@ -1516,27 +1691,36 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
             logger.info("Detected file mention (raw filename): %s", matched)
             return matched
 
-    # 1. Numbered type pattern — precise per-document scoping
-    num_match = _DOC_NAME_PATTERN.search(question)
-    if num_match:
-        doc_num = num_match.group(1)
-        type_match = re.search(
-            r'(services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
-            r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)',
-            question, re.IGNORECASE,
-        )
-        type_core = ""
-        if type_match:
-            t = type_match.group(1).lower()
-            # First word distinguishes the type in the filename ("service", "nda", ...)
-            type_core = {"jva": "joint", "sha": "shareholder", "sa": "service"}.get(t, t.split()[0])
+    # 1. Numbered type pattern — precise per-document scoping.
+    # A question can name MORE THAN ONE document this way (e.g. "compare Tata
+    # Brand Judgment 6 and Tata Brand Judgment 8") — iterate every match rather
+    # than just the first, and pair each number with its OWN adjacent type word
+    # rather than reusing whichever type happened to appear earliest in the
+    # question. Confirmed live: a question naming "Judgment 6" and "Judgment 8"
+    # only force-included Judgment 6 (the second document was silently dropped
+    # to generic retrieval, which pulled an unrelated document instead).
+    for num_match in _DOC_NAME_PATTERN.finditer(question):
+        t = num_match.group(1).lower()
+        t = re.sub(r'\s+', ' ', t).strip()
+        doc_num = num_match.group(2)
+        # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
+        # NOT the first word, which for "legal opinion" is the non-distinctive
+        # "legal" that prefixes every source_doc.
+        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
+        # Match the number allowing zero-padding: the user types "service
+        # agreement 1" but redacted test files are saved zero-padded as
+        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
+        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
+        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
+        # keep it from bleeding into a different document number.
+        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
         for sd in src_docs:
             norm = _norm_doc_name(sd)
-            if re.search(rf'\b{re.escape(doc_num)}\b', norm) and (not type_core or type_core in norm):
+            if re.search(num_re, norm) and (not type_core or type_core in norm):
                 matched.add(sd)
-        if matched:
-            logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
-            return matched
+    if matched:
+        logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
+        return matched
 
     # 2. Distinctive full-name match (e.g. user pastes the exact doc name)
     for sd in src_docs:
@@ -1615,12 +1799,20 @@ QUESTION: {question}"""
 
 
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
-                 exclude_cached_answers: bool = False) -> tuple[str, list]:
+                 exclude_cached_answers: bool = False,
+                 doc_family: "str | list[str] | None" = None, force_broad: bool = False,
+                 force_docs: "list[str] | None" = None) -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
     all pages originating from that file are force-included so the answer stays
     grounded in the correct document.
+
+    doc_family / force_broad (Phase 2): forwarded from the resolved scope to the
+    hybrid page-selection path — doc_family pre-filters the pgvector search to a
+    document family, force_broad widens+diversifies the candidate pool. Both are
+    inert (None / False) for single-document and default corpus scopes, keeping
+    behaviour identical to before Phase 2 for those cases.
 
     exclude_cached_answers: when True, drops cached "Q:" answer pages (see
     generate_answer()'s answer-filing step) from consideration entirely, so a
@@ -1638,7 +1830,25 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         return {"context": "", "selected_titles": [], "bm25_count": 0}
 
     # --- Step 0: Detect file mentions in the question or use target_doc ---
-    if target_doc:
+    # Scope resolution (resolve_scope) may have already pinned specific documents
+    # by party-name content match — documents the in-question detectors below
+    # cannot find (party masked in metadata, filed under a bare type+number).
+    # Honour that pin first and scope STRICTLY to those documents' own pages
+    # (same strict, supplementary-free treatment as an explicit target_doc): the
+    # user named one specific agreement, so cross-document pages are contamination.
+    forced_set = {d for d in (force_docs or []) if d}
+    forced_pages = [
+        title for title, page in pages.items()
+        if isinstance(page, dict) and page.get("source_doc", "") in forced_set
+    ] if forced_set else []
+    strict_scope = False
+    if forced_pages:
+        mentioned_files = forced_set
+        file_pages = forced_pages
+        strict_scope = True
+        logger.info("Scope-pinned to %d document(s) by party match: %d page(s)",
+                    len(forced_set), len(file_pages))
+    elif target_doc:
         # Match by source_doc field (DB) or by title substring (file-based)
         file_pages = [
             title for title, page in pages.items()
@@ -1679,10 +1889,11 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     page_selection_usage: dict = {}
 
     # --- Step 1: Select relevant pages ---
-    if file_pages and target_doc:
-        # Explicit single-document scope (UI-pinned: the "summarise this document"
-        # flow and the disambiguation folder-picker both pass target_doc). The user
-        # pinned exactly ONE document, so supplementary cross-document pages are pure
+    if file_pages and (target_doc or strict_scope):
+        # Explicit single-document scope: either a UI pin (target_doc — the
+        # "summarise this document" flow and the disambiguation folder-picker) or
+        # a party-name content match resolved upstream (strict_scope). The user
+        # named exactly ONE document, so supplementary cross-document pages are pure
         # contamination here: an isolation test on the Test_JVA_05 summary showed the
         # supplementary pass dragged in ~30 boilerplate clause pages from an unrelated
         # Source Code Escrow Agreement, which the answer LLM then variably cited AS
@@ -1690,8 +1901,8 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # run-to-run citation-warning non-determinism. Scope strictly to the pinned
         # document's own pages; skip supplementary retrieval entirely.
         selected_titles = file_pages
-        logger.info("Explicit target_doc=%r: scoped to %d page(s), supplementary retrieval skipped",
-                     target_doc, len(file_pages))
+        logger.info("Single-document scope (%s): scoped to %d page(s), supplementary retrieval skipped",
+                     target_doc or f"party:{sorted(forced_set)}", len(file_pages))
     elif file_pages:
         # File mention detected from the question text (not an explicit UI pin) — force
         # those pages in, then add topic-collision-filtered supplementary pages.
@@ -1743,11 +1954,15 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
                      len(file_pages), len(selected_titles))
     else:
-        # No file mentioned — original behaviour
+        # No file mentioned — original behaviour, now with optional family
+        # pre-filter + broad-widen forwarded from the resolved scope (Phase 2).
         if len(pages) <= 20:
             selected_titles = list(pages.keys())
         else:
-            selected_titles, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
+            selected_titles, page_selection_usage = _select_relevant_pages(
+                pages_for_llm, question, session_id,
+                doc_family=doc_family, force_broad=force_broad,
+            )
 
     # --- Step 2: Build context string from selected pages ---
     # Q: pages are cached prior answers — cap so they don't crowd out source content.
@@ -2032,9 +2247,90 @@ def _quote_segments(q: str) -> list[str]:
 # hole the greedy regex was built to close in the first place.
 _INTERNAL_QUOTE_SPLIT_RE = re.compile(r'["“”]')
 
+# Common short words that appear as narration BETWEEN two separately-quoted
+# phrases in the same sentence (e.g. `**"quote one"** and that **"quote two"**`).
+# When two adjacent quotes are each individually bolded, the greedy quote-span
+# match merges them into one span with this connector prose caught in the
+# middle; _quote_inner_segments correctly splits it back into 3 pieces, but the
+# middle piece is markdown formatting + filler words, never meant to be a
+# verbatim quote itself — requiring it to independently match context (like
+# the two real quotes either side of it) dragged genuinely correct answers
+# down. A segment made ENTIRELY of these words (after stripping markdown
+# emphasis markers) is connector prose, not a quote fragment, and shouldn't be
+# required to verify. Confirmed live: "** and that **" between two genuine,
+# independently-verifiable quotes was the sole reason a fully-grounded answer
+# got flagged.
+_CONNECTOR_ONLY_WORDS = {
+    "and", "that", "but", "or", "which", "who", "the", "a", "an", "is", "are",
+    "was", "were", "states", "stating", "further", "also", "it", "its", "this",
+    "these", "those", "as", "to", "of", "in",
+}
+
+
+def _is_connector_only_segment(s: str) -> bool:
+    words = re.findall(r"[a-zA-Z']+", s.lower())
+    if not words:
+        return True  # pure punctuation/markdown noise, not a quote
+    return all(w in _CONNECTOR_ONLY_WORDS for w in words)
+
 
 def _quote_inner_segments(q: str) -> list[str]:
-    return [s.strip() for s in _INTERNAL_QUOTE_SPLIT_RE.split(q) if len(s.strip()) >= 8]
+    segments = []
+    for s in _INTERNAL_QUOTE_SPLIT_RE.split(q):
+        s = s.strip()
+        if len(s) < 8:
+            continue
+        stripped_md = re.sub(r'[*_]+', '', s).strip()
+        if _is_connector_only_segment(stripped_md):
+            continue
+        segments.append(stripped_md or s)
+    return segments
+
+
+# Follow-up to the connector-word filter above: found on retest of the same
+# CCD6 question, two genuine quotes are sometimes separated by real narrative
+# words ("This distinction underpins the request for an...") rather than pure
+# filler ("and that") — _is_connector_only_segment correctly refuses to drop a
+# segment with real content, so that segment still has to independently
+# "verify" against context even though it was never a quote itself, just the
+# model's own connecting prose between two already-confirmed genuine quotes.
+# A word-list can't tell "model narration between two quotes" apart from
+# "genuine document text that itself contains internal punctuation" (the
+# nested-quote case, e.g. `("Depositor")`, where EVERY split piece — including
+# the short ones — really is part of one continuous verbatim excerpt and must
+# still independently verify). The distinguishing signal isn't the segment's
+# own words, it's its position: if a segment fails to verify but sits directly
+# between two segments that DO independently verify, it's excused as narration
+# bridging two confirmed real quotes rather than a free-standing unverifiable
+# claim. A segment with no verified neighbor on both sides (leading/trailing,
+# or next to another unverified segment) still must verify on its own — this
+# only excuses the specific "quote, narration, quote" shape.
+def _segments_effectively_verified(q: str, ctx_norm: str, question_norm: str) -> bool:
+    def _seg_norm_ok(seg: str) -> bool:
+        sn = _norm_for_match(seg)
+        return sn in ctx_norm or (bool(question_norm) and sn in question_norm)
+
+    parts = []
+    for s in _INTERNAL_QUOTE_SPLIT_RE.split(q):
+        stripped_md = re.sub(r'[*_]+', '', s.strip()).strip()
+        if len(stripped_md) < 8:
+            continue
+        parts.append((stripped_md, _seg_norm_ok(stripped_md)))
+
+    if not parts:
+        return True
+
+    for i, (seg, verified) in enumerate(parts):
+        if verified:
+            continue
+        if _is_connector_only_segment(seg):
+            continue
+        prev_ok = parts[i - 1][1] if i > 0 else False
+        next_ok = parts[i + 1][1] if i < len(parts) - 1 else False
+        if prev_ok and next_ok:
+            continue  # real narrative prose bridging two confirmed genuine quotes
+        return False
+    return True
 
 
 def _known_page_titles(context: str) -> set[str]:
@@ -2147,8 +2443,7 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
         segments = _quote_segments(q)
         if segments and all(_seg_ok(seg) for seg in segments):
             continue
-        inner_segments = _quote_inner_segments(q)
-        if inner_segments and all(_seg_ok(seg) for seg in inner_segments):
+        if _INTERNAL_QUOTE_SPLIT_RE.search(q) and _segments_effectively_verified(q, ctx_norm, question_norm):
             continue
         unverified.append(q.strip())
     return unverified
@@ -2190,7 +2485,19 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
     if not blocks:
         return []
-    norm_blocks = [(title, _norm(_block_verification_text(title, body))) for title, body in blocks]
+    # Candidate discovery uses each block's FULL body, not the Supporting-Quotes-
+    # restricted text _verify_answer_citations uses — that stricter scope exists to
+    # stop fabricated quotes from passing as genuine (a separate, still-strict check
+    # below in this same function's caller). Here the question is different: "is
+    # there ANY block that could confirm this citation is attributed correctly,"
+    # and using only the verified-quotes subset undercounts real candidates. Confirmed
+    # live: a shared risk-assessment sentence genuinely appears in both Opinion_37's
+    # Supporting Quotes section AND Opinion_41's ordinary prose (ingest-time filtering
+    # only kept it under Opinion_37's heading) — citing Opinion_41 is factually
+    # correct, but restricting candidate search to Supporting-Quotes-only meant
+    # Opinion_41 never appeared as a candidate, so the only candidate found (Opinion_37)
+    # didn't match the citation and it was wrongly flagged as misattributed.
+    norm_blocks = [(title, _norm(body)) for title, body in blocks]
     known_titles = _known_page_titles(context)
 
     # Map each block title to its "[From: <filename>]" label (emitted by
@@ -2315,7 +2622,31 @@ from CONTEXT into quotation marks, or if no exact verbatim sentence exists, desc
 the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual") -> dict:
+# A line is "complete" if it ends with a terminal mark a truncated model
+# stream wouldn't leave dangling: sentence punctuation, a closing quote, a
+# closed markdown table row ("...|"), a closing code fence, or is blank.
+_COMPLETE_LINE_RE = re.compile(r'(^\s*$)|([.!?"\'`)\]|:])\s*$')
+
+
+def _truncate_to_last_complete_unit(text: str) -> str:
+    """Drop a dangling, truncated tail (e.g. a table row cut off mid-cell) so a
+    still-truncated retry ships a clean partial answer instead of a broken
+    fragment. Only trims from the end and only if most of the answer survives —
+    never used on an answer that already ends cleanly."""
+    stripped = text.rstrip()
+    if not stripped or _COMPLETE_LINE_RE.search(stripped):
+        return text
+    lines = stripped.split("\n")
+    for i in range(len(lines) - 2, -1, -1):
+        if _COMPLETE_LINE_RE.search(lines[i]):
+            kept = "\n".join(lines[: i + 1]).rstrip()
+            if len(kept) >= 0.4 * len(stripped):
+                return kept + "\n\n_[Response was cut off before completion — some entries may be missing.]_"
+            break
+    return text
+
+
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False) -> dict:
     """Generate an answer using the provided wiki content."""
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -2334,7 +2665,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total_tokens": page_selection_usage.get("prompt_tokens", 0) + page_selection_usage.get("completion_tokens", 0),
         })
 
-    if not wiki_content:
+    # A retrieval failure (e.g. a transient embedding/DB hiccup) can leave
+    # wiki_content as a non-empty-but-pure-whitespace string — `if not
+    # wiki_content` alone doesn't catch that, so it silently reaches the LLM
+    # with a blank {context} slot. The model then correctly (from its own
+    # view) says "not covered", but the answer looks like a normal confident
+    # response instead of surfacing that retrieval actually returned nothing.
+    if not wiki_content or not wiki_content.strip():
         return {
             "answer": "The wiki is empty — no documents have been ingested yet.",
             "pages_used": [],
@@ -2364,6 +2701,37 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     from services import rules as _rules
     house_rules_block = _rules.enabled_rules_block()
 
+    # The question named a document by pattern ("service agreement 1") that
+    # check_disambiguation_node could not confirm exists in this corpus. Two
+    # placements were tried and verified live before this one: appended to
+    # `question` (embeds mid-prompt, right before a rigid REQUIRED OUTPUT
+    # FORMAT directive the model follows very literally — got partial
+    # compliance, stopped the false "Service Agreement 1 (Test_SA_44)" title
+    # but dropped the disclosure-first-sentence requirement); prepended to
+    # house_rules_block (substituted right after metadata_block, but
+    # metadata_block itself can be large — party names and matter references
+    # across every selected document — so the note still ends up hundreds of
+    # characters deep, diluting it the same way). Prepending directly onto the
+    # fully-composed prompt, before even the model's persona-setting opening
+    # sentence, is the most salient position available.
+    _unconfirmed_doc_note = (
+        "CRITICAL — UNCONFIRMED DOCUMENT REFERENCE: No document in this corpus "
+        "matches the specific document number/name referenced in the question "
+        "below. This does not override the required output structure below "
+        "(reasoning block first, if one is specified) — it constrains what "
+        "goes inside it. The FIRST LINE of your reasoning (or, if no reasoning "
+        "block is specified, the FIRST SENTENCE of your answer) MUST state "
+        "this plainly, e.g. \"No document matching '<name>' exists in this "
+        "corpus.\" The final answer itself must ALSO open with that same "
+        "disclosure as its first sentence, before any table or analysis. Do "
+        "NOT use the referenced name as a title or heading anywhere in the "
+        "answer (e.g. never write \"... in Service Agreement 1\" as a "
+        "heading). If related documents exist that the user may have meant, "
+        "name them by their REAL identifiers and offer them as likely "
+        "alternatives — but never answer as if the referenced document were "
+        "one of them.\n\n"
+    ) if unconfirmed_doc_reference else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -2373,7 +2741,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
-    prompt = prompt_template.format(
+    prompt = _unconfirmed_doc_note + prompt_template.format(
         context=wiki_content,
         question=question,
         conversation_block=conv_block,
@@ -2394,12 +2762,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else config.MAX_TOKENS_ANSWER
     )
 
-    # Match <reasoning> block — tolerant of unicode angle brackets and whitespace
-    _REASON_OPEN = r'<\s*reasoning\s*>'
-    _REASON_CLOSE = r'<\s*/?\s*reasoning\s*>'
+    # Reasoning-block tags. The OPEN and CLOSE patterns are kept SEPARATE and the
+    # close pattern requires a real slash — a previous single pattern with an
+    # OPTIONAL slash (<\s*/?\s*reasoning\s*>) also matched the opening tag, which
+    # combined with regex-substituting the block out intermittently deleted the
+    # entire answer (confirmed live: the model correctly wrote <reasoning>plan
+    # </reasoning> + a 12k-char answer, but the strip ate the answer). Extraction
+    # below is positional (split on the close tag) rather than sub-based, so it is
+    # deterministic and model-agnostic — works whether the model reasons briefly,
+    # at length, or (like Azure GPT-5.x) keeps its native reasoning out of the
+    # content entirely.
+    _REASON_OPEN_RE = re.compile(r'<\s*reasoning\s*>', re.I)
+    _REASON_CLOSE_RE = re.compile(r'<\s*/\s*reasoning\s*>', re.I)
     _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
 
-    def _run_generation_pass(gen_prompt: str) -> tuple[str, dict, int, str]:
+    def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
         """Run one LLM answer-generation call and parse out answer text + confidence.
 
         Factored out of the main body so the corrective citation retry below can
@@ -2412,25 +2789,35 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             raw_answer, pass_usage = llm.ask(
                 gen_prompt,
                 pipeline="wiki",
-                max_tokens=_answer_token_budget,
+                max_tokens=token_budget or _answer_token_budget,
             )
 
-            # --- Extract confidence from reasoning BEFORE stripping the block ---
-            # The ANSWER_PROMPT instructs the model to append two structured lines
-            # at the end of <reasoning>:
-            #   CONFIDENCE_SCORE: [int]
-            #   CONFIDENCE_REASON: [sentence]
-            # Extracting here avoids a second LLM call for _evaluate_confidence().
-            reasoning_match = re.search(
-                rf'(?i){_REASON_OPEN}(.*?){_REASON_CLOSE}', raw_answer, flags=re.DOTALL
-            )
-            # Fallback: if no closing tag, grab everything after the opening tag
-            if not reasoning_match:
-                reasoning_match = re.search(
-                    rf'(?i){_REASON_OPEN}(.*)', raw_answer, flags=re.DOTALL
-                )
-            if reasoning_match:
-                reasoning_text = reasoning_match.group(1)
+            # --- Positional split: reasoning block vs. user-facing answer ---
+            # Contract: an optional <reasoning>…CONFIDENCE_SCORE…CONFIDENCE_REASON…
+            # </reasoning> block, then the answer. We locate the opening tag and
+            # its matching (real-slash) closing tag by POSITION:
+            #   reasoning_text = between the tags   (carries confidence)
+            #   pass_answer    = everything AFTER the close tag
+            # This is deterministic across models: brief reasoning, long reasoning,
+            # no block at all, or an unclosed block are each handled explicitly —
+            # and it never substitutes the block out, so it cannot eat the answer.
+            open_m = _REASON_OPEN_RE.search(raw_answer)
+            close_m = _REASON_CLOSE_RE.search(raw_answer, open_m.end()) if open_m else None
+            if open_m and close_m:
+                reasoning_text = raw_answer[open_m.end():close_m.start()]
+                pass_answer = raw_answer[close_m.end():].strip()
+            elif open_m:
+                # Opened but never closed — the whole tail is reasoning; the model
+                # left no separate answer section (recovered below).
+                reasoning_text = raw_answer[open_m.end():]
+                pass_answer = ""
+            else:
+                # No reasoning block — model answered directly (e.g. a model whose
+                # native reasoning never enters the content).
+                reasoning_text = ""
+                pass_answer = raw_answer.strip()
+
+            if reasoning_text:
                 score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
                 reason_match = re.search(
                     r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_text
@@ -2443,44 +2830,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 if reason_match:
                     pass_reason = reason_match.group(1).strip()
 
-            # Strip reasoning tags for the user-facing answer (all variants)
-            pass_answer = re.sub(
-                rf'(?i){_REASON_OPEN}.*?{_REASON_CLOSE}', '', raw_answer, flags=re.DOTALL
-            ).strip()
-            # Also strip unclosed reasoning block (model wrote opening tag but no closing)
-            pass_answer = re.sub(
-                rf'(?i){_REASON_OPEN}.*', '', pass_answer, flags=re.DOTALL
-            ).strip()
-
-            # Fallback: if stripping left an empty/trivial answer but reasoning had
-            # real content, the model put the answer inside the reasoning block.
-            # Recover by stripping tags, confidence lines, and reasoning preamble.
-            if len(pass_answer) <= 10 and reasoning_match:
-                reasoning_body = reasoning_match.group(1)
-                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_body).strip()
-                # Strip reasoning preamble: numbered analysis steps before the
-                # actual content (e.g. "1. Identify the core language...\n2. Add...")
-                # Heuristic: find the first markdown heading, divider, or
-                # numbered formulation header — everything before is preamble.
-                content_start = re.search(
-                    r'(?m)(^#{1,3}\s|^---\s*$|\n1️⃣|\n\*\*Confidentiality|^\*\*[A-Z].*\*\*\s*$)',
-                    recovered,
-                )
-                if content_start and content_start.start() > 20:
-                    recovered = recovered[content_start.start():].strip()
-                # Re-extract confidence from recovered text if main extraction got default
-                if pass_score == 75:
-                    re_score = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_body)
-                    if re_score:
-                        try:
-                            pass_score = min(100, max(0, int(re_score.group(1))))
-                        except ValueError:
-                            pass
-                    re_reason = re.search(r'(?i)CONFIDENCE[_\s]*REASON[^\w]*(.+?)(?:\n|$)', reasoning_body)
-                    if re_reason:
-                        pass_reason = re_reason.group(1).strip()
+            # Recovery: the model put the whole answer INSIDE the reasoning block
+            # (nothing after the close tag). Recover the full reasoning body minus
+            # the confidence lines. Only drop a SHORT leading plan preamble if a
+            # clear content heading sits near the very start — never trim into the
+            # bulk of the content (the previous heuristic could discard ~90%).
+            if len(pass_answer) <= 10 and reasoning_text.strip():
+                recovered = re.sub(_CONFIDENCE_LINE_RE, '', reasoning_text).strip()
+                cs = re.search(r'(?m)^\s*(#{1,3}\s|\*\*[A-Z][^\n]*\*\*\s*$|\|)', recovered)
+                if cs and 0 < cs.start() < len(recovered) * 0.3:
+                    recovered = recovered[cs.start():].strip()
                 if len(recovered) > len(pass_answer):
-                    logger.warning("Answer was empty after reasoning strip — recovering %d chars from reasoning block", len(recovered))
+                    logger.warning(
+                        "Answer empty after reasoning split — recovered %d chars from reasoning block",
+                        len(recovered),
+                    )
                     pass_answer = recovered
 
             # Always strip any stray CONFIDENCE lines that leaked into the answer
@@ -2516,6 +2880,40 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
 
+    # Truncation retry: a "factual"-intent question that's actually broad/cross-
+    # document in scope (e.g. "across all JVAs in the corpus...") can exhaust the
+    # narrower MAX_TOKENS_ANSWER budget before the model ever writes real content —
+    # confirmed live: a 25-page cross-document question got cut off at
+    # completion_tokens=4034 (against a 4096 cap), leaving only the model's own
+    # numbered reasoning/plan trace ("1. Identified... 5. Compiled the findings
+    # into a table.") with no actual table ever emitted. Unlike the citation
+    # retry below, a truncated response is unambiguously worse than a complete
+    # one, so this always keeps the retry — no comparison needed.
+    if usage.get("finish_reason") == "length" and _answer_token_budget < config.MAX_TOKENS_ANSWER_BROAD:
+        logger.warning("Answer generation truncated at %d tokens — retrying with broader budget",
+                       usage.get("completion_tokens", 0))
+        retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(
+            prompt, token_budget=config.MAX_TOKENS_ANSWER_BROAD
+        )
+        token_breakdown.append({
+            "call": "truncation_retry",
+            "model": llm.active_model(fast=False),
+            "prompt_tokens": retry_usage.get("prompt_tokens", 0),
+            "completion_tokens": retry_usage.get("completion_tokens", 0),
+            "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+        })
+        if retry_usage.get("finish_reason") != "length":
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+        else:
+            logger.warning("Truncation retry also hit the token limit — keeping it anyway, trimmed to its last complete unit")
+            retry_answer = _truncate_to_last_complete_unit(retry_answer)
+            answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
+    elif usage.get("finish_reason") == "length":
+        # Already generated at the broad budget and still truncated — no
+        # further retry available, so just trim the dangling tail.
+        logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
+        answer = _truncate_to_last_complete_unit(answer)
+
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
     # context (paraphrase dressed up as an exact quote), and any quote
@@ -2545,7 +2943,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
 
-        if len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed):
+        _fewer_issues = len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed)
+        # A citation fix must not gut the answer. The retry sometimes comes back
+        # far shorter — e.g. only the reasoning plan, or a truncated table — which
+        # trivially has "fewer" unverified quotes simply because it has fewer
+        # quotes (or none). Confirmed live: a 9,974-char comparison answer was
+        # replaced by an 818-char plan-only answer that "passed" this check.
+        # Require the retry to retain most of the original's length to count.
+        _retained_length = len(retry_answer) >= 0.6 * len(answer)
+        if _fewer_issues and _retained_length:
             logger.info(
                 "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed",
                 len(_unverified_quotes), len(retry_unverified),
@@ -2553,6 +2959,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             )
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
             _unverified_quotes, _misattributed = retry_unverified, retry_misattributed
+        elif _fewer_issues and not _retained_length:
+            logger.info(
+                "Citation retry had fewer issues but was drastically shorter "
+                "(%d vs %d chars) — keeping fuller original answer",
+                len(retry_answer), len(answer),
+            )
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
 
@@ -2578,14 +2990,30 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
-    
-    # Get all canonical doc names from pages
+
+    # Get all canonical doc names from pages. Some pages have a malformed
+    # trailing parenthetical that's just the bare instrument TYPE (e.g. "(Service
+    # Agreement)", "(Agreement)", "(NDA)") instead of a real filename — an
+    # ingest-time data-quality gap, not a real per-document identifier. Skip
+    # these: since "agreement"/"NDA" are common words in any legal answer, a
+    # bare type-word can spuriously substring-match citation text and pollute
+    # files_used with a fake "document" that isn't an actual file. Confirmed
+    # live: 6 such generic entries in one session's canonical_files, and
+    # "Service Agreement"/"Agreement" showing up as bogus reference cards.
+    _GENERIC_CANONICAL_EXCLUDE = {
+        "agreement", "nda", "sha", "jva", "sa", "ccd", "msa",
+        "service agreement", "shareholder agreement", "joint venture agreement",
+        "non-disclosure agreement", "master services agreement",
+    }
     canonical_files = set()
     for title in pages.keys():
         match = re.search(r'\(([^)]+)\)\s*$', title.strip())
         if match:
-            canonical_files.add(match.group(1))
-            
+            cfile = match.group(1)
+            if cfile.strip().lower() in _GENERIC_CANONICAL_EXCLUDE:
+                continue
+            canonical_files.add(cfile)
+
     pages_used_dedup = []
     files_used = []
     seen = set()
@@ -2615,6 +3043,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     _FILES_USED_FALLBACK_CAP = 3
     if not files_used and selected_titles:
         mentioned = _detect_mentioned_files(question, pages)
+        if not mentioned:
+            # The question may not name the document explicitly (e.g. a rephrased,
+            # more generic version of a question that previously named it), but the
+            # ANSWER itself frequently does — especially when the model's own
+            # citation didn't use a bracketed [N] marker at all, so the referenced-
+            # bracket scan above never had a chance to resolve it via inline
+            # citations. Confirmed live: a rephrased SA2 question (no "(SA 2)")
+            # with a bolded-but-unbracketed citation fell all the way to the
+            # arbitrary "first 3 selected pages" last resort below and rendered
+            # unrelated documents, even though the answer text plainly named
+            # "Service Agreement 2" and its real filename throughout.
+            mentioned = _detect_mentioned_files(answer, pages)
         if mentioned:
             files_used = sorted(mentioned)
         else:
@@ -2633,6 +3073,25 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     # Confidence is already extracted from the reasoning block above —
     # no second LLM call needed.
+    if unconfirmed_doc_reference and confidence_score > 45:
+        # Confidence is the model's own self-assessment of how well it answered
+        # from what it was given — it has no visibility into whether the
+        # document the question actually named was ever confirmed to exist.
+        # Confirmed live: answers built on an unconfirmed "service agreement 1"
+        # reference carried 92-96% self-reported confidence even while
+        # grounding (a separate, independent check) read as low as 20-55% —
+        # the two signals were never reconciled. Cap it deterministically here
+        # rather than trust the model to discount its own score for a fact it
+        # can't see; 45 sits below the >=80 threshold that gates auto-caching
+        # an answer as a trusted "Q:" page below, so an unconfirmed-reference
+        # answer can never entrench itself as future ground truth either.
+        confidence_reason = (
+            f"Capped at 45 (was {confidence_score}) — the question referenced a "
+            f"document this corpus could not confirm exists; the model's own "
+            f"confidence in its retrieval-independent reasoning cannot offset that. "
+            f"{confidence_reason}"
+        )
+        confidence_score = 45
     confidence = {"score": confidence_score, "reason": confidence_reason}
 
     # Log query
@@ -2715,11 +3174,36 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 # ---------------------------------------------------------------------------
 
 _DOC_NAME_PATTERN = re.compile(
-    r'(?:services?\s+agreement|shareholders?\s+agreement|nda|joint\s+venture|'
-    r'legal\s+opinion|court\s+case|judgment|jva|sha|sa)\s*'
-    r'(?:#?\s*)?(\d+)',
+    # Type phrase, then the number. The number may be separated from the type by
+    # a filler word the corpus actually uses in filenames — "Court Case DOCUMENT
+    # 4", "Joint Venture AGREEMENT 4" — or by "#", "no.", "number". Without the
+    # optional filler, only "court case 4"/"joint venture 4" matched, so every
+    # multi-document question naming "Court Case Document N" / "Joint Venture
+    # Agreement N" silently force-included NONE of those docs (confirmed live:
+    # Q52 named 3 docs, only the one written "Judgment 6" matched).
+    r'(services?\s+agreement|shareholders?\s+agreement|nda|'
+    r'joint\s+venture(?:\s+agreement)?|legal\s+opinion|'
+    r'court\s+case(?:\s+document)?|judgment|jva|sha|sa)'
+    r'\s*(?:#|no\.?|number)?\s*(\d+)',
     re.IGNORECASE,
 )
+
+# Distinctive core token each matched type must ALSO appear as in a filename, to
+# stop a number from matching documents of the wrong type. Must NOT be the type's
+# first word when that word is non-distinctive: every source_doc here is prefixed
+# "Legal AI - Raja …", so "legal" (from "legal opinion") appears in EVERY filename
+# and would let "Legal Opinion 7" match every number-7 document of any type
+# (confirmed live: Q56 matched 9 docs). "opinion" is the distinctive token.
+_DOC_TYPE_CORE = {
+    "service agreement": "service", "services agreement": "service",
+    "shareholder agreement": "shareholder", "shareholders agreement": "shareholder",
+    "nda": "nda",
+    "joint venture": "venture", "joint venture agreement": "venture",
+    "legal opinion": "opinion",
+    "court case": "court", "court case document": "court",
+    "judgment": "judgment",
+    "jva": "venture", "sha": "shareholder", "sa": "service",
+}
 
 # Matches when a question names a document type together with a distinctive entity
 # or party name (e.g. "ReVolt JV Agreement", "Meridian service agreement"). The
@@ -2748,6 +3232,11 @@ _NON_ENTITY_WORDS = {
     "compare", "in", "of", "for", "on", "about", "regarding", "tata", "given",
     "from", "with", "and", "or", "to", "by", "under", "between", "during", "at",
     "into", "onto", "over", "after", "before", "against", "across", "within",
+    # Quantifiers over the whole corpus ("across all Service Agreements") name
+    # NO specific document — confirmed live to false-trigger unconfirmed_doc_reference
+    # (and the resulting 45%-confidence cap) on a genuinely broad, correctly
+    # cross-document-synthesized answer.
+    "all", "both", "such", "these", "those", "various", "multiple", "several", "many",
 }
 
 # Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
@@ -2880,6 +3369,65 @@ _ENTITY_EXCLUDE = {
     # abandoning force-include entirely.
     "capital", "equity", "obligations", "power", "structure", "technologies",
     "solar", "nexus", "joint venture agreement",
+    # Found live-testing "identify the top 10 legal and commercial risks in this
+    # document" — a vague, no-document-named question that should always
+    # disambiguate: "risk" and "commercial" leaked in as if they were distinctive
+    # document identifiers (from a malformed title like "Risk Assessment –
+    # Commercial (...)"), so _question_mentions_known_entity() falsely matched
+    # ordinary risk-assessment vocabulary and skipped disambiguation entirely.
+    "risk", "risks", "commercial",
+    # Found live-testing VoltMetric/SteelCircle SHA questions: "SHA-OmniRetail –
+    # Transfer Restrictions" has swapped Topic/DocID order, so these generic
+    # clause-topic words leaked in as if "Transfer Restrictions" were a
+    # distinctive identifier, out-competing the real single-token "voltmetric"
+    # entity match. Also needed as the trigger condition for the swapped-title
+    # detection in _doc_identifier_part() below (a last-segment made entirely
+    # of these words is treated as a topic phrase, not a real identifier).
+    "transfer", "transfers", "restriction", "restrictions", "specific",
+    "applicable", "analytics", "rofo", "rofr", "offer", "refusal",
+    # Found live-testing "Summarize this document in 10 bullet points..." — a
+    # fully generic question with zero identifying information still skipped
+    # disambiguation. Root cause: malformed titles like "Definitions – General
+    # (Legal Opinion)" and "Right of First Offer – General (Shared)" use the
+    # bare word "General" (or a clause-topic phrase) as their identifier segment
+    # when ingest synthesis had no distinctive party name to put there, so these
+    # generic words leaked into the entity set the same way as the cases above.
+    # A pure frequency cap (_ENTITY_DOC_FREQ_CAP) can't catch this class — each
+    # of these words happened to appear in only 1-4 documents in this corpus,
+    # same as a genuine rare entity name, so raw occurrence count can't tell
+    # them apart from a real distinctive name. Only a vocabulary-level exclusion
+    # works here.
+    "general", "liability", "provision", "provisions", "obligation",
+    "statutory", "principle", "principles", "reasoning", "standard", "standards",
+    "types", "relief", "injunctive", "notice", "notices", "breach", "threshold",
+    "approval", "rules", "protection", "harm",
+    # Found live-testing a cross-document question naming an NDA, an Arbitration
+    # Notice, and a Section 9 Petition by role (no numbers given): "arbitration",
+    # "contractual", "alleged", "preservation", "contract", "work", "under"
+    # leaked in as entities from clause-topic identifiers. _pages_matching_
+    # question_entity()'s winner-take-all scoring (keep only the highest
+    # combined-hit-count group) means a document that happens to ALSO share one
+    # of these generic words outscores — and completely excludes — a document
+    # that only matches the genuinely distinctive party names. Confirmed live:
+    # the real NDA (1 hit: "nordforge") and the real Arbitration Notice (1 hit)
+    # were both dropped in favour of an unrelated Section 9 Petition that
+    # scored 2 by also matching leaked "arbitration" vocabulary in its own
+    # identifier — even though the question named all three documents by role.
+    "arbitration", "contractual", "alleged", "preservation", "contract", "work",
+    "under",
+    # Found live-testing a DriveConnect/VoltMetric cross-document question:
+    # "Definitions – Intellectual Property (Legal Opinion)" and "Miscellaneous
+    # – Governing Law and Forum (Legal Opinion)" use a generic clause-topic
+    # label as their identifier segment (same fallback-label failure mode as
+    # "General" above), inflating unrelated Legal Opinions to a 4-way compound
+    # match that buried the real "voltmetric" (1 hit) and "joint venture
+    # agreement 5" (1 hit) matches entirely. "data" is a different cause: it's
+    # a legitimate word inside a real company name ("Pinnacle Data Analytics
+    # LLC"), but extracting individual constituent words from a multi-word
+    # identifier leaks that word as if it were its own distinctive entity —
+    # excluding it loses only the ability to match on "data" alone, not the
+    # full "Pinnacle Data Analytics" name.
+    "intellectual", "property", "governing", "forum", "proper", "data",
 }
 
 
@@ -2908,8 +3456,76 @@ def _doc_identifier_part(title: str) -> str:
     if dash < 0:
         return ""
     rest = title[dash + 3:]
-    rest = re.sub(r'\s*\([^)]*\)\s*$', '', rest)
-    return rest.strip()
+    rest = re.sub(r'\s*\([^)]*\)\s*$', '', rest).strip()
+
+    # Root-cause fix for the recurring "swapped title order" failure mode
+    # (previously only patched one leaked word at a time via _ENTITY_EXCLUDE,
+    # e.g. "party"/"confidential"/"risk"/"commercial"/"transfer"/"restrictions"):
+    # some ingested titles have DocID-then-Topic order ("SHA-OmniRetail –
+    # Transfer Restrictions") instead of the expected Topic-then-DocID order
+    # ("Transfer Restrictions – SHA-OmniRetail"), so taking the last segment
+    # grabs the generic topic phrase as if it were the identifier. Confirmed
+    # live: this happened with BOTH "Transfer Restrictions" (VoltMetric case)
+    # and "Information Rights" (SteelCircle case) — two different generic
+    # phrases, same swap pattern — so a word-list can never fully close this;
+    # it needs a structural check instead. If the last segment doesn't look
+    # like a real document ID at all (no doc-type prefix, no camelCase — just
+    # ordinary multi-word prose) AND the alternate segment DOES look like one,
+    # use the alternate segment. A genuine multi-word party name with no
+    # prefix (e.g. "Meridian Portfolio Labs LLP") also fails the ID-shape check,
+    # but its alternate segment ("Recitals", a plain topic word) fails it too,
+    # so the original `rest` is correctly kept in that case — this only kicks
+    # in when exactly one of the two candidates looks ID-shaped.
+    if not _looks_like_doc_id(rest):
+        # Deliberately does NOT require first_dash != dash — the common case is
+        # a title with exactly ONE " – " separator, where both point to the same
+        # position; the multi-dash case ("Holding – Motion to Dismiss – HASG")
+        # is still handled safely since its naive first segment ("Holding")
+        # won't look like a real doc ID either, so it falls through unchanged.
+        first_dash = title.find(" – ")
+        if first_dash >= 0:
+            first_seg = title[:first_dash].strip()
+            if _looks_like_doc_id(first_seg):
+                return first_seg
+    return rest
+
+
+_DOC_ID_SHAPE_RE = re.compile(r'^(?:sha|jva?|nda|sa|msa|ccd)(?:\d*[-]|\d+$)', re.IGNORECASE)
+
+
+_COMPANY_SUFFIX_RE = re.compile(
+    r'\b(?:private\s+limited|pvt\.?\s*ltd\.?|limited|ltd\.?|llp|llc|inc\.?|'
+    r'corp(?:oration)?|plc|gmbh|s\.?a\.?|pte\.?\s*ltd\.?)\s*$',
+    re.IGNORECASE,
+)
+
+
+def _looks_like_doc_id(s: str) -> bool:
+    """True if a title segment looks like a real document identifier rather
+    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Meridian"),
+    a single camelCase word ("JVReVolt"), or a company-style name ending in a
+    corporate suffix ("Acme Holdings Private Limited") — not generic multi-word
+    legal/clause prose, which essentially never ends in a corporate suffix.
+    """
+    if not s:
+        return False
+    if _DOC_ID_SHAPE_RE.match(s):
+        return True
+    if _COMPANY_SUFFIX_RE.search(s):
+        return True
+    return " " not in s and bool(re.search(r'[a-z][A-Z]', s))
+
+
+# A genuine party/entity name (Meridian, ReVolt) is specific to one deal, so it
+# should appear in identifiers from only a handful of source documents. A token
+# appearing across many distinct documents is generic vocabulary that leaked in
+# via a descriptive or swapped-order title, not a distinctive entity name — cap
+# it here since the hand-maintained _ENTITY_EXCLUDE stoplist can never keep up
+# with every corpus. Confirmed live: on a 499-doc corpus, "Summarize this
+# document" (zero real identifying information) matched "liability", "general",
+# "provisions", and "obligation" as if they were known entities, silently
+# skipping disambiguation on a fully ambiguous query.
+_ENTITY_DOC_FREQ_CAP = 4
 
 
 def _extract_doc_entities(pages: dict) -> set[str]:
@@ -2917,10 +3533,11 @@ def _extract_doc_entities(pages: dict) -> set[str]:
 
     "SA-Meridian" → {"meridian"}, "JVReVolt" → {"revolt"},
     "Yuvraj Kanther" → {"yuvraj kanther", "yuvraj", "kanther"}. Doc-type
-    abbreviations and generic words are excluded.
+    abbreviations, generic words, and tokens too common across distinct
+    documents to be a real entity name are excluded.
     """
-    entities: set[str] = set()
-    for title in pages:
+    token_docs: dict[str, set[str]] = {}
+    for title, page in pages.items():
         ident = _doc_identifier_part(title)
         if not ident:
             continue
@@ -2939,21 +3556,40 @@ def _extract_doc_entities(pages: dict) -> set[str]:
         # which then false-matches unrelated documents via substring containment.
         if len(core.split()) > 4:
             continue
+        sd = (page.get("source_doc") or title) if isinstance(page, dict) else title
+        candidates = set()
         cl = core.lower()
         if len(cl) >= 4 and cl not in _ENTITY_EXCLUDE:
-            entities.add(cl)
+            candidates.add(cl)
         for w in re.findall(r"[A-Za-z]{4,}", core):
             wl = w.lower()
             if wl not in _ENTITY_EXCLUDE:
-                entities.add(wl)
-    return entities
+                candidates.add(wl)
+        for c in candidates:
+            token_docs.setdefault(c, set()).add(sd)
+    return {tok for tok, docs in token_docs.items() if len(docs) <= _ENTITY_DOC_FREQ_CAP}
+
+
+def _contains_token(token: str, text: str) -> bool:
+    """Word-boundary-aware substring check: True if `token` appears in `text`
+    as a whole word/phrase, not merely as a run of characters inside a longer
+    word. Confirmed live: a plain `token in text` check let the entity "vice"
+    (extracted from a "Vice Chancellor" judicial-title identifier) match inside
+    "ser‑VICE‑agreement", so ANY question mentioning "service agreement" was
+    falsely treated as naming a known entity — this collision class (a short
+    entity string happening to be a substring of an unrelated common word) is
+    distinct from, and not fixable by, the vocabulary-stoplist approach used
+    elsewhere in this file, since the token itself ("vice") is a legitimate
+    entity fragment, just not present here as a standalone word.
+    """
+    return re.search(rf'\b{re.escape(token)}\b', text) is not None
 
 
 def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     """True if the question mentions a distinctive entity/party name from a
     document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
     q = question.lower()
-    return any(ent in q for ent in _extract_doc_entities(pages))
+    return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
 
 
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
@@ -2969,7 +3605,7 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     total past ENTITY_MATCH_MAX_PAGES, abandoning force-include entirely.
     """
     q = question.lower()
-    hits = {ent for ent in _extract_doc_entities(pages) if ent in q}
+    hits = {ent for ent in _extract_doc_entities(pages) if _contains_token(ent, q)}
     if not hits:
         return []
     by_match_count: dict[int, list[str]] = {}
@@ -2977,13 +3613,277 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
         ident = _doc_identifier_part(title).lower()
         if not ident:
             continue
-        n = sum(1 for h in hits if h in ident)
+        n = sum(1 for h in hits if _contains_token(h, ident))
         if n > 0:
             by_match_count.setdefault(n, []).append(title)
     if not by_match_count:
         return []
     best = max(by_match_count)
     return by_match_count[best]
+
+
+# Plural / collective family nouns that signal a question is asking ABOUT A SET
+# of documents ("compare the NDAs", "summarize the agreements") rather than one.
+# Combined with a family keyword (via _DOC_FAMILY_RULES) to resolve family scope.
+_PLURAL_FAMILY_HINT_RE = re.compile(
+    r'\b(ndas|agreements|judgments|judgements|opinions|pleadings|petitions|'
+    r'contracts|ventures|leases)\b',
+    re.IGNORECASE,
+)
+
+
+def _detect_question_family(question: str, available_families: set[str]) -> str | None:
+    """Return the single document family a question refers to, or None.
+
+    Reuses the same keyword→family rules as ingest-time normalization
+    (_DOC_FAMILY_RULES). Returns a family only when EXACTLY ONE known family is
+    referenced AND it actually exists in this session — a question naming two
+    families ("the service agreements and the NDAs") is cross-family, so it
+    stays unfiltered (None) rather than being wrongly narrowed to one.
+    """
+    if not available_families:
+        return None
+    q = question.lower()
+    matched: set[str] = set()
+    for keyword, family in _DOC_FAMILY_RULES:
+        if family not in available_families:
+            continue
+        # Plural-tolerant, word-boundary match: a collective family question uses
+        # the plural ("compare the NDAs", "the service agreements"), so allow an
+        # optional trailing 's' on the keyword's final word — without it "nda"
+        # would fail to match "NDAs" and silently drop the family.
+        if re.search(rf'\b{re.escape(keyword)}s?\b', q):
+            matched.add(family)
+    return next(iter(matched)) if len(matched) == 1 else None
+
+
+# A party the user names to identify an agreement almost always carries its
+# corporate form ("… Private Limited", "… GmbH"). Capturing the capitalised
+# words immediately BEFORE that suffix yields the distinctive party name
+# ("SteelLoop Resource Recovery", "Cold Chain Energy Services") without dragging
+# in surrounding prose — and the suffix gate keeps ordinary capitalised topic
+# phrases ("Reserved Matters", "Joint Venture Agreement") from ever qualifying.
+_CORP_SUFFIX_RE_STR = (
+    r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
+    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
+)
+_PARTY_NAME_RE = re.compile(
+    r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
+)
+
+
+def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
+    """Resolve the document(s) of a PARTY NAME typed in the question.
+
+    Lawyers name an agreement by its counterparty ("the JV with Cold Chain
+    Energy Services"), not by the filename ("JVA 4") the corpus stores it under.
+    The party name often survives only in the document BODY — the filename is a
+    bare type+number, the page-title identifier can be an ingest-synthesised
+    short-name ("SunBridge-JV"), and the parties metadata may be redaction-masked
+    ("[Redacted Logistics Infrastructure Partner]"). So resolve it by a full-text
+    CONTENT search on the distinctive party phrase.
+
+    Returns the doc set of the MOST distinctive party named — the one hitting the
+    fewest documents — provided that set is small (<= max_docs). An umbrella name
+    like "Tata Steel Limited" hits many documents and is correctly ignored; the
+    specific counterparty resolves to one document ("SteelLoop Resource Recovery"
+    → JVA 3) or, when the same two parties share several instruments, to that
+    small cluster ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration
+    notice + Section 9 petition). The caller decides, from how many instruments
+    the question names, whether to pin the whole cluster or narrow to one. Returns
+    an empty set on ambiguity (no hit, or the smallest set exceeds max_docs), so
+    it only ever ADDS precise matches the filename/entity detectors miss.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    candidates = [c for c in candidates if len(c) >= 4]
+    if not candidates:
+        return set()
+    best_docs: set[str] | None = None
+    best_n = 1 << 30
+    for name in candidates:
+        try:
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=max_docs + 2) if d]
+        except Exception as e:
+            logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
+            continue
+        if docs and len(docs) < best_n:
+            best_n, best_docs = len(docs), set(docs)
+    if best_docs is not None and best_n <= max_docs:
+        logger.info("Party-name content match → %d document(s): %s",
+                    best_n, {_norm_doc_name(d) for d in best_docs})
+        return best_docs
+    return set()
+
+
+# Distinct legal-instrument categories a question may name. Counting how many
+# DIFFERENT categories appear tells scope resolution whether a question about a
+# named party wants ONE of its instruments (summarise "the NordForge NDA") or a
+# cross-instrument view of SEVERAL ("across the NDA, the arbitration notice, and
+# the Section 9 petition") — the difference between pinning one document and
+# pinning the whole party cluster.
+_INSTRUMENT_PATTERNS = [
+    ("nda",                re.compile(r'\bnda\b|non[-\s]?disclosure', re.I)),
+    ("arbitration_notice", re.compile(r'arbitration\s+notice|notice\s+of\s+arbitration|request\s+for\s+arbitration', re.I)),
+    ("petition",           re.compile(r'section\s*9\s*petition|\bpetition\b', re.I)),
+    ("sha",                re.compile(r'shareholders?\s+agreement|\bsha\b', re.I)),
+    ("service_agreement",  re.compile(r'services?\s+agreement|master\s+services|\bmsa\b', re.I)),
+    ("jva",                re.compile(r'joint\s+venture(?:\s+agreement)?|\bjva?\b', re.I)),
+    ("judgment",           re.compile(r'judg[e]?ment', re.I)),
+    ("opinion",            re.compile(r'legal\s+opinion', re.I)),
+    ("pleading",           re.compile(r'\bpleading\b|\bcomplaint\b', re.I)),
+]
+
+
+def _count_instrument_mentions(question: str) -> int:
+    """Number of DISTINCT legal-instrument categories the question names."""
+    return sum(1 for _, rx in _INSTRUMENT_PATTERNS if rx.search(question))
+
+
+def _docs_of_entity_pages(question: str, pages: dict) -> dict:
+    """Map entity-matched page titles to their source_docs with page counts.
+
+    Returns {source_doc: n_matched_pages}. Lets scope resolution pin the entity's
+    dominant document (whole-document summary → strict scope) or all of them
+    (multi-instrument question) instead of returning no concrete target at all.
+    """
+    counts: dict[str, int] = {}
+    for title in _pages_matching_question_entity(question, pages):
+        page = pages.get(title)
+        sd = page.get("source_doc", "") if isinstance(page, dict) else ""
+        if sd:
+            counts[sd] = counts.get(sd, 0) + 1
+    return counts
+
+
+def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
+    """Resolve the retrieval scope of a question in ONE place (Phase 2).
+
+    Consolidates the three previously-scattered scope signals — named-document
+    detection, known-entity matching, and broad/collective phrasing — into a
+    single decision object the retrieval node acts on, instead of each stage
+    re-deriving scope with its own regex.
+
+    Returns a dict:
+      scope         : "single_doc" | "family" | "corpus"
+      target_docs   : concrete source_doc names when known (single_doc/family)
+      target_family : canonical family label when scope == "family", else None
+      is_broad      : True for family / broad cross-document questions
+      confidence    : rough 0-1 confidence in the scope call
+      method        : which signal decided it ("file"/"entity"/"family"/"broad"/"default")
+
+    Deliberately deterministic (no LLM call) — it composes the existing
+    detectors, matching how the rest of this pipeline resolves scope, and stays
+    conservative: anything it isn't sure about falls through to "corpus"
+    (unfiltered whole-session search), which is the pre-Phase-2 behaviour and
+    can never wrongly starve retrieval of a relevant document.
+    """
+    if pages is None:
+        try:
+            pages = _load_index(session_id).get("pages", {})
+        except Exception as e:
+            logger.error("resolve_scope: could not load index: %s", e)
+            pages = {}
+
+    # 1. Single specific document — a named file or a distinctive known entity.
+    #    Mirrors get_context's own force-include logic; here it only records the
+    #    decision (get_context still does the actual page scoping for this case).
+    try:
+        mentioned = _detect_mentioned_files(question, pages)
+    except Exception:
+        mentioned = set()
+    if mentioned:
+        return {"scope": "single_doc", "target_docs": sorted(mentioned),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.9, "method": "file"}
+    # Party-name → document via full-text content match. Catches the case the
+    # filename/entity detectors miss: the user names the counterparty ("SteelLoop
+    # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
+    # document under a bare type+number and masks the party in metadata. Only
+    # fires on an unambiguous single-document hit, so it's safe to prefer over the
+    # weaker entity heuristic below (which resolves no concrete target_docs).
+    try:
+        party_docs = _resolve_docs_by_party(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party resolution failed: %s", e)
+        party_docs = set()
+    if party_docs:
+        n_instr = _count_instrument_mentions(question)
+        if len(party_docs) == 1 or n_instr >= 2:
+            # One document, OR a multi-instrument question naming this party's
+            # several instruments ("across the NDA, the arbitration notice, and
+            # the Section 9 petition") — pin the whole resolved cluster so every
+            # named instrument is retrieved, not just the ones a single semantic
+            # pass happened to surface.
+            return {"scope": "single_doc", "target_docs": sorted(party_docs),
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.85 if len(party_docs) == 1 else 0.8,
+                    "method": "party" if len(party_docs) == 1 else "party-multi"}
+        # Party spans several documents but the question names only one instrument
+        # type — narrow to that family when it resolves cleanly, else fall through
+        # rather than guess.
+        try:
+            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+            fam = _detect_question_family(question, available)
+            fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+        except Exception:
+            fam_docs = set()
+        narrowed = party_docs & fam_docs
+        if len(narrowed) == 1:
+            return {"scope": "single_doc", "target_docs": sorted(narrowed),
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.8, "method": "party"}
+    if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
+        # Resolve the concrete document(s) the entity points at so retrieval can
+        # scope STRICTLY to them. A single-instrument question (e.g. "summarise
+        # the NordForge NDA") pins the entity's dominant document — dropping the
+        # supplementary cross-document pages that otherwise dilute a whole-document
+        # summary into half "Not covered"; a multi-instrument question keeps all
+        # matched documents.
+        ent_counts = _docs_of_entity_pages(question, pages)
+        if ent_counts:
+            if _count_instrument_mentions(question) >= 2:
+                ent_targets = sorted(ent_counts)
+            else:
+                ent_targets = [max(ent_counts, key=ent_counts.get)]
+            return {"scope": "single_doc", "target_docs": ent_targets,
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.72, "method": "entity"}
+        return {"scope": "single_doc", "target_docs": [],
+                "target_family": None, "is_broad": False,
+                "confidence": 0.7, "method": "entity"}
+
+    # 2. Family scope — a COLLECTIVE reference to one document family that
+    #    actually exists in this session. Requires both a collective marker
+    #    (broad phrasing or a plural family noun) and a single resolved family,
+    #    so a narrow single-clause question is never wrongly filtered.
+    collective = bool(_BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question))
+    if collective:
+        try:
+            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+        except Exception as e:
+            logger.error("resolve_scope: list_doc_families failed: %s", e)
+            available = set()
+        family = _detect_question_family(question, available)
+        if family:
+            try:
+                docs = _db.get_documents_by_family(session_id, family)
+            except Exception as e:
+                logger.error("resolve_scope: get_documents_by_family failed: %s", e)
+                docs = []
+            return {"scope": "family", "target_docs": docs,
+                    "target_family": family, "is_broad": True,
+                    "confidence": 0.75, "method": "family"}
+
+    # 3. Broad cross-document question with no single resolvable family.
+    if _BROAD_SCOPE_RE.search(question):
+        return {"scope": "corpus", "target_docs": [], "target_family": None,
+                "is_broad": True, "confidence": 0.6, "method": "broad"}
+
+    # 4. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
+    return {"scope": "corpus", "target_docs": [], "target_family": None,
+            "is_broad": False, "confidence": 0.5, "method": "default"}
 
 
 def classify_query(question: str, session_id: str) -> dict:
@@ -3250,8 +4150,79 @@ def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str
     return [t for _, t in scored[:n]]
 
 
+def _rrf_fuse(rankings: list[list[str]], k: int = 60, limit: int | None = None) -> list[str]:
+    """Reciprocal Rank Fusion of several ranked title lists into one (Phase 3).
+
+    RRF score for a title = sum over each list of 1/(k + rank), rank 1-based. A
+    title ranked highly by EITHER retriever (vector OR BM25) rises; one ranked
+    well by both rises most. This properly merges the two hybrid rankings —
+    unlike the previous "all vector results, then BM25 appended" which buried a
+    strong keyword-only match below every semantic hit. Zero LLM calls. Ties
+    (same fused score) preserve first-seen order via a stable sort.
+    """
+    scores: dict[str, float] = {}
+    order: dict[str, int] = {}
+    seq = 0
+    for ranking in rankings:
+        for rank, title in enumerate(ranking, start=1):
+            scores[title] = scores.get(title, 0.0) + 1.0 / (k + rank)
+            if title not in order:
+                order[title] = seq
+                seq += 1
+    fused = sorted(scores, key=lambda t: (-scores[t], order[t]))
+    return fused[:limit] if limit else fused
+
+
+def _rerank_pages(question: str, candidate_titles: list[str], pages: dict,
+                  limit: int | None = None) -> list[str]:
+    """Optional fast-model relevance rerank of already-retrieved candidates.
+
+    Gated behind config.ENABLE_RERANK and only applied to broad/family queries
+    by the caller. Reuses the same compact "- title: summary" candidate index as
+    PAGE_SELECT_PROMPT, but asks the model to ORDER by relevance rather than
+    select a subset. Fail-safe: on any error or unparseable output, returns the
+    input order unchanged (never drops the pipeline into a worse state).
+    """
+    if not candidate_titles:
+        return candidate_titles
+    index_lines = []
+    for t in candidate_titles:
+        page = pages.get(t)
+        summary = page.get("summary", "") if isinstance(page, dict) else ""
+        index_lines.append(f"- {t}: {summary}" if summary else f"- {t}")
+    prompt = (
+        "Rank these legal wiki pages by how directly relevant each is to answering "
+        "the QUESTION. Respond with ONLY valid JSON, no other text:\n"
+        '{"ranking": ["<most relevant title>", "<next>", ...]}\n'
+        "Include every title exactly once, most relevant first.\n\n"
+        f"QUESTION: {question}\n\nPAGES:\n" + "\n".join(index_lines)
+    )
+    try:
+        raw, _usage = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_RERANK)
+        # The fast gpt-oss reasoning model can spend its whole budget on hidden
+        # reasoning and emit nothing when the cap is too low (same failure mode as
+        # the grounding check). One doubling retry recovers those cases before
+        # falling back to fusion order.
+        if _usage.get("finish_reason") == "length":
+            raw, _usage = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_RERANK * 2)
+        parsed = _parse_json_safe(raw)
+        ranking = parsed.get("ranking") if isinstance(parsed, dict) else None
+        if isinstance(ranking, list):
+            cand_set = set(candidate_titles)
+            valid = [t for t in ranking if t in cand_set]
+            # Append any titles the model dropped, preserving their prior order,
+            # so a lazy/truncated ranking never silently loses candidates.
+            seen = set(valid)
+            ranked = valid + [t for t in candidate_titles if t not in seen]
+            return ranked[:limit] if limit else ranked
+    except Exception as e:
+        logger.warning("LLM rerank failed, keeping fusion order: %s", e)
+    return candidate_titles[:limit] if limit else candidate_titles
+
+
 def _select_relevant_pages(
-    pages: dict, question: str, session_id: str | None = None
+    pages: dict, question: str, session_id: str | None = None,
+    doc_family: "str | list[str] | None" = None, force_broad: bool = False,
 ) -> tuple[list[str], dict]:
     """Select the most relevant pages for a question.
 
@@ -3259,6 +4230,16 @@ def _select_relevant_pages(
       1. pgvector cosine similarity search (DB mode only, Phase 3) — 0 LLM calls, ~5ms
       2. BM25 pre-filter + LLM selection (fallback or file mode)
       3. BM25 keyword-only (if LLM selection fails)
+
+    doc_family (Phase 1): when scope resolution (Phase 2) narrows a question to a
+    document family, it's passed here to pre-filter the pgvector search to that
+    family's embeddings. None = unfiltered whole-session search (default).
+
+    force_broad (Phase 2): when scope resolution classifies a question as family
+    or broad, force the wide+diversified candidate path even if the local
+    _BROAD_SCOPE_RE regex wouldn't have fired on the phrasing (e.g. "compare the
+    NDAs"). Only ever WIDENS — never narrows — so it can't regress existing broad
+    detection.
 
     Returns (selected_titles, usage_dict).
     usage_dict is empty when vector search is used (no LLM call made).
@@ -3290,33 +4271,61 @@ def _select_relevant_pages(
             if emb_count > 0:
                 from services import embedder as _embedder
                 q_embedding = _embedder.embed(question, is_query=True)
+                is_broad = force_broad or bool(_BROAD_SCOPE_RE.search(question))
+                vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=config.VECTOR_SEARCH_TOP_K
+                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family
                 )
                 # Validate titles against the in-memory pages dict (guards against
                 # stale embeddings pointing at deleted pages)
                 valid_vector = [t for t in vector_titles if t in pages]
 
-                # BM25 supplement: add keyword-matched pages that vector missed.
-                # Vector results come first (better semantic rank); BM25 pages
-                # are appended only if not already present.
-                bm25_supplement = _keyword_fallback_pages(
-                    pages, question, n=config.HYBRID_BM25_SUPPLEMENT_N
-                )
-                seen: set[str] = set(valid_vector)
-                hybrid: list[str] = list(valid_vector)
-                bm25_added = 0
-                for t in bm25_supplement:
-                    if t not in seen:
-                        hybrid.append(t)
-                        seen.add(t)
-                        bm25_added += 1
+                # BM25 ranking for fusion — pull a comparable-length keyword list
+                # (not just the old small supplement) so RRF has two real rankings
+                # to merge, not one ranking plus a handful of extras.
+                bm25_ranking = [
+                    t for t in _keyword_fallback_pages(pages, question, n=vector_limit)
+                    if t in pages
+                ]
+
+                # Phase 3: Reciprocal Rank Fusion of the vector and BM25 rankings,
+                # replacing the previous "all vector, then BM25 appended" order —
+                # a strong keyword-only match now ranks on its own merit instead of
+                # sitting below every semantic hit. Zero LLM calls.
+                if is_broad:
+                    # Fuse first, THEN diversify: the per-document cap + Parties-page
+                    # force-include operate on a better-ordered base list, but the
+                    # breadth guarantee for "across all X" questions is unchanged.
+                    fused = _rrf_fuse([valid_vector, bm25_ranking], k=config.RRF_K)
+                    hybrid = _diversify_by_document(
+                        fused, pages,
+                        config.BROAD_QUESTION_PER_DOC_CAP, config.BROAD_QUESTION_TOTAL_CAP,
+                    )
+                    logger.info(
+                        "Broad question — widened to %d vector candidates, RRF-fused with "
+                        "BM25, diversified to %d pages across documents",
+                        vector_limit, len(hybrid),
+                    )
+                else:
+                    hybrid = _rrf_fuse(
+                        [valid_vector, bm25_ranking],
+                        k=config.RRF_K, limit=config.HYBRID_FUSION_TOP_K,
+                    )
+
+                # Optional LLM rerank (off by default) — only for broad/family
+                # queries, where retrieval precision matters most and the extra
+                # fast-model call is worth its latency. RRF already gives a strong
+                # base order, so this is a refinement, not a dependency.
+                if hybrid and config.ENABLE_RERANK and is_broad:
+                    before = len(hybrid)
+                    hybrid = _rerank_pages(question, hybrid, pages, limit=before)
+                    logger.info("LLM rerank applied to %d broad-query candidates", before)
 
                 if hybrid:
                     logger.info(
-                        "Page selection: %d pages via hybrid "
-                        "(vector=%d, bm25_added=%d, embeddings_in_db=%d)",
-                        len(hybrid), len(valid_vector), bm25_added, emb_count,
+                        "Page selection: %d pages via hybrid RRF fusion "
+                        "(vector=%d, bm25=%d, embeddings_in_db=%d, broad=%s)",
+                        len(hybrid), len(valid_vector), len(bm25_ranking), emb_count, is_broad,
                     )
                     return hybrid, {}
 
