@@ -3132,44 +3132,64 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
 
-    # Get all canonical doc names from pages. Some pages have a malformed
-    # trailing parenthetical that's just the bare instrument TYPE (e.g. "(Service
-    # Agreement)", "(Agreement)", "(NDA)") instead of a real filename — an
-    # ingest-time data-quality gap, not a real per-document identifier. Skip
-    # these: since "agreement"/"NDA" are common words in any legal answer, a
-    # bare type-word can spuriously substring-match citation text and pollute
-    # files_used with a fake "document" that isn't an actual file. Confirmed
-    # live: 6 such generic entries in one session's canonical_files, and
-    # "Service Agreement"/"Agreement" showing up as bogus reference cards.
-    _GENERIC_CANONICAL_EXCLUDE = {
-        "agreement", "nda", "sha", "jva", "sa", "ccd", "msa",
-        "service agreement", "shareholder agreement", "joint venture agreement",
-        "non-disclosure agreement", "master services agreement",
-    }
-    canonical_files = set()
-    for title in pages.keys():
-        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
-        if match:
-            cfile = match.group(1)
-            if cfile.strip().lower() in _GENERIC_CANONICAL_EXCLUDE:
-                continue
-            canonical_files.add(cfile)
+    # Map each selected page to its real document identifier — the SOURCE_DOC
+    # filename (e.g. "...Legal Opinions (1)_Legal Opinion 6 (1).pdf"), not the
+    # page title's trailing parenthetical. That parenthetical is, for
+    # essentially every page in this corpus, just the bare instrument TYPE
+    # ("NDA", "Legal Opinion", "Shareholders' Agreement") — the title format is
+    # "{Topic} – {DocID} ({DocType})", so the type label sits in the SAME
+    # position for every document regardless of which one it is. Matching
+    # citation text against these type-only strings meant a fully-qualified
+    # citation like "Legal Opinion 6 (1)" would substring-match the generic
+    # "Legal Opinion" from some UNRELATED page's title too, and — since the old
+    # loop appended every substring hit rather than the most specific one —
+    # that generic, unnumbered entry could ride along into files_used and
+    # render as its own bogus reference card ("1. Legal Opinion") alongside or
+    # instead of the real, numbered document. A hand-maintained stoplist of
+    # generic type-words can never fully close this (there are dozens of
+    # instrument types in a legal corpus); source_doc is the actual per-file
+    # identifier and is immune to the collision because two distinct documents
+    # never share the same filename.
+    canonical_files: dict[str, str] = {}  # cleaned display name -> raw source_doc
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        sd = page.get("source_doc", "")
+        if not sd:
+            continue
+        clean = re.sub(r'^[a-f0-9-]{36}_', '', sd.replace("\\", "/").rsplit("/", 1)[-1])
+        clean = os.path.splitext(clean)[0]
+        canonical_files[clean] = sd
 
     pages_used_dedup = []
     files_used = []
     seen = set()
-    
+
     for t in referenced:
         if t not in seen:
             pages_used_dedup.append(t)
             seen.add(t)
-            # Try to figure out which file this refers to
-            for cfile in canonical_files:
-                # Strip UUID for comparison
-                stripped_cfile = re.sub(r'^[a-f0-9-]{36}_', '', cfile)
-                if stripped_cfile.lower() in t.lower() or cfile.lower() in t.lower():
-                    if cfile not in files_used:
-                        files_used.append(cfile)
+            # Try to figure out which file this refers to. Checked in both
+            # directions since citation text conventions vary — the model may
+            # write the bare identifier ("Legal Opinion 6", checked via t-in-
+            # clean_name since clean_name carries extra folder-path noise) or
+            # something closer to the full cleaned name (checked the other
+            # way). The reverse direction (t-in-clean_name) is gated to
+            # citation text of at least 6 chars: clean_name is a long,
+            # noise-bearing string (folder segments, the "(1)" copy suffix),
+            # so an unguarded reverse check let a short/generic bracket marker
+            # (e.g. a bare "[1]") trivially match almost every document in the
+            # corpus — confirmed live: this produced a 494-file "files_used"
+            # list (essentially the entire corpus) instead of the 1-3 real
+            # citations. The forward direction has no such risk: clean_name
+            # itself is never short (source_doc filenames always carry a doc
+            # type + number), so it can't spuriously match unrelated text.
+            t_norm = t.lower().strip()
+            for clean_name, sd in canonical_files.items():
+                cn_norm = clean_name.lower()
+                if cn_norm in t_norm or (len(t_norm) >= 6 and t_norm in cn_norm):
+                    if sd not in files_used:
+                        files_used.append(sd)
 
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
