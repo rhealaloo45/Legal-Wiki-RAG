@@ -74,6 +74,24 @@ _RX_BETWEEN_EXCLUDE = re.compile(
     r'\b(?:pleaded|argued|established|asserted|drawn|treated|addressed|framed|structured)\b',
     re.IGNORECASE,
 )
+# A second, far more common false trigger for the _RX_BETWEEN-only rule: naming a
+# SINGLE bilateral instrument by its two parties — "the Joint Venture Agreement
+# between Tata Consumer Products and BrewSphere", "the NDA between X and Y". That
+# is a factual question about ONE document, not a cross-document comparison, but
+# "between … and …" matched and forced a comparison intent, which then rendered a
+# two-column "Key Differences / Which Party It Favors" table that fabricated a
+# second-document framing absent from the question (confirmed live on the
+# BrewSphere JVA1 and SteelLoop JVA3 questions). Suppress the between-only trigger
+# when an instrument noun immediately precedes "between … and". A genuine
+# cross-document comparison ("compare the NDA between A and B with the one between
+# C and D") still carries an explicit comparison keyword that _RX_COMPARISON
+# matches one check earlier, so this exclusion never reaches it.
+_RX_BETWEEN_PARTIES = re.compile(
+    r'\b(?:agreement|contract|nda|sha|jva?|jv|msa|mou|deed|lease|licen[cs]e|'
+    r'venture|arrangement|memorandum|settlement)\b[^.?!;]{0,30}?\bbetween\b'
+    r'[^.?!;]+\band\b',
+    re.IGNORECASE,
+)
 _RX_OBLIGATION = re.compile(
     r'(?:'
     r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
@@ -97,6 +115,29 @@ _RX_RISK = re.compile(
     r'accept\s+or\s+reject|proceed\s+or\s+not)',
     re.IGNORECASE,
 )
+# "board approval", "shareholder consent", "unanimous / special-majority approval"
+# are GOVERNANCE MECHANICS a factual question asks ABOUT (e.g. "which reserved
+# matters require unanimous board approval?") — not a request to assess risk or
+# recommend signing. But _RX_RISK's bare "approve|approval" token matched them,
+# forcing a risk-assessment template onto a plain clause-extraction question
+# (confirmed live on the SteelLoop Reserved-Matters question). This guard fires
+# only when approval/consent is governance-qualified.
+_RX_GOVERNANCE_APPROVAL = re.compile(
+    r'\b(?:board|shareholders?|members?|majority|unanimous|special\s+majority|'
+    r'statutory|regulatory|prior\s+written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
+    r'|\b(?:approval|approve|consent)\s+(?:of|by|from)\s+(?:the\s+)?(?:board|shareholders?|members?)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_governance_approval_only(q: str) -> bool:
+    """True when the ONLY _RX_RISK signal in the question is an approval/consent
+    word used in a governance sense — so risk intent should be suppressed and the
+    question routed to factual/obligation instead. A question that ALSO carries a
+    real risk cue (recommend, should we sign, go/no-go, …) still classifies as
+    risk, because its risk hits then aren't a subset of {approve, approval}."""
+    hits = {m.group(0).lower() for m in _RX_RISK.finditer(q)}
+    return hits <= {"approve", "approval"} and bool(_RX_GOVERNANCE_APPROVAL.search(q))
 
 _INTENT_LLM_PROMPT = (
     "You classify a lawyer's question into exactly ONE intent.\n\n"
@@ -124,9 +165,10 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
     if _RX_COMPARISON.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q):
+    if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
+            and not _RX_BETWEEN_PARTIES.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_RISK.search(q):
+    if _RX_RISK.search(q) and not _is_governance_approval_only(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
     if _RX_OBLIGATION.search(q):
         return {"intent": "obligation", "confidence": 0.85, "method": "regex"}

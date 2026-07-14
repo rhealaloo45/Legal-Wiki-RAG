@@ -3753,6 +3753,45 @@ def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
 
 
+def _appears_as_proper_noun(token: str, question: str) -> bool:
+    """True if `token` appears in the ORIGINAL-case question capitalised as a
+    deliberate proper noun — not as a lowercase common word, and not as a
+    grammatically-forced capital at a sentence start.
+
+    A distinctive party/entity name the user types to identify a document
+    ("ReVolt", "Meridian", "SteelLoop") is a proper noun and is written
+    capitalised; generic clause vocabulary that leaked into the entity set from a
+    malformed/swapped-order title ("termination", "liability", "confidentiality")
+    appears lowercase inside the question's prose ("… term, termination,
+    liability …"). Checking case lets the disambiguation gate tell a real entity
+    mention from an incidental keyword collision WITHOUT extending the
+    hand-maintained _ENTITY_EXCLUDE stoplist, which by its own admission "can
+    never keep up with every corpus".
+    """
+    for m in re.finditer(rf'\b{re.escape(token)}\b', question, re.IGNORECASE):
+        start = m.start()
+        if not question[start].isupper():
+            continue
+        prefix = question[:start].rstrip()
+        if not prefix or prefix[-1] in '.!?\n':
+            continue  # sentence-initial capital is grammar, not a proper-noun signal
+        return True
+    return False
+
+
+def _question_names_distinctive_entity(question: str, pages: dict) -> bool:
+    """Stricter _question_mentions_known_entity for the disambiguation gate: an
+    entity token counts only when it ALSO appears as a capitalised proper noun in
+    the question. Stops a generic dictionary word that leaked into the entity set
+    from suppressing disambiguation on a genuinely vague query (e.g. "Summarize
+    this document…" listing "term, termination, liability" — none proper nouns)."""
+    q = question.lower()
+    return any(
+        _contains_token(ent, q) and _appears_as_proper_noun(ent, question)
+        for ent in _extract_doc_entities(pages)
+    )
+
+
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     """Return page titles whose document identifier contains an entity name
     mentioned in the question. Used to force-scope context to the right document.
@@ -4076,7 +4115,7 @@ def classify_query(question: str, session_id: str) -> dict:
     # documents → ask which one. Narrow to the named type when possible.
     vmatch = _VAGUE_DOC_PATTERN.search(question)
     if vmatch and not _question_names_a_document(question, docs) \
-            and not _question_mentions_known_entity(question, pages):
+            and not _question_names_distinctive_entity(question, pages):
         vtype = re.sub(r'\s+', ' ', vmatch.group(1).lower().strip())
         if vtype in _GENERIC_VAGUE_WORDS:
             logger.info("Vague document reference '%s' → disambiguate (all docs)", vtype)
@@ -4104,8 +4143,11 @@ def classify_query(question: str, session_id: str) -> dict:
     if _question_names_a_document(question, docs):
         return {"needs_disambiguation": False, "documents": docs}
 
-    # Skip if the question mentions a distinctive entity/party name from the wiki
-    if _question_mentions_known_entity(question, pages):
+    # Skip if the question mentions a distinctive entity/party name from the wiki.
+    # Use the proper-noun-aware check so an incidental lowercase clause word that
+    # leaked into the entity set can't short-circuit disambiguation here either;
+    # a genuine (even lowercase) entity still falls through to the LLM triage below.
+    if _question_names_distinctive_entity(question, pages):
         return {"needs_disambiguation": False, "documents": docs}
 
     # Clean document names for display
