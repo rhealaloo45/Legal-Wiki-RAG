@@ -2605,6 +2605,121 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     return mismatches
 
 
+def _autocorrect_citation_attribution(answer: str, context: str) -> tuple[str, int]:
+    """Deterministically fix a wrong-document citation label in place, instead
+    of only warning about it.
+
+    _verify_citation_attribution already identifies both the WRONG token a
+    citation claims (e.g. "JVA18") and the CORRECT one the quote actually lives
+    under (e.g. "JVA45") when they share a doc-type — confirmed live: an
+    "across all JVAs" answer cited JVA45's clause as JVA18, purely because
+    JVA18 happened to be the first of several JVAs sharing a repeated
+    boilerplate forum clause. Only that "shared type, different number" case
+    is corrected — the replacement text is unambiguous. A candidate whose real
+    title has no numbered identifier at all (e.g. "NDA-Tata", a party-name
+    identifier) has no safe substitution text and is left to the existing
+    warning.
+
+    Never worsens the answer: after substitution, citation-attribution is
+    re-checked, and the fix is discarded (original answer returned) unless it
+    strictly reduces the number of misattributed quotes.
+
+    Returns (possibly-corrected answer, n_corrections_applied).
+    """
+    if not answer or not context:
+        return answer, 0
+
+    def _norm(s: str) -> str:
+        return _norm_for_match(s)
+
+    blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
+    if not blocks:
+        return answer, 0
+    norm_blocks = [(title, _norm(body)) for title, body in blocks]
+    known_titles = _known_page_titles(context)
+
+    def _from_label(body: str) -> str:
+        m = re.search(r'^\[From:\s*(.+?)\]\s*$', body, re.MULTILINE)
+        return m.group(1) if m else ""
+    from_by_title = {title.strip(): _from_label(body) for title, body in blocks}
+
+    # (span_start, span_end, replacement_text) in reverse-position order so
+    # earlier substitutions don't shift the spans of later ones.
+    fixes: list[tuple[int, int, str]] = []
+
+    for m in _QUOTE_SPAN_RE.finditer(answer):
+        quote = m.group(1)
+        qn = _norm(quote)
+        if qn in known_titles:
+            continue
+        candidate_titles = [title for title, body in norm_blocks if qn in body]
+        if not candidate_titles:
+            segments = _quote_segments(quote)
+            if segments:
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in segments)]
+        if not candidate_titles:
+            inner_segments = _quote_inner_segments(quote)
+            if inner_segments:
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in inner_segments)]
+        if not candidate_titles:
+            continue
+
+        label_start = max(0, m.start() - 150)
+        label = answer[label_start:m.start()]
+        claim_matches = list(_DOC_NUM_RE.finditer(label))
+        if not claim_matches:
+            continue
+        claimed = {(mm.group(1).lower(), mm.group(2)) for mm in claim_matches}
+
+        any_match = False
+        any_confident_mismatch = False
+        rep_actual: "tuple[str, str] | None" = None
+        for block_title in candidate_titles:
+            actual_text = f"{block_title} {from_by_title.get(block_title, '')}"
+            actual = _extract_doc_number_tokens(actual_text)
+            if not actual:
+                continue  # no numbered id in the real title — no safe substitution
+            shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
+            if not shared_types:
+                continue
+            if claimed & actual:
+                any_match = True
+                break
+            any_confident_mismatch = True
+            if rep_actual is None:
+                rep_actual = next((a for a in actual if a[0] in shared_types), next(iter(actual)))
+
+        if any_match or not any_confident_mismatch or rep_actual is None:
+            continue
+
+        correct_type, correct_num = rep_actual
+        for mm in claim_matches:
+            if mm.group(1).lower() != correct_type:
+                continue
+            new_type = correct_type.upper() if mm.group(1)[0].isupper() else correct_type
+            fixes.append((label_start + mm.start(), label_start + mm.end(), f"{new_type}{correct_num}"))
+
+    if not fixes:
+        return answer, 0
+
+    fixes.sort(key=lambda f: f[0], reverse=True)
+    corrected = answer
+    for start, end, repl in fixes:
+        corrected = corrected[:start] + repl + corrected[end:]
+
+    try:
+        before_n = len(_verify_citation_attribution(answer, context))
+        after_n = len(_verify_citation_attribution(corrected, context))
+    except Exception as e:
+        logger.error("Citation autocorrect safety check failed: %s", e)
+        return answer, 0
+    if after_n < before_n:
+        return corrected, before_n - after_n
+    return answer, 0
+
+
 # Appended to the original prompt for a one-shot corrective retry when
 # citation verification flags quotes as unverifiable or misattributed —
 # rather than just warning the user after the fact, give the model one
@@ -2867,9 +2982,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                         pass_score = 50
                         pass_reason = "Very short answer; limited context."
                 else:
-                    # Substantial answer but no reasoning block — model answered directly
-                    pass_score = 72
-                    pass_reason = "Model answered without reasoning block; score estimated."
+                    # Substantial answer but no reasoning block — model answered
+                    # directly (this is the NORMAL path for a model whose native
+                    # reasoning stays out of the content, e.g. Azure GPT-5.x).
+                    # Previously hardcoded to a flat 72 regardless of actual answer
+                    # quality — that floor was silently capping otherwise-correct
+                    # comparison/factual answers (confirmed live at 72% on answers
+                    # that were fully grounded). Get a REAL score from the existing
+                    # LLM confidence evaluator instead, so the score reflects this
+                    # answer's actual support in context rather than a constant.
+                    try:
+                        _eval = _evaluate_confidence(question, wiki_content, pass_answer)
+                        pass_score = _eval["score"]
+                        pass_reason = _eval["reason"] or "Confidence evaluated (no reasoning block in generation output)."
+                    except Exception as e:
+                        logger.error("Fallback confidence evaluation failed: %s", e)
+                        pass_score = 72
+                        pass_reason = "Model answered without reasoning block; score estimated."
 
         except RuntimeError as e:
             pass_answer = f"⚠️ LLM error: {e}"
@@ -2979,6 +3108,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"be verified verbatim against the retrieved source text — treat as paraphrase, not "
             f"exact quote: {_preview}]"
         )
+
+    if _misattributed:
+        # The corrective retry above already had its shot at fixing this via a
+        # full regeneration; for whatever survives, try a deterministic,
+        # in-place label fix before falling back to a warning — the correct
+        # document is already known (it's how the mismatch was detected), so a
+        # regeneration isn't needed to fix a same-type wrong-number citation.
+        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
+        if _n_fixed:
+            _misattributed = _verify_citation_attribution(answer, wiki_content)
+            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
+                       _n_fixed, len(_misattributed))
 
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
