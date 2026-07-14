@@ -4128,6 +4128,32 @@ def classify_query(question: str, session_id: str) -> dict:
     if len(docs) <= 1:
         return {"needs_disambiguation": False, "documents": docs}
 
+    # A named party that resolves to exactly ONE document via full-text content
+    # search is an unambiguous document reference — skip disambiguation and let
+    # resolve_scope (which runs the SAME resolver later) pin it. This catches the
+    # common case the distinctive-entity check below misses: a counterparty named
+    # by its full corporate name ("Helios Grid Advisory Private Limited") whose
+    # name lives only in the document BODY / redaction-masked metadata, not in the
+    # page-title identifier tokens _extract_doc_entities mines — so
+    # _question_names_distinctive_entity returns False and the vague "the Services
+    # Agreement between X and Y" phrasing would otherwise trigger a needless
+    # "which document?" prompt even though the party pins it uniquely (confirmed
+    # live: SA5/Helios and SA6/Meridian questions both disambiguated despite each
+    # party name resolving to a single Service Agreement). Only a UNIQUE hit skips
+    # here; a party shared across several documents stays genuinely ambiguous and
+    # falls through to normal disambiguation. _resolve_docs_by_party is DB-gated
+    # and returns an empty set with no party phrase present, so questions that
+    # name no corporate party incur no extra cost.
+    try:
+        party_docs = _resolve_docs_by_party(question, session_id)
+    except Exception as e:
+        logger.error("classify_query: party resolution failed: %s", e)
+        party_docs = set()
+    if len(party_docs) == 1:
+        logger.info("Named party resolves to a single document → skip disambiguation: %s",
+                    _norm_doc_name(next(iter(party_docs))))
+        return {"needs_disambiguation": False, "documents": docs}
+
     # Vague singular reference ("this NDA", "the agreement") with multiple matching
     # documents → ask which one. Narrow to the named type when possible.
     vmatch = _VAGUE_DOC_PATTERN.search(question)
