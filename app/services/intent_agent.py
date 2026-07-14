@@ -319,12 +319,37 @@ def check_disambiguation_node(state: QueryState) -> dict:
         if confirmed:
             logger.info("[AGENT] disambiguation skipped (doc named and confirmed)")
             return {"needs_disambiguation": False}
-        logger.warning(
-            "Question names a document by pattern but no matching document exists "
-            "in this session — flagging as unconfirmed instead of silently "
-            "answering from an arbitrary document: %r", state["question"][:80],
+        # Confirmation failed. HOW the question named a document decides what an
+        # unresolved reference means:
+        #  - Numbered reference ("Service Agreement 1", "NDA 3"): names a document
+        #    by the identifier the corpus uses as a filename. If none matches it
+        #    genuinely does not exist, so flag unconfirmed_doc_reference (the model
+        #    then says so plainly instead of silently answering from an arbitrary
+        #    document — the original protection this branch was built for).
+        #  - Descriptive paraphrase ("wastewater-dosing NDA", "subsea diagnostic
+        #    deliverables"): a subject-matter description that is NEVER a literal
+        #    corpus name even when the document is real and merely filed under a
+        #    bare type+number. A miss here means "couldn't resolve the paraphrase",
+        #    not "document absent" — so DON'T assert non-existence. Fall through to
+        #    classify_query below, which runs vague-reference disambiguation and,
+        #    failing that, ordinary corpus retrieval. Confirmed live: descriptive
+        #    NDA/JV questions (e.g. "irrigation-management NDA", "floodgate-
+        #    automation NDA") that name a genuinely-present document were being
+        #    answered with a flat "No document matching '<paraphrase>' exists in
+        #    this corpus" plus a fabricated generic-clause answer.
+        if wiki._names_numbered_document(state["question"]):
+            logger.warning(
+                "Question names a NUMBERED document but no matching document exists "
+                "in this session — flagging as unconfirmed instead of silently "
+                "answering from an arbitrary document: %r", state["question"][:80],
+            )
+            return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
+        logger.info(
+            "Question names a document by descriptive paraphrase that didn't "
+            "resolve — falling through to disambiguation/corpus retrieval instead "
+            "of asserting non-existence: %r", state["question"][:80],
         )
-        return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
+        # fall through to classify_query below
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:

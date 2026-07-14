@@ -3497,6 +3497,23 @@ def _question_names_a_document(question: str, docs: list[str]) -> bool:
     return False
 
 
+def _names_numbered_document(question: str) -> bool:
+    """True only for a NUMBERED document reference ("Service Agreement 1", "NDA 3").
+
+    Distinguishes the two ways _question_names_a_document() can fire. The numbered
+    branch names a document by an identifier the corpus actually uses as a
+    filename, so if no such document exists it genuinely does not exist, and the
+    caller is right to say so (this is the original "Service Agreement 1 doesn't
+    exist" protection). The entity branch, by contrast, matches a DESCRIPTIVE
+    paraphrase of subject matter ("wastewater-dosing NDA", "subsea diagnostic
+    deliverables") — a phrase that is never a literal corpus name even when the
+    document is real and merely filed under a bare type+number. A confirmation
+    miss there means "couldn't resolve the paraphrase", NOT "document absent", so
+    the caller must NOT assert non-existence on it.
+    """
+    return bool(_DOC_NAME_PATTERN.search(question))
+
+
 # Tokens that are doc types / generic vocabulary, NOT distinctive entity names.
 _ENTITY_EXCLUDE = {
     "nda", "sha", "jva", "jv", "sa", "tata", "agreement", "agreements", "service",
