@@ -19,13 +19,15 @@ Browser (Chat UI)  ◄── Server-Sent Events (stage tiles + answer)
         ├── ThreadPoolExecutor  ──► wiki.ingest()        ──► LLM (full model)
         │                                                 ──► Embedder
         │                                                 ──► PostgreSQL
-        ├── /query (SSE)  ──► intent_agent LangGraph:
+        ├── /query (SSE)  ──► intent_agent LangGraph (7 nodes):
         │     classify_intent ─► LLM (fast) → 1 of 5 intents (regex fast-path first)
         │     disambiguation  ─► wiki.classify_query()    ──► LLM (fast) → document chips
         │     clarification   ─► wiki.check_ambiguity()   ──► LLM (fast) → clarifying question
-        │     retrieve        ─► wiki.get_context()       ──► pgvector + BM25 + entity matching
+        │     resolve_scope   ─► wiki.resolve_scope()     ──► deterministic scope cascade (no LLM)
+        │     retrieve        ─► wiki.get_context()       ──► pgvector + BM25 → RRF fusion + entity matching
         │     generate        ─► wiki.generate_answer()   ──► LLM (full: intent-specific prompt)
-        │     validate        ─► format check (logged, non-blocking)
+        │                                                 ──► deterministic citation/attribution verify + retry
+        │     validate        ─► format check (logged, non-blocking) + LLM grounding audit (full)
         ├── /messages           ──► chat_messages table   ──► conversation history
         ├── /document/locate    ──► source_positions      ──► quote position lookup
         ├── /review, /compare   ──► advanced_modes        ──► LLM (fast model)
@@ -47,27 +49,35 @@ PostgreSQL
 
 ## 2. LLM routing
 
-Two model tiers, one `ask()` function:
+Three providers (`azure`, `openrouter`, `nvidia`, selected by `config.LLM_PROVIDER`), two model tiers, one `ask()` function:
 
-| Tier | Azure config | OpenRouter config | Used for |
-|---|---|---|---|
-| **Full** | `AZURE_OPENAI_DEPLOYMENT` | `OPENROUTER_MODEL` | Ingest synthesis, answer generation, compaction, drafting, compare narrative |
-| **Fast** | `AZURE_FAST_DEPLOYMENT` | `OPENROUTER_FAST_MODEL` | Cell extraction (Review/Compare), JSON repair, contradiction pre-flight, document disambiguation, query clarification, intent classification |
+| Tier | Azure config | OpenRouter config | NVIDIA NIM config | Used for |
+|---|---|---|---|---|
+| **Full** | `AZURE_OPENAI_DEPLOYMENT` (`gpt-5.4-mini`) | `OPENROUTER_MODEL` | `NVIDIA_MODEL` (`openai/gpt-oss-120b`) | Ingest synthesis, answer generation, compaction, drafting, compare narrative, grounding check |
+| **Fast** | `AZURE_FAST_DEPLOYMENT` (`gpt-5.4-mini`) | `OPENROUTER_FAST_MODEL` | `NVIDIA_FAST_MODEL` (`openai/gpt-oss-20b`) | Cell extraction (Review/Compare), JSON repair, contradiction pre-flight, document disambiguation, query clarification, intent classification, optional LLM rerank |
 
-All calls: `temperature=0.0` (deterministic). Explicit `max_tokens` cap on every call — no silent 4096-token defaults.
+Azure currently points both tiers at the same `gpt-5.4-mini` reasoning deployment.
 
-Fast client has a 45s timeout and 1 retry (bulk extraction tolerance). Full client has 120s timeout and 2 retries (synthesis tasks can be slow).
+**Provider-aware call kwargs** (`llm.py`, `_is_azure()` + `_completion_kwargs()`): Azure's GPT-5.x / o-series reasoning deployments reject the classic Chat Completions contract — they 400 on `max_tokens` (need `max_completion_tokens` instead) and reject any non-default `temperature`. `_completion_kwargs()` builds the right kwargs per provider so every call site (`ask()`, `fast_ask()`) works unchanged across providers:
+- Azure path: `max_completion_tokens`, no `temperature` key
+- nvidia / openrouter path (OpenAI-compatible): `temperature=0.0` (deterministic) + `max_tokens`
+
+Explicit token cap on every call — no silent 4096-token defaults.
+
+Fast client has a 45s timeout and 1 retry (bulk extraction tolerance). Full client has 120s timeout and 2 retries (synthesis tasks can be slow). NVIDIA clients use a 120s (fast) / 300s (full) timeout with 1 retry.
+
+**Runtime provider switch:** `/api/settings/llm` and `/api/settings/embedding` set `config.LLM_PROVIDER` / `config.EMBEDDING_PROVIDER` in-memory — no restart needed for the switch itself. This does **not** persist to `.env`, so it reverts on process restart. Separately, the Flask dev server runs with `FLASK_USE_RELOADER=0` by default, so any edit to `.env`, `prompts.py`, `wiki.py`, `intent_agent.py`, or `llm.py` requires a manual process restart to take effect (the running process won't pick up file changes on its own).
 
 ---
 
 ## 3. Embedding
 
-- Provider: Azure (`text-embedding-3-large`) or OpenRouter (`nvidia/llama-nemotron-embed-vl-1b-v2:free`)
-- OpenRouter embeddings use direct `requests.post()` — the OpenAI SDK mis-parses OpenRouter's response envelope for this model
-- Embeddings are 2048-dimensional (Nemotron) or 1536-dimensional (Azure)
+- Provider: Azure (`text-embedding-3-large`), OpenRouter (`nvidia/llama-nemotron-embed-vl-1b-v2:free`), or NVIDIA NIM (`nvidia/nv-embed-v1`) — selected independently via `EMBEDDING_PROVIDER`
+- OpenRouter and NVIDIA embeddings route through their own client helpers in `embedder.py` (NVIDIA via the OpenAI-compatible SDK against `NVIDIA_ENDPOINT`; OpenRouter via direct `requests.post()` since the OpenAI SDK mis-parses OpenRouter's response envelope for that model)
+- Embedding dimensionality is provider-specific: Azure 1536-dim, OpenRouter Nemotron 2048-dim, NVIDIA `nv-embed-v1` **4096-dim** (`NVIDIA_EMBEDDING_DIMENSIONS`)
 - Query embeddings use `"search_query:"` prefix; document embeddings use `"search_document:"` prefix
 - Batch size: 16 texts per API call
-- HNSW index created if `EMBEDDING_DIMENSIONS ≤ 2000`; otherwise exact cosine scan
+- HNSW index created if the active embedding dimension is ≤ 2000 (Azure, OpenRouter); NVIDIA's 4096-dim vectors fall back to exact cosine scan (pgvector's HNSW/IVFFlat hard limit is 2000 dims)
 
 ---
 
@@ -173,16 +183,33 @@ For each due page, `_compact_page()`:
 
 ## 6. Query pipeline
 
-### 6.1 Page selection (hybrid retrieval)
+### 6.1 Scope resolution (`resolve_scope`)
+
+Before retrieval runs, `wiki.resolve_scope()` decides — deterministically, no LLM call — whether the question targets a single document, a document family, or the whole corpus. It's a priority cascade:
+
+1. Named file/number match (`_detect_mentioned_files`) → `single_doc`
+2. Named party resolving via full-text content search (`_resolve_docs_by_party`) → `single_doc` (catches counterparties whose name lives only in the document body or redaction-masked metadata, not the filename or page-title tokens)
+3. Known-entity match against page titles → `single_doc`
+4. Collective/broad phrasing resolving to a known document family → `family`
+5. Broad phrasing with no resolvable family → `corpus` (whole-session search, marked `is_broad`)
+6. Default → `corpus`
+
+The result (`{scope, target_docs, target_family, is_broad, confidence, method}`) feeds the `retrieve` node, which still does the actual page-level selection but now respects this pre-resolved scope instead of re-deriving it from scratch.
+
+**Architectural note:** there are two partially-redundant scope-signal systems in the codebase. `classify_query()` (used by the `disambiguation` node) decides "should I ask the user which document they mean?" `resolve_scope()` decides "what's the actual retrieval scope?" Both run the same underlying detectors (named-file, party-content-search, entity match, broad-phrasing) but independently, at different pipeline stages, for different questions. This is a known quirk, not a bug — but worth flagging for anyone extending either function, since a fix to one detector doesn't automatically apply to the other's decision.
+
+### 6.2 Page selection (hybrid retrieval)
 
 With a wiki of potentially thousands of pages, the system uses a three-path cascade:
 
-**Path 1 — Hybrid vector + BM25** (primary, DB mode):
+**Path 1 — Hybrid vector + BM25, fused via RRF** (primary, DB mode):
 1. Embed the question with `"search_query:"` prefix
-2. pgvector cosine similarity → top-15 pages (`VECTOR_SEARCH_TOP_K`)
-3. BM25 keyword scoring over all page summaries → top-8 supplement (`HYBRID_BM25_SUPPLEMENT_N`)
-4. Merge: vector results first, BM25 pages appended if not already present
-5. Result: up to 23 pages, 0 LLM calls, ~5ms DB query
+2. pgvector cosine similarity → top candidates (`VECTOR_SEARCH_TOP_K` = 15 for a normal question; widened to `BROAD_QUESTION_VECTOR_TOP_K` = 80 for broad/family questions)
+3. BM25 keyword ranking over all page summaries, sized to match the vector candidate list
+4. **Reciprocal Rank Fusion** (`_rrf_fuse`, `RRF_K` = 60): merges the two rankings by `sum(1 / (k + rank))` per title across both lists, so a title ranked highly by *either* retriever rises, and one ranked well by both rises most — this replaced the older "all vector results first, BM25 appended if not already present" order, which buried a strong keyword-only match below every semantic hit
+5. Non-broad questions: fused list capped at `HYBRID_FUSION_TOP_K` (23 pages). Broad/family questions: fuse first, then `_diversify_by_document()` caps any single document's contribution (`BROAD_QUESTION_PER_DOC_CAP` = 4) up to a wider total budget (`BROAD_QUESTION_TOTAL_CAP` = 60), so a broad "across all X" question can't be dominated by one document's pages
+6. **Optional LLM rerank** (`ENABLE_RERANK`, off by default): a fast-model relevance rerank pass applied only to broad/family queries, on top of the RRF-fused order — off by default because RRF alone already gives a strong base order; this is a refinement, not a dependency
+7. Result: 0 LLM calls (unless rerank is enabled), ~5ms DB query for the base fusion
 
 **Path 2 — BM25 + LLM selection** (fallback if no embeddings):
 1. BM25 pre-filter: top-150 candidates (`PAGE_SELECTION_PREFILTER_N`)
@@ -191,19 +218,20 @@ With a wiki of potentially thousands of pages, the system uses a three-path casc
 **Path 3 — BM25 keyword-only** (fallback if LLM fails):
 Returns top-25 pages by keyword overlap score.
 
-### 6.2 Context building
+### 6.3 Context building
 
 For each selected page:
 - Regular pages: capped at `MAX_PAGE_CONTEXT_CHARS` (2,000 chars)
 - Cached-answer pages (titles starting with `Q:`): capped at `MAX_QPAGE_CONTEXT_CHARS` (3,000 chars)
 - Pages with `contradiction_flagged = True`: prepend `[WARNING: This page contains conflicting claims...]`
+- Combined context capped at `MAX_TOTAL_CONTEXT_CHARS` (60,000 chars) to prevent context-window overflow on broad queries matching many similar documents
 
-### 6.3 LangGraph orchestration & intent classification
+### 6.4 LangGraph orchestration & intent classification
 
-The `/query` route is a LangGraph `StateGraph` (`intent_agent.py`) with six nodes and conditional edges:
+The `/query` route is a LangGraph `StateGraph` (`intent_agent.py`) with **seven** nodes and conditional edges:
 
 ```
-classify_intent → disambiguation → clarification → retrieve → generate → validate
+classify_intent → disambiguation → clarification → resolve_scope → retrieve → generate → validate
                        │ (needs)        │ (needs)
                        ▼                ▼
                       END              END
@@ -211,19 +239,21 @@ classify_intent → disambiguation → clarification → retrieve → generate �
 
 1. **classify_intent** — classifies the query into one of five lawyer intents: `factual`, `risk_assessment`, `comparison`, `obligation`, `drafting`. Regex fast-path (0 tokens) handles obvious queries; ambiguous queries fall to a fast LLM call (`MAX_TOKENS_INTENT_CLASSIFY` = 150). Any failure defaults to `factual`.
 
-2. **disambiguation** — skips if the question names a document (numbered pattern, entity+doc-type pattern, or known entity from page titles via `_question_mentions_known_entity()`). Otherwise a fast LLM call checks for vague document references.
+2. **disambiguation** (`wiki.classify_query()`) — skips if the question names a document (numbered pattern, entity+doc-type pattern, or known entity from page titles), uses broad/collective phrasing that resolves to a known family, or names a party that resolves to exactly one document via full-text content search. Otherwise a fast LLM call checks for vague document references.
 
 3. **clarification** — fast LLM call determines if the question needs one clarifying question. Hard limit: 1 per turn.
 
-4. **retrieve** (`wiki.get_context()`) — hybrid page selection, tuned by per-intent `retrieval_hints`. Entity-aware retrieval: when the question mentions a distinctive entity/party name from page titles (e.g. "ReVolt"), those pages are force-included even if the source filename doesn't match. Numbered doc-type patterns ("service agreement 3") also match via enhanced `_detect_mentioned_files()`.
+4. **resolve_scope** (`wiki.resolve_scope()`) — see §6.1. Deterministic, no LLM call. Writes the scope decision that `retrieve` consumes.
 
-5. **generate** (`wiki.generate_answer(intent=...)`) — selects the intent-specific prompt.
+5. **retrieve** (`wiki.get_context()`) — hybrid page selection (§6.2), tuned by per-intent `retrieval_hints` and constrained by the resolved scope (family filter narrows the vector search; `single_doc` scope force-pins retrieval to the resolved document(s)). Entity-aware retrieval: when the question mentions a distinctive entity/party name from page titles (e.g. "ReVolt"), those pages are force-included even if the source filename doesn't match. Numbered doc-type patterns ("service agreement 3") also match via enhanced `_detect_mentioned_files()`.
 
-6. **validate** — light format check (comparison → table present; obligation → list/table; drafting → clause formulations). Non-blocking.
+6. **generate** (`wiki.generate_answer(intent=...)`) — selects the intent-specific prompt, then runs deterministic citation verification (§6.5) with a corrective retry.
+
+7. **validate** — light format check (comparison → table present; obligation → list/table; drafting → clause formulations, non-blocking) plus an independent LLM grounding audit (§6.6) when `ENABLE_ANSWER_VALIDATION` is on.
 
 Each node emits a custom stage event via LangGraph's stream writer; `app.py` relays these as SSE.
 
-### 6.4 Answer generation — intent-specific prompts
+### 6.5 Answer generation — intent-specific prompts
 
 | Intent | Prompt | Output shape |
 |---|---|---|
@@ -238,8 +268,29 @@ All five prompts include:
 - **Document metadata** block (party names, governing law, effective dates from `page_metadata`)
 - Full wiki context (capped pages, contradiction warnings, source labels)
 - Chain-of-thought `<reasoning>` block with confidence score — zero additional LLM calls
+- Table-citation discipline rules (every table row must carry an inline citation anchor; quotes may not be manufactured to fill a table) — extended to `ASSESSMENT_PROMPT` and `OBLIGATION_PROMPT` this phase after both were found emitting uncited tables
 
 The reasoning-block extraction uses a tolerant regex that handles unclosed tags, whitespace variants, and unicode characters. The classified intent is returned in the answer payload and surfaced as a coloured tag on the answer card.
+
+### 6.6 Citation verification and corrective retry
+
+After the answer LLM returns, `generate_answer()` runs two deterministic (regex/substring, not LLM-judged) checks against the exact retrieved context:
+
+- **`_verify_answer_citations()`** — every quoted span in the answer must appear verbatim (whitespace/case-insensitive) in the context's Supporting-Quotes-restricted text. Catches the model paraphrasing a clause and presenting it in quotation marks as if it were the document's own wording.
+- **`_verify_citation_attribution()`** — a quote that IS verbatim-correct must also be attributed to the right source document, not a different one that happens to contain similar text.
+
+If either check flags issues, the pipeline makes **one** corrective-retry LLM call with an addendum prompt asking the model to fix the flagged quotes. The retry is only kept if it has *fewer* combined issues than the original **and** retains at least 60% of the original answer's length (guards against a "fix" that guts the answer to dodge the check). If issues remain after the retry (or the retry doesn't qualify), `[CITATION WARNING: ...]` and/or `[ATTRIBUTION WARNING: ...]` banners are appended to the answer.
+
+### 6.7 Grounding check (independent of confidence score)
+
+The `validate` node runs a **separate** LLM audit (`_check_grounding()`, `intent_agent.py`) — not the citation-verification regex passes above, and not the answer LLM's own self-reported confidence. It compares the finished answer's factual claims against the retrieved context and produces a `grounding_score` (0–100). Key behaviour:
+- Explicitly treats "not covered" / absence-findings as **correct** behaviour, not a violation — an honest "the excerpts don't contain X" is high-grounding, never flagged as fabrication
+- For `risk_assessment` and `drafting` intents, professional judgment and risk analysis are expected and not penalized — only fabricated facts are
+- Caps at 8 flagged claims per check
+- `MAX_TOKENS_GROUNDING_CHECK` = 900, with a doubling-retry (up to 3 additional attempts) if the model's hidden reasoning consumes the whole budget with no visible JSON output
+- Controlled by `ENABLE_ANSWER_VALIDATION`
+
+**Confidence score** (self-reported by the answer LLM inside its own `<reasoning>` block, zero extra LLM calls) and **grounding score** (this separate, independently-audited LLM call) are two different numbers surfaced to the user — they can disagree, and both are shown on the answer.
 
 ---
 
@@ -284,16 +335,19 @@ Cells run concurrently via `ThreadPoolExecutor`. Result exported to confidence-c
 
 | Call | Model tier | Budget |
 |---|---|---|
-| Ingest: single-call synthesis | Full | 4,096 |
-| Ingest: overview pass | Full | 1,500 |
-| Ingest: detail segment | Full | 3,500 |
+| Ingest: single-call synthesis | Full | 16,000 |
+| Ingest: overview pass | Full | 2,000 |
+| Ingest: detail segment | Full | 8,000 |
 | Page compaction | Full | 4,096 |
-| Answer generation | Full | 4,096 |
+| Answer generation (narrow/single-doc) | Full | 4,096 |
+| Answer generation (broad: comparison/risk/obligation) | Full | 8,192 |
+| Grounding check (validate node) | Full | 900 (doubles on truncation, up to 4 attempts) |
 | JSON repair | Fast | 2,048 |
 | Cell extraction (Review/Compare) | Fast | 300 |
 | Document disambiguation | Fast | 200 |
 | Query clarification | Fast | 300 |
 | Intent classification (LLM fallback) | Fast | 150 |
+| Optional LLM rerank (broad queries) | Fast | 2,048 |
 | Page selection (BM25+LLM fallback) | Full | 1,000 |
 
 ---

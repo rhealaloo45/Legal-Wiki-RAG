@@ -8,7 +8,7 @@ For the broader system context, see `SYSTEM_OVERVIEW.md` and `FLOWCHART.md`.
 
 ## 1. Overview
 
-Every user question in the Ask tab is orchestrated by a LangGraph `StateGraph` — a directed graph of six nodes with conditional edges. The graph classifies the query from a lawyer's perspective, runs pre-query safety checks (disambiguation, clarification), retrieves wiki context, generates an intent-specific answer, and validates the output format.
+Every user question in the Ask tab is orchestrated by a LangGraph `StateGraph` — a directed graph of seven nodes with conditional edges. The graph classifies the query from a lawyer's perspective, runs pre-query safety checks (disambiguation, clarification), resolves retrieval scope, retrieves wiki context, generates an intent-specific answer, and validates the output format (including an independent grounding audit).
 
 Each node emits real-time **stage events** via LangGraph's custom stream writer. Flask relays these as **Server-Sent Events (SSE)** so the chat UI can render animated progress tiles. The graph runs synchronously inside the Flask request thread — no Celery or async needed.
 
@@ -44,25 +44,33 @@ flowchart TD
     TAG_D --> DIS
 
     subgraph PREQUERIES["② ③ Pre-query safety gates"]
-        DIS[disambiguation\nSkips if doc named\nor entity matched]
+        DIS[disambiguation\nSkips if doc named,\nentity matched, broad phrasing,\nor unique party match]
         DIS -->|needs_disambiguation| END_DIS([END — document chips])
         DIS -->|pass| CLAR[clarification\nSkips if followup\nor doc named]
         CLAR -->|needs_clarification| END_CLAR([END — clarifying question])
-        CLAR -->|pass| RET_START
+        CLAR -->|pass| SCOPE_START
     end
 
+    SCOPE_START --> SCOPE
+
+    subgraph SCOPING["④ Scope resolution"]
+        SCOPE["resolve_scope\nDeterministic, no LLM call\nfile → party → entity →\nfamily → broad → corpus"]
+    end
+
+    SCOPE --> RET_START
     RET_START --> RET
 
-    subgraph PIPELINE["④ ⑤ ⑥ Core pipeline"]
-        RET["retrieve\nHybrid pgvector + BM25\nEntity-aware page matching\nIntent-tuned retrieval hints"]
-        RET --> GEN["generate\nFull LLM · 4096 tokens\nPrompt selected by intent\nConversation + metadata injected"]
-        GEN --> VAL["validate\nFormat check per intent\nNon-blocking · logged only"]
+    subgraph PIPELINE["⑤ ⑥ ⑦ Core pipeline"]
+        RET["retrieve\nHybrid pgvector + BM25 → RRF fusion\nEntity-aware page matching\nScope-constrained · Intent-tuned hints"]
+        RET --> GEN["generate\nFull LLM · 4096/8192 tokens\nPrompt selected by intent\nConversation + metadata injected\n+ citation verification + retry"]
+        GEN --> VAL["validate\nFormat check per intent (non-blocking)\n+ independent grounding audit (LLM)"]
     end
 
-    VAL --> END_ANS([END — answer + intent tag\n+ confidence badge])
+    VAL --> END_ANS([END — answer + intent tag\n+ confidence badge + grounding score])
 
     style CLASSIFY fill:#e0e7ff,stroke:#4f46e5
     style PREQUERIES fill:#fef9e7,stroke:#d97706
+    style SCOPING fill:#f3e8ff,stroke:#9333ea
     style PIPELINE fill:#e8f5e9,stroke:#059669
     style TAG_F fill:#dbeafe,stroke:#2563eb
     style TAG_R fill:#fee2e2,stroke:#dc2626
@@ -73,7 +81,8 @@ flowchart TD
 
 **Conditional edges:**
 - After `disambiguation`: if `needs_disambiguation` is true → END (short-circuit). Otherwise → `clarification`.
-- After `clarification`: if `needs_clarification` is true → END (short-circuit). Otherwise → `retrieve`.
+- After `clarification`: if `needs_clarification` is true → END (short-circuit). Otherwise → `resolve_scope`.
+- `resolve_scope → retrieve` is unconditional (fail-open: any internal error yields a default "corpus" decision).
 - All other edges are unconditional.
 
 ### Intent → Prompt → Output shape (quick reference)
@@ -111,13 +120,16 @@ class QueryState(TypedDict, total=False):
     needs_clarification: bool
     clarification_data: dict   # {message, options, original_question}
 
+    # ── Set by resolve_scope node ──
+    scope_decision: dict       # {scope, target_docs, target_family, is_broad, confidence, method}
+
     # ── Set by retrieve / generate / validate nodes ──
     conversation_context: str  # Last 3–5 chat messages, max ~2000 chars
     wiki_context: str          # Formatted "## Title\ncontent" string
     selected_titles: list      # Page titles included in context
     retrieval_meta: dict       # {bm25_count, page_selection_usage}
     answer_result: dict        # Full generate_answer() return + intent fields
-    validation: dict           # {valid: bool, warning: str|None}
+    validation: dict           # {valid: bool, warning: str|None, grounding: dict}
 ```
 
 ---
@@ -219,7 +231,29 @@ Calls `wiki.check_ambiguity(question, session_id, conversation_context)` — fas
 
 ---
 
-### 4.4 `retrieve` — Context Retrieval
+### 4.4 `resolve_scope` — Retrieval Scope Resolution
+
+**Purpose:** Decide, in one deterministic place, whether the question targets a single document, a document family, or the whole corpus — before retrieval runs.
+
+**SSE events emitted:** none (no `_emit()` call — this node is fast enough to fold into the surrounding stage tiles without its own).
+
+**Logic (`wiki.resolve_scope()`, no LLM call):** priority cascade, first match wins:
+1. Named file/number match (`_detect_mentioned_files`) → `scope="single_doc"`.
+2. Named party resolving to a document set via full-text content search (`_resolve_docs_by_party`) → `scope="single_doc"`. Catches counterparties named by their full corporate name whose identity lives only in the document body or redaction-masked metadata — not the page-title tokens the entity check mines. A multi-instrument question naming several of that party's documents ("across the NDA, the arbitration notice, and the Section 9 petition") pins the whole resolved cluster instead of narrowing to one.
+3. Known-entity match against page titles (`_question_mentions_known_entity`) → `scope="single_doc"`, pinned to the entity's dominant document (or all matched documents for a multi-instrument question).
+4. Collective/broad phrasing (`_BROAD_SCOPE_RE` or a plural family noun) resolving to a document family that actually exists in this session → `scope="family"`, `is_broad=True`.
+5. Broad phrasing with no resolvable family → `scope="corpus"`, `is_broad=True` (whole-session search).
+6. Default (nothing matched) → `scope="corpus"`, `is_broad=False` — identical to pre-Phase-2 behaviour.
+
+**Fail-open:** any internal exception is caught in `resolve_scope_node` and yields a default `{"scope": "corpus", "is_broad": False, "method": "error"}` decision, so the pipeline degrades to unfiltered whole-session search rather than failing the query.
+
+**Architectural note:** this node's detectors overlap significantly with `classify_query()` (the `disambiguation` node, §4.2) — both run named-file, party-content-search, entity-match, and broad-phrasing checks independently, at different pipeline stages, answering different questions ("should I ask the user?" vs "what's the actual scope?"). This is a known duplication, not a bug, but a fix to one detector does not automatically apply to the other.
+
+**State written:** `scope_decision`
+
+---
+
+### 4.5 `retrieve` — Context Retrieval
 
 **Purpose:** Select relevant wiki pages and format them as context for the answer LLM.
 
@@ -234,16 +268,16 @@ Calls `wiki.check_ambiguity(question, session_id, conversation_context)` — fas
    - `drafting` → `{keyword_boost: ["definition", "clause", "shall", …]}`
    - `factual` / `risk_assessment` → `{}` (default retrieval)
 
-2. Calls `wiki.get_context(question, session_id, target_doc, retrieval_hints)` which runs:
+2. Calls `wiki.get_context(question, session_id, target_doc, retrieval_hints, doc_family, force_broad, force_docs)` — the last three parameters are forwarded from `scope_decision` (§4.4): a `family` scope narrows the vector search to that family's embeddings, a `single_doc` scope force-pins retrieval to the resolved document(s). It runs:
    - **Document detection** (3 layers): filename matching → entity matching → target_doc
-   - **Page selection** (3-path cascade): hybrid pgvector+BM25 → BM25+LLM → BM25-only
+   - **Page selection** (3-path cascade): hybrid pgvector+BM25 fused via Reciprocal Rank Fusion (`_rrf_fuse`, `RRF_K=60`) → BM25+LLM fallback → BM25-only fallback. Broad/family questions widen the vector candidate pool and diversify by document (`_diversify_by_document`) after fusion; an optional fast-model LLM rerank (`ENABLE_RERANK`, off by default) can refine the fused order further for those questions.
    - **Context formatting**: cap pages at 2000 chars, prepend contradiction warnings
 
 **State written:** `wiki_context`, `selected_titles`, `retrieval_meta`, `conversation_context`
 
 ---
 
-### 4.5 `generate` — Answer Generation
+### 4.6 `generate` — Answer Generation
 
 **Purpose:** Call the full-power LLM with an intent-specific prompt template to produce the answer.
 
@@ -261,12 +295,15 @@ Calls `wiki.check_ambiguity(question, session_id, conversation_context)` — fas
 | `drafting` | `DRAFTING_PROMPT` | Three formulations (aggressive/balanced/conservative) with implications |
 
 All prompts include: `{conversation_block}`, `{metadata_block}`, `{context}`, `{question}`.
-All require `<reasoning>` block with `CONFIDENCE_SCORE` and `CONFIDENCE_REASON`.
+All require `<reasoning>` block with `CONFIDENCE_SCORE` and `CONFIDENCE_REASON`. All five now share table-citation discipline rules (every table row needs an inline citation anchor; no manufacturing quotes to fill a table) — extended to `ASSESSMENT_PROMPT` and `OBLIGATION_PROMPT` this phase.
 
 **Post-LLM processing** (inside `wiki.generate_answer()`):
 - Extract confidence via tolerant regex (handles unclosed tags, unicode, whitespace)
 - Strip `<reasoning>` block from user-facing answer
 - Short "not covered" → force confidence to 0
+- **Citation verification** — `_verify_answer_citations()` checks every quoted span appears verbatim in the retrieved context; `_verify_citation_attribution()` checks a verbatim-correct quote is attributed to the right source document. Both are deterministic (regex/substring), not LLM-judged.
+- **Corrective retry** — if either check flags issues, one retry LLM call attempts a fix; the retry is kept only if it has fewer combined issues AND retains ≥60% of the original answer's length. Otherwise the original is kept.
+- Any issues still present after the retry step → `[CITATION WARNING: ...]` / `[ATTRIBUTION WARNING: ...]` banners appended to the answer.
 
 **Enrichment:** After `wiki.generate_answer()` returns, the node adds `intent`, `intent_label`, `intent_confidence`, `intent_method` to the result dict.
 
@@ -274,14 +311,16 @@ All require `<reasoning>` block with `CONFIDENCE_SCORE` and `CONFIDENCE_REASON`.
 
 ---
 
-### 4.6 `validate` — Response Format Check
+### 4.7 `validate` — Response Format Check + Grounding Audit
 
-**Purpose:** Light sanity check — does the answer match the expected format for the classified intent?
+**Purpose:** Light sanity check — does the answer match the expected format for the classified intent? Plus an independent LLM audit of whether the answer's factual claims are actually grounded in the retrieved context.
 
 **SSE events emitted:**
-1. `{stage: "complete", status: "done", type: "answer", payload: {full answer result}, message: "Done"}`
+1. `{stage: "validating", status: "active", message: "Checking answer grounding…"}` — only when `ENABLE_ANSWER_VALIDATION` is on
+2. `{stage: "validating", status: "done", grounding_score, message: "Grounding: N%"}` — only when `ENABLE_ANSWER_VALIDATION` is on
+3. `{stage: "complete", status: "done", type: "answer", payload: {full answer result}, message: "Done"}`
 
-**Checks per intent:**
+**Format checks per intent:**
 
 | Intent | Validation rule | What triggers a warning |
 |---|---|---|
@@ -292,7 +331,16 @@ All require `<reasoning>` block with `CONFIDENCE_SCORE` and `CONFIDENCE_REASON`.
 
 **Non-blocking:** Warnings are logged (`logger.info`) but the answer is still returned to the user. The validation never blocks or retries.
 
-**State written:** `answer_result.validation`, `validation`
+**Grounding check (`_check_grounding()`, gated by `ENABLE_ANSWER_VALIDATION`):** a separate full-model LLM call (`fast=False`) — distinct from both the deterministic citation-verification checks in `generate` (§4.6) and the answer LLM's own self-reported `confidence_score` — that audits the finished answer's factual claims against the retrieved context:
+- Treats "not covered" / absence findings as **correct** behaviour, never flags them as ungrounded
+- For `risk_assessment` / `drafting` intents, professional judgment and risk analysis are expected and not penalized — only fabricated facts are
+- Caps output at 8 flagged `ungrounded_claims`
+- `MAX_TOKENS_GROUNDING_CHECK` = 900, with a doubling-retry (up to 3 further attempts) when the model's hidden reasoning consumes the whole budget with no visible JSON output
+- Returns `{grounding_score: 0-100, ungrounded_claims: [...], summary: "..."}`, stored under `answer_result.validation.grounding`
+
+`confidence_score` and `grounding_score` are two different numbers shown to the user on the same answer card — they measure different things (self-reported vs. independently audited) and can disagree.
+
+**State written:** `answer_result.validation` (`{valid, warning, grounding}`), `validation`
 
 ---
 
@@ -311,8 +359,14 @@ data: {"stage": "pages_retrieved", "status": "done", "count": 15, ...}
 
 data: {"stage": "generating", "status": "active", "message": "Generating comparison answer…"}
 
-data: {"type": "answer", "wiki": {"answer": "...", "intent": "comparison", "intent_label": "Comparison", "confidence_score": 92, ...}}
+data: {"stage": "validating", "status": "active", "message": "Checking answer grounding…"}
+
+data: {"stage": "validating", "status": "done", "grounding_score": 88, "message": "Grounding: 88%"}
+
+data: {"type": "answer", "wiki": {"answer": "...", "intent": "comparison", "intent_label": "Comparison", "confidence_score": 92, "validation": {"valid": true, "warning": null, "grounding": {"grounding_score": 88, "ungrounded_claims": [], "summary": "..."}}, ...}}
 ```
+
+Note: `resolve_scope` (between `clarification` and `retrieve`) emits no SSE stage of its own — it's fast enough (no LLM call) to fold silently into the surrounding stage tiles.
 
 **Terminal events** (exactly one per request):
 - `{type: "answer", wiki: {...}}` — full answer with intent metadata
@@ -331,12 +385,13 @@ The frontend reads the stream via `ReadableStream.getReader()`, renders animated
 | `classify_intent` | `llm.ask(fast=True)` (only if regex misses) | Fast | 150 |
 | `disambiguation` | `wiki.classify_query()` → `llm.ask(fast=True)` | Fast | 200 |
 | `clarification` | `wiki.check_ambiguity()` → `llm.ask(fast=True)` | Fast | 300 |
-| `retrieve` | `wiki.get_context()` → `embedder.embed()` + `db.search_similar_pages()` + BM25 | — | 0 (hybrid) or 1000 (LLM fallback) |
-| `generate` | `wiki.generate_answer()` → `llm.ask(fast=False)` | Full | 4096 |
-| `validate` | Pure Python (regex checks) | — | 0 |
+| `resolve_scope` | `wiki.resolve_scope()` — pure Python cascade, DB lookups only, no LLM call | — | 0 |
+| `retrieve` | `wiki.get_context()` → `embedder.embed()` + `db.search_similar_pages()` + BM25 → RRF fusion + optional rerank | — | 0 (hybrid) or 1000 (LLM fallback), + 2048 if `ENABLE_RERANK` fires on a broad query |
+| `generate` | `wiki.generate_answer()` → `llm.ask(fast=False)` + citation verification + optional corrective retry | Full | 4096 (8192 broad), + up to 4096/8192 again if a corrective retry fires |
+| `validate` | Pure Python (regex checks) + `_check_grounding()` (`llm.ask(fast=False)`) if `ENABLE_ANSWER_VALIDATION` | Full (grounding only) | 0 (format check) + 900 (grounding, doubles on truncation up to 4x) |
 
-**Total worst-case token budget per query:** 150 + 200 + 300 + 1000 + 4096 = **5,746 tokens**
-**Typical token budget (regex intent, hybrid retrieval):** 200 + 300 + 4096 = **4,596 tokens** (disambiguation + clarification may not fire)
+**Total worst-case token budget per query (base pass, no retries, rerank/broad off):** 150 + 200 + 300 + 1000 + 4096 + 900 = **6,646 tokens**
+**Typical token budget (regex intent, hybrid retrieval, grounding on):** 200 + 300 + 4096 + 900 = **5,496 tokens** (disambiguation + clarification may not fire; `resolve_scope` and RRF fusion add 0 LLM tokens)
 
 ---
 
@@ -365,9 +420,12 @@ Every node logs entry and key decisions at `INFO` level with `[AGENT]` prefix:
 [AGENT] intent=comparison conf=0.90 method=regex
 [AGENT] check_disambiguation_node
 [AGENT] disambiguation skipped (doc named or followup)
+[AGENT] resolve_scope_node
+[AGENT] scope=single_doc family=None broad=False method=file
 [AGENT] retrieve_context_node: intent=comparison
 [AGENT] generate_answer_node: intent=comparison pages=14
 [AGENT] validate_response_node: intent=comparison
+[AGENT] Grounding score: 88 | Most claims traceable to context
 ```
 
 `app.py` additionally logs each SSE event:
@@ -377,6 +435,8 @@ SSE stage: intent_identified | Intent: Comparison
 SSE stage: retrieving | Retrieving relevant pages…
 SSE stage: pages_retrieved | Retrieved 14 page(s)
 SSE stage: generating | Generating comparison answer…
+SSE stage: validating | Checking answer grounding…
+SSE stage: validating | Grounding: 88%
 SSE answer: intent=comparison conf=92%
 ```
 
@@ -389,8 +449,11 @@ SSE answer: intent=comparison conf=92%
 | Intent LLM call returns 429 / error | Falls back to `factual` intent (safest default) |
 | Intent LLM returns invalid JSON | Falls back to `factual` |
 | Disambiguation LLM fails | Skips disambiguation, proceeds to clarification |
-| Clarification LLM fails | Skips clarification, proceeds to retrieval |
+| Clarification LLM fails | Skips clarification, proceeds to resolve_scope |
+| `resolve_scope()` throws exception | Falls back to `{"scope": "corpus", "method": "error"}` — unfiltered whole-session search, identical to pre-Phase-2 behaviour |
 | `generate_answer()` throws exception | Returns error message as the answer with confidence 0 |
+| Citation/attribution verification finds issues | One corrective retry; if still unresolved, warning banners appended to the answer (not blocked) |
+| Grounding check LLM call fails or returns unparseable output | Returns `{grounding_score: None, ...}` — no grounding badge shown, answer still returned |
 | Validate finds format mismatch | Logs warning, returns the answer anyway |
 | `_emit()` fails (no stream writer) | Silently skipped — answer still produced, just no SSE tiles |
 
