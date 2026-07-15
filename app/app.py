@@ -673,6 +673,10 @@ def query_route():
                                         "intent": wiki_result.get("intent", "factual"),
                                         "intent_label": wiki_result.get("intent_label", ""),
                                         "intent_confidence": wiki_result.get("intent_confidence", 0),
+                                        # Consumed by the NEXT turn's scope
+                                        # carryover (wiki._carryover_scope).
+                                        "scope_method": wiki_result.get("scope_method", ""),
+                                        "scope_docs": wiki_result.get("scope_docs", []),
                                     })
                     _update_session_history(session_id, question)
                     try:
