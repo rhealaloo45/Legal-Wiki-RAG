@@ -1036,6 +1036,49 @@ def get_recent_context(session_id: str, n: int = 5) -> list[dict]:
         return [{"role": r.role, "content": r.content, "msg_type": r.msg_type} for r in rows]
 
 
+def get_recent_answer_scope(session_id: str, n: int = 1) -> list[dict]:
+    """Return ``{method, docs}`` for the last n assistant answers, newest first.
+
+    Reads the scope decision the query pipeline records in each answer's
+    metadata JSONB. Consumed by wiki._carryover_scope: a question that names no
+    document can inherit the scope of the document the conversation is
+    demonstrably already about.
+
+    Deliberately reads the recorded SCOPE, not ``files_used``. A file count
+    cannot tell "scoped to one named reference" from "synthesised across the
+    corpus" — in this corpus a single numbered reference routinely resolves to
+    two files (a real document plus its zero-padded Test_* sibling), so any
+    count-based rule is guesswork. The resolver's own method is the ground truth.
+
+    Answers written before this metadata existed yield method="" and are
+    therefore never inherited from.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT metadata
+                FROM chat_messages
+                WHERE session_id = :sid
+                  AND role = 'assistant'
+                  AND msg_type = 'answer'
+                ORDER BY created_at DESC
+                LIMIT :n
+            """),
+            {"sid": session_id, "n": n},
+        )
+        out: list[dict] = []
+        for r in rows:
+            md = r.metadata if isinstance(r.metadata, dict) else {}
+            docs = md.get("scope_docs")
+            out.append({
+                "method": str(md.get("scope_method") or ""),
+                "docs": [str(x) for x in docs if x] if isinstance(docs, list) else [],
+            })
+        return out
+
+
 def delete_messages(session_id: str) -> None:
     """Delete all chat messages for a session."""
     from sqlalchemy import text

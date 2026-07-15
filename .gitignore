@@ -271,6 +271,8 @@ app/test_output.txt
 app/ingest_remaining.py
 app/register_files.py
 
+
+
 # One-off diagnostic/scratch scripts (leading-underscore convention used for
 # throwaway repro/verify/trace scripts during live debugging sessions —
 # reusable utilities like reingest_missing_docs.py don't use this prefix)
@@ -281,3 +283,8 @@ Thumbs.db
 *.bak
 *.orig
 nohup.out
+
+
+
+app/reingest_stuck_docs.py
+app/reingest_missing_docs.py

@@ -1571,9 +1571,17 @@ def _distinct_source_docs(pages: dict) -> set[str]:
 # silently starving the rest even though they're all relevant. Confirmed live
 # (500-doc session): cross-SA liability-caps and cross-court-case digital-
 # evidence questions both synthesized only 2-3 of 7+ relevant documents.
+# "across the court case documents" is as broad as "across all court case
+# documents", but only the bare "across the corpus|documents" form matched — so
+# a typed plural ("across the court case documents, what digital evidence…")
+# fell through to disambiguation and got answered from ONE document instead of
+# synthesised across all of them. Allow up to 3 intervening type words before
+# the plural noun.
 _BROAD_SCOPE_RE = re.compile(
-    r'\bacross all\b|\ball of the\b|\beach of the\b|\bacross the (corpus|documents)\b|'
-    r'\bevery (service agreement|shareholders? agreement|joint venture agreement|judgment|court case)\b',
+    r'\bacross all\b|\ball of the\b|\beach of the\b|'
+    r'\bacross the (?:\w+\s+){0,3}'
+    r'(?:corpus|documents?|agreements?|ndas?|judge?ments?|opinions?|cases?)\b|'
+    r'\bevery (service agreement|shareholders? agreement|joint venture agreement|judge?ment|court case)\b',
     re.IGNORECASE,
 )
 
@@ -1650,6 +1658,68 @@ def _norm_doc_name(name: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
+def _numbered_docs_in(question: str, doc_names) -> set[str]:
+    """Which of ``doc_names`` the question names by document type + number.
+
+    Factored out of ``_detect_mentioned_files`` so the same matching can run
+    against an arbitrary name set — notably the UPLOAD list, which (unlike the
+    page index) still contains documents that ingested with zero pages.
+
+    A question can name MORE THAN ONE document this way (e.g. "compare Tata
+    Brand Judgment 6 and Tata Brand Judgment 8") — iterate every match rather
+    than just the first, and pair each number with its OWN adjacent type word
+    rather than reusing whichever type happened to appear earliest in the
+    question. Confirmed live: a question naming "Judgment 6" and "Judgment 8"
+    only force-included Judgment 6 (the second document was silently dropped to
+    generic retrieval, which pulled an unrelated document instead).
+    """
+    matched: set[str] = set()
+    for num_match in _DOC_NAME_PATTERN.finditer(question):
+        t = num_match.group(1).lower()
+        t = re.sub(r'\s+', ' ', t).strip()
+        doc_num = num_match.group(2)
+        # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
+        # NOT the first word, which for "legal opinion" is the non-distinctive
+        # "legal" that prefixes every source_doc.
+        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
+        # Match the number allowing zero-padding: the user types "service
+        # agreement 1" but redacted test files are saved zero-padded as
+        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
+        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
+        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
+        # keep it from bleeding into a different document number.
+        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+        for sd in doc_names:
+            norm = _norm_doc_name(sd)
+            if re.search(num_re, norm) and (not type_core or type_core in norm):
+                matched.add(sd)
+    return matched
+
+
+def _uploaded_doc_names(session_id: str) -> set[str]:
+    """Every document UPLOADED to this session, read from the upload directory.
+
+    The page index only knows documents that produced at least one page. A
+    document whose ingest yielded nothing — e.g. a scanned PDF whose OCR failed
+    — is absent from it entirely, so no page-index query can ever reveal that
+    the user's named document exists but is empty. The upload directory is the
+    only record that they supplied it at all.
+
+    Returns names with the ``{session_id}_`` prefix stripped; ``_norm_doc_name``
+    normalises these to the same string as the corresponding indexed
+    ``source_doc``, so the two sets are directly comparable.
+    """
+    try:
+        prefix = f"{session_id}_"
+        return {
+            fn[len(prefix):] for fn in os.listdir(config.UPLOAD_PATH)
+            if fn.startswith(prefix)
+        }
+    except Exception as e:
+        logger.error("_uploaded_doc_names failed: %s", e)
+        return set()
+
+
 def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
     """Detect which SPECIFIC source documents the user is asking about.
 
@@ -1692,32 +1762,7 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
             return matched
 
     # 1. Numbered type pattern — precise per-document scoping.
-    # A question can name MORE THAN ONE document this way (e.g. "compare Tata
-    # Brand Judgment 6 and Tata Brand Judgment 8") — iterate every match rather
-    # than just the first, and pair each number with its OWN adjacent type word
-    # rather than reusing whichever type happened to appear earliest in the
-    # question. Confirmed live: a question naming "Judgment 6" and "Judgment 8"
-    # only force-included Judgment 6 (the second document was silently dropped
-    # to generic retrieval, which pulled an unrelated document instead).
-    for num_match in _DOC_NAME_PATTERN.finditer(question):
-        t = num_match.group(1).lower()
-        t = re.sub(r'\s+', ' ', t).strip()
-        doc_num = num_match.group(2)
-        # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
-        # NOT the first word, which for "legal opinion" is the non-distinctive
-        # "legal" that prefixes every source_doc.
-        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
-        # Match the number allowing zero-padding: the user types "service
-        # agreement 1" but redacted test files are saved zero-padded as
-        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
-        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
-        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
-        # keep it from bleeding into a different document number.
-        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
-        for sd in src_docs:
-            norm = _norm_doc_name(sd)
-            if re.search(num_re, norm) and (not type_core or type_core in norm):
-                matched.add(sd)
+    matched |= _numbered_docs_in(question, src_docs)
     if matched:
         logger.info("Detected file mention (numbered): %s", {_norm_doc_name(d) for d in matched})
         return matched
@@ -2377,7 +2422,20 @@ def _block_verification_text(title: str, body: str) -> str:
     it contributes nothing here — any quote attributed to it correctly fails.
     """
     if title.startswith("Q:"):
-        return body
+        # A cached prior answer is NOT a source document. Returning its body
+        # here made the ENTIRE cached Q&A — including the user's own question
+        # text — verifiable "quotable" material, so the answer LLM could quote a
+        # previous question back and have it pass as a contract excerpt
+        # (confirmed live: an SA 1 answer cited "…ummarize this document in 10
+        # bullet points for a G…" as a source quote).
+        #
+        # Same reasoning as the no-quotes page below: a page carrying no
+        # verifiable ORIGINAL content contributes nothing to the verification
+        # corpus, so any quote attributed to it correctly fails. A quote the
+        # cached answer merely REPEATS from a real document still verifies
+        # against that document's own page when it is in context — which is
+        # exactly the condition under which it is safe to cite.
+        return ""
     sq_matches = _SUPPORTING_QUOTES_RE.findall(body)
     return '\n'.join(sq_matches) if sq_matches else ""
 
@@ -2605,6 +2663,121 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     return mismatches
 
 
+def _autocorrect_citation_attribution(answer: str, context: str) -> tuple[str, int]:
+    """Deterministically fix a wrong-document citation label in place, instead
+    of only warning about it.
+
+    _verify_citation_attribution already identifies both the WRONG token a
+    citation claims (e.g. "JVA18") and the CORRECT one the quote actually lives
+    under (e.g. "JVA45") when they share a doc-type — confirmed live: an
+    "across all JVAs" answer cited JVA45's clause as JVA18, purely because
+    JVA18 happened to be the first of several JVAs sharing a repeated
+    boilerplate forum clause. Only that "shared type, different number" case
+    is corrected — the replacement text is unambiguous. A candidate whose real
+    title has no numbered identifier at all (e.g. "NDA-Tata", a party-name
+    identifier) has no safe substitution text and is left to the existing
+    warning.
+
+    Never worsens the answer: after substitution, citation-attribution is
+    re-checked, and the fix is discarded (original answer returned) unless it
+    strictly reduces the number of misattributed quotes.
+
+    Returns (possibly-corrected answer, n_corrections_applied).
+    """
+    if not answer or not context:
+        return answer, 0
+
+    def _norm(s: str) -> str:
+        return _norm_for_match(s)
+
+    blocks = [(title.strip(), body) for title, body in _PAGE_BLOCK_RE.findall(context)]
+    if not blocks:
+        return answer, 0
+    norm_blocks = [(title, _norm(body)) for title, body in blocks]
+    known_titles = _known_page_titles(context)
+
+    def _from_label(body: str) -> str:
+        m = re.search(r'^\[From:\s*(.+?)\]\s*$', body, re.MULTILINE)
+        return m.group(1) if m else ""
+    from_by_title = {title.strip(): _from_label(body) for title, body in blocks}
+
+    # (span_start, span_end, replacement_text) in reverse-position order so
+    # earlier substitutions don't shift the spans of later ones.
+    fixes: list[tuple[int, int, str]] = []
+
+    for m in _QUOTE_SPAN_RE.finditer(answer):
+        quote = m.group(1)
+        qn = _norm(quote)
+        if qn in known_titles:
+            continue
+        candidate_titles = [title for title, body in norm_blocks if qn in body]
+        if not candidate_titles:
+            segments = _quote_segments(quote)
+            if segments:
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in segments)]
+        if not candidate_titles:
+            inner_segments = _quote_inner_segments(quote)
+            if inner_segments:
+                candidate_titles = [title for title, body in norm_blocks
+                                     if all(_norm(seg) in body for seg in inner_segments)]
+        if not candidate_titles:
+            continue
+
+        label_start = max(0, m.start() - 150)
+        label = answer[label_start:m.start()]
+        claim_matches = list(_DOC_NUM_RE.finditer(label))
+        if not claim_matches:
+            continue
+        claimed = {(mm.group(1).lower(), mm.group(2)) for mm in claim_matches}
+
+        any_match = False
+        any_confident_mismatch = False
+        rep_actual: "tuple[str, str] | None" = None
+        for block_title in candidate_titles:
+            actual_text = f"{block_title} {from_by_title.get(block_title, '')}"
+            actual = _extract_doc_number_tokens(actual_text)
+            if not actual:
+                continue  # no numbered id in the real title — no safe substitution
+            shared_types = {t for t, _ in claimed} & {t for t, _ in actual}
+            if not shared_types:
+                continue
+            if claimed & actual:
+                any_match = True
+                break
+            any_confident_mismatch = True
+            if rep_actual is None:
+                rep_actual = next((a for a in actual if a[0] in shared_types), next(iter(actual)))
+
+        if any_match or not any_confident_mismatch or rep_actual is None:
+            continue
+
+        correct_type, correct_num = rep_actual
+        for mm in claim_matches:
+            if mm.group(1).lower() != correct_type:
+                continue
+            new_type = correct_type.upper() if mm.group(1)[0].isupper() else correct_type
+            fixes.append((label_start + mm.start(), label_start + mm.end(), f"{new_type}{correct_num}"))
+
+    if not fixes:
+        return answer, 0
+
+    fixes.sort(key=lambda f: f[0], reverse=True)
+    corrected = answer
+    for start, end, repl in fixes:
+        corrected = corrected[:start] + repl + corrected[end:]
+
+    try:
+        before_n = len(_verify_citation_attribution(answer, context))
+        after_n = len(_verify_citation_attribution(corrected, context))
+    except Exception as e:
+        logger.error("Citation autocorrect safety check failed: %s", e)
+        return answer, 0
+    if after_n < before_n:
+        return corrected, before_n - after_n
+    return answer, 0
+
+
 # Appended to the original prompt for a one-shot corrective retry when
 # citation verification flags quotes as unverifiable or misattributed —
 # rather than just warning the user after the fact, give the model one
@@ -2646,8 +2819,15 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False) -> dict:
-    """Generate an answer using the provided wiki content."""
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "") -> dict:
+    """Generate an answer using the provided wiki content.
+
+    scope_note: a plain-English disclosure of HOW the scope was decided, when it
+        was decided by inference rather than by the question itself (currently:
+        conversational carryover). Appended verbatim as a deterministic banner —
+        the model must not be able to omit the one line explaining why it
+        answered about a document the question never named.
+    """
     index = _load_index(session_id)
     pages = index.get("pages", {})
     relations = index.get("relations", [])
@@ -2775,6 +2955,11 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     _REASON_OPEN_RE = re.compile(r'<\s*reasoning\s*>', re.I)
     _REASON_CLOSE_RE = re.compile(r'<\s*/\s*reasoning\s*>', re.I)
     _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
+    # How much text must follow the confidence lines before we treat them as the
+    # END of a reasoning preamble rather than a trailer on a finished answer.
+    # Guards against amputating a short answer that happens to close with its
+    # confidence lines.
+    _MD_REASONING_MIN_TAIL = 200
 
     def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
         """Run one LLM answer-generation call and parse out answer text + confidence.
@@ -2812,10 +2997,40 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 reasoning_text = raw_answer[open_m.end():]
                 pass_answer = ""
             else:
-                # No reasoning block — model answered directly (e.g. a model whose
-                # native reasoning never enters the content).
+                # No reasoning TAG. Two very different cases hide here:
+                #
+                #  (a) The model answered directly, native reasoning never
+                #      entering the content (e.g. Azure GPT-5.x) — nothing to strip.
+                #  (b) The model honoured the block's SHAPE but emitted it as a
+                #      markdown preamble instead of a tag ("## Reasoning … ##
+                #      Confidence … CONFIDENCE_SCORE: 92" then the answer). The tag
+                #      search misses this entirely, so the planning prose AND the raw
+                #      CONFIDENCE_SCORE line rendered straight to the user (confirmed
+                #      live on an obligations answer).
+                #
+                # Split on the confidence lines themselves — the one part of the
+                # contract these models still emit verbatim.
                 reasoning_text = ""
                 pass_answer = raw_answer.strip()
+                _conf_lines = list(re.finditer(_CONFIDENCE_LINE_RE, raw_answer))
+                if _conf_lines:
+                    _tail = raw_answer[_conf_lines[-1].end():].strip()
+                    if len(_tail) >= _MD_REASONING_MIN_TAIL:
+                        # Substantial content AFTER the confidence lines → they
+                        # close a reasoning preamble; the answer is the tail.
+                        reasoning_text = raw_answer[:_conf_lines[-1].end()]
+                        pass_answer = _tail
+                        logger.info(
+                            "Reasoning preamble emitted without <reasoning> tag — "
+                            "split on confidence lines (%d chars of reasoning stripped)",
+                            len(reasoning_text),
+                        )
+                    else:
+                        # Confidence lines trail a finished answer (or nothing
+                        # substantial follows). Keep the answer, drop the lines
+                        # in place — never treat the answer itself as reasoning.
+                        reasoning_text = raw_answer[_conf_lines[0].start():_conf_lines[-1].end()]
+                        pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', raw_answer).strip()
 
             if reasoning_text:
                 score_match = re.search(r'(?i)CONFIDENCE[_\s]*SCORE[^0-9]*(\d+)', reasoning_text)
@@ -2867,9 +3082,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                         pass_score = 50
                         pass_reason = "Very short answer; limited context."
                 else:
-                    # Substantial answer but no reasoning block — model answered directly
-                    pass_score = 72
-                    pass_reason = "Model answered without reasoning block; score estimated."
+                    # Substantial answer but no reasoning block — model answered
+                    # directly (this is the NORMAL path for a model whose native
+                    # reasoning stays out of the content, e.g. Azure GPT-5.x).
+                    # Previously hardcoded to a flat 72 regardless of actual answer
+                    # quality — that floor was silently capping otherwise-correct
+                    # comparison/factual answers (confirmed live at 72% on answers
+                    # that were fully grounded). Get a REAL score from the existing
+                    # LLM confidence evaluator instead, so the score reflects this
+                    # answer's actual support in context rather than a constant.
+                    try:
+                        _eval = _evaluate_confidence(question, wiki_content, pass_answer)
+                        pass_score = _eval["score"]
+                        pass_reason = _eval["reason"] or "Confidence evaluated (no reasoning block in generation output)."
+                    except Exception as e:
+                        logger.error("Fallback confidence evaluation failed: %s", e)
+                        pass_score = 72
+                        pass_reason = "Model answered without reasoning block; score estimated."
 
         except RuntimeError as e:
             pass_answer = f"⚠️ LLM error: {e}"
@@ -2981,6 +3210,18 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         )
 
     if _misattributed:
+        # The corrective retry above already had its shot at fixing this via a
+        # full regeneration; for whatever survives, try a deterministic,
+        # in-place label fix before falling back to a warning — the correct
+        # document is already known (it's how the mismatch was detected), so a
+        # regeneration isn't needed to fix a same-type wrong-number citation.
+        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
+        if _n_fixed:
+            _misattributed = _verify_citation_attribution(answer, wiki_content)
+            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
+                       _n_fixed, len(_misattributed))
+
+    if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
                         len(_misattributed), _misattributed)
         answer += (
@@ -2988,47 +3229,115 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"to the wrong document — {'; '.join(_misattributed[:2])}]"
         )
 
+    # --- Named-document substitution check ---
+    # A document whose ingest produced NO pages (e.g. a scanned PDF whose OCR
+    # failed) is absent from the page index entirely — so it cannot be detected
+    # there, and retrieval never sees it. But a same-numbered sibling
+    # ("Test_SA_01" ← "service agreement 1": both normalise to a name carrying
+    # "service" + a 1) matches the same type+number, IS populated, and silently
+    # supplies every word of the answer. The result reads as authoritative about
+    # a document the user never asked about (confirmed live: "service agreement
+    # 1" answered entirely from Test_SA_01's unrelated Helios/Zephyr Delaware
+    # MSA at 92% confidence, with nothing indicating the real Service Agreement 1
+    # was empty).
+    #
+    # Detect by matching the question against the UPLOAD list — the only record
+    # that an empty document exists — and flagging any named upload the page
+    # index doesn't know. Deterministic banner rather than a prompt rule: the
+    # model cannot see which of its sources was a substitution.
+    _empty_named: list[str] = []
+    try:
+        _named_uploads = _numbered_docs_in(question, _uploaded_doc_names(session_id))
+        # Only a MIX matters. All-empty → no content either way, and the model
+        # says "not covered" on its own; all-populated → nothing was substituted.
+        if len(_named_uploads) > 1:
+            _indexed_norms = {_norm_doc_name(d) for d in _distinct_source_docs(pages)}
+            _populated = [u for u in _named_uploads if _norm_doc_name(u) in _indexed_norms]
+            _empty = [u for u in _named_uploads if _norm_doc_name(u) not in _indexed_norms]
+            if _populated and _empty:
+                _empty_named = _empty
+    except Exception as e:
+        logger.error("Named-document substitution check failed: %s", e)
+
+    if _empty_named:
+        logger.warning(
+            "Named-document substitution: %d matched document(s) have no ingested "
+            "pages; answer sourced from same-numbered sibling(s): %s",
+            len(_empty_named), [_norm_doc_name(d) for d in _empty_named],
+        )
+        _names = "; ".join(_norm_doc_name(d) for d in _empty_named[:3])
+        answer += (
+            f"\n\n[SCOPE WARNING: {len(_empty_named)} document(s) matching your question have "
+            f"NO ingested content and contributed nothing to this answer — {_names}. What you "
+            f"see above was drawn from other document(s) that matched the same name/number. "
+            f"Check the References section names the document you actually meant.]"
+        )
+
+    # Scope was inferred rather than stated by the question — say so, always.
+    if scope_note:
+        answer += f"\n\n[SCOPE NOTE: {scope_note}]"
+
     # Extract [Reference] from the answer
     referenced = re.findall(r"\[([^\]]+)\]", answer)
 
-    # Get all canonical doc names from pages. Some pages have a malformed
-    # trailing parenthetical that's just the bare instrument TYPE (e.g. "(Service
-    # Agreement)", "(Agreement)", "(NDA)") instead of a real filename — an
-    # ingest-time data-quality gap, not a real per-document identifier. Skip
-    # these: since "agreement"/"NDA" are common words in any legal answer, a
-    # bare type-word can spuriously substring-match citation text and pollute
-    # files_used with a fake "document" that isn't an actual file. Confirmed
-    # live: 6 such generic entries in one session's canonical_files, and
-    # "Service Agreement"/"Agreement" showing up as bogus reference cards.
-    _GENERIC_CANONICAL_EXCLUDE = {
-        "agreement", "nda", "sha", "jva", "sa", "ccd", "msa",
-        "service agreement", "shareholder agreement", "joint venture agreement",
-        "non-disclosure agreement", "master services agreement",
-    }
-    canonical_files = set()
-    for title in pages.keys():
-        match = re.search(r'\(([^)]+)\)\s*$', title.strip())
-        if match:
-            cfile = match.group(1)
-            if cfile.strip().lower() in _GENERIC_CANONICAL_EXCLUDE:
-                continue
-            canonical_files.add(cfile)
+    # Map each selected page to its real document identifier — the SOURCE_DOC
+    # filename (e.g. "...Legal Opinions (1)_Legal Opinion 6 (1).pdf"), not the
+    # page title's trailing parenthetical. That parenthetical is, for
+    # essentially every page in this corpus, just the bare instrument TYPE
+    # ("NDA", "Legal Opinion", "Shareholders' Agreement") — the title format is
+    # "{Topic} – {DocID} ({DocType})", so the type label sits in the SAME
+    # position for every document regardless of which one it is. Matching
+    # citation text against these type-only strings meant a fully-qualified
+    # citation like "Legal Opinion 6 (1)" would substring-match the generic
+    # "Legal Opinion" from some UNRELATED page's title too, and — since the old
+    # loop appended every substring hit rather than the most specific one —
+    # that generic, unnumbered entry could ride along into files_used and
+    # render as its own bogus reference card ("1. Legal Opinion") alongside or
+    # instead of the real, numbered document. A hand-maintained stoplist of
+    # generic type-words can never fully close this (there are dozens of
+    # instrument types in a legal corpus); source_doc is the actual per-file
+    # identifier and is immune to the collision because two distinct documents
+    # never share the same filename.
+    canonical_files: dict[str, str] = {}  # cleaned display name -> raw source_doc
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        sd = page.get("source_doc", "")
+        if not sd:
+            continue
+        clean = re.sub(r'^[a-f0-9-]{36}_', '', sd.replace("\\", "/").rsplit("/", 1)[-1])
+        clean = os.path.splitext(clean)[0]
+        canonical_files[clean] = sd
 
     pages_used_dedup = []
     files_used = []
     seen = set()
-    
+
     for t in referenced:
         if t not in seen:
             pages_used_dedup.append(t)
             seen.add(t)
-            # Try to figure out which file this refers to
-            for cfile in canonical_files:
-                # Strip UUID for comparison
-                stripped_cfile = re.sub(r'^[a-f0-9-]{36}_', '', cfile)
-                if stripped_cfile.lower() in t.lower() or cfile.lower() in t.lower():
-                    if cfile not in files_used:
-                        files_used.append(cfile)
+            # Try to figure out which file this refers to. Checked in both
+            # directions since citation text conventions vary — the model may
+            # write the bare identifier ("Legal Opinion 6", checked via t-in-
+            # clean_name since clean_name carries extra folder-path noise) or
+            # something closer to the full cleaned name (checked the other
+            # way). The reverse direction (t-in-clean_name) is gated to
+            # citation text of at least 6 chars: clean_name is a long,
+            # noise-bearing string (folder segments, the "(1)" copy suffix),
+            # so an unguarded reverse check let a short/generic bracket marker
+            # (e.g. a bare "[1]") trivially match almost every document in the
+            # corpus — confirmed live: this produced a 494-file "files_used"
+            # list (essentially the entire corpus) instead of the 1-3 real
+            # citations. The forward direction has no such risk: clean_name
+            # itself is never short (source_doc filenames always carry a doc
+            # type + number), so it can't spuriously match unrelated text.
+            t_norm = t.lower().strip()
+            for clean_name, sd in canonical_files.items():
+                cn_norm = clean_name.lower()
+                if cn_norm in t_norm or (len(t_norm) >= 6 and t_norm in cn_norm):
+                    if sd not in files_used:
+                        files_used.append(sd)
 
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
@@ -3183,7 +3492,7 @@ _DOC_NAME_PATTERN = re.compile(
     # Q52 named 3 docs, only the one written "Judgment 6" matched).
     r'(services?\s+agreement|shareholders?\s+agreement|nda|'
     r'joint\s+venture(?:\s+agreement)?|legal\s+opinion|'
-    r'court\s+case(?:\s+document)?|judgment|jva|sha|sa)'
+    r'court\s+case(?:\s+document)?|judge?ment|jva|sha|sa)'
     r'\s*(?:#|no\.?|number)?\s*(\d+)',
     re.IGNORECASE,
 )
@@ -3201,7 +3510,10 @@ _DOC_TYPE_CORE = {
     "joint venture": "venture", "joint venture agreement": "venture",
     "legal opinion": "opinion",
     "court case": "court", "court case document": "court",
-    "judgment": "judgment",
+    # "judgement" (British) must map to the American "judgment" the filenames
+    # actually use — otherwise type_core is the user's own spelling, which is
+    # never in the filename, and the doc reads as non-existent.
+    "judgment": "judgment", "judgement": "judgment",
     "jva": "venture", "sha": "shareholder", "sa": "service",
 }
 
@@ -3217,7 +3529,7 @@ _DOC_TYPE_CORE = {
 _DOC_WITH_ENTITY_PATTERN = re.compile(
     r'(?:the\s+)?([A-Za-z]+(?:\s+[A-Za-z]+){0,2})\s+'
     r'(?:jv\s+agreement|jva|joint\s+venture|services?\s+agreement|nda|'
-    r'shareholders?\s+agreement|sha|court\s+case|judgment|legal\s+opinion)',
+    r'shareholders?\s+agreement|sha|court\s+case|judge?ment|legal\s+opinion)',
     re.IGNORECASE,
 )
 
@@ -3334,6 +3646,23 @@ def _question_names_a_document(question: str, docs: list[str]) -> bool:
         if last_word and last_word not in _NON_ENTITY_WORDS:
             return True
     return False
+
+
+def _names_numbered_document(question: str) -> bool:
+    """True only for a NUMBERED document reference ("Service Agreement 1", "NDA 3").
+
+    Distinguishes the two ways _question_names_a_document() can fire. The numbered
+    branch names a document by an identifier the corpus actually uses as a
+    filename, so if no such document exists it genuinely does not exist, and the
+    caller is right to say so (this is the original "Service Agreement 1 doesn't
+    exist" protection). The entity branch, by contrast, matches a DESCRIPTIVE
+    paraphrase of subject matter ("wastewater-dosing NDA", "subsea diagnostic
+    deliverables") — a phrase that is never a literal corpus name even when the
+    document is real and merely filed under a bare type+number. A confirmation
+    miss there means "couldn't resolve the paraphrase", NOT "document absent", so
+    the caller must NOT assert non-existence on it.
+    """
+    return bool(_DOC_NAME_PATTERN.search(question))
 
 
 # Tokens that are doc types / generic vocabulary, NOT distinctive entity names.
@@ -3592,6 +3921,45 @@ def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
 
 
+def _appears_as_proper_noun(token: str, question: str) -> bool:
+    """True if `token` appears in the ORIGINAL-case question capitalised as a
+    deliberate proper noun — not as a lowercase common word, and not as a
+    grammatically-forced capital at a sentence start.
+
+    A distinctive party/entity name the user types to identify a document
+    ("ReVolt", "Meridian", "SteelLoop") is a proper noun and is written
+    capitalised; generic clause vocabulary that leaked into the entity set from a
+    malformed/swapped-order title ("termination", "liability", "confidentiality")
+    appears lowercase inside the question's prose ("… term, termination,
+    liability …"). Checking case lets the disambiguation gate tell a real entity
+    mention from an incidental keyword collision WITHOUT extending the
+    hand-maintained _ENTITY_EXCLUDE stoplist, which by its own admission "can
+    never keep up with every corpus".
+    """
+    for m in re.finditer(rf'\b{re.escape(token)}\b', question, re.IGNORECASE):
+        start = m.start()
+        if not question[start].isupper():
+            continue
+        prefix = question[:start].rstrip()
+        if not prefix or prefix[-1] in '.!?\n':
+            continue  # sentence-initial capital is grammar, not a proper-noun signal
+        return True
+    return False
+
+
+def _question_names_distinctive_entity(question: str, pages: dict) -> bool:
+    """Stricter _question_mentions_known_entity for the disambiguation gate: an
+    entity token counts only when it ALSO appears as a capitalised proper noun in
+    the question. Stops a generic dictionary word that leaked into the entity set
+    from suppressing disambiguation on a genuinely vague query (e.g. "Summarize
+    this document…" listing "term, termination, liability" — none proper nouns)."""
+    q = question.lower()
+    return any(
+        _contains_token(ent, q) and _appears_as_proper_noun(ent, question)
+        for ent in _extract_doc_entities(pages)
+    )
+
+
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     """Return page titles whose document identifier contains an entity name
     mentioned in the question. Used to force-scope context to the right document.
@@ -3757,6 +4125,74 @@ def _docs_of_entity_pages(question: str, pages: dict) -> dict:
     return counts
 
 
+# Any document-TYPE word. A question naming a type is talking ABOUT that type —
+# it is not silently continuing with the current document — so carryover must
+# never fire into it ("what about our NDAs?" asked during a Service Agreement
+# thread is a pivot, not a continuation).
+_CARRYOVER_TYPE_RE = re.compile(
+    r'\b(nda|non-?disclosure|confidentiality\s+agreement|service\s+agreement|'
+    r'shareholders?\s+agreement|joint\s+venture|jva|sha|msa|deed|lease|licen[cs]e|'
+    r'judgment|judgement|court\s+case|legal\s+opinion|arbitration|petition|'
+    r'complaint|affidavit|notice|contract|agreement)\b',
+    re.IGNORECASE,
+)
+
+
+# Scope-resolution methods that pinned specific documents and are therefore safe
+# to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
+# on. "carryover" is included so a multi-turn thread stays on the same document
+# rather than only the first follow-up working — the type-word and broad-phrasing
+# guards remain the exits, and every carried turn discloses itself.
+_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "entity", "carryover"})
+
+
+def _carryover_scope(question: str, session_id: str) -> list[str]:
+    """The document this conversation is already about, when the question names none.
+
+    A follow-up like "list all obligations of each party" carries no document
+    reference at all, so every detector above it returns nothing and the scope
+    defaults to the whole corpus — which then answers from whatever unrelated
+    documents happen to rank well. Confirmed live: that exact question, asked
+    directly after a Service Agreement thread, was answered from NDAs 1/4/6 about
+    a party appearing in none of the documents under discussion; the same gap
+    produced false "this clause is missing" findings in an earlier batch, because
+    relative to the documents it wrongly retrieved, the clauses genuinely were.
+
+    Deliberately conservative — inherits ONLY when there is nothing to weigh it
+    against and the prior scope is unambiguous:
+      * the question names no document TYPE (a type word means a pivot),
+      * it isn't broad/collective phrasing (that wants the corpus, by design),
+      * the preceding answer's scope was RESOLVED to specific documents.
+    Anything else returns [] and the pre-existing corpus default stands, so this
+    can only ever narrow a question that had no scope of its own.
+
+    Inherits the preceding turn's recorded SCOPE, not its file count. Counting
+    files cannot distinguish "scoped to one named reference" from "synthesised
+    across the corpus": in this corpus one numbered reference routinely resolves
+    to two files (a real document plus its zero-padded Test_* sibling), so a
+    "exactly one file" rule never fires on the very follow-ups it exists to catch
+    (confirmed live: the SA 2 key-dates answer recorded 2 files, so the
+    obligations follow-up after it fell through to the corpus anyway).
+    """
+    if not config.USE_DATABASE:
+        return []
+    if _CARRYOVER_TYPE_RE.search(question):
+        return []
+    if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
+        return []
+    try:
+        recent = _db.get_recent_answer_scope(session_id, n=1)
+    except Exception as e:
+        logger.error("_carryover_scope: could not read recent answer scope: %s", e)
+        return []
+    if not recent:
+        return []
+    last = recent[0]
+    if last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"):
+        return list(last["docs"])
+    return []
+
+
 def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
 
@@ -3881,7 +4317,20 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> 
         return {"scope": "corpus", "target_docs": [], "target_family": None,
                 "is_broad": True, "confidence": 0.6, "method": "broad"}
 
-    # 4. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
+    # 4. Conversational carryover — the question names no document, no party, no
+    #    entity, no family, and isn't broad. If the conversation is demonstrably
+    #    already about ONE document, stay there rather than silently widening to
+    #    the whole corpus. Runs last, so it can only claim questions every real
+    #    detector above has already passed on (see _carryover_scope for guards).
+    carried = _carryover_scope(question, session_id)
+    if carried:
+        logger.info("Scope carried over from the conversation: %s",
+                    _norm_doc_name(carried[0]))
+        return {"scope": "single_doc", "target_docs": carried,
+                "target_family": None, "is_broad": False,
+                "confidence": 0.55, "method": "carryover"}
+
+    # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
     return {"scope": "corpus", "target_docs": [], "target_family": None,
             "is_broad": False, "confidence": 0.5, "method": "default"}
 
@@ -3911,11 +4360,59 @@ def classify_query(question: str, session_id: str) -> dict:
     if len(docs) <= 1:
         return {"needs_disambiguation": False, "documents": docs}
 
+    # Deliberately broad phrasing ("across all NDAs", "across the court case
+    # documents") is not an ambiguous reference to ONE document — it asks for a
+    # synthesis over many, and resolve_scope already knows how to scope it that
+    # way. Without this, _VAGUE_DOC_PATTERN below matches the type word inside
+    # the broad phrase ("the court case …") and prompts "which one?" for a
+    # question that named no single document and wanted none (confirmed live on
+    # Q40, which then got answered from a single CCD instead of across them).
+    # Checked before the party resolver: explicit broad phrasing outranks an
+    # incidental party mention.
+    #
+    # A bare plural with no breadth word ("our NDAs", "these judgments") means
+    # the same thing but doesn't match _BROAD_SCOPE_RE — that's what
+    # _PLURAL_FAMILY_HINT_RE is for, and resolve_scope already ORs the two
+    # together for its own family check (see below). This gate had only checked
+    # _BROAD_SCOPE_RE, so "our NDAs" fell through to the vague-reference check
+    # and asked "which one?" for a question that named no single document
+    # (confirmed live: resolve_scope handles it fine once it gets there — this
+    # gate just never let it).
+    if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
+        logger.info("Broad/plural-family phrasing → skip disambiguation")
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # A named party that resolves to exactly ONE document via full-text content
+    # search is an unambiguous document reference — skip disambiguation and let
+    # resolve_scope (which runs the SAME resolver later) pin it. This catches the
+    # common case the distinctive-entity check below misses: a counterparty named
+    # by its full corporate name ("Helios Grid Advisory Private Limited") whose
+    # name lives only in the document BODY / redaction-masked metadata, not in the
+    # page-title identifier tokens _extract_doc_entities mines — so
+    # _question_names_distinctive_entity returns False and the vague "the Services
+    # Agreement between X and Y" phrasing would otherwise trigger a needless
+    # "which document?" prompt even though the party pins it uniquely (confirmed
+    # live: SA5/Helios and SA6/Meridian questions both disambiguated despite each
+    # party name resolving to a single Service Agreement). Only a UNIQUE hit skips
+    # here; a party shared across several documents stays genuinely ambiguous and
+    # falls through to normal disambiguation. _resolve_docs_by_party is DB-gated
+    # and returns an empty set with no party phrase present, so questions that
+    # name no corporate party incur no extra cost.
+    try:
+        party_docs = _resolve_docs_by_party(question, session_id)
+    except Exception as e:
+        logger.error("classify_query: party resolution failed: %s", e)
+        party_docs = set()
+    if len(party_docs) == 1:
+        logger.info("Named party resolves to a single document → skip disambiguation: %s",
+                    _norm_doc_name(next(iter(party_docs))))
+        return {"needs_disambiguation": False, "documents": docs}
+
     # Vague singular reference ("this NDA", "the agreement") with multiple matching
     # documents → ask which one. Narrow to the named type when possible.
     vmatch = _VAGUE_DOC_PATTERN.search(question)
     if vmatch and not _question_names_a_document(question, docs) \
-            and not _question_mentions_known_entity(question, pages):
+            and not _question_names_distinctive_entity(question, pages):
         vtype = re.sub(r'\s+', ' ', vmatch.group(1).lower().strip())
         if vtype in _GENERIC_VAGUE_WORDS:
             logger.info("Vague document reference '%s' → disambiguate (all docs)", vtype)
@@ -3943,8 +4440,11 @@ def classify_query(question: str, session_id: str) -> dict:
     if _question_names_a_document(question, docs):
         return {"needs_disambiguation": False, "documents": docs}
 
-    # Skip if the question mentions a distinctive entity/party name from the wiki
-    if _question_mentions_known_entity(question, pages):
+    # Skip if the question mentions a distinctive entity/party name from the wiki.
+    # Use the proper-noun-aware check so an incidental lowercase clause word that
+    # leaked into the entity set can't short-circuit disambiguation here either;
+    # a genuine (even lowercase) entity still falls through to the LLM triage below.
+    if _question_names_distinctive_entity(question, pages):
         return {"needs_disambiguation": False, "documents": docs}
 
     # Clean document names for display
