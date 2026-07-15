@@ -87,8 +87,14 @@ _RX_BETWEEN_EXCLUDE = re.compile(
 # C and D") still carries an explicit comparison keyword that _RX_COMPARISON
 # matches one check earlier, so this exclusion never reaches it.
 _RX_BETWEEN_PARTIES = re.compile(
+    # Litigation filings name their two parties the same way a contract does
+    # ("the Notice Invoking Arbitration between Tata Steel and NordForge"), and
+    # are just as much a SINGLE document — but only contract-type nouns were
+    # listed, so those questions still forced a comparison template.
     r'\b(?:agreement|contract|nda|sha|jva?|jv|msa|mou|deed|lease|licen[cs]e|'
-    r'venture|arrangement|memorandum|settlement)\b[^.?!;]{0,30}?\bbetween\b'
+    r'venture|arrangement|memorandum|settlement|'
+    r'notice|petition|affidavit|application|award|plaint|summons|'
+    r'suit|claim|proceedings?|dispute|arbitration)\b[^.?!;]{0,30}?\bbetween\b'
     r'[^.?!;]+\band\b',
     re.IGNORECASE,
 )
@@ -475,6 +481,22 @@ def generate_answer_node(state: QueryState) -> dict:
     # for attention at that position). Passed through as its own parameter
     # instead so wiki.generate_answer can inject it via house_rules_block,
     # which every template substitutes at the TOP, before the RULES section.
+    # The question named no document and the scope was inherited from the
+    # document already under discussion (wiki.resolve_scope → method="carryover").
+    # That inference is invisible in the answer text, so disclose it explicitly:
+    # the user must be able to see WHY they got an answer about a document they
+    # never named, and how to override it.
+    _scope = state.get("scope_decision") or {}
+    _scope_note = ""
+    if _scope.get("method") == "carryover" and _scope.get("target_docs"):
+        _carried = wiki._norm_doc_name(_scope["target_docs"][0])
+        _scope_note = (
+            f"This question named no document, so it was answered using "
+            f"\"{_carried}\" — the document already under discussion in this "
+            f"conversation. To scope it differently, name a document explicitly, "
+            f"or use \"across all …\" to search every document."
+        )
+
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
@@ -482,16 +504,24 @@ def generate_answer_node(state: QueryState) -> dict:
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
+            scope_note=_scope_note,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
         wr = {"answer": f"Wiki error: {type(e).__name__}: {e}",
+              "scope_method": "", "scope_docs": [],
               "pages_used": [], "files_used": [], "confidence_score": 0}
 
     wr["intent"] = intent
     wr["intent_label"] = label
     wr["intent_confidence"] = state.get("intent_confidence", 0.0)
     wr["intent_method"] = state.get("intent_method", "")
+    # Record HOW this turn's scope was resolved. app.py persists it to
+    # chat_messages.metadata so the NEXT turn's wiki._carryover_scope can inherit
+    # a genuinely-resolved single-document scope instead of guessing from a file
+    # count (see wiki._CARRYOVER_FROM_METHODS).
+    wr["scope_method"] = _scope.get("method", "")
+    wr["scope_docs"] = _scope.get("target_docs") or []
     # Private key, not part of the public answer shape — app.py pops this off
     # before the SSE payload reaches the frontend. Exists only so the RAG query
     # log (_log_rag_query) can record what was actually retrieved; previously
