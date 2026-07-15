@@ -94,6 +94,34 @@ def active_model(fast: bool = False) -> str:
     return config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
 
+def _is_azure() -> bool:
+    """The active LLM provider is Azure (anything that isn't the two
+    OpenAI-compatible community endpoints)."""
+    return config.LLM_PROVIDER not in ("openrouter", "nvidia")
+
+
+def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None) -> dict:
+    """Build chat.completions kwargs, adapted to the active provider's API.
+
+    Azure GPT-5.x / o-series reasoning deployments differ from the classic
+    Chat Completions contract in two ways that otherwise 400 the request:
+      - they reject `max_tokens` and require `max_completion_tokens`;
+      - they reject any non-default `temperature` (only the default is allowed),
+    so we omit temperature entirely on that path.
+    The nvidia/openrouter OpenAI-compatible endpoints keep the classic params
+    (deterministic `temperature=0.0` + `max_tokens`).
+    """
+    kwargs = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
+    if _is_azure():
+        if max_tokens is not None:
+            kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["temperature"] = 0.0
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+    return kwargs
+
+
 def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False) -> tuple[str, dict]:
     """Send a prompt to the selected LLM and return the response text and usage dict.
 
@@ -118,14 +146,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
     try:
-        kwargs = {
-            "model": model_name,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.0
-        }
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-            
+        kwargs = _completion_kwargs(model_name, prompt, max_tokens)
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
@@ -159,12 +180,8 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
         model_name = config.AZURE_FAST_DEPLOYMENT
 
     try:
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            max_tokens=max_tokens
-        )
+        kwargs = _completion_kwargs(model_name, prompt, max_tokens)
+        response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
