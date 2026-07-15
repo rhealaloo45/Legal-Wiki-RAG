@@ -74,6 +74,30 @@ _RX_BETWEEN_EXCLUDE = re.compile(
     r'\b(?:pleaded|argued|established|asserted|drawn|treated|addressed|framed|structured)\b',
     re.IGNORECASE,
 )
+# A second, far more common false trigger for the _RX_BETWEEN-only rule: naming a
+# SINGLE bilateral instrument by its two parties — "the Joint Venture Agreement
+# between Tata Consumer Products and BrewSphere", "the NDA between X and Y". That
+# is a factual question about ONE document, not a cross-document comparison, but
+# "between … and …" matched and forced a comparison intent, which then rendered a
+# two-column "Key Differences / Which Party It Favors" table that fabricated a
+# second-document framing absent from the question (confirmed live on the
+# BrewSphere JVA1 and SteelLoop JVA3 questions). Suppress the between-only trigger
+# when an instrument noun immediately precedes "between … and". A genuine
+# cross-document comparison ("compare the NDA between A and B with the one between
+# C and D") still carries an explicit comparison keyword that _RX_COMPARISON
+# matches one check earlier, so this exclusion never reaches it.
+_RX_BETWEEN_PARTIES = re.compile(
+    # Litigation filings name their two parties the same way a contract does
+    # ("the Notice Invoking Arbitration between Tata Steel and NordForge"), and
+    # are just as much a SINGLE document — but only contract-type nouns were
+    # listed, so those questions still forced a comparison template.
+    r'\b(?:agreement|contract|nda|sha|jva?|jv|msa|mou|deed|lease|licen[cs]e|'
+    r'venture|arrangement|memorandum|settlement|'
+    r'notice|petition|affidavit|application|award|plaint|summons|'
+    r'suit|claim|proceedings?|dispute|arbitration)\b[^.?!;]{0,30}?\bbetween\b'
+    r'[^.?!;]+\band\b',
+    re.IGNORECASE,
+)
 _RX_OBLIGATION = re.compile(
     r'(?:'
     r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
@@ -97,6 +121,29 @@ _RX_RISK = re.compile(
     r'accept\s+or\s+reject|proceed\s+or\s+not)',
     re.IGNORECASE,
 )
+# "board approval", "shareholder consent", "unanimous / special-majority approval"
+# are GOVERNANCE MECHANICS a factual question asks ABOUT (e.g. "which reserved
+# matters require unanimous board approval?") — not a request to assess risk or
+# recommend signing. But _RX_RISK's bare "approve|approval" token matched them,
+# forcing a risk-assessment template onto a plain clause-extraction question
+# (confirmed live on the SteelLoop Reserved-Matters question). This guard fires
+# only when approval/consent is governance-qualified.
+_RX_GOVERNANCE_APPROVAL = re.compile(
+    r'\b(?:board|shareholders?|members?|majority|unanimous|special\s+majority|'
+    r'statutory|regulatory|prior\s+written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
+    r'|\b(?:approval|approve|consent)\s+(?:of|by|from)\s+(?:the\s+)?(?:board|shareholders?|members?)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_governance_approval_only(q: str) -> bool:
+    """True when the ONLY _RX_RISK signal in the question is an approval/consent
+    word used in a governance sense — so risk intent should be suppressed and the
+    question routed to factual/obligation instead. A question that ALSO carries a
+    real risk cue (recommend, should we sign, go/no-go, …) still classifies as
+    risk, because its risk hits then aren't a subset of {approve, approval}."""
+    hits = {m.group(0).lower() for m in _RX_RISK.finditer(q)}
+    return hits <= {"approve", "approval"} and bool(_RX_GOVERNANCE_APPROVAL.search(q))
 
 _INTENT_LLM_PROMPT = (
     "You classify a lawyer's question into exactly ONE intent.\n\n"
@@ -124,9 +171,10 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
     if _RX_COMPARISON.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q):
+    if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
+            and not _RX_BETWEEN_PARTIES.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_RISK.search(q):
+    if _RX_RISK.search(q) and not _is_governance_approval_only(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
     if _RX_OBLIGATION.search(q):
         return {"intent": "obligation", "confidence": 0.85, "method": "regex"}
@@ -277,12 +325,37 @@ def check_disambiguation_node(state: QueryState) -> dict:
         if confirmed:
             logger.info("[AGENT] disambiguation skipped (doc named and confirmed)")
             return {"needs_disambiguation": False}
-        logger.warning(
-            "Question names a document by pattern but no matching document exists "
-            "in this session — flagging as unconfirmed instead of silently "
-            "answering from an arbitrary document: %r", state["question"][:80],
+        # Confirmation failed. HOW the question named a document decides what an
+        # unresolved reference means:
+        #  - Numbered reference ("Service Agreement 1", "NDA 3"): names a document
+        #    by the identifier the corpus uses as a filename. If none matches it
+        #    genuinely does not exist, so flag unconfirmed_doc_reference (the model
+        #    then says so plainly instead of silently answering from an arbitrary
+        #    document — the original protection this branch was built for).
+        #  - Descriptive paraphrase ("wastewater-dosing NDA", "subsea diagnostic
+        #    deliverables"): a subject-matter description that is NEVER a literal
+        #    corpus name even when the document is real and merely filed under a
+        #    bare type+number. A miss here means "couldn't resolve the paraphrase",
+        #    not "document absent" — so DON'T assert non-existence. Fall through to
+        #    classify_query below, which runs vague-reference disambiguation and,
+        #    failing that, ordinary corpus retrieval. Confirmed live: descriptive
+        #    NDA/JV questions (e.g. "irrigation-management NDA", "floodgate-
+        #    automation NDA") that name a genuinely-present document were being
+        #    answered with a flat "No document matching '<paraphrase>' exists in
+        #    this corpus" plus a fabricated generic-clause answer.
+        if wiki._names_numbered_document(state["question"]):
+            logger.warning(
+                "Question names a NUMBERED document but no matching document exists "
+                "in this session — flagging as unconfirmed instead of silently "
+                "answering from an arbitrary document: %r", state["question"][:80],
+            )
+            return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
+        logger.info(
+            "Question names a document by descriptive paraphrase that didn't "
+            "resolve — falling through to disambiguation/corpus retrieval instead "
+            "of asserting non-existence: %r", state["question"][:80],
         )
-        return {"needs_disambiguation": False, "unconfirmed_doc_reference": True}
+        # fall through to classify_query below
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
@@ -408,6 +481,22 @@ def generate_answer_node(state: QueryState) -> dict:
     # for attention at that position). Passed through as its own parameter
     # instead so wiki.generate_answer can inject it via house_rules_block,
     # which every template substitutes at the TOP, before the RULES section.
+    # The question named no document and the scope was inherited from the
+    # document already under discussion (wiki.resolve_scope → method="carryover").
+    # That inference is invisible in the answer text, so disclose it explicitly:
+    # the user must be able to see WHY they got an answer about a document they
+    # never named, and how to override it.
+    _scope = state.get("scope_decision") or {}
+    _scope_note = ""
+    if _scope.get("method") == "carryover" and _scope.get("target_docs"):
+        _carried = wiki._norm_doc_name(_scope["target_docs"][0])
+        _scope_note = (
+            f"This question named no document, so it was answered using "
+            f"\"{_carried}\" — the document already under discussion in this "
+            f"conversation. To scope it differently, name a document explicitly, "
+            f"or use \"across all …\" to search every document."
+        )
+
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
@@ -415,16 +504,24 @@ def generate_answer_node(state: QueryState) -> dict:
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
+            scope_note=_scope_note,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
         wr = {"answer": f"Wiki error: {type(e).__name__}: {e}",
+              "scope_method": "", "scope_docs": [],
               "pages_used": [], "files_used": [], "confidence_score": 0}
 
     wr["intent"] = intent
     wr["intent_label"] = label
     wr["intent_confidence"] = state.get("intent_confidence", 0.0)
     wr["intent_method"] = state.get("intent_method", "")
+    # Record HOW this turn's scope was resolved. app.py persists it to
+    # chat_messages.metadata so the NEXT turn's wiki._carryover_scope can inherit
+    # a genuinely-resolved single-document scope instead of guessing from a file
+    # count (see wiki._CARRYOVER_FROM_METHODS).
+    wr["scope_method"] = _scope.get("method", "")
+    wr["scope_docs"] = _scope.get("target_docs") or []
     # Private key, not part of the public answer shape — app.py pops this off
     # before the SSE payload reaches the frontend. Exists only so the RAG query
     # log (_log_rag_query) can record what was actually retrieved; previously

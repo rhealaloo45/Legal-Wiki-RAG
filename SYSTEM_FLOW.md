@@ -207,7 +207,7 @@ via `intent_agent.run_query_stream()`. Each node emits a custom stage event; `ap
 relays them as SSE so the chat UI animates progress tiles.
 
 ```
-START → classify_intent → disambiguation → clarification → retrieve → generate → validate → END
+START → classify_intent → disambiguation → clarification → resolve_scope → retrieve → generate → validate → END
                                │ needs            │ needs
                                ▼                  ▼
                               END                END
@@ -220,26 +220,63 @@ START → classify_intent → disambiguation → clarification → retrieve → 
    - No regex match → fast LLM call (MAX_TOKENS_INTENT_CLASSIFY=150) → {intent, confidence}.
    - Any failure → defaults to "factual".
 
-2. disambiguation (wiki.classify_query)
-   - Skipped if target_doc, is_followup, _question_names_a_document() matches,
-     or _question_mentions_known_entity() finds a known party/entity name in
-     page titles (e.g. "ReVolt", "Meridian", "Yuvraj Kanther").
-   - Fast LLM prompt now recognises party names as document identifiers.
+2. disambiguation (wiki.classify_query) — check order:
+   a. Named file/number match (_detect_mentioned_files) → skip.
+   b. Broad/collective phrasing (_BROAD_SCOPE_RE, e.g. "across all NDAs") → skip
+      (added this session — without it, broad cross-document questions wrongly
+      got "which one?" because the type word inside the broad phrase matched
+      the vague-reference pattern below).
+   c. Named party resolving to exactly ONE document via full-text content
+      search (_resolve_docs_by_party) → skip (added this session — catches a
+      counterparty named by its full corporate name whose identity lives only
+      in the document body / redaction-masked metadata, not the page-title
+      tokens the entity check mines).
+   d. Vague reference (_VAGUE_DOC_PATTERN, e.g. "this NDA", "the agreement")
+      with multiple matching candidates → ask.
+   e. _question_names_a_document() match (numbered/entity+type pattern) → skip.
+   f. _question_mentions_known_entity() finds a known party/entity name in
+      page titles (e.g. "ReVolt", "Meridian", "Yuvraj Kanther") → skip.
+   g. Fast LLM triage fallback.
+   Also skipped upstream if target_doc or is_followup is set.
+
+   NOTE: classify_query() (this node, "should I ask the user to disambiguate?")
+   and resolve_scope() (step 4 below, "what's the actual retrieval scope?") are
+   two partially-redundant scope-signal systems — both run similar detectors
+   independently at different pipeline stages. Known architectural quirk, not
+   a bug; a fix to one detector doesn't automatically apply to the other.
 
 3. clarification (wiki.check_ambiguity)
    - Skipped if is_followup, question names a doc, or ENABLE_CLARIFICATION=false.
 
-4. retrieve (wiki.get_context)
+4. resolve_scope (wiki.resolve_scope) — deterministic, no LLM call. Priority
+   cascade, first match wins:
+   a. Named file/number (_detect_mentioned_files) → scope="single_doc".
+   b. Named party resolving via full-text content search
+      (_resolve_docs_by_party) → scope="single_doc".
+   c. Known-entity match against page titles → scope="single_doc".
+   d. Collective/broad phrasing resolving to a known document family →
+      scope="family" (is_broad=True).
+   e. Broad phrasing with no resolvable family → scope="corpus" (is_broad=True).
+   f. Default → scope="corpus" (unfiltered whole-session search, matches
+      pre-Phase-2 behaviour).
+   Result feeds directly into retrieve.
+
+5. retrieve (wiki.get_context)
    - Enhanced file detection: numbered doc-type patterns ("service agreement 3")
      match against source docs via regex, even with UUID prefixes/paths.
    - Entity-aware retrieval: when no source_doc filename matches but
      _question_mentions_known_entity() finds entity names in page titles,
      those pages are force-included (fixes the "ReVolt not covered" gap).
+   - Scope-constrained: a "family" scope narrows the vector search to that
+     family's embeddings; a "single_doc" scope force-pins retrieval to the
+     resolved document(s).
    - Retrieval hints per intent (comparison widens small-wiki threshold to 30).
 
-5. generate (wiki.generate_answer) — intent selects prompt template.
+6. generate (wiki.generate_answer) — intent selects prompt template, then runs
+   deterministic citation verification + one corrective retry (see Step 5 below).
 
-6. validate — format check per intent (logged, non-blocking).
+7. validate — format check per intent (logged, non-blocking) + independent LLM
+   grounding audit (see Step 5 below), gated by ENABLE_ANSWER_VALIDATION.
 ```
 
 ### Step 2 — Page selection (`get_context`)
@@ -256,15 +293,25 @@ Load all pages for the session from DB (`get_pages(session_id)`).
 **For wikis with >20 pages** → `_select_relevant_pages()`:
 
 ```
-Path 1 — Hybrid retrieval (primary):
+Path 1 — Hybrid retrieval, fused via RRF (primary):
   1. embed(question, is_query=True)  → "search_query:" prefix
-  2. pgvector cosine similarity → top 15
-  3. BM25 keyword scoring → top 8 supplement
-  4. Merge: vector first, BM25 appended if not present
-  → Up to 23 pages, 0 LLM calls
+  2. pgvector cosine similarity → top 15 (VECTOR_SEARCH_TOP_K), or top 80
+     (BROAD_QUESTION_VECTOR_TOP_K) for broad/family-scoped questions
+  3. BM25 keyword ranking over all page summaries, sized to match the vector
+     candidate count
+  4. Reciprocal Rank Fusion (_rrf_fuse, RRF_K=60): score(title) =
+     sum(1 / (60 + rank)) across both rankings — replaces the old
+     "vector first, BM25 appended if absent" order
+  5. Non-broad: cap fused list at HYBRID_FUSION_TOP_K (23 pages)
+     Broad/family: fuse first, then _diversify_by_document() caps each
+     document's contribution (BROAD_QUESTION_PER_DOC_CAP=4) up to
+     BROAD_QUESTION_TOTAL_CAP (60 pages)
+  6. Optional LLM rerank (ENABLE_RERANK, off by default) — broad/family
+     queries only, refines the RRF order with a fast-model relevance pass
+  → 0 LLM calls (unless rerank enabled), ~5ms DB query
 
-Path 2 — BM25 + LLM (fallback)
-Path 3 — BM25 keyword-only (fallback)
+Path 2 — BM25 + LLM (fallback, no embeddings)
+Path 3 — BM25 keyword-only (fallback, LLM fails)
 ```
 
 ### Step 3 — Context building
@@ -292,7 +339,7 @@ The classified intent selects one of five prompt templates:
 | `obligation` | `OBLIGATION_PROMPT` | Duty/deadline table |
 | `drafting` | `DRAFTING_PROMPT` | Aggressive/balanced/conservative clause formulations |
 
-All prompts include conversation history, document metadata, wiki context, and chain-of-thought `<reasoning>` block.
+All prompts include conversation history, document metadata, wiki context, and chain-of-thought `<reasoning>` block. All five now share table-citation discipline rules (every table row needs an inline citation anchor; quotes may not be manufactured to fill a table) — extended to `ASSESSMENT_PROMPT` and `OBLIGATION_PROMPT` this phase after both were found emitting uncited clause-by-clause tables.
 
 ### Step 5 — Post-processing
 
@@ -316,17 +363,66 @@ if "not covered" in answer.lower() and len(answer) < 150:
     confidence_score = 0
 ```
 
+### Step 5b — Citation verification and corrective retry (`generate_answer`)
+
+Two deterministic (regex/substring against the exact retrieved context, not LLM-judged) checks run on every answer:
+
+```
+_verify_answer_citations(answer, context, question)
+    → every quoted span must appear verbatim (whitespace/case-insensitive) in
+      the context's Supporting-Quotes-restricted text; catches paraphrase
+      dressed up as a verbatim quote
+
+_verify_citation_attribution(answer, context)
+    → a verbatim-correct quote must be attributed to the right source
+      document; catches misattribution to a plausible-but-wrong document
+```
+
+If either check flags issues:
+```
+1. One corrective-retry LLM call with an addendum prompt asking the model
+   to fix the flagged quotes
+2. Re-run both checks against the retry's output
+3. Keep the retry ONLY if:
+     (fewer combined unverified+misattributed issues than the original)
+     AND (retry length >= 60% of the original answer's length)
+   Otherwise keep the original answer unchanged.
+4. Any issues still present after this → append banners:
+     "[CITATION WARNING: N quoted passage(s) above could not be verified...]"
+     "[ATTRIBUTION WARNING: N quote(s) above appear to be attributed...]"
+```
+
+### Step 5c — Grounding check (`validate` node, `intent_agent.py`)
+
+Separate from both the citation-verification checks above AND the answer's self-reported confidence score. `_check_grounding()` makes an independent full-model LLM call that audits the finished answer's factual claims against the retrieved context:
+
+```
+- Treats "not covered"/absence findings as CORRECT behaviour, never flags them
+- risk_assessment/drafting: professional judgment and risk analysis expected,
+  not penalized — only fabricated facts are
+- Caps at 8 flagged ungrounded_claims
+- MAX_TOKENS_GROUNDING_CHECK=900, doubling retry up to 3x if the model's
+  hidden reasoning consumes the whole budget with no visible JSON output
+- Gated by ENABLE_ANSWER_VALIDATION
+→ Returns {grounding_score: 0-100, ungrounded_claims: [...], summary: "..."}
+```
+
+`confidence_score` (self-reported, inside `<reasoning>`, zero extra LLM calls) and `grounding_score` (this separate audited call) are two different numbers — both surfaced to the user, and they can disagree.
+
 ### Step 6 — Chat storage and SSE response
 
 ```
 1. Store assistant answer + intent in chat_messages
-   metadata={confidence_score, files_used, token_total, intent, intent_label}
+   metadata={confidence_score, grounding_score, files_used, token_total, intent, intent_label}
 
 2. Log: QUERY + TOKEN_USAGE events to session log
 
 3. Emit final SSE event:
-   data: {type: "answer", wiki: {answer, intent, intent_label, confidence_score, ...}}
+   data: {type: "answer", wiki: {answer, intent, intent_label, confidence_score,
+                                  validation: {valid, warning, grounding}, ...}}
 ```
+
+The `validate` node also emits its own `validating` active/done stage pair (with `grounding_score` on the `done` event) before the terminal `answer` event.
 
 The SSE stream carries progress events followed by one terminal event of type `answer`, `disambiguation`, or `clarification`. The frontend renders stage tiles, then the answer card with intent tag.
 
@@ -427,16 +523,20 @@ Upload
   → Embedding (embedder.py → db.py: page_embeddings)
   → Compaction if due (wiki.py → db.py: reset + contradictions table)
 
-Query (conversational, SSE-streamed via intent_agent LangGraph)
+Query (conversational, SSE-streamed via intent_agent LangGraph, 7 nodes)
   → Store user message (db.py: chat_messages)
   → classify_intent (intent_agent.py: regex fast-path → llm fast fallback)  ──► SSE stage
   → Disambiguation check (wiki.py → llm fast → chat_messages)               ──► SSE stage / early-exit
   → Clarification check (wiki.py → llm fast → chat_messages)                ──► SSE stage / early-exit
-  → Entity-aware file detection + hybrid retrieval                           ──► SSE stage
+  → resolve_scope (wiki.py: deterministic file/party/entity/family/broad cascade, no LLM call)
+  → Entity-aware file detection + hybrid RRF-fused retrieval (scope-constrained) ──► SSE stage
   → Context building (wiki.py: page caps, contradiction warnings, metadata block)
   → Prompt selection by intent (ANSWER / ASSESSMENT / COMPARISON / OBLIGATION / DRAFTING)
   → Answer generation (llm.py: full model)                                  ──► SSE stage
+  → Citation verification + one corrective retry (wiki.py: _verify_answer_citations,
+    _verify_citation_attribution — deterministic, not LLM-judged)
   → Validate format per intent (intent_agent.py: logged, non-blocking)
+  → Grounding check (intent_agent.py: independent LLM audit, ENABLE_ANSWER_VALIDATION) ──► SSE stage
   → Confidence extraction (wiki.py: tolerant regex from <reasoning>)
   → Store assistant answer + intent (db.py: chat_messages)                  ──► SSE terminal event
 
