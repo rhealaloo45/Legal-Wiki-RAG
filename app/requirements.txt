@@ -1,5 +1,5 @@
 flask
-chromadb
+gunicorn
 pypdf
 requests
 python-dotenv

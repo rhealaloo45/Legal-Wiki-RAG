@@ -17,6 +17,19 @@ logger = logging.getLogger(__name__)
 _engine = None
 
 
+def _emb_table_name() -> str:
+    """Vector-table name for the currently active embedding provider.
+
+    Each provider gets its own table (page_embeddings for the legacy nvidia
+    4096-dim vectors, page_embeddings_azure for the new 3072-dim ones, etc.)
+    so switching providers never touches another provider's already-stored
+    vectors — no drop, no forced re-embed, revert by flipping the env var.
+    """
+    import config
+    provider = config.EMBEDDING_PROVIDER
+    return "page_embeddings" if provider == "nvidia" else f"page_embeddings_{provider}"
+
+
 def get_engine():
     global _engine
     if _engine is not None:
@@ -30,14 +43,18 @@ def get_engine():
     if not url:
         raise RuntimeError("DATABASE_URL is not set — cannot initialise PostgreSQL engine")
 
-    _engine = create_engine(
+    engine = create_engine(
         url,
         poolclass=QueuePool,
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
     )
-    _init_schema(_engine)
+    _init_schema(engine)
+    # Only cache on success — if schema init throws (e.g. a transient DB
+    # connectivity issue), the next call should retry from scratch instead
+    # of being stuck forever on a schema-less engine.
+    _engine = engine
     return _engine
 
 
@@ -54,12 +71,50 @@ def reset_engine() -> None:
         _engine = None
 
 
+# Arbitrary fixed key for the schema-init advisory lock — any int64 works,
+# it just needs to be the same constant everywhere it's used.
+_SCHEMA_INIT_LOCK_KEY = 727273001
+
+
 def _init_schema(engine) -> None:
-    """Create all tables on first connect. Idempotent (IF NOT EXISTS throughout)."""
+    """Create all tables on first connect. Idempotent (IF NOT EXISTS throughout).
+
+    Multiple gunicorn worker processes can each call this independently on
+    boot. Without serializing, concurrent workers race on the same ALTER
+    TABLE/CREATE INDEX statements and can deadlock each other (seen live:
+    two workers both migrating `pages` at once). A session-level Postgres
+    advisory lock makes every worker but one simply wait its turn — the
+    winner does the real work, the rest then run a fast no-op pass since
+    everything below is IF NOT EXISTS.
+    """
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": _SCHEMA_INIT_LOCK_KEY})
+        try:
+            _run_schema_statements(conn, text)
+        finally:
+            conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": _SCHEMA_INIT_LOCK_KEY})
+
+
+def _run_schema_statements(conn, text) -> None:
+    # (indentation below kept one level deep intentionally — this used to be
+    # the body of a `with engine.connect() as conn:` block)
+    if True:
+        # The app's DB role may not have privilege to CREATE EXTENSION even
+        # when it's a no-op (already installed by an admin) — Postgres still
+        # enforces the permission check on the attempt itself. Don't let a
+        # permission error here abort the whole schema-init transaction and
+        # skip every table below.
+        try:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        except Exception as _ext_err:
+            logger.warning(
+                "Could not create/verify 'vector' extension (may already exist "
+                "and this role lacks CREATE EXTENSION privilege — fine if an "
+                "admin already ran it): %s", _ext_err,
+            )
+            conn.rollback()
 
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS pages (
@@ -95,8 +150,9 @@ def _init_schema(engine) -> None:
 
         import config as _cfg
         _emb_dims = _cfg.get_embedding_dimensions()
+        _emb_table = _emb_table_name()
         conn.execute(text(f"""
-            CREATE TABLE IF NOT EXISTS page_embeddings (
+            CREATE TABLE IF NOT EXISTS {_emb_table} (
                 session_id TEXT NOT NULL,
                 title      TEXT NOT NULL,
                 embedding  vector({_emb_dims}),
@@ -104,9 +160,11 @@ def _init_schema(engine) -> None:
                 PRIMARY KEY (session_id, title)
             )
         """))
-        # Dimension migration: if the table already exists but was created with
-        # a different vector size (e.g. 1536 default before nemotron/2048 model),
-        # drop and recreate.  Embeddings are always re-derivable, so this is safe.
+        # Dimension migration: if THIS provider's table already exists but was
+        # created with a different vector size (e.g. dims changed for the same
+        # provider), drop and recreate it. Each provider owns a separate table
+        # (see _emb_table_name), so this never touches another provider's data —
+        # switching EMBEDDING_PROVIDER just points at a different table.
         try:
             row = conn.execute(text("""
                 SELECT (regexp_matches(
@@ -115,20 +173,20 @@ def _init_schema(engine) -> None:
                 ))[1]::int AS dim
                 FROM pg_attribute a
                 JOIN pg_class c ON c.oid = a.attrelid
-                WHERE c.relname = 'page_embeddings'
+                WHERE c.relname = :tbl
                   AND a.attname  = 'embedding'
                   AND NOT a.attisdropped
-            """)).fetchone()
+            """), {"tbl": _emb_table}).fetchone()
             if row and row.dim != _emb_dims:
                 logger.warning(
-                    "page_embeddings dimension mismatch (DB=%d, config=%d) — "
+                    "%s dimension mismatch (DB=%d, config=%d) — "
                     "recreating table (embeddings will be regenerated by backfill)",
-                    row.dim, _emb_dims,
+                    _emb_table, row.dim, _emb_dims,
                 )
-                conn.execute(text("DROP INDEX IF EXISTS page_embeddings_hnsw_idx"))
-                conn.execute(text("DROP TABLE page_embeddings"))
+                conn.execute(text(f"DROP INDEX IF EXISTS {_emb_table}_hnsw_idx"))
+                conn.execute(text(f"DROP TABLE {_emb_table}"))
                 conn.execute(text(f"""
-                    CREATE TABLE page_embeddings (
+                    CREATE TABLE {_emb_table} (
                         session_id TEXT NOT NULL,
                         title      TEXT NOT NULL,
                         embedding  vector({_emb_dims}),
@@ -137,23 +195,25 @@ def _init_schema(engine) -> None:
                     )
                 """))
         except Exception as _dim_err:
-            logger.warning("Could not check page_embeddings dimension: %s", _dim_err)
+            logger.warning("Could not check %s dimension: %s", _emb_table, _dim_err)
+            conn.rollback()
 
         # doc_family (Phase 1) — added AFTER the dimension-migration block so the
         # guard applies to the final table whether it was freshly created, an old
         # pre-doc_family table, or just dropped+recreated above. Composite btree
         # index makes the family pre-filter cheap before the HNSW ORDER BY.
         try:
-            conn.execute(text("""
-                ALTER TABLE page_embeddings
+            conn.execute(text(f"""
+                ALTER TABLE {_emb_table}
                 ADD COLUMN IF NOT EXISTS doc_family TEXT
             """))
-            conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS page_embeddings_family_idx
-                ON page_embeddings (session_id, doc_family)
+            conn.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS {_emb_table}_family_idx
+                ON {_emb_table} (session_id, doc_family)
             """))
         except Exception as _emb_fam_err:
-            logger.warning("Could not add page_embeddings.doc_family column/index (may already exist): %s", _emb_fam_err)
+            logger.warning("Could not add %s.doc_family column/index (may already exist): %s", _emb_table, _emb_fam_err)
+            conn.rollback()
 
         # HNSW index for sub-5ms cosine similarity search at 140k+ pages.
         # pgvector ≤ 0.6 enforces a hard 2000-dimension limit on HNSW/IVFFlat.
@@ -163,14 +223,15 @@ def _init_schema(engine) -> None:
         # (which raises the limit to 16000) to re-enable the index at higher dims.
         if _emb_dims <= 2000:
             try:
-                conn.execute(text("""
-                    CREATE INDEX IF NOT EXISTS page_embeddings_hnsw_idx
-                    ON page_embeddings
+                conn.execute(text(f"""
+                    CREATE INDEX IF NOT EXISTS {_emb_table}_hnsw_idx
+                    ON {_emb_table}
                     USING hnsw (embedding vector_cosine_ops)
                     WITH (m = 16, ef_construction = 64)
                 """))
             except Exception as _idx_err:
                 logger.warning("Could not create HNSW index (pgvector limit?): %s", _idx_err)
+                conn.rollback()
         else:
             logger.info(
                 "EMBEDDING_DIMENSIONS=%d > 2000 — skipping HNSW index "
@@ -217,6 +278,7 @@ def _init_schema(engine) -> None:
             """))
         except Exception as _matter_ref_err:
             logger.warning("Could not add matter_reference column (may already exist): %s", _matter_ref_err)
+            conn.rollback()
 
         # doc_type / doc_family added later (Phase 0, 20k-doc scale work) — same
         # migration guard so pre-existing session DBs pick up the columns.
@@ -231,6 +293,7 @@ def _init_schema(engine) -> None:
             """))
         except Exception as _docfam_err:
             logger.warning("Could not add doc_type/doc_family columns (may already exist): %s", _docfam_err)
+            conn.rollback()
 
         # S2: FTS column + GIN index for O(log N) cross-reference (Phase 4)
         # Add generated tsvector column to pages if it doesn't exist yet.
@@ -242,6 +305,7 @@ def _init_schema(engine) -> None:
             """))
         except Exception as _tsv_err:
             logger.warning("Could not add content_tsv column (may already exist): %s", _tsv_err)
+            conn.rollback()
         try:
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS pages_content_tsv_gin_idx
@@ -249,6 +313,7 @@ def _init_schema(engine) -> None:
             """))
         except Exception as _gin_err:
             logger.warning("Could not create GIN index (may already exist): %s", _gin_err)
+            conn.rollback()
 
         # S4: Structured contradictions table (Phase 4)
         conn.execute(text("""
@@ -417,16 +482,17 @@ def upsert_embedding(session_id: str, title: str, embedding: list[float],
     """
     from sqlalchemy import text
     engine = get_engine()
+    tbl = _emb_table_name()
     # Format as pgvector literal string: [x1,x2,...] then CAST to vector
     emb_str = "[" + ",".join(f"{x:.8f}" for x in embedding) + "]"
     with engine.connect() as conn:
         conn.execute(
-            text("""
-                INSERT INTO page_embeddings (session_id, title, embedding, doc_family)
+            text(f"""
+                INSERT INTO {tbl} (session_id, title, embedding, doc_family)
                 VALUES (:sid, :title, CAST(:embedding AS vector), :fam)
                 ON CONFLICT (session_id, title) DO UPDATE SET
                     embedding  = EXCLUDED.embedding,
-                    doc_family = COALESCE(EXCLUDED.doc_family, page_embeddings.doc_family)
+                    doc_family = COALESCE(EXCLUDED.doc_family, {tbl}.doc_family)
             """),
             {"sid": session_id, "title": title, "embedding": emb_str, "fam": doc_family},
         )
@@ -450,6 +516,7 @@ def search_similar_pages(
     """
     from sqlalchemy import text
     engine = get_engine()
+    tbl = _emb_table_name()
     emb_str = "[" + ",".join(f"{x:.8f}" for x in query_embedding) + "]"
     params = {"sid": session_id, "embedding": emb_str, "limit": limit}
     family_clause = ""
@@ -462,7 +529,7 @@ def search_similar_pages(
         rows = conn.execute(
             text(f"""
                 SELECT title
-                FROM page_embeddings
+                FROM {tbl}
                 WHERE session_id = :sid
                 {family_clause}
                 ORDER BY embedding <=> CAST(:embedding AS vector)
@@ -484,10 +551,11 @@ def backfill_embedding_families(session_id: str) -> int:
     """
     from sqlalchemy import text
     engine = get_engine()
+    tbl = _emb_table_name()
     with engine.connect() as conn:
         result = conn.execute(
-            text("""
-                UPDATE page_embeddings pe
+            text(f"""
+                UPDATE {tbl} pe
                 SET doc_family = pm.doc_family
                 FROM pages p
                 JOIN page_metadata pm
@@ -508,9 +576,10 @@ def count_embeddings(session_id: str) -> int:
     """Return the number of pages with embeddings stored for a session."""
     from sqlalchemy import text
     engine = get_engine()
+    tbl = _emb_table_name()
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT COUNT(*) FROM page_embeddings WHERE session_id = :sid"),
+            text(f"SELECT COUNT(*) FROM {tbl} WHERE session_id = :sid"),
             {"sid": session_id},
         ).scalar()
         return result or 0
