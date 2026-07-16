@@ -2,7 +2,9 @@
 backfill_embeddings.py — Phase 3 one-time backfill
 
 Finds every session that has pages in PostgreSQL but is missing embeddings,
-then embeds their summaries and stores them in page_embeddings.
+then embeds their summaries and stores them in the active embedding
+provider's table (see db._emb_table_name — page_embeddings for nvidia,
+page_embeddings_azure for azure, etc).
 
 Safe to run multiple times — only processes pages that don't already have
 an embedding row (uses NOT IN sub-query).
@@ -28,16 +30,18 @@ logger = logging.getLogger("backfill")
 
 def _get_sessions_with_missing_embeddings(conn, target_session: str | None) -> list[str]:
     from sqlalchemy import text
+    from services import db as _db
 
     if target_session:
         return [target_session]
 
+    tbl = _db._emb_table_name()
     rows = conn.execute(
-        text("""
+        text(f"""
             SELECT DISTINCT p.session_id
             FROM pages p
             WHERE NOT EXISTS (
-                SELECT 1 FROM page_embeddings pe
+                SELECT 1 FROM {tbl} pe
                 WHERE pe.session_id = p.session_id
                   AND pe.title      = p.title
             )
@@ -50,14 +54,16 @@ def _get_sessions_with_missing_embeddings(conn, target_session: str | None) -> l
 def _get_unembedded_pages(conn, session_id: str) -> list[tuple[str, str]]:
     """Return (title, embed_text) for pages missing embeddings in this session."""
     from sqlalchemy import text
+    from services import db as _db
 
+    tbl = _db._emb_table_name()
     rows = conn.execute(
-        text("""
+        text(f"""
             SELECT title, summary, content
             FROM pages
             WHERE session_id = :sid
               AND title NOT IN (
-                  SELECT title FROM page_embeddings WHERE session_id = :sid
+                  SELECT title FROM {tbl} WHERE session_id = :sid
               )
         """),
         {"sid": session_id},
@@ -71,7 +77,7 @@ def _get_unembedded_pages(conn, session_id: str) -> list[tuple[str, str]]:
     return result
 
 
-def backfill(target_session: str | None = None, batch_size: int = 16) -> None:
+def backfill(target_session: str | None = None, batch_size: int = 16) -> dict:
     import config
 
     if not config.USE_DATABASE:
@@ -79,7 +85,9 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> None:
             "DATABASE_URL is not set — backfill only applies to PostgreSQL mode. "
             "File-based sessions use BM25+LLM for page selection."
         )
-        sys.exit(1)
+        if __name__ == "__main__":
+            sys.exit(1)
+        return {"embedded": 0, "errors": 0, "message": "DATABASE_URL not set"}
 
     from services import db as _db
     from services import embedder as _embedder
@@ -92,7 +100,7 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> None:
 
     if not sessions:
         logger.info("Nothing to backfill — all pages already have embeddings.")
-        return
+        return {"embedded": 0, "errors": 0, "sessions": 0}
 
     logger.info("Sessions to backfill: %d", len(sessions))
 
@@ -164,6 +172,7 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> None:
         "Backfill complete — %d embeddings stored, %d skipped due to errors.",
         total_embedded, total_skipped,
     )
+    return {"embedded": total_embedded, "errors": total_skipped, "sessions": len(sessions)}
 
 
 if __name__ == "__main__":

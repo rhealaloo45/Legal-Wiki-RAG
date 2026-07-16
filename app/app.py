@@ -30,7 +30,7 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import rag, wiki, hybrid, advanced_modes, draft
+from services import wiki, hybrid, advanced_modes, draft
 import threading
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ def _get_compare_lock(job_id):
     return _compare_locks[job_id]
 
 # Ensure data directories exist
-for d in [config.CHROMA_PATH, config.WIKI_PATH, config.UPLOAD_PATH]:
+for d in [config.WIKI_PATH, config.UPLOAD_PATH]:
     os.makedirs(d, exist_ok=True)
 
 # Configure Tesseract OCR path if set in .env (Windows users)
@@ -252,7 +252,6 @@ def health():
         "llm_provider": "azure",
         "model": config.AZURE_OPENAI_DEPLOYMENT,
         "data_dirs": {
-            "chroma": os.path.isdir(config.CHROMA_PATH),
             "wiki": os.path.isdir(config.WIKI_PATH),
             "uploads": os.path.isdir(config.UPLOAD_PATH),
         },
@@ -461,7 +460,6 @@ def upload():
 
     # Submit all tasks to executor (non-blocking)
     for save_path, meta in zip(saved_paths, metadata_list):
-        # executor.submit(_ingest_single_doc_rag, save_path, session_id, meta)
         executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
     # Save session metadata
@@ -485,25 +483,128 @@ def upload():
     })
 
 
+@app.route("/resume_ingest")
+def resume_ingest():
+    """Re-queue only the docs from a session's uploads that never got any pages.
+
+    For recovering an interrupted large batch (container restart mid-ingest,
+    deploy mid-ingest, etc.) without re-processing — and re-billing LLM/embed
+    calls for — documents that already completed. Reads straight from disk
+    (config.UPLOAD_PATH) and Postgres; doesn't need the files re-uploaded,
+    since they're still sitting wherever the original /upload saved them.
+
+    Guards against being called again while a previous resume_ingest call's
+    docs are still in flight — otherwise a second call could re-queue (and
+    re-bill) whatever hasn't finished writing to `pages` yet.
+    """
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    if not config.USE_DATABASE:
+        return jsonify({"error": "resume_ingest requires DATABASE_URL (Postgres) mode"}), 400
+
+    from services import db as _db
+    from sqlalchemy import text
+    engine = _db.get_engine()
+
+    # Two gunicorn worker processes means an in-process Python lock alone
+    # can't stop a near-simultaneous double-call landing on different
+    # workers. Use a Postgres advisory lock (cross-process) around the whole
+    # check-then-set critical section below instead — if another
+    # resume_ingest call for this session is mid-flight, this one backs off
+    # immediately rather than racing it.
+    lock_key = hash(("resume_ingest", session_id)) & 0x7FFFFFFF
+    with engine.connect() as lock_conn:
+        got_lock = lock_conn.execute(
+            text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
+        ).scalar()
+        if not got_lock:
+            return jsonify({
+                "error": "Another resume_ingest call for this session is being processed right now — try again in a moment.",
+            }), 409
+        try:
+            progress = _get_progress(session_id)
+            pending_lock = progress.get("resume_lock") or []
+            if pending_lock:
+                status_by_name = {d.get("name"): d.get("status") for d in progress.get("docs_list", [])}
+                still_running = [n for n in pending_lock if status_by_name.get(n) not in ("done", "error")]
+                if still_running:
+                    return jsonify({
+                        "error": "A previous resume_ingest call is still in flight for this session.",
+                        "still_running": len(still_running),
+                        "hint": "Poll /progress until these finish before calling resume_ingest again.",
+                    }), 409
+
+            prefix = f"{session_id}_"
+            uploaded = [f for f in os.listdir(config.UPLOAD_PATH) if f.startswith(prefix)]
+            if not uploaded:
+                return jsonify({"error": f"No uploaded files found for session {session_id}"}), 404
+
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+                indexed = {r.source_doc for r in rows}
+
+            missing = [f for f in uploaded if f not in indexed]
+            if not missing:
+                return jsonify({
+                    "status": "nothing_to_resume",
+                    "uploaded": len(uploaded),
+                    "already_indexed": len(indexed),
+                })
+
+            new_progress = {
+                "phase": "processing",
+                "docs": {"total": len(missing), "wiki_done": 0},
+                "wiki": {"step": "queued", "message": "", "pages_total": 0, "relations_total": 0},
+                "docs_list": [
+                    {"name": f, "status": "queued", "pages": 0, "step": ""}
+                    for f in missing
+                ],
+                "resume_lock": missing,
+            }
+            _set_progress(session_id, new_progress)
+
+            for fname in missing:
+                save_path = os.path.join(config.UPLOAD_PATH, fname)
+                executor.submit(_ingest_single_doc_wiki, save_path, session_id)
+
+            return jsonify({
+                "status": "accepted",
+                "uploaded": len(uploaded),
+                "already_indexed": len(indexed),
+                "resuming": len(missing),
+                "session_id": session_id,
+            })
+        finally:
+            lock_conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
+
+
+@app.route("/backfill_embeddings")
+def backfill_embeddings_route():
+    """Embed any pages that have synthesized content but no vector yet.
+
+    Cheap fixup for pages that got interrupted between the synthesis step
+    (writes to `pages`) and the embed step (writes to the embedding table) —
+    e.g. a container restart landing in that gap. Runs synchronously since
+    it's a handful of pages at most, not a full re-ingest.
+    """
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    if not config.USE_DATABASE:
+        return jsonify({"error": "backfill_embeddings requires DATABASE_URL (Postgres) mode"}), 400
+
+    import backfill_embeddings
+    result = backfill_embeddings.backfill(target_session=session_id)
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Background Pipelines
 # ---------------------------------------------------------------------------
-def _ingest_single_doc_rag(file_path: str, session_id: str, meta: dict = None):
-    """Worker for RAG embedding of a single doc."""
-    try:
-        rag.ingest(file_path, session_id, meta)
-    except Exception as e:
-        logger.error("RAG ingest failed for %s: %s", file_path, e)
-    finally:
-        with _get_progress_lock(session_id):
-            progress = _get_progress(session_id)
-            docs = progress.get("docs", {})
-            docs["rag_done"] = docs.get("rag_done", 0) + 1
-            progress["docs"] = docs
-            _set_progress(session_id, progress)
-        _check_completion(session_id)
-
-
 def _ingest_single_doc_wiki(file_path: str, session_id: str):
     """Worker for Wiki building of a single doc."""
     doc_name = os.path.basename(file_path)
@@ -716,16 +817,40 @@ def file_structure():
     try:
         sessions = load_sessions()
         paths = set()
-        
+
+        # Docs with zero indexed pages (OCR/ingest failures) never made it
+        # into the corpus — exclude them here so the Files tab doesn't imply
+        # they're searchable when generate_answer() will never see them.
+        indexed_docs: set[str] = set()
+        if config.USE_DATABASE:
+            try:
+                from services import db as _db
+                from sqlalchemy import text
+                engine = _db.get_engine()
+                with engine.connect() as conn:
+                    rows = conn.execute(
+                        text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
+                        {"sid": session_id},
+                    )
+                    indexed_docs = {r.source_doc for r in rows}
+            except Exception as _idx_err:
+                logger.warning("Could not fetch indexed docs for /files filtering: %s", _idx_err)
+
         # 1. Try to read from session metadata first
         if session_id in sessions and "file_paths" in sessions[session_id]:
             for p in sessions[session_id]["file_paths"]:
+                # source_doc is stored as session_id + "_" + path with "/" flattened to "_"
+                flat_key = f"{session_id}_" + p.replace("\\", "/").replace("/", "_")
+                if indexed_docs and flat_key not in indexed_docs:
+                    continue
                 paths.add(p.replace("\\", "/"))
         else:
             # 2. Fallback: Scan config.UPLOAD_PATH and reconstruct original paths
             prefix = f"{session_id}_"
             for fname in os.listdir(config.UPLOAD_PATH):
                 if fname.startswith(prefix):
+                    if indexed_docs and fname not in indexed_docs:
+                        continue
                     rel_name = fname[len(prefix):]
                     
                     # Reconstruction logic for existing folders
@@ -958,24 +1083,12 @@ def rename_session(session_id):
 
 @app.route("/session", methods=["DELETE"])
 def clear_session():
-    """Delete all data associated with a session (ChromaDB collection, wiki index, uploads)."""
+    """Delete all data associated with a session (wiki index, uploads)."""
     session_id = request.args.get("session_id", "")
     if not session_id:
         return jsonify({"error": "session_id is required"}), 400
 
     errors = []
-
-    # Remove ChromaDB collection
-    try:
-        client = rag._get_client()
-        col_name = f"rag_{session_id}"
-        try:
-            client.delete_collection(col_name)
-            logger.info("Deleted ChromaDB collection: %s", col_name)
-        except Exception:
-            pass  # collection may not exist yet
-    except Exception as e:
-        errors.append(f"chroma: {e}")
 
     # Remove wiki index directory
     wiki_dir = os.path.join(config.WIKI_PATH, session_id)

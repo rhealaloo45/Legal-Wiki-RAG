@@ -32,8 +32,8 @@ def _get_azure_client():
     if _azure_client is None:
         from openai import OpenAI
         _azure_client = OpenAI(
-            api_key=config.AZURE_OPENAI_API_KEY,
-            base_url=f"{config.AZURE_OPENAI_ENDPOINT}/openai/v1",
+            api_key=config.AZURE_EMBEDDING_API_KEY,
+            base_url=f"{config.AZURE_EMBEDDING_ENDPOINT}/openai/v1",
         )
     return _azure_client
 
