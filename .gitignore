@@ -284,6 +284,9 @@ Thumbs.db
 *.orig
 nohup.out
 
+# Deployment artifacts (zip push deploy bundles)
+*.zip
+
 
 
 app/reingest_stuck_docs.py
