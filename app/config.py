@@ -10,6 +10,24 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 USE_DATABASE = bool(DATABASE_URL)
 
+# ---------------------------------------------------------------------------
+# Production wiki mode — every wiki-scoped call (retrieval, files, graph) is
+# redirected to one fixed "main" session regardless of the caller's own
+# session_id, so every chat thread queries the same wiki. PRODUCTION_WIKI_SESSION_ID
+# below is only the STARTING value for that pointer; app.py tracks the live
+# value in data/main_session.json, which a completed local ingest updates
+# automatically (see app.py:_set_main_session_id). Two independent concerns:
+#   - PRODUCTION_WIKI_SESSION_ID: which session is "main" right now (mutable
+#     locally, effectively fixed on Azure since ingest never runs there).
+#   - DISABLE_INGEST: whether ingest-capable / session-destructive routes are
+#     locked at all. True only on the deployed Azure app — ingestion happens
+#     locally and the finished wiki is shipped to Azure Postgres out of band,
+#     never through the deployed app itself. False locally, where ingesting
+#     new content and having it become the new main session is the point.
+# ---------------------------------------------------------------------------
+PRODUCTION_WIKI_SESSION_ID = os.getenv("PRODUCTION_WIKI_SESSION_ID", "")
+DISABLE_INGEST = os.getenv("DISABLE_INGEST", "false").lower() == "true"
+
 # Global Providers (azure / openrouter / nvidia)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
@@ -117,6 +135,7 @@ _DATA_DIR = os.getenv("DATA_DIR", _APP_DIR)
 WIKI_PATH = os.path.join(_DATA_DIR, "data", "wiki")
 UPLOAD_PATH = os.path.join(_DATA_DIR, "data", "uploads")
 SESSIONS_PATH = os.path.join(_DATA_DIR, "data", "sessions.json")
+MAIN_SESSION_PATH = os.path.join(_DATA_DIR, "data", "main_session.json")
 LOGS_PATH = os.path.join(_DATA_DIR, "data", "logs")
 
 # Pre-create data directories at import time
