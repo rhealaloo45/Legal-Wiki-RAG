@@ -936,6 +936,20 @@ def _norm_for_match(s: str) -> str:
     return s.strip('.,;:')
 
 
+def _alnum_only(s: str) -> str:
+    """Strip everything but letters/digits, for comparing a citation label
+
+    against a page title when the model has reformatted punctuation (e.g.
+    "Purpose and Permitted Use (NDA)" vs "Purpose and Permitted Use – NDA") —
+    both keys collapse to the same alnum string. Only ever used for the
+    title-label exclusion, never for content-quote verification, so
+    loosening punctuation here can't let a fabricated content quote slip
+    through — it can only better-recognize a real title being cited as a
+    label.
+    """
+    return re.sub(r'[^a-z0-9]', '', s)
+
+
 def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
     """Drop any 'quotes' entries that aren't actually verbatim substrings of the
     raw source text the ingest LLM was given.
@@ -2265,8 +2279,13 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # source text. "|" is excluded from content for exactly this reason: a
 # real legal quote essentially never contains a literal pipe character, so
 # this bounds greedy matching to one table cell without narrowing anything
-# that matters.
-_QUOTE_SPAN_RE = re.compile(r'["“]([^|\n]{15,500})["”]')
+# that matters. Quote characters themselves are excluded from content for the
+# same reason "|" is: a line like `"Title" – Supporting Quote: "actual text"`
+# would otherwise match as ONE span running from the first quote's open
+# through the second quote's close — merging a citation label with its own
+# quoted text and producing a span that matches neither. Excluding quote
+# chars forces each `"..."` span to stop at its own closing quote instead.
+_QUOTE_SPAN_RE = re.compile(r'["“]([^"“”|\n]{15,500})["”]')
 
 # Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
 # splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
@@ -2387,9 +2406,15 @@ def _known_page_titles(context: str) -> set[str]:
     format), not claiming that string is a verbatim excerpt from the source
     text. Without this, the quote-verification regex treats any quoted span as
     a content-verbatim claim and flags the title itself as unverifiable.
+
+    Keyed on alphanumerics only (see _alnum_only) so a model-reformatted label
+    like "Purpose and Permitted Use – NDA-Greensteel – NDA" still matches the
+    real title "Purpose and Permitted Use – NDA-Greensteel (NDA)" — exact
+    punctuation match was rejecting these and flagging the title itself as a
+    fabricated quote.
     """
     return {
-        _norm_for_match(title)
+        _alnum_only(_norm_for_match(title))
         for title, _ in _PAGE_BLOCK_RE.findall(context)
     }
 
@@ -2487,7 +2512,7 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
         qn = _norm(q)
-        if qn in known_titles:
+        if _alnum_only(qn) in known_titles:
             continue  # citation label (page title in quotes), not a content quote
         if qn in ctx_norm:
             continue
@@ -2572,7 +2597,7 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
         qn = _norm(quote)
-        if qn in known_titles:
+        if _alnum_only(qn) in known_titles:
             continue  # citation label (page title in quotes), not a content quote
         candidate_titles = [title for title, body in norm_blocks if qn in body]
         if not candidate_titles:
@@ -2708,7 +2733,7 @@ def _autocorrect_citation_attribution(answer: str, context: str) -> tuple[str, i
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
         qn = _norm(quote)
-        if qn in known_titles:
+        if _alnum_only(qn) in known_titles:
             continue
         candidate_titles = [title for title, body in norm_blocks if qn in body]
         if not candidate_titles:

@@ -10,17 +10,41 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 USE_DATABASE = bool(DATABASE_URL)
 
+# ---------------------------------------------------------------------------
+# Production wiki mode — every wiki-scoped call (retrieval, files, graph) is
+# redirected to one fixed "main" session regardless of the caller's own
+# session_id, so every chat thread queries the same wiki. PRODUCTION_WIKI_SESSION_ID
+# below is only the STARTING value for that pointer; app.py tracks the live
+# value in data/main_session.json, which a completed local ingest updates
+# automatically (see app.py:_set_main_session_id). Two independent concerns:
+#   - PRODUCTION_WIKI_SESSION_ID: which session is "main" right now (mutable
+#     locally, effectively fixed on Azure since ingest never runs there).
+#   - DISABLE_INGEST: whether ingest-capable / session-destructive routes are
+#     locked at all. True only on the deployed Azure app — ingestion happens
+#     locally and the finished wiki is shipped to Azure Postgres out of band,
+#     never through the deployed app itself. False locally, where ingesting
+#     new content and having it become the new main session is the point.
+# ---------------------------------------------------------------------------
+PRODUCTION_WIKI_SESSION_ID = os.getenv("PRODUCTION_WIKI_SESSION_ID", "")
+DISABLE_INGEST = os.getenv("DISABLE_INGEST", "false").lower() == "true"
+
 # Global Providers (azure / openrouter / nvidia)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 
-# Azure Config
+# Azure Config — chat/completions resource
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+
+# Azure embeddings can live on a separate AI Foundry resource from chat —
+# falls back to the chat resource's key/endpoint if not set separately, so a
+# single-resource setup still works with zero extra config.
+AZURE_EMBEDDING_API_KEY = os.getenv("AZURE_EMBEDDING_API_KEY", AZURE_OPENAI_API_KEY)
+AZURE_EMBEDDING_ENDPOINT = os.getenv("AZURE_EMBEDDING_ENDPOINT", AZURE_OPENAI_ENDPOINT)
 
 # OpenRouter embedding models may produce different vector dimensions from Azure.
 # nvidia/llama-nemotron-embed-vl-1b-v2 outputs 2048 dims; override via env if needed.
@@ -103,21 +127,20 @@ COMPACTION_CHAR_THRESHOLD    = int(os.getenv("COMPACTION_CHAR_THRESHOLD", "8000"
 # Concurrency settings for wiki pipeline
 WIKI_MAX_WORKERS = int(os.getenv("WIKI_MAX_WORKERS", "3"))
 
-# Resolve all data paths to absolute so they stay stable regardless of CWD
+# Resolve all data paths to absolute so they stay stable regardless of CWD.
+# DATA_DIR overrides the base — on App Service, code under wwwroot gets wiped
+# on every redeploy, so set DATA_DIR=/home/data (persisted) in production.
 _APP_DIR = os.path.abspath(os.path.dirname(__file__))
-CHROMA_PATH = os.path.join(_APP_DIR, "data", "chroma")
-WIKI_PATH = os.path.join(_APP_DIR, "data", "wiki")
-UPLOAD_PATH = os.path.join(_APP_DIR, "data", "uploads")
-SESSIONS_PATH = os.path.join(_APP_DIR, "data", "sessions.json")
-LOGS_PATH = os.path.join(_APP_DIR, "data", "logs")
+_DATA_DIR = os.getenv("DATA_DIR", _APP_DIR)
+WIKI_PATH = os.path.join(_DATA_DIR, "data", "wiki")
+UPLOAD_PATH = os.path.join(_DATA_DIR, "data", "uploads")
+SESSIONS_PATH = os.path.join(_DATA_DIR, "data", "sessions.json")
+MAIN_SESSION_PATH = os.path.join(_DATA_DIR, "data", "main_session.json")
+LOGS_PATH = os.path.join(_DATA_DIR, "data", "logs")
 
 # Pre-create data directories at import time
-for _d in [CHROMA_PATH, WIKI_PATH, UPLOAD_PATH, LOGS_PATH]:
+for _d in [WIKI_PATH, UPLOAD_PATH, LOGS_PATH]:
     os.makedirs(_d, exist_ok=True)
-
-CHUNK_SIZE = 2000
-CHUNK_OVERLAP = 200
-TOP_K = int(os.getenv("TOP_K", "40"))
 
 # Global progress store for UI feedback
 PROGRESS_STORE = {}
