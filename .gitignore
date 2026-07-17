@@ -284,7 +284,16 @@ Thumbs.db
 *.orig
 nohup.out
 
+# Deployment artifacts (zip push deploy bundles)
+*.zip
+
 
 
 app/reingest_stuck_docs.py
 app/reingest_missing_docs.py
+
+# Confidential DB exports (real wiki content — session-scoped CSV dumps)
+backups/
+
+# Deployment working notes (same genre as PLAN.md / checklist.md above)
+deployment_test.md
