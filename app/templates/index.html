@@ -2319,6 +2319,11 @@
       <div class="session-chip"><i class="ti ti-folder" style="font-size:11px"></i><span id="top-session-name">New
           Session</span></div>
       <div class="topbar-right">
+        {% if production_mode %}
+        <div class="session-chip" title="This app answers from one fixed, pre-built wiki. New chats start a fresh conversation, not a new wiki.">
+          <i class="ti ti-database" style="font-size:11px"></i>Ingest name: {{ production_wiki_name }}
+        </div>
+        {% endif %}
         <div class="provider-status-btn" onclick="toggleProviderModal()" title="LLM &amp; Embedding providers">
           <span class="provider-status-dot"></span>Enabled
         </div>
@@ -2333,8 +2338,14 @@
 
     <div class="layout">
       <div class="sidebar" id="sidebar">
-        <button class="new-btn" onclick="newSession()"><i class="ti ti-plus" style="font-size:13px"></i>New
-          matter</button>
+        {% if production_mode %}
+        <button class="new-btn" onclick="newChat()"><i class="ti ti-plus" style="font-size:13px"></i>New
+          chat</button>
+        {% endif %}
+        {% if not ingest_disabled %}
+        <button class="new-btn" onclick="newSession()"><i class="ti ti-upload" style="font-size:13px"></i>New
+          ingest</button>
+        {% endif %}
         <div class="sidebar-label">Sessions</div>
         <div id="session-list" style="flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:4px">
           <!-- sessions injected here -->
@@ -4030,7 +4041,33 @@
     // ============================================================
     // Sessions
     // ============================================================
-    function newSession() { location.reload(); }
+    function newSession() {
+      // A fresh reload naturally lands on the upload panel (its default HTML
+      // state). But when a main session exists, DOMContentLoaded normally
+      // auto-jumps to newChat() on load — which would immediately hide that
+      // panel again. This flag skips that one auto-jump so "New ingest"
+      // actually reaches the upload panel instead of bouncing back to chat.
+      sessionStorage.setItem('lw_skip_auto_chat', '1');
+      location.reload();
+    }
+
+    // Production mode: chats are threads over one fixed, server-side wiki —
+    // this never touches ingestion, only the chat_id used for history.
+    function newChat() {
+      SID = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : generateUUID();
+      uploadDone = true;
+      document.getElementById('modeTabs').classList.remove('d-none');
+      document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+      switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
+      document.getElementById('top-session-name').textContent = "New Chat";
+      // A fresh SID has no history — clear the previous chat's thread and
+      // stale citation state instead of leaving the old messages on screen.
+      $chatThread.innerHTML = '';
+      currentResultReferences = [];
+      loadSessions();
+      loadFileTree();
+      loadGraph();
+    }
 
     async function loadSessions() {
       try {
@@ -4052,7 +4089,7 @@
           <div class="s-item ${isActive}" onclick="resumeSession('${s.id}')" data-id="${s.id}">
             <div style="min-width:0;flex:1">
               <div class="s-title" data-name="${safeName}">${s.name || 'Unnamed Session'}</div>
-              <div class="s-meta">${s.files} docs · ${date}</div>
+              <div class="s-meta">${date}</div>
             </div>
             <div class="s-item-actions">
               <button class="rename-btn" onclick="startRenameSession(event, '${s.id}')" title="Rename"><i class="ti ti-pencil"></i></button>
@@ -4129,7 +4166,16 @@
       } catch (err) { }
     }
 
-    document.addEventListener('DOMContentLoaded', loadSessions);
+    document.addEventListener('DOMContentLoaded', () => {
+      loadSessions();
+      {% if production_mode %}
+      if (sessionStorage.getItem('lw_skip_auto_chat')) {
+        sessionStorage.removeItem('lw_skip_auto_chat');
+      } else {
+        newChat();
+      }
+      {% endif %}
+    });
 
     // ============================================================
     // Upload Logic
@@ -4653,8 +4699,8 @@
 
       const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
-      const tokens = (wikiResult.usage && wikiResult.usage.prompt_tokens) ?
-        (wikiResult.usage.prompt_tokens + wikiResult.usage.completion_tokens) : 0;
+      const tt = wikiResult.token_total || {};
+      const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
 
       const intent = wikiResult.intent || '';
       const intentLabel = wikiResult.intent_label || (intent ? intent.replace(/_/g, ' ') : '');
@@ -4966,7 +5012,7 @@
               confidence_score: meta.confidence_score || 0,
               files_used: meta.files_used || [],
               token_total: meta.token_total || {},
-              usage: {},
+              validation: meta.validation || {},
               elapsed_ms: 0,
               intent: meta.intent || '',
               intent_label: meta.intent_label || '',

@@ -30,6 +30,13 @@ def reingest_stuck(session_id: str, doc_names: list[str]) -> None:
     from services import db as _db
     from services import wiki
 
+    # app.py wires TESSERACT_CMD into pytesseract at Flask startup; standalone
+    # scripts need to do it themselves or every scanned-PDF page silently
+    # fails OCR with "tesseract is not installed".
+    if config.TESSERACT_CMD:
+        from services.reader import configure_tesseract
+        configure_tesseract(config.TESSERACT_CMD)
+
     engine = _db.get_engine()
     with engine.begin() as conn:
         for doc_name in doc_names:
@@ -39,7 +46,8 @@ def reingest_stuck(session_id: str, doc_names: list[str]) -> None:
             )]
             logger.info("%s: clearing %d existing pages", doc_name, len(titles))
             if titles:
-                conn.execute(text("DELETE FROM page_embeddings WHERE session_id = :sid AND title = ANY(:titles)"),
+                emb_tbl = _db._emb_table_name()
+                conn.execute(text(f"DELETE FROM {emb_tbl} WHERE session_id = :sid AND title = ANY(:titles)"),
                              {"sid": session_id, "titles": titles})
                 conn.execute(text("DELETE FROM page_metadata WHERE session_id = :sid AND title = ANY(:titles)"),
                              {"sid": session_id, "titles": titles})
