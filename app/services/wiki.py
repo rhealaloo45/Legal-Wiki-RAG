@@ -1691,22 +1691,37 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
     for num_match in _DOC_NAME_PATTERN.finditer(question):
         t = num_match.group(1).lower()
         t = re.sub(r'\s+', ' ', t).strip()
-        doc_num = num_match.group(2)
         # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
         # NOT the first word, which for "legal opinion" is the non-distinctive
         # "legal" that prefixes every source_doc.
         type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
-        # Match the number allowing zero-padding: the user types "service
-        # agreement 1" but redacted test files are saved zero-padded as
-        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
-        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
-        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
-        # keep it from bleeding into a different document number.
-        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
-        for sd in doc_names:
-            norm = _norm_doc_name(sd)
-            if re.search(num_re, norm) and (not type_core or type_core in norm):
-                matched.add(sd)
+        # A shorthand numbered list shares ONE type word across several numbers:
+        # "Service Agreement 1, 2 & 3", "compare NDA 1, 2, and 3". The base
+        # pattern only binds the type to the FIRST number, so 2 and 3 were
+        # silently dropped and the "comparison" ran on a single document
+        # (confirmed live: "Compare the Service Agreement 1, 2 & 3" retrieved
+        # only SA 1). Consume the trailing ", N"/"& N"/"and N" run and apply the
+        # same type to each number.
+        nums = [num_match.group(2)]
+        tail = question[num_match.end():]
+        while True:
+            m = re.match(r'\s*(?:,|&|and)\s*(\d+)', tail)
+            if not m:
+                break
+            nums.append(m.group(1))
+            tail = tail[m.end():]
+        for doc_num in nums:
+            # Match the number allowing zero-padding: the user types "service
+            # agreement 1" but redacted test files are saved zero-padded as
+            # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
+            # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
+            # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
+            # keep it from bleeding into a different document number.
+            num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            for sd in doc_names:
+                norm = _norm_doc_name(sd)
+                if re.search(num_re, norm) and (not type_core or type_core in norm):
+                    matched.add(sd)
     return matched
 
 
@@ -2532,6 +2547,35 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     return unverified
 
 
+def _nearest_verbatim_span(quote: str, context: str) -> str | None:
+    """The context span a flagged (paraphrased) quote most closely paraphrases.
+
+    The citation retry previously just re-listed the bad quotes and re-asked —
+    so the model (esp. gpt-5-nano) reworded them again the same way, and the
+    retry "did not improve" on nearly every answer (confirmed live). The verbatim
+    text is right there in context under a "**Supporting Quotes:** > …" block;
+    the model just isn't copying it. Return the exact span so the retry can show
+    the model precisely what to paste. Content-word overlap ≥ 0.6 required, so a
+    weak coincidental match never suggests the wrong clause.
+    """
+    qwords = {w for w in re.findall(r'[a-z0-9]+', quote.lower()) if len(w) > 3}
+    if len(qwords) < 3:
+        return None
+    corpus = _strict_verification_corpus(context)
+    # Candidate spans: supporting-quote lines (after "> ") first, then sentences.
+    cands = re.findall(r'>\s*([^\n]{20,400})', corpus)
+    cands += re.split(r'(?<=[.!?])\s+', corpus)
+    best, best_score = None, 0.0
+    for cand in cands:
+        cwords = {w for w in re.findall(r'[a-z0-9]+', cand.lower()) if len(w) > 3}
+        if not cwords:
+            continue
+        overlap = len(qwords & cwords) / len(qwords)
+        if overlap > best_score:
+            best, best_score = cand.strip(), overlap
+    return best if (best and best_score >= 0.6) else None
+
+
 # Page blocks in wiki_content look like "## Some Topic – DocID (DocType)\n<content>".
 _PAGE_BLOCK_RE = re.compile(r'^##\s+(.+?)\s*\n(.*?)(?=^##\s+|\Z)', re.MULTILINE | re.DOTALL)
 
@@ -2812,12 +2856,16 @@ _CITATION_RETRY_ADDENDUM = """
 ---
 IMPORTANT CORRECTION NEEDED: Your previous answer to this question included quoted \
 passages that could not be verified against the CONTEXT above (they were paraphrased, \
-not exact, or attributed to the wrong document). The flagged passages were:
+not exact, or attributed to the wrong document). Each flagged passage is shown below, \
+and where the CONTEXT contains the matching verbatim text, the exact text to copy is \
+given right after it:
 {flagged}
 
-Write the answer again. For each flagged passage: either copy the exact verbatim text \
-from CONTEXT into quotation marks, or if no exact verbatim sentence exists, describe \
-the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
+Write the answer again. For each flagged passage: if an "Exact text in CONTEXT" line is \
+shown, replace your quotation with THAT text copied character-for-character (do not \
+reword "shall not exceed" into "caps at", do not add a clause/section number that isn't \
+in the quote). If no exact text is shown, describe the provision in your own words \
+WITHOUT quotation marks. Do not repeat the same error."""
 
 
 # A line is "complete" if it ends with a terminal mark a truncated model
@@ -2979,18 +3027,41 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # content entirely.
     _REASON_OPEN_RE = re.compile(r'<\s*reasoning\s*>', re.I)
     _REASON_CLOSE_RE = re.compile(r'<\s*/\s*reasoning\s*>', re.I)
-    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
+    # Optional leading list marker ("- CONFIDENCE_SCORE", "* CONFIDENCE_REASON")
+    # and optional bold — the model formats these lines inconsistently. Without
+    # matching the bulleted form, an un-stripped "- CONFIDENCE_SCORE" line leaked
+    # into the answer AND the plain form mid-text got mistaken for a reasoning
+    # boundary (confirmed live: a comparison table was stripped as "reasoning").
+    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*(?:[-*]\s*)?\**CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
     # How much text must follow the confidence lines before we treat them as the
     # END of a reasoning preamble rather than a trailer on a finished answer.
     # Guards against amputating a short answer that happens to close with its
     # confidence lines.
     _MD_REASONING_MIN_TAIL = 200
+    # The model sometimes self-organizes into a working draft followed by its
+    # own "Final Answer" heading with a polished restatement — confirmed live
+    # on a risk_assessment answer that shipped BOTH: a full "One-Sided /
+    # Ambiguity / Missing / Inconsistencies" analysis, then a "Final Answer"
+    # section covering the same ground again in different words (15.8k chars,
+    # 18.8k tokens for one question). Neither the <reasoning> tag split nor
+    # the CONFIDENCE-line split catches this shape, since it has no
+    # confidence block at all — it's a second, unrequested self-revision.
+    # Not part of the prompt contract (nothing asks the model to emit this),
+    # so this is entirely a symptom to strip, not a format to support.
+    _FINAL_ANSWER_HEADING_RE = re.compile(
+        r'(?im)^[ \t]*(?:#{1,3}\s*)?\*{0,2}Final\s+Answer\*{0,2}\s*:?\s*$'
+    )
 
-    def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
+    def _run_generation_pass(gen_prompt: str, token_budget: int = None,
+                             reasoning_effort: str = None) -> tuple[str, dict, int, str]:
         """Run one LLM answer-generation call and parse out answer text + confidence.
 
         Factored out of the main body so the corrective citation retry below can
         reuse the exact same parsing/fallback logic as the primary pass.
+
+        reasoning_effort escalates the model's effort for this call (Azure
+        reasoning models only) — used when a low-effort pass returned hidden
+        reasoning but no visible answer.
         """
         pass_usage: dict = {}
         pass_score = 75
@@ -3000,6 +3071,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 gen_prompt,
                 pipeline="wiki",
                 max_tokens=token_budget or _answer_token_budget,
+                reasoning_effort=reasoning_effort,
             )
 
             # --- Positional split: reasoning block vs. user-facing answer ---
@@ -3040,9 +3112,22 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 _conf_lines = list(re.finditer(_CONFIDENCE_LINE_RE, raw_answer))
                 if _conf_lines:
                     _tail = raw_answer[_conf_lines[-1].end():].strip()
-                    if len(_tail) >= _MD_REASONING_MIN_TAIL:
-                        # Substantial content AFTER the confidence lines → they
-                        # close a reasoning preamble; the answer is the tail.
+                    _head = raw_answer[:_conf_lines[-1].start()].strip()
+                    # A genuine reasoning PREAMBLE is a short plan that precedes a
+                    # longer answer — so only treat the pre-confidence content as
+                    # strippable reasoning when the tail (candidate answer) is at
+                    # least as long as the head. The restructured comparison/
+                    # obligation/assessment prompts now put the ANSWER first and
+                    # the confidence lines at the end, so the model routinely emits
+                    # a big body, then CONFIDENCE, then a short refs/notes tail;
+                    # the old "any substantial tail → head is reasoning" rule then
+                    # amputated the entire body (confirmed live: a 6509-char
+                    # comparison table was discarded, leaving only the confidence
+                    # lines + references). Requiring tail >= head keeps the body.
+                    if len(_tail) >= _MD_REASONING_MIN_TAIL and len(_tail) >= len(_head):
+                        # Substantial content AFTER the confidence lines and the
+                        # head is shorter → they close a reasoning preamble; the
+                        # answer is the tail.
                         reasoning_text = raw_answer[:_conf_lines[-1].end()]
                         pass_answer = _tail
                         logger.info(
@@ -3090,6 +3175,24 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             # Always strip any stray CONFIDENCE lines that leaked into the answer
             pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', pass_answer).strip()
 
+            # Drop a duplicated self-revision: if a "Final Answer" heading
+            # appears after a substantial chunk of prior content, the model
+            # restated its own draft — keep only the polished tail, not both
+            # copies. A heading in the first 20% of the text is more likely
+            # an intentional section label on a short answer, not a redo.
+            _fa_matches = list(_FINAL_ANSWER_HEADING_RE.finditer(pass_answer))
+            if _fa_matches:
+                _fa = _fa_matches[-1]
+                if _fa.start() > len(pass_answer) * 0.2:
+                    _tail = pass_answer[_fa.end():].strip()
+                    if len(_tail) >= _MD_REASONING_MIN_TAIL:
+                        logger.warning(
+                            "Answer contained a duplicated 'Final Answer' self-revision — "
+                            "dropped %d chars of draft, kept %d chars of final",
+                            _fa.start(), len(_tail),
+                        )
+                        pass_answer = _tail
+
             # --- Fallback confidence when model skipped the reasoning block ---
             # A short "Not covered" answer means the context had nothing relevant —
             # confidence should be 0, not the generic 75 default.
@@ -3134,20 +3237,71 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
 
-    # Truncation retry: a "factual"-intent question that's actually broad/cross-
-    # document in scope (e.g. "across all JVAs in the corpus...") can exhaust the
-    # narrower MAX_TOKENS_ANSWER budget before the model ever writes real content —
-    # confirmed live: a 25-page cross-document question got cut off at
-    # completion_tokens=4034 (against a 4096 cap), leaving only the model's own
-    # numbered reasoning/plan trace ("1. Identified... 5. Compiled the findings
-    # into a table.") with no actual table ever emitted. Unlike the citation
-    # retry below, a truncated response is unambiguously worse than a complete
-    # one, so this always keeps the retry — no comparison needed.
-    if usage.get("finish_reason") == "length" and _answer_token_budget < config.MAX_TOKENS_ANSWER_BROAD:
-        logger.warning("Answer generation truncated at %d tokens — retrying with broader budget",
-                       usage.get("completion_tokens", 0))
+    # Minimum length below which an answer is not "short but real" — it's
+    # effectively empty and unusable, regardless of why.
+    _MIN_VIABLE_ANSWER_CHARS = 50
+
+    # Truncation/empty-answer retry. Two distinct failure shapes land here:
+    #   (a) finish_reason == "length": a "factual"-intent question that's
+    #       actually broad/cross-document (e.g. "across all JVAs in the
+    #       corpus...") can exhaust the narrower MAX_TOKENS_ANSWER budget
+    #       before the model ever writes real content — confirmed live: a
+    #       25-page cross-document question got cut off at
+    #       completion_tokens=4034 (against a 4096 cap), leaving only the
+    #       model's own numbered reasoning/plan trace with no actual table
+    #       ever emitted.
+    #   (b) finish_reason == "stop" but the answer is near-empty: confirmed
+    #       live on open-ended risk_assessment prompts ("identify one-sided
+    #       clauses", "go/no-go recommendation") — the model spent its
+    #       reasoning budget and then just... stopped, with a clean
+    #       finish_reason that gave the original code no signal anything
+    #       was wrong. This shape is invisible to the finish_reason=="length"
+    #       check alone, so it shipped silently as a blank answer to the
+    #       user. Both shapes get the same treatment: unlike the citation
+    #       retry below, a truncated/empty response is unambiguously worse
+    #       than a complete one, so this always keeps the retry — no
+    #       comparison needed.
+    _was_truncated = usage.get("finish_reason") == "length"
+    _was_empty = len(answer.strip()) < _MIN_VIABLE_ANSWER_CHARS
+    _at_broad_budget = _answer_token_budget >= config.MAX_TOKENS_ANSWER_BROAD
+
+    # A same-budget retry is only worth attempting for the EMPTY case, not
+    # truncation: truncation is a real content-length problem that will
+    # almost certainly hit the exact same wall again at the same budget, so
+    # retrying without more room just burns a call. An empty answer at
+    # "stop" is a different failure — confirmed live on open-ended
+    # risk_assessment prompts ("go/no-go recommendation"): gpt-5-nano spent
+    # its whole reasoning allotment internally (2366 hidden reasoning tokens,
+    # finish_reason=stop) and emitted ZERO visible content, twice in a row.
+    # A plain same-effort re-ask hits the same wall (proven live). The lever
+    # that actually addresses "reasoned then produced nothing" is
+    # reasoning_effort: the primary pass runs at the global low setting to
+    # save tokens, so on an empty result we escalate effort ONE step to give
+    # the model room to commit to an answer. Only the empty case escalates —
+    # a genuine length-truncation wants MORE output budget, not more
+    # reasoning (which would make it worse).
+    _EFFORT_ESCALATION = {"minimal": "low", "low": "medium", "medium": "high", "high": "high"}
+    # Escalate reasoning_effort ONLY for a stop-empty (finish_reason=stop, no
+    # visible output → the model gave up and needs a nudge to commit). For a
+    # truncation-empty (finish_reason=length → the model spent the ENTIRE budget
+    # on hidden reasoning and never reached visible output, e.g. a 61-page broad
+    # question), MORE effort is exactly wrong — it reasons even harder and still
+    # emits nothing (confirmed live: a "from all service agreements" answer went
+    # blank this way after a medium-effort retry). Truncation wants LOW effort +
+    # a bigger budget so the room goes to output, not reasoning.
+    _stop_empty = _was_empty and not _was_truncated
+    if (_was_truncated or _was_empty) and not (_was_truncated and _at_broad_budget):
+        _retry_budget = config.MAX_TOKENS_ANSWER_BROAD if not _at_broad_budget else _answer_token_budget
+        _retry_effort = _EFFORT_ESCALATION.get(config.AZURE_REASONING_EFFORT, "medium") if _stop_empty else None
+        logger.warning(
+            "Answer generation %s (%d completion tokens, %d chars) — retrying%s%s",
+            "truncated" if _was_truncated else "came back empty",
+            usage.get("completion_tokens", 0), len(answer),
+            " with broader budget" if not _at_broad_budget else " at the same (already broad) budget",
+            f", reasoning_effort escalated to '{_retry_effort}'" if _retry_effort else "",
+        )
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(
-            prompt, token_budget=config.MAX_TOKENS_ANSWER_BROAD
+            prompt, token_budget=_retry_budget, reasoning_effort=_retry_effort
         )
         token_breakdown.append({
             "call": "truncation_retry",
@@ -3156,15 +3310,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "completion_tokens": retry_usage.get("completion_tokens", 0),
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
-        if retry_usage.get("finish_reason") != "length":
+        _retry_ok = retry_usage.get("finish_reason") != "length" and len(retry_answer.strip()) >= _MIN_VIABLE_ANSWER_CHARS
+        if _retry_ok:
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
-        else:
-            logger.warning("Truncation retry also hit the token limit — keeping it anyway, trimmed to its last complete unit")
+        elif len(retry_answer.strip()) > len(answer.strip()):
+            # Retry didn't fully resolve it, but produced more content than
+            # the original empty/truncated pass — keep the better of the two
+            # rather than shipping whichever came first.
+            logger.warning("Retry still incomplete but longer than the original — keeping retry, trimmed to last complete unit")
             retry_answer = _truncate_to_last_complete_unit(retry_answer)
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
-    elif usage.get("finish_reason") == "length":
-        # Already generated at the broad budget and still truncated — no
-        # further retry available, so just trim the dangling tail.
+        else:
+            logger.warning("Retry did not improve on the original — keeping original, trimmed to last complete unit")
+            answer = _truncate_to_last_complete_unit(answer)
+    elif _was_truncated or _was_empty:
+        # Truncated with no higher budget available — nothing left to try.
         logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
         answer = _truncate_to_last_complete_unit(answer)
 
@@ -3182,9 +3342,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # warning is appended as before.
     if _unverified_quotes or _misattributed:
         _flagged = list(_unverified_quotes) + list(_misattributed)
-        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(
-            flagged="\n".join(f"- {f[:200]}" for f in _flagged[:6])
-        )
+        _flag_lines = []
+        for f in _flagged[:6]:
+            _span = _nearest_verbatim_span(f, wiki_content)
+            if _span:
+                _flag_lines.append(f'- Flagged (not verbatim): "{f[:180]}"\n'
+                                   f'  Exact text in CONTEXT to copy: "{_span[:240]}"')
+            else:
+                _flag_lines.append(f'- Flagged (no verbatim match in CONTEXT — remove the '
+                                   f'quotation marks and state it plainly): "{f[:180]}"')
+        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(flagged="\n".join(_flag_lines))
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
         retry_unverified = _verify_answer_citations(retry_answer, wiki_content, question)
         retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
@@ -4218,7 +4385,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     return []
 
 
-def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
+def resolve_scope(question: str, session_id: str, pages: dict | None = None,
+                  chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
 
     Consolidates the three previously-scattered scope signals — named-document
@@ -4347,7 +4515,15 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> 
     #    already about ONE document, stay there rather than silently widening to
     #    the whole corpus. Runs last, so it can only claim questions every real
     #    detector above has already passed on (see _carryover_scope for guards).
-    carried = _carryover_scope(question, session_id)
+    # Carryover reads THIS conversation's recent scope, so it must use the chat
+    # session (where the thread's messages are stored), NOT the wiki/doc session
+    # (where pages live). They diverge when a fixed main wiki is served: retrieval
+    # runs against the doc session, but each chat thread's answers are saved under
+    # its own session_id. Reading the doc session here made carryover inherit a
+    # stale answer frozen in the ingest session (confirmed live: every no-doc
+    # question in every new chat defaulted to a July-17 JVA7 answer). Falls back
+    # to session_id when no separate chat session is passed (dev single-session).
+    carried = _carryover_scope(question, chat_session_id or session_id)
     if carried:
         logger.info("Scope carried over from the conversation: %s",
                     _norm_doc_name(carried[0]))

@@ -37,6 +37,12 @@ AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
 AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
+# GPT-5.x/o-series burn an uncapped share of max_completion_tokens on hidden
+# reasoning before writing any visible content — confirmed live: a 37-page
+# single-doc summary spent its entire 8192-token retry budget on reasoning,
+# leaving <20 visible chars (default effort is "medium"). Capping effort to
+# "low" leaves far more of the budget for the actual answer.
+AZURE_REASONING_EFFORT = os.getenv("AZURE_REASONING_EFFORT", "low")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
 EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
 
@@ -149,7 +155,7 @@ PROGRESS_STORE = {}
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
-MAX_TOKENS_GROUNDING_CHECK = 900  # bumped from 500: full (untruncated) answers can surface more ungrounded_claims entries
+MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning models (nano) the 900-token first pass routinely spent the whole budget on hidden reasoning and truncated (finish_reason=length), forcing a wasted retry at 1800 before any visible JSON — starting at 1500 skips that discarded first call on big answers. The escalating-budget ladder in _check_grounding still doubles from here (1500→3000→6000→12000) for the largest contexts.
 
 # Optional LLM reranking pass (Phase 3). RRF fusion is always on (free); this adds
 # a fast-model relevance rerank ON TOP, applied only to broad/family queries where
