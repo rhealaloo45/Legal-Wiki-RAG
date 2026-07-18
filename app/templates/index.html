@@ -3216,10 +3216,25 @@
 
       const lines = refsContent.split('\n');
       const refs = [];
+      // Backend-appended banners ([CITATION WARNING], [ATTRIBUTION WARNING],
+      // [SCOPE WARNING], [SCOPE NOTE]) are added AFTER the model's References
+      // section, so they land inside refsContent here. They start with "[" but
+      // not a digit, so the [N] parser below skips them — silently dropping the
+      // one signal that tells the user a quote couldn't be verified or the wrong
+      // document was used. Collect them and hoist them back into the visible
+      // body (confirmed live: a 16-unverified-quote answer showed no warning at
+      // all because its References heading triggered this extraction).
+      const banners = [];
+      const bannerRe = /^\[(?:CITATION WARNING|ATTRIBUTION WARNING|SCOPE WARNING|SCOPE NOTE)\b/i;
 
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
+
+        if (bannerRe.test(trimmed)) {
+          banners.push(trimmed);
+          continue;
+        }
 
         // Match [N] at the start
         const numMatch = trimmed.match(/^\[(\d+)\]\s*/);
@@ -3311,7 +3326,10 @@
         }
       }
 
-      return { cleanText, refs };
+      // Re-attach any hoisted banners to the visible body so a verification
+      // warning is never lost just because a References heading followed it.
+      const finalText = banners.length ? (cleanText + '\n\n' + banners.join('\n\n')).trim() : cleanText;
+      return { cleanText: finalText, refs };
     }
 
     // Map reference file name to canonical path from currentDocs
@@ -4563,12 +4581,59 @@
     $askBtn.addEventListener('click', doQuery);
     $qInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery(); } });
 
+    // Coerce the two malformed "table" shapes the model actually emits into
+    // valid GFM pipe tables so marked renders them. Without this, comparison /
+    // obligation answers showed as flat run-on text (confirmed live: "no table
+    // detected" + tab-separated rows that marked left as plain lines):
+    //   (a) TAB-separated rows — the model uses \t instead of " | ".
+    //   (b) PIPE rows with NO "|---|" delimiter row after the header — GFM
+    //       requires the delimiter or it isn't a table at all.
+    function coerceTables(text) {
+      const lines = text.split('\n');
+      const out = [];
+      const isTabRow = l => l.indexOf('\t') >= 0 && l.split('\t').length >= 2;
+      const isPipeRow = l => { const t = l.trim(); return t.indexOf('|') >= 0 && t.split('|').filter(s => s.trim() !== '').length >= 2; };
+      const isDelim = l => /^[\s|:\-]+$/.test(l) && l.indexOf('-') >= 0;
+      const pipeRow = (cells, ncol) => { const c = cells.slice(); while (c.length < ncol) c.push(''); return '| ' + c.map(x => x.replace(/\|/g, '\\|')).join(' | ') + ' |'; };
+      let i = 0;
+      while (i < lines.length) {
+        // (a) tab-separated block → pipe table
+        if (isTabRow(lines[i])) {
+          let j = i; const block = [];
+          while (j < lines.length && isTabRow(lines[j])) { block.push(lines[j]); j++; }
+          if (block.length >= 2) {
+            const rows = block.map(l => l.split('\t').map(c => c.trim()));
+            const ncol = Math.max(...rows.map(r => r.length));
+            out.push(pipeRow(rows[0], ncol));
+            out.push('| ' + Array(ncol).fill('---').join(' | ') + ' |');
+            for (let k = 1; k < rows.length; k++) out.push(pipeRow(rows[k], ncol));
+            i = j; continue;
+          }
+        }
+        // (b) pipe block missing its delimiter row → inject one
+        if (isPipeRow(lines[i]) && !(i + 1 < lines.length && isDelim(lines[i + 1]))) {
+          let j = i; const block = [];
+          while (j < lines.length && isPipeRow(lines[j]) && !isDelim(lines[j])) { block.push(lines[j]); j++; }
+          if (block.length >= 2) {
+            const ncol = Math.max(...block.map(l => l.trim().replace(/^\||\|$/g, '').split('|').length));
+            out.push(block[0]);
+            out.push('| ' + Array(ncol).fill('---').join(' | ') + ' |');
+            for (let k = 1; k < block.length; k++) out.push(block[k]);
+            i = j; continue;
+          }
+        }
+        out.push(lines[i]); i++;
+      }
+      return out.join('\n');
+    }
+
     function renderMarkdown(text) {
       if (!text) return '';
       // Strip ```text / ```markdown / ``` fences so clause drafts render
       // as formatted prose instead of monospace code blocks.
       text = text.replace(/```(?:text|markdown|plaintext)?\s*\n/g, '')
                  .replace(/\n```\s*/g, '\n');
+      text = coerceTables(text);
       try { return marked.parse(text, { breaks: true, gfm: true }); }
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
     }

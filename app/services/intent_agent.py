@@ -218,7 +218,11 @@ def get_query_strategy(intent: str) -> dict:
 class QueryState(TypedDict, total=False):
     # Input
     question: str
-    session_id: str
+    session_id: str          # wiki/doc session — where pages & documents live (retrieval)
+    chat_session_id: str     # per-thread chat session — where THIS conversation's
+                             # messages are stored (carryover + conversation history).
+                             # Diverges from session_id whenever a fixed main wiki is
+                             # served; falls back to session_id when unset.
     target_doc: str
     is_followup: bool
     exclude_cached_answers: bool
@@ -416,7 +420,8 @@ def resolve_scope_node(state: QueryState) -> dict:
     """
     logger.info("[AGENT] resolve_scope_node")
     try:
-        decision = wiki.resolve_scope(state["question"], state["session_id"])
+        decision = wiki.resolve_scope(state["question"], state["session_id"],
+                                      chat_session_id=state.get("chat_session_id"))
     except Exception as e:
         logger.error("resolve_scope failed, defaulting to corpus: %s", e)
         decision = {"scope": "corpus", "target_docs": [], "target_family": None,
@@ -430,7 +435,8 @@ def resolve_scope_node(state: QueryState) -> dict:
 def retrieve_context_node(state: QueryState) -> dict:
     logger.info("[AGENT] retrieve_context_node: intent=%s", state.get("intent"))
     _emit({"stage": "retrieving", "status": "active", "message": "Retrieving relevant pages…"})
-    conv = state.get("conversation_context") or wiki.build_conversation_context(state["session_id"])
+    conv = state.get("conversation_context") or wiki.build_conversation_context(
+        state.get("chat_session_id") or state["session_id"])
     hints = get_query_strategy(state["intent"])
     # Phase 2: forward the resolved scope's family filter + broad flag into
     # retrieval. Only "family" scope narrows the vector search; everything else
@@ -587,6 +593,153 @@ Scoring guide:
 - 0-49: Significant fabricated facts"""
 
 
+_CLAIM_PATTERNS = [
+    re.compile(r'\$\s?\d[\d,]*(?:\.\d+)?'),                                    # currency
+    re.compile(r'\b\d[\d,]*(?:\.\d+)?\s?%'),                                   # percentages
+    re.compile(r'\b\d+\s*(?:day|days|month|months|year|years|week|weeks)\b', re.I),  # durations
+    re.compile(r'\b(?:January|February|March|April|May|June|July|August|'
+               r'September|October|November|December)\s+\d{1,2},?\s+\d{4}\b', re.I),  # long dates
+    re.compile(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b'),                                # numeric dates
+    re.compile(r'\b\d{4}-\d{2}-\d{2}\b'),                                      # ISO dates
+    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+[\dA-Za-z.]+\b', re.I),  # doc refs
+    re.compile(r'\b(?:[A-Z][a-zA-Z&\'-]+(?:\s+[A-Z][a-zA-Z&\'-]+){1,3})\b'),    # multi-word proper nouns
+]
+
+# Words that pattern-match as "proper nouns" (capitalized phrases) but are
+# generic legal boilerplate, not a fact that could be fabricated — checking
+# these against context is noise, not signal.
+_CLAIM_STOPWORDS = {
+    "the agreement", "this agreement", "the document", "this document",
+    "the parties", "the party", "the company", "the effective date",
+    "not covered", "not applicable", "not stated", "not specified",
+}
+
+
+def _extract_claims(text: str) -> list[str]:
+    """Pull out checkable factual atoms (amounts, dates, durations, doc
+    references, proper nouns) from an answer, deduplicated and stripped of
+    generic boilerplate phrases that aren't really factual claims."""
+    claims: list[str] = []
+    seen = set()
+    for pattern in _CLAIM_PATTERNS:
+        for m in pattern.finditer(text):
+            claim = m.group(0).strip()
+            key = claim.lower()
+            if key in seen or key in _CLAIM_STOPWORDS or len(key) < 3:
+                continue
+            seen.add(key)
+            claims.append(claim)
+    return claims
+
+
+def _claim_grounded(claim: str, context_norm: str) -> bool:
+    """Normalize and substring-match a single claim against the flattened
+    context. Exact-enough for numbers/dates; good-enough for proper nouns
+    (a real fabrication swaps the name/number outright, it doesn't just
+    reformat whitespace)."""
+    norm = re.sub(r'\s+', ' ', claim.strip().lower())
+    norm = re.sub(r'[,.]', '', norm)
+    return norm in context_norm
+
+
+def _deterministic_grounding(context: str, answer: str) -> dict:
+    """Zero-cost grounding score: extract factual claims from the answer and
+    check each one's literal presence in the retrieved context. Catches the
+    most common fabrication shape (wrong number/date/party name) without an
+    LLM call. Cannot catch claims that are semantically wrong while reusing
+    real numbers/names already in context — that gap is what the LLM
+    escalation in _check_grounding_hybrid exists for."""
+    claims = _extract_claims(answer)
+    if not claims:
+        return {"grounding_score": None, "ungrounded_claims": [], "summary":
+                 "No checkable factual claims (amounts/dates/names) found in answer.",
+                 "total_claims": 0, "method": "deterministic"}
+
+    context_norm = re.sub(r'\s+', ' ', context.lower())
+    context_norm = re.sub(r'[,.]', '', context_norm)
+    ungrounded = [c for c in claims if not _claim_grounded(c, context_norm)]
+    score = round(100 * (len(claims) - len(ungrounded)) / len(claims))
+    return {
+        "grounding_score": score,
+        "ungrounded_claims": ungrounded[:8],
+        "summary": f"{len(claims) - len(ungrounded)}/{len(claims)} checkable claims verified against context (deterministic).",
+        "total_claims": len(claims),
+        "method": "deterministic",
+    }
+
+
+# Escalation bands per intent — comparison/obligation/risk_assessment answers
+# synthesize across many sources and are more prone to claims that are
+# factually-real-but-logically-wrong (right number, wrong clause it's
+# attached to), which the deterministic pass can't detect. Bias those
+# intents toward escalating to the LLM judge more readily: lower min-claims
+# floor and a wider "ambiguous" band around the score.
+#
+# escalate_high was 95 for those three, so nearly EVERY answer escalated (real
+# answers rarely score above 95 deterministically) — the "deterministic first
+# to save cost" barely saved anything for them, and each escalation is a full
+# (sometimes reasoning-truncated, retried) LLM call for a DECORATIVE score that
+# gates nothing. Lowered to 85: an answer that already verifies ≥85% of its
+# checkable claims is well-grounded enough to trust without paying for the
+# judge. escalate_low stays low ON PURPOSE — a low deterministic score on these
+# paraphrase-heavy intents is often just reworded-but-real quotes, so surfacing
+# it raw would mislead (same trap as drafting grounding); those still escalate
+# to get a truer number.
+_GROUNDING_THRESHOLDS = {
+    "default":         {"min_claims": 3, "escalate_low": 50, "escalate_high": 85},
+    "comparison":      {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
+    "obligation":      {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
+    "risk_assessment": {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
+}
+
+
+def _check_grounding_hybrid(question: str, context: str, answer: str, intent: str = "factual") -> dict:
+    """Deterministic grounding check first (free); escalate to the LLM judge
+    only when the deterministic signal is too thin or too ambiguous to trust."""
+    if not context or not answer or len(answer) < 20:
+        return {"grounding_score": None, "ungrounded_claims": [], "summary": "Skipped — insufficient content."}
+
+    # Drafting answers are NEW clause language written to order, not facts
+    # retrieved from the context — so claim-by-claim matching against the
+    # source is structurally the wrong metric and always scores low
+    # (confirmed live: good drafted clauses scored 25–46% grounding, which
+    # reads as a quality warning when it is nothing of the sort). The part of
+    # a drafting answer that CAN be verified — its "Source Clauses" verbatim
+    # quotes — is already checked by _verify_answer_citations in
+    # wiki.generate_answer, so skip the grounding score here rather than
+    # surface a misleading number.
+    if intent == "drafting":
+        return {"grounding_score": None, "ungrounded_claims": [],
+                "summary": "Not scored — drafted clause language is newly authored text, not retrieved facts (source-clause citations are verified separately).",
+                "method": "skipped-drafting"}
+
+    det = _deterministic_grounding(context, answer)
+    thresholds = _GROUNDING_THRESHOLDS.get(intent, _GROUNDING_THRESHOLDS["default"])
+    score = det["grounding_score"]
+
+    needs_escalation = (
+        det["total_claims"] < thresholds["min_claims"]
+        or (score is not None and thresholds["escalate_low"] < score < thresholds["escalate_high"])
+    )
+
+    if needs_escalation:
+        logger.info(
+            "[GROUNDING] Deterministic pass inconclusive (claims=%d, score=%s) — escalating to LLM judge",
+            det["total_claims"], score,
+        )
+        llm_result = _check_grounding(question, context, answer, intent=intent)
+        if llm_result.get("grounding_score") is not None:
+            llm_result["method"] = "llm"
+            return llm_result
+        # LLM check failed outright — fall back to the deterministic read
+        # rather than surfacing nothing.
+        return det
+
+    logger.info("[GROUNDING] Deterministic pass sufficient (claims=%d, score=%s) — skipped LLM call",
+                det["total_claims"], score)
+    return det
+
+
 def _check_grounding(question: str, context: str, answer: str, intent: str = "factual") -> dict:
     """LLM-based grounding check — verifies answer claims against context."""
     if not context or not answer or len(answer) < 20:
@@ -671,7 +824,7 @@ def validate_response_node(state: QueryState) -> dict:
     grounding = {"grounding_score": None, "ungrounded_claims": [], "summary": "Disabled."}
     if config.ENABLE_ANSWER_VALIDATION:
         _emit({"stage": "validating", "status": "active", "message": "Checking answer grounding…"})
-        grounding = _check_grounding(
+        grounding = _check_grounding_hybrid(
             state["question"],
             state.get("wiki_context", ""),
             answer,
@@ -734,7 +887,8 @@ def get_query_graph():
 
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
-                     is_followup: bool = False, exclude_cached_answers: bool = False):
+                     is_followup: bool = False, exclude_cached_answers: bool = False,
+                     chat_session_id: str = ""):
     """Run the query graph and yield stage event dicts in real time.
 
     Each yielded dict is a custom stage event emitted by a node. The terminal
@@ -747,6 +901,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     state: QueryState = {
         "question": question,
         "session_id": session_id,
+        "chat_session_id": chat_session_id or session_id,
         "target_doc": target_doc or "",
         "is_followup": bool(is_followup),
         "exclude_cached_answers": bool(exclude_cached_answers),
