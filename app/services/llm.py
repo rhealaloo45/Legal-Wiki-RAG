@@ -4,6 +4,7 @@ Entry point: ask(prompt, pipeline) -> tuple[str, dict]
 """
 
 import logging
+import re
 from openai import OpenAI, RateLimitError
 import config
 
@@ -100,7 +101,17 @@ def _is_azure() -> bool:
     return config.LLM_PROVIDER not in ("openrouter", "nvidia")
 
 
-def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None) -> dict:
+def _is_reasoning_model(model_name: str) -> bool:
+    """True for GPT-5.x / o-series deployments, which take `reasoning_effort`
+    and reject a non-default `temperature`. Classic Azure chat deployments
+    (gpt-4o, gpt-4o-mini, gpt-4.1, ...) reject `reasoning_effort` outright —
+    keyed off the deployment name since Azure has no model-family field."""
+    name = model_name.lower()
+    return bool(re.match(r"^(gpt-5|o1|o3|o4)\b", name)) or "gpt-5" in name
+
+
+def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None,
+                       reasoning_effort: str | None = None) -> dict:
     """Build chat.completions kwargs, adapted to the active provider's API.
 
     Azure GPT-5.x / o-series reasoning deployments differ from the classic
@@ -110,11 +121,19 @@ def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None) -> 
     so we omit temperature entirely on that path.
     The nvidia/openrouter OpenAI-compatible endpoints keep the classic params
     (deterministic `temperature=0.0` + `max_tokens`).
+
+    reasoning_effort overrides the global config default for this one call —
+    used to escalate effort on a retry when a low-effort reasoning-model call
+    came back with hidden reasoning but zero visible content.
     """
     kwargs = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
     if _is_azure():
         if max_tokens is not None:
             kwargs["max_completion_tokens"] = max_tokens
+        if _is_reasoning_model(model_name):
+            kwargs["reasoning_effort"] = reasoning_effort or config.AZURE_REASONING_EFFORT
+        else:
+            kwargs["temperature"] = 0.0
     else:
         kwargs["temperature"] = 0.0
         if max_tokens is not None:
@@ -122,7 +141,8 @@ def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None) -> 
     return kwargs
 
 
-def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False) -> tuple[str, dict]:
+def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False,
+        reasoning_effort: str = None) -> tuple[str, dict]:
     """Send a prompt to the selected LLM and return the response text and usage dict.
 
     Args:
@@ -134,6 +154,9 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
                     OPENROUTER_FAST_MODEL) instead of the full synthesis model.
                     Use for: contradiction checks, page selection, JSON repair.
                     Do NOT use for: ingest synthesis, answer generation, drafting.
+        reasoning_effort: Override the global AZURE_REASONING_EFFORT for this one
+                    call (Azure reasoning models only; ignored elsewhere). Used to
+                    escalate effort on an empty-answer retry.
     """
     if config.LLM_PROVIDER == "openrouter":
         client = get_openrouter_client()
@@ -146,7 +169,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
     try:
-        kwargs = _completion_kwargs(model_name, prompt, max_tokens)
+        kwargs = _completion_kwargs(model_name, prompt, max_tokens, reasoning_effort)
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {

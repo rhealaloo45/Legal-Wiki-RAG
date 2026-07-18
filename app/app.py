@@ -831,7 +831,8 @@ def query_route():
         final_emitted = False
         try:
             for ev in intent_agent.run_query_stream(question, wiki_session_id, target_doc, is_followup,
-                                                     exclude_cached_answers):
+                                                     exclude_cached_answers,
+                                                     chat_session_id=session_id):
                 etype = ev.get("type")
                 logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
 
