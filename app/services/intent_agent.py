@@ -668,7 +668,21 @@ _CLAIM_PATTERNS = [
                r'September|October|November|December)\s+\d{1,2},?\s+\d{4}\b', re.I),  # long dates
     re.compile(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b'),                                # numeric dates
     re.compile(r'\b\d{4}-\d{2}-\d{2}\b'),                                      # ISO dates
-    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+[\dA-Za-z.]+\b', re.I),  # doc refs
+    # doc refs — the identifier MUST start with a digit ("Clause 5.3") or an
+    # uppercase roman numeral ("Section IV"), never a bare following word.
+    # Without this, "Clause"/"Schedule" followed by ANY word matched ordinary
+    # prose continuations like "clause allowing", "schedule of", "clause
+    # tailored" as if they were checkable document references (confirmed live:
+    # a risk-assessment answer's own sentence "the explicit liberty clause
+    # allowing plaintiffs..." produced a fake claim "clause allowing" that
+    # then, correctly but meaninglessly, never matched context — one of
+    # several junk matches that dragged a well-grounded answer's deterministic
+    # score down to 20%). Split into two case-sensitivity-matched patterns
+    # rather than one re.I pattern: under re.I, a lowercase "in" or "is" would
+    # satisfy a case-insensitive [IVXLC] lookahead (I matches i), letting the
+    # exact same junk back in through the roman-numeral branch.
+    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+(?=\d)[\dA-Za-z.]+\b', re.I),  # doc refs (numeric)
+    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+(?=[IVXLC]+\b)[IVXLC]+\b'),   # doc refs (roman numeral, case-sensitive)
     re.compile(r'\b(?:[A-Z][a-zA-Z&\'-]+(?:\s+[A-Z][a-zA-Z&\'-]+){1,3})\b'),    # multi-word proper nouns
 ]
 

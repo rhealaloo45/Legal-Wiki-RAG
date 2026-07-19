@@ -3553,7 +3553,42 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # identifier and is immune to the collision because two distinct documents
     # never share the same filename.
     canonical_files: dict[str, str] = {}  # cleaned display name -> raw source_doc
-    for page in pages.values():
+    # Pages are also titled with a short SYNTHESIZED identifier — "Dynamic
+    # Injunction Framework – LO-Tata – Legal Opinion" carries "LO-Tata" — and the
+    # model frequently cites bracket-style using THAT identifier ("[LO-Tata –
+    # Dynamic Injunction Framework; ...]") instead of the real filename shown in
+    # the context's own "[From: ...]" label right below the title (confirmed
+    # live: this left files_used empty for two answers whose bracket citations
+    # never matched canonical_files at all, silently falling through to the
+    # arbitrary "first 3 selected pages" last resort below — which rendered
+    # NDA 7 as the References list for an answer that never once cited NDA 7).
+    # Index those identifiers too, using the same extractor _doc_identifier_part
+    # already uses for entity-matching, so a "LO-Tata"-style citation resolves to
+    # its real document exactly like a filename-style citation does.
+    # Some pages never got a distinctive synthesized ID at ingest time and just
+    # repeat the bare document TYPE as their "identifier" instead — e.g. a title
+    # like "Assignment Clause Recommendation – Legal Opinion (Legal Opinion)"
+    # makes _doc_identifier_part return "Legal Opinion", not a real per-document
+    # code. That generic word appears on MANY unrelated documents, so indexing
+    # it would make ANY citation mentioning "Legal Opinion" (or "Court
+    # Judgment", etc.) false-match whichever one of those documents happened to
+    # be written into the dict last (confirmed live: a compound citation
+    # bracket containing the bare words "Legal Opinion" and "Court Judgment"
+    # pulled in two topically unrelated documents — a Sentinel IP work-for-hire
+    # opinion and a Delaware trade-secrets judgment — neither actually cited).
+    # A generic type word can never distinguish one document from another, so
+    # exclude it from the identifier index entirely rather than let it resolve
+    # to an arbitrary single document.
+    _GENERIC_TYPE_IDENTIFIERS = {
+        "nda", "service agreement", "master services agreement", "msa",
+        "shareholders agreement", "shareholder agreement", "sha",
+        "joint venture agreement", "jva", "court judgment", "legal opinion",
+        "legal opinions", "judgment", "petition", "affidavit", "arbitration notice",
+        "complaint", "lease", "licence", "license", "deed", "memorandum",
+        "settlement", "agreement", "contract",
+    }
+    identifier_files: dict[str, str] = {}  # short doc identifier -> raw source_doc
+    for title, page in pages.items():
         if not isinstance(page, dict):
             continue
         sd = page.get("source_doc", "")
@@ -3562,6 +3597,9 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         clean = re.sub(r'^[a-f0-9-]{36}_', '', sd.replace("\\", "/").rsplit("/", 1)[-1])
         clean = os.path.splitext(clean)[0]
         canonical_files[clean] = sd
+        ident = _doc_identifier_part(title)
+        if len(ident) >= 4 and ident.lower() not in _GENERIC_TYPE_IDENTIFIERS:
+            identifier_files[ident.lower()] = sd
 
     pages_used_dedup = []
     files_used = []
@@ -3592,6 +3630,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 if cn_norm in t_norm or (len(t_norm) >= 6 and t_norm in cn_norm):
                     if sd not in files_used:
                         files_used.append(sd)
+            # Forward-only, same as canonical_files above: the identifier
+            # ("LO-Tata") is short and distinctive by construction (>=4 chars,
+            # ingest-synthesized per document), so checking it appears IN the
+            # citation text is safe — the reverse direction isn't needed since
+            # citation text is never shorter than a 4-char identifier in a way
+            # that would matter.
+            for ident, sd in identifier_files.items():
+                if ident in t_norm and sd not in files_used:
+                    files_used.append(sd)
 
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
@@ -4572,40 +4619,20 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         return {"scope": "corpus", "target_docs": [], "target_family": None,
                 "is_broad": True, "confidence": 0.6, "method": "broad"}
 
-    # 4. Conversational carryover — the question names no document, no party, no
-    #    entity, no family, and isn't broad. If the conversation is demonstrably
-    #    already about ONE document, stay there rather than silently widening to
-    #    the whole corpus. Runs last, so it can only claim questions every real
-    #    detector above has already passed on (see _carryover_scope for guards).
-    # Carryover reads THIS conversation's recent scope, so it must use the chat
-    # session (where the thread's messages are stored), NOT the wiki/doc session
-    # (where pages live). They diverge when a fixed main wiki is served: retrieval
-    # runs against the doc session, but each chat thread's answers are saved under
-    # its own session_id. Reading the doc session here made carryover inherit a
-    # stale answer frozen in the ingest session (confirmed live: every no-doc
-    # question in every new chat defaulted to a July-17 JVA7 answer). Falls back
-    # to session_id when no separate chat session is passed (dev single-session).
-    carried = _carryover_scope(question, chat_session_id or session_id)
-    if carried:
-        logger.info("Scope carried over from the conversation: %s",
-                    _norm_doc_name(carried[0]))
-        return {"scope": "single_doc", "target_docs": carried,
-                "target_family": None, "is_broad": False,
-                "confidence": 0.55, "method": "carryover"}
-
-    # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
-    #    But first: did the question NAME a specific counterparty that simply
-    #    couldn't be pinned to one document? Reaching here means every detector
-    #    above passed — including the party-content match, which returns empty
-    #    when the named party spans too many documents to disambiguate (an
-    #    umbrella name like "Tata Consumer Products Limited" appearing across
-    #    many NDAs/SHAs/JVAs). The question still expects ONE specific document,
-    #    but corpus search will answer from whichever same-family page ranks
-    #    highest — which may not be the one the user meant, and nothing else in
-    #    the pipeline can tell (confirmed live: "the mutual NDA of Tata Consumer
-    #    Products Limited" was answered from NDA-Battery/NDA 5 at 92% confidence
-    #    when the user meant NDA 7). Surface the ambiguity so the answer can warn
-    #    rather than look authoritative about an unconfirmed document.
+    # Did the question NAME a specific counterparty that simply couldn't be
+    # pinned to one document? Reaching here means every detector above passed —
+    # including the party-content match, which returns empty when the named
+    # party spans too many documents to disambiguate (an umbrella name like
+    # "Tata Sons Private Limited" appearing across many NDAs/SHAs/JVAs/
+    # Judgments). Computed BEFORE carryover, and used to GATE it below: a
+    # question that names a party is a fresh topic reference, even when that
+    # name is too ambiguous to resolve to one document — it must never be
+    # confused with "names no document at all" and silently answered from
+    # whatever document the previous, unrelated question happened to land on
+    # (confirmed live: a Judgment-thread's carried scope kept answering brand-new
+    # Legal-Opinion questions about Tata Sons/Consumer Products/Motors from the
+    # stale Judgment 6 context, because none of those questions contained an
+    # explicit document-TYPE word for _CARRYOVER_TYPE_RE to catch).
     unresolved_party = ""
     try:
         _cands = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
@@ -4614,6 +4641,35 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             unresolved_party = _cands[0]
     except Exception:
         unresolved_party = ""
+
+    # 4. Conversational carryover — the question names no document, no party
+    #    (resolved OR unresolved), no entity, no family, and isn't broad. If the
+    #    conversation is demonstrably already about ONE document, stay there
+    #    rather than silently widening to the whole corpus. Runs last, so it can
+    #    only claim questions every real detector above has already passed on
+    #    (see _carryover_scope for guards) AND that named no party at all —
+    #    unresolved_party being non-empty means this IS a fresh topic reference,
+    #    just an ambiguous one, so it falls through to the corpus-default branch
+    #    below (which discloses the ambiguity via a [SCOPE WARNING]) instead of
+    #    ever reaching carryover.
+    # Carryover reads THIS conversation's recent scope, so it must use the chat
+    # session (where the thread's messages are stored), NOT the wiki/doc session
+    # (where pages live). They diverge when a fixed main wiki is served: retrieval
+    # runs against the doc session, but each chat thread's answers are saved under
+    # its own session_id. Reading the doc session here made carryover inherit a
+    # stale answer frozen in the ingest session (confirmed live: every no-doc
+    # question in every new chat defaulted to a July-17 JVA7 answer). Falls back
+    # to session_id when no separate chat session is passed (dev single-session).
+    if not unresolved_party:
+        carried = _carryover_scope(question, chat_session_id or session_id)
+        if carried:
+            logger.info("Scope carried over from the conversation: %s",
+                        _norm_doc_name(carried[0]))
+            return {"scope": "single_doc", "target_docs": carried,
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.55, "method": "carryover"}
+
+    # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
     return {"scope": "corpus", "target_docs": [], "target_family": None,
             "is_broad": False, "confidence": 0.5, "method": "default",
             "unresolved_party": unresolved_party}
