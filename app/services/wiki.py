@@ -2491,6 +2491,40 @@ def _strict_verification_corpus(context: str) -> str:
     return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
 
 
+# A reference/citation line ending in a QUOTE-WRAPPED placeholder standing in for
+# a real excerpt the model didn't have — e.g. `... Liability and Indemnity — "Not
+# provided in excerpt"` or `... Section 2.3. Quote: (not provided here)`. The
+# ANSWER/ASSESSMENT/COMPARISON prompts already ban this, but gpt-5-nano at low
+# reasoning effort re-emits it intermittently (confirmed live across batches:
+# JVA6 came back clean once, then NDA 7 regressed to the em-dash form). The set of
+# stand-in phrases is finite and none is ever a legitimate quote, so strip it
+# deterministically rather than depend on model compliance. Requires the phrase to
+# be WRAPPED in quotes/parens — a bare "not available" in prose is left untouched.
+_PLACEHOLDER_QUOTE_RE = re.compile(
+    r'(?im)'
+    r'[ \t]*(?:[|—–-][ \t]*)?'                 # optional leading separator (pipe / dash)
+    r'(?:Quote[ \t]*:[ \t]*)?'                  # optional "Quote:" label
+    r'[("“\']'                                    # REQUIRED opening wrapper (quote or paren)
+    r'[ \t]*'
+    r'(?:not[ \t]+provided(?:[ \t]+in[ \t]+excerpt|[ \t]+here)?'
+    r'|not[ \t]+available|not[ \t]+applicable|n/?a|none[ \t]+provided)'
+    r'[ \t]*\.?'
+    r'[)"”\']'                                    # closing wrapper
+    r'[ \t]*$'
+)
+
+
+def _strip_placeholder_quotes(answer: str) -> str:
+    """Remove quote-wrapped placeholder stand-ins (e.g. "Not provided in excerpt")
+    from the ends of reference/citation lines. Leaves the rest of the line — the
+    real FileName + Clause/Section citation — intact, so a reference with no
+    verbatim quote simply ends after its clause reference, as the prompts require.
+    """
+    if not answer or '"' not in answer and "'" not in answer and '(' not in answer:
+        return answer
+    return _PLACEHOLDER_QUOTE_RE.sub('', answer)
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -2892,7 +2926,7 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
     scope_note: a plain-English disclosure of HOW the scope was decided, when it
@@ -2900,6 +2934,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         conversational carryover). Appended verbatim as a deterministic banner —
         the model must not be able to omit the one line explaining why it
         answered about a document the question never named.
+
+    scope_warning: a plain-English WARNING appended when the question named a
+        specific counterparty that could not be pinned to one document, so the
+        answer was drawn from a broad corpus search that may have surfaced the
+        wrong same-family document. Stronger than scope_note (emitted as
+        [SCOPE WARNING], which the frontend hoists into the visible body).
     """
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -3328,6 +3368,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
         answer = _truncate_to_last_complete_unit(answer)
 
+    # Strip quote-wrapped placeholder stand-ins ("Not provided in excerpt", "(not
+    # provided here)", etc.) from reference lines BEFORE the integrity checks — they
+    # are a known nano non-compliance the prompts already forbid, and stripping them
+    # here both cleans the output and stops them from tripping the citation check
+    # (which correctly flags "Not provided in excerpt" as a non-verbatim quote).
+    answer = _strip_placeholder_quotes(answer)
+
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
     # context (paraphrase dressed up as an exact quote), and any quote
@@ -3464,6 +3511,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"see above was drawn from other document(s) that matched the same name/number. "
             f"Check the References section names the document you actually meant.]"
         )
+
+    # The question named a counterparty that couldn't be pinned to one document —
+    # the answer came from a broad search that may have surfaced a sibling of the
+    # same type. Warn deterministically (the model can't see that its source was a
+    # best-guess rather than the document the user meant).
+    if scope_warning:
+        answer += f"\n\n[SCOPE WARNING: {scope_warning}]"
 
     # Scope was inferred rather than stated by the question — say so, always.
     if scope_note:
@@ -4532,8 +4586,29 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                 "confidence": 0.55, "method": "carryover"}
 
     # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
+    #    But first: did the question NAME a specific counterparty that simply
+    #    couldn't be pinned to one document? Reaching here means every detector
+    #    above passed — including the party-content match, which returns empty
+    #    when the named party spans too many documents to disambiguate (an
+    #    umbrella name like "Tata Consumer Products Limited" appearing across
+    #    many NDAs/SHAs/JVAs). The question still expects ONE specific document,
+    #    but corpus search will answer from whichever same-family page ranks
+    #    highest — which may not be the one the user meant, and nothing else in
+    #    the pipeline can tell (confirmed live: "the mutual NDA of Tata Consumer
+    #    Products Limited" was answered from NDA-Battery/NDA 5 at 92% confidence
+    #    when the user meant NDA 7). Surface the ambiguity so the answer can warn
+    #    rather than look authoritative about an unconfirmed document.
+    unresolved_party = ""
+    try:
+        _cands = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+        _cands = [c for c in _cands if len(c) >= 4]
+        if _cands:
+            unresolved_party = _cands[0]
+    except Exception:
+        unresolved_party = ""
     return {"scope": "corpus", "target_docs": [], "target_family": None,
-            "is_broad": False, "confidence": 0.5, "method": "default"}
+            "is_broad": False, "confidence": 0.5, "method": "default",
+            "unresolved_party": unresolved_party}
 
 
 def classify_query(question: str, session_id: str) -> dict:

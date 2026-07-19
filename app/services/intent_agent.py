@@ -98,6 +98,20 @@ _RX_BETWEEN_PARTIES = re.compile(
     r'[^.?!;]+\band\b',
     re.IGNORECASE,
 )
+# A third false trigger: "board composition structured between Tata Power and
+# the founders", "equity split between the two shareholders", "seats divided
+# between X and Y" — this describes how ONE document internally apportions
+# something (board seats, equity, duties) between two parties/constituencies,
+# not a request to compare two documents. The verb immediately before
+# "between" signals an internal allocation, not a second document's identity
+# (confirmed live: "How is the board composition structured between Tata
+# Power Renewable Energy Limited and the founders" on a single-document SHA
+# review forced a comparison template that rendered a "Not applicable — no
+# second document in corpus" table instead of just answering the question).
+_RX_BETWEEN_ALLOCATION = re.compile(
+    r'\b(?:structured|split|divided|allocated|apportioned|distributed|shared|balanced)\s+between\b',
+    re.IGNORECASE,
+)
 _RX_OBLIGATION = re.compile(
     r'(?:'
     r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
@@ -172,7 +186,8 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
     if _RX_COMPARISON.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
-            and not _RX_BETWEEN_PARTIES.search(q):
+            and not _RX_BETWEEN_PARTIES.search(q) \
+            and not _RX_BETWEEN_ALLOCATION.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_RISK.search(q) and not _is_governance_approval_only(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
@@ -503,6 +518,22 @@ def generate_answer_node(state: QueryState) -> dict:
             f"or use \"across all …\" to search every document."
         )
 
+    # The question named a specific counterparty the pipeline could not pin to
+    # one document (the name spans too many documents to disambiguate), so scope
+    # fell through to a broad corpus search. The answer may be sourced from a
+    # same-type sibling rather than the exact document the user meant — warn.
+    _scope_warning = ""
+    _unresolved = _scope.get("unresolved_party") if _scope.get("method") == "default" else ""
+    if _unresolved:
+        _scope_warning = (
+            f"The question named \"{_unresolved}\" but that party appears in several "
+            f"documents, so no single document could be confirmed as the one you meant. "
+            f"The answer below was drawn from a broad search and may reflect a "
+            f"different document of the same type — check the References section, and "
+            f"if it's the wrong one, name the document by its number (e.g. \"NDA 7\") "
+            f"or its distinctive counterparty."
+        )
+
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
@@ -510,7 +541,7 @@ def generate_answer_node(state: QueryState) -> dict:
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
-            scope_note=_scope_note,
+            scope_note=_scope_note, scope_warning=_scope_warning,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
