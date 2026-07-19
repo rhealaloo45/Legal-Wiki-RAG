@@ -1688,26 +1688,109 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
     generic retrieval, which pulled an unrelated document instead).
     """
     matched: set[str] = set()
+    # Underscore-normalise before matching: the corpus's own synthetic filenames
+    # are underscore-joined ("Test_SHA_01.txt"), and users echo that shorthand
+    # back ("sha_01") — but "_" is a \w char, so it doesn't satisfy the \s*
+    # gap between type and number in _DOC_NAME_PATTERN and the match silently
+    # fails, same length so match.end() offsets used below stay valid.
+    question = question.replace('_', ' ')
     for num_match in _DOC_NAME_PATTERN.finditer(question):
         t = num_match.group(1).lower()
         t = re.sub(r'\s+', ' ', t).strip()
-        doc_num = num_match.group(2)
         # Distinctive core token the filename must contain (see _DOC_TYPE_CORE) —
         # NOT the first word, which for "legal opinion" is the non-distinctive
         # "legal" that prefixes every source_doc.
         type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
-        # Match the number allowing zero-padding: the user types "service
-        # agreement 1" but redacted test files are saved zero-padded as
-        # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
-        # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
-        # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
-        # keep it from bleeding into a different document number.
-        num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
-        for sd in doc_names:
-            norm = _norm_doc_name(sd)
-            if re.search(num_re, norm) and (not type_core or type_core in norm):
-                matched.add(sd)
+        # A shorthand numbered list shares ONE type word across several numbers:
+        # "Service Agreement 1, 2 & 3", "compare NDA 1, 2, and 3". The base
+        # pattern only binds the type to the FIRST number, so 2 and 3 were
+        # silently dropped and the "comparison" ran on a single document
+        # (confirmed live: "Compare the Service Agreement 1, 2 & 3" retrieved
+        # only SA 1). Consume the trailing ", N"/"& N"/"and N" run and apply the
+        # same type to each number.
+        nums = [num_match.group(2)]
+        tail = question[num_match.end():]
+        while True:
+            m = re.match(r'\s*(?:,|&|and)\s*(\d+)', tail)
+            if not m:
+                break
+            nums.append(m.group(1))
+            tail = tail[m.end():]
+        for doc_num in nums:
+            # Match the number allowing zero-padding: the user types "service
+            # agreement 1" but redacted test files are saved zero-padded as
+            # "Test_SA_01" (norm → "... sa 01"), so a bare \b1\b never matched and
+            # the document was treated as non-existent. (?<!\d)0*N(?!\d) matches
+            # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
+            # keep it from bleeding into a different document number.
+            num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            for sd in doc_names:
+                norm = _norm_doc_name(sd)
+                if re.search(num_re, norm) and (not type_core or type_core in norm):
+                    matched.add(sd)
     return matched
+
+
+# A synthetic corpus document, named "Test_<TYPE>_<NN>" (e.g. "Test_SHA_01",
+# "Test_JVA_04", "Test_Opinion_35"). These sit ALONGSIDE the real documents in
+# the same upload folder ("Legal AI - Test_Shareholder Agreements (1)"), and the
+# real ones are NOT so-named (they are "Shareholder Agreement 1_redacted", "NDA 7
+# _Redacted", "Court Case Document 5", "Tata Brand Judgment 6", etc.). The user's
+# convention is that the real documents are the ones that matter; the Test_* files
+# are fictional stand-ins. NOTE the leading separator class instead of \b — the
+# uploader underscore-joins the folder path into source_doc, so the marker is
+# preceded by "_" (a word char), and \b never fires between "_" and "test".
+_SYNTHETIC_DOC_RE = re.compile(r'(?:^|[_ /\\-])test_[a-z]+_\d+(?![a-z])', re.I)
+
+
+def _is_synthetic_test_doc(source_doc: str) -> bool:
+    """True when source_doc is a synthetic "Test_<TYPE>_<NN>" stand-in, not a
+    real corpus document."""
+    base = re.sub(r'^[a-f0-9-]{36}_', '', source_doc.replace("\\", "/").rsplit("/", 1)[-1])
+    return bool(_SYNTHETIC_DOC_RE.search(base))
+
+
+def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
+    """Human-readable labels for each numbered reference in the question that
+    matches BOTH a real document and a synthetic Test_* sibling.
+
+    "SHA 1" matches the real "Shareholder Agreement 1_redacted" AND the synthetic
+    "Test_SHA_01" (same type + number, different naming scheme) — both get pinned
+    into context, and the answer LLM then silently answers from whichever has the
+    richer content, usually the synthetic one, with no indication it switched
+    documents (confirmed live: a GridEdge SHA question was answered entirely from
+    Test_SHA_01's fictional Aether/Helios/Apex parties and $1,000,000 veto
+    threshold, none of which belong to the real GridEdge agreement). Mirrors the
+    per-number matching loop in _numbered_docs_in so the collision is detected
+    against the exact same references the user named — no behaviour change to the
+    matcher itself, this is a read-only overlay used to warn the user.
+    """
+    collisions: list[str] = []
+    for num_match in _DOC_NAME_PATTERN.finditer(question):
+        t = re.sub(r'\s+', ' ', num_match.group(1).lower()).strip()
+        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
+        nums = [num_match.group(2)]
+        tail = question[num_match.end():]
+        while True:
+            m = re.match(r'\s*(?:,|&|and)\s*(\d+)', tail)
+            if not m:
+                break
+            nums.append(m.group(1))
+            tail = tail[m.end():]
+        for doc_num in nums:
+            num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            hits = [
+                sd for sd in doc_names
+                if re.search(num_re, _norm_doc_name(sd))
+                and (not type_core or type_core in _norm_doc_name(sd))
+            ]
+            has_synthetic = any(_is_synthetic_test_doc(sd) for sd in hits)
+            has_real = any(not _is_synthetic_test_doc(sd) for sd in hits)
+            if has_synthetic and has_real:
+                label = f"{t} {doc_num}"
+                if label not in collisions:
+                    collisions.append(label)
+    return collisions
 
 
 def _uploaded_doc_names(session_id: str) -> set[str]:
@@ -2476,6 +2559,48 @@ def _strict_verification_corpus(context: str) -> str:
     return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
 
 
+# A reference/citation line ending in a placeholder standing in for a real
+# excerpt the model didn't have — e.g. `... Liability and Indemnity — "Not
+# provided in excerpt"`, `... Section 2.3. Quote: (not provided here)`, a
+# BARE `| Quote: not provided in excerpt` with no wrapping quotes/parens at all,
+# or a double-wrapped `— "(none)"` (parens nested inside the outer quote marks)
+# (confirmed live: nano varies the format across every batch — wrapped, bare,
+# double-wrapped). The ANSWER/ASSESSMENT/COMPARISON prompts already ban this,
+# but gpt-5-nano at low reasoning effort re-emits it intermittently. The set of
+# stand-in phrases is finite and none is ever a legitimate quote, so strip it
+# deterministically rather than depend on model compliance. Two branches: after
+# an explicit "Quote:" label the wrapper is OPTIONAL (the label alone
+# disambiguates intent from ordinary prose); without that label the wrapper is
+# REQUIRED (otherwise a genuine unwrapped sentence like "the clause is not
+# available" would be eaten). An optional inner "(...)" is tolerated either way.
+_PLACEHOLDER_QUOTE_RE = re.compile(
+    r'(?im)'
+    r'[ \t]*(?:[|—–-][ \t]*)?'                 # optional leading separator (pipe / dash)
+    r'(?:'
+    r'Quote[ \t]*:[ \t]*[("“\']?'               # "Quote:" label — wrapper optional after it
+    r'|[("“\']'                                   # no label — wrapper REQUIRED
+    r')'
+    r'[ \t]*\(?[ \t]*'                          # optional inner paren ("(none)" inside outer quotes)
+    r'(?:not[ \t]+provided(?:[ \t]+in[ \t]+excerpt|[ \t]+here)?'
+    r'|not[ \t]+available|not[ \t]+applicable|n/?a|none(?:[ \t]+provided)?|nil)'
+    r'[ \t]*\)?'
+    r'[ \t]*\.?'
+    r'[)"”\']?'                                   # closing wrapper (optional to match either branch)
+    r'[ \t]*$'
+)
+
+
+def _strip_placeholder_quotes(answer: str) -> str:
+    """Remove quote-wrapped placeholder stand-ins (e.g. "Not provided in excerpt")
+    from the ends of reference/citation lines. Leaves the rest of the line — the
+    real FileName + Clause/Section citation — intact, so a reference with no
+    verbatim quote simply ends after its clause reference, as the prompts require.
+    """
+    if not answer or '"' not in answer and "'" not in answer and '(' not in answer:
+        return answer
+    return _PLACEHOLDER_QUOTE_RE.sub('', answer)
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -2530,6 +2655,35 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
             continue
         unverified.append(q.strip())
     return unverified
+
+
+def _nearest_verbatim_span(quote: str, context: str) -> str | None:
+    """The context span a flagged (paraphrased) quote most closely paraphrases.
+
+    The citation retry previously just re-listed the bad quotes and re-asked —
+    so the model (esp. gpt-5-nano) reworded them again the same way, and the
+    retry "did not improve" on nearly every answer (confirmed live). The verbatim
+    text is right there in context under a "**Supporting Quotes:** > …" block;
+    the model just isn't copying it. Return the exact span so the retry can show
+    the model precisely what to paste. Content-word overlap ≥ 0.6 required, so a
+    weak coincidental match never suggests the wrong clause.
+    """
+    qwords = {w for w in re.findall(r'[a-z0-9]+', quote.lower()) if len(w) > 3}
+    if len(qwords) < 3:
+        return None
+    corpus = _strict_verification_corpus(context)
+    # Candidate spans: supporting-quote lines (after "> ") first, then sentences.
+    cands = re.findall(r'>\s*([^\n]{20,400})', corpus)
+    cands += re.split(r'(?<=[.!?])\s+', corpus)
+    best, best_score = None, 0.0
+    for cand in cands:
+        cwords = {w for w in re.findall(r'[a-z0-9]+', cand.lower()) if len(w) > 3}
+        if not cwords:
+            continue
+        overlap = len(qwords & cwords) / len(qwords)
+        if overlap > best_score:
+            best, best_score = cand.strip(), overlap
+    return best if (best and best_score >= 0.6) else None
 
 
 # Page blocks in wiki_content look like "## Some Topic – DocID (DocType)\n<content>".
@@ -2812,12 +2966,16 @@ _CITATION_RETRY_ADDENDUM = """
 ---
 IMPORTANT CORRECTION NEEDED: Your previous answer to this question included quoted \
 passages that could not be verified against the CONTEXT above (they were paraphrased, \
-not exact, or attributed to the wrong document). The flagged passages were:
+not exact, or attributed to the wrong document). Each flagged passage is shown below, \
+and where the CONTEXT contains the matching verbatim text, the exact text to copy is \
+given right after it:
 {flagged}
 
-Write the answer again. For each flagged passage: either copy the exact verbatim text \
-from CONTEXT into quotation marks, or if no exact verbatim sentence exists, describe \
-the provision in your own words WITHOUT quotation marks. Do not repeat the same error."""
+Write the answer again. For each flagged passage: if an "Exact text in CONTEXT" line is \
+shown, replace your quotation with THAT text copied character-for-character (do not \
+reword "shall not exceed" into "caps at", do not add a clause/section number that isn't \
+in the quote). If no exact text is shown, describe the provision in your own words \
+WITHOUT quotation marks. Do not repeat the same error."""
 
 
 # A line is "complete" if it ends with a terminal mark a truncated model
@@ -2844,7 +3002,7 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
     scope_note: a plain-English disclosure of HOW the scope was decided, when it
@@ -2852,6 +3010,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         conversational carryover). Appended verbatim as a deterministic banner —
         the model must not be able to omit the one line explaining why it
         answered about a document the question never named.
+
+    scope_warning: a plain-English WARNING appended when the question named a
+        specific counterparty that could not be pinned to one document, so the
+        answer was drawn from a broad corpus search that may have surfaced the
+        wrong same-family document. Stronger than scope_note (emitted as
+        [SCOPE WARNING], which the frontend hoists into the visible body).
     """
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -2979,18 +3143,41 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # content entirely.
     _REASON_OPEN_RE = re.compile(r'<\s*reasoning\s*>', re.I)
     _REASON_CLOSE_RE = re.compile(r'<\s*/\s*reasoning\s*>', re.I)
-    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
+    # Optional leading list marker ("- CONFIDENCE_SCORE", "* CONFIDENCE_REASON")
+    # and optional bold — the model formats these lines inconsistently. Without
+    # matching the bulleted form, an un-stripped "- CONFIDENCE_SCORE" line leaked
+    # into the answer AND the plain form mid-text got mistaken for a reasoning
+    # boundary (confirmed live: a comparison table was stripped as "reasoning").
+    _CONFIDENCE_LINE_RE = r'(?im)^[ \t]*(?:[-*]\s*)?\**CONFIDENCE[_\s]*(?:SCORE|REASON)[^\n]*\n?'
     # How much text must follow the confidence lines before we treat them as the
     # END of a reasoning preamble rather than a trailer on a finished answer.
     # Guards against amputating a short answer that happens to close with its
     # confidence lines.
     _MD_REASONING_MIN_TAIL = 200
+    # The model sometimes self-organizes into a working draft followed by its
+    # own "Final Answer" heading with a polished restatement — confirmed live
+    # on a risk_assessment answer that shipped BOTH: a full "One-Sided /
+    # Ambiguity / Missing / Inconsistencies" analysis, then a "Final Answer"
+    # section covering the same ground again in different words (15.8k chars,
+    # 18.8k tokens for one question). Neither the <reasoning> tag split nor
+    # the CONFIDENCE-line split catches this shape, since it has no
+    # confidence block at all — it's a second, unrequested self-revision.
+    # Not part of the prompt contract (nothing asks the model to emit this),
+    # so this is entirely a symptom to strip, not a format to support.
+    _FINAL_ANSWER_HEADING_RE = re.compile(
+        r'(?im)^[ \t]*(?:#{1,3}\s*)?\*{0,2}Final\s+Answer\*{0,2}\s*:?\s*$'
+    )
 
-    def _run_generation_pass(gen_prompt: str, token_budget: int = None) -> tuple[str, dict, int, str]:
+    def _run_generation_pass(gen_prompt: str, token_budget: int = None,
+                             reasoning_effort: str = None) -> tuple[str, dict, int, str]:
         """Run one LLM answer-generation call and parse out answer text + confidence.
 
         Factored out of the main body so the corrective citation retry below can
         reuse the exact same parsing/fallback logic as the primary pass.
+
+        reasoning_effort escalates the model's effort for this call (Azure
+        reasoning models only) — used when a low-effort pass returned hidden
+        reasoning but no visible answer.
         """
         pass_usage: dict = {}
         pass_score = 75
@@ -3000,6 +3187,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 gen_prompt,
                 pipeline="wiki",
                 max_tokens=token_budget or _answer_token_budget,
+                reasoning_effort=reasoning_effort,
             )
 
             # --- Positional split: reasoning block vs. user-facing answer ---
@@ -3040,9 +3228,22 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 _conf_lines = list(re.finditer(_CONFIDENCE_LINE_RE, raw_answer))
                 if _conf_lines:
                     _tail = raw_answer[_conf_lines[-1].end():].strip()
-                    if len(_tail) >= _MD_REASONING_MIN_TAIL:
-                        # Substantial content AFTER the confidence lines → they
-                        # close a reasoning preamble; the answer is the tail.
+                    _head = raw_answer[:_conf_lines[-1].start()].strip()
+                    # A genuine reasoning PREAMBLE is a short plan that precedes a
+                    # longer answer — so only treat the pre-confidence content as
+                    # strippable reasoning when the tail (candidate answer) is at
+                    # least as long as the head. The restructured comparison/
+                    # obligation/assessment prompts now put the ANSWER first and
+                    # the confidence lines at the end, so the model routinely emits
+                    # a big body, then CONFIDENCE, then a short refs/notes tail;
+                    # the old "any substantial tail → head is reasoning" rule then
+                    # amputated the entire body (confirmed live: a 6509-char
+                    # comparison table was discarded, leaving only the confidence
+                    # lines + references). Requiring tail >= head keeps the body.
+                    if len(_tail) >= _MD_REASONING_MIN_TAIL and len(_tail) >= len(_head):
+                        # Substantial content AFTER the confidence lines and the
+                        # head is shorter → they close a reasoning preamble; the
+                        # answer is the tail.
                         reasoning_text = raw_answer[:_conf_lines[-1].end()]
                         pass_answer = _tail
                         logger.info(
@@ -3090,6 +3291,24 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             # Always strip any stray CONFIDENCE lines that leaked into the answer
             pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', pass_answer).strip()
 
+            # Drop a duplicated self-revision: if a "Final Answer" heading
+            # appears after a substantial chunk of prior content, the model
+            # restated its own draft — keep only the polished tail, not both
+            # copies. A heading in the first 20% of the text is more likely
+            # an intentional section label on a short answer, not a redo.
+            _fa_matches = list(_FINAL_ANSWER_HEADING_RE.finditer(pass_answer))
+            if _fa_matches:
+                _fa = _fa_matches[-1]
+                if _fa.start() > len(pass_answer) * 0.2:
+                    _tail = pass_answer[_fa.end():].strip()
+                    if len(_tail) >= _MD_REASONING_MIN_TAIL:
+                        logger.warning(
+                            "Answer contained a duplicated 'Final Answer' self-revision — "
+                            "dropped %d chars of draft, kept %d chars of final",
+                            _fa.start(), len(_tail),
+                        )
+                        pass_answer = _tail
+
             # --- Fallback confidence when model skipped the reasoning block ---
             # A short "Not covered" answer means the context had nothing relevant —
             # confidence should be 0, not the generic 75 default.
@@ -3134,20 +3353,71 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
     answer, usage, confidence_score, confidence_reason = _run_generation_pass(prompt)
 
-    # Truncation retry: a "factual"-intent question that's actually broad/cross-
-    # document in scope (e.g. "across all JVAs in the corpus...") can exhaust the
-    # narrower MAX_TOKENS_ANSWER budget before the model ever writes real content —
-    # confirmed live: a 25-page cross-document question got cut off at
-    # completion_tokens=4034 (against a 4096 cap), leaving only the model's own
-    # numbered reasoning/plan trace ("1. Identified... 5. Compiled the findings
-    # into a table.") with no actual table ever emitted. Unlike the citation
-    # retry below, a truncated response is unambiguously worse than a complete
-    # one, so this always keeps the retry — no comparison needed.
-    if usage.get("finish_reason") == "length" and _answer_token_budget < config.MAX_TOKENS_ANSWER_BROAD:
-        logger.warning("Answer generation truncated at %d tokens — retrying with broader budget",
-                       usage.get("completion_tokens", 0))
+    # Minimum length below which an answer is not "short but real" — it's
+    # effectively empty and unusable, regardless of why.
+    _MIN_VIABLE_ANSWER_CHARS = 50
+
+    # Truncation/empty-answer retry. Two distinct failure shapes land here:
+    #   (a) finish_reason == "length": a "factual"-intent question that's
+    #       actually broad/cross-document (e.g. "across all JVAs in the
+    #       corpus...") can exhaust the narrower MAX_TOKENS_ANSWER budget
+    #       before the model ever writes real content — confirmed live: a
+    #       25-page cross-document question got cut off at
+    #       completion_tokens=4034 (against a 4096 cap), leaving only the
+    #       model's own numbered reasoning/plan trace with no actual table
+    #       ever emitted.
+    #   (b) finish_reason == "stop" but the answer is near-empty: confirmed
+    #       live on open-ended risk_assessment prompts ("identify one-sided
+    #       clauses", "go/no-go recommendation") — the model spent its
+    #       reasoning budget and then just... stopped, with a clean
+    #       finish_reason that gave the original code no signal anything
+    #       was wrong. This shape is invisible to the finish_reason=="length"
+    #       check alone, so it shipped silently as a blank answer to the
+    #       user. Both shapes get the same treatment: unlike the citation
+    #       retry below, a truncated/empty response is unambiguously worse
+    #       than a complete one, so this always keeps the retry — no
+    #       comparison needed.
+    _was_truncated = usage.get("finish_reason") == "length"
+    _was_empty = len(answer.strip()) < _MIN_VIABLE_ANSWER_CHARS
+    _at_broad_budget = _answer_token_budget >= config.MAX_TOKENS_ANSWER_BROAD
+
+    # A same-budget retry is only worth attempting for the EMPTY case, not
+    # truncation: truncation is a real content-length problem that will
+    # almost certainly hit the exact same wall again at the same budget, so
+    # retrying without more room just burns a call. An empty answer at
+    # "stop" is a different failure — confirmed live on open-ended
+    # risk_assessment prompts ("go/no-go recommendation"): gpt-5-nano spent
+    # its whole reasoning allotment internally (2366 hidden reasoning tokens,
+    # finish_reason=stop) and emitted ZERO visible content, twice in a row.
+    # A plain same-effort re-ask hits the same wall (proven live). The lever
+    # that actually addresses "reasoned then produced nothing" is
+    # reasoning_effort: the primary pass runs at the global low setting to
+    # save tokens, so on an empty result we escalate effort ONE step to give
+    # the model room to commit to an answer. Only the empty case escalates —
+    # a genuine length-truncation wants MORE output budget, not more
+    # reasoning (which would make it worse).
+    _EFFORT_ESCALATION = {"minimal": "low", "low": "medium", "medium": "high", "high": "high"}
+    # Escalate reasoning_effort ONLY for a stop-empty (finish_reason=stop, no
+    # visible output → the model gave up and needs a nudge to commit). For a
+    # truncation-empty (finish_reason=length → the model spent the ENTIRE budget
+    # on hidden reasoning and never reached visible output, e.g. a 61-page broad
+    # question), MORE effort is exactly wrong — it reasons even harder and still
+    # emits nothing (confirmed live: a "from all service agreements" answer went
+    # blank this way after a medium-effort retry). Truncation wants LOW effort +
+    # a bigger budget so the room goes to output, not reasoning.
+    _stop_empty = _was_empty and not _was_truncated
+    if (_was_truncated or _was_empty) and not (_was_truncated and _at_broad_budget):
+        _retry_budget = config.MAX_TOKENS_ANSWER_BROAD if not _at_broad_budget else _answer_token_budget
+        _retry_effort = _EFFORT_ESCALATION.get(config.AZURE_REASONING_EFFORT, "medium") if _stop_empty else None
+        logger.warning(
+            "Answer generation %s (%d completion tokens, %d chars) — retrying%s%s",
+            "truncated" if _was_truncated else "came back empty",
+            usage.get("completion_tokens", 0), len(answer),
+            " with broader budget" if not _at_broad_budget else " at the same (already broad) budget",
+            f", reasoning_effort escalated to '{_retry_effort}'" if _retry_effort else "",
+        )
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(
-            prompt, token_budget=config.MAX_TOKENS_ANSWER_BROAD
+            prompt, token_budget=_retry_budget, reasoning_effort=_retry_effort
         )
         token_breakdown.append({
             "call": "truncation_retry",
@@ -3156,17 +3426,30 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "completion_tokens": retry_usage.get("completion_tokens", 0),
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
-        if retry_usage.get("finish_reason") != "length":
+        _retry_ok = retry_usage.get("finish_reason") != "length" and len(retry_answer.strip()) >= _MIN_VIABLE_ANSWER_CHARS
+        if _retry_ok:
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
-        else:
-            logger.warning("Truncation retry also hit the token limit — keeping it anyway, trimmed to its last complete unit")
+        elif len(retry_answer.strip()) > len(answer.strip()):
+            # Retry didn't fully resolve it, but produced more content than
+            # the original empty/truncated pass — keep the better of the two
+            # rather than shipping whichever came first.
+            logger.warning("Retry still incomplete but longer than the original — keeping retry, trimmed to last complete unit")
             retry_answer = _truncate_to_last_complete_unit(retry_answer)
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
-    elif usage.get("finish_reason") == "length":
-        # Already generated at the broad budget and still truncated — no
-        # further retry available, so just trim the dangling tail.
+        else:
+            logger.warning("Retry did not improve on the original — keeping original, trimmed to last complete unit")
+            answer = _truncate_to_last_complete_unit(answer)
+    elif _was_truncated or _was_empty:
+        # Truncated with no higher budget available — nothing left to try.
         logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
         answer = _truncate_to_last_complete_unit(answer)
+
+    # Strip quote-wrapped placeholder stand-ins ("Not provided in excerpt", "(not
+    # provided here)", etc.) from reference lines BEFORE the integrity checks — they
+    # are a known nano non-compliance the prompts already forbid, and stripping them
+    # here both cleans the output and stops them from tripping the citation check
+    # (which correctly flags "Not provided in excerpt" as a non-verbatim quote).
+    answer = _strip_placeholder_quotes(answer)
 
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
@@ -3182,9 +3465,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # warning is appended as before.
     if _unverified_quotes or _misattributed:
         _flagged = list(_unverified_quotes) + list(_misattributed)
-        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(
-            flagged="\n".join(f"- {f[:200]}" for f in _flagged[:6])
-        )
+        _flag_lines = []
+        for f in _flagged[:6]:
+            _span = _nearest_verbatim_span(f, wiki_content)
+            if _span:
+                _flag_lines.append(f'- Flagged (not verbatim): "{f[:180]}"\n'
+                                   f'  Exact text in CONTEXT to copy: "{_span[:240]}"')
+            else:
+                _flag_lines.append(f'- Flagged (no verbatim match in CONTEXT — remove the '
+                                   f'quotation marks and state it plainly): "{f[:180]}"')
+        _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(flagged="\n".join(_flag_lines))
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
         retry_unverified = _verify_answer_citations(retry_answer, wiki_content, question)
         retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
@@ -3222,6 +3512,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
 
+    if _misattributed:
+        # The corrective retry above already had its shot at fixing this via a
+        # full regeneration; for whatever survives, try a deterministic,
+        # in-place label fix before falling back to a warning — the correct
+        # document is already known (it's how the mismatch was detected), so a
+        # regeneration isn't needed to fix a same-type wrong-number citation.
+        # Runs BEFORE any [WARNING] banner is appended below — it's a genuine
+        # in-place fix to the answer's own citation text, not a banner, so it
+        # must land before the reference-extraction snapshot two blocks down.
+        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
+        if _n_fixed:
+            _misattributed = _verify_citation_attribution(answer, wiki_content)
+            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
+                       _n_fixed, len(_misattributed))
+
+    # Snapshot the answer's own [N]/[From: ...] citation markers BEFORE any
+    # [CITATION WARNING]/[ATTRIBUTION WARNING]/[SCOPE WARNING]/[SCOPE NOTE]
+    # banner gets appended below. Those banners are themselves bracket-shaped
+    # text (and routinely mention document names/quotes while explaining what
+    # went wrong), so extracting references AFTER they land let the banner's
+    # own prose get scanned as if it were a citation and substring-matched
+    # against document identifiers — confirmed live: a comparison's References
+    # section rendered "Tata Brand Judgment 2" though the answer never once
+    # discussed that document, because the warning text below happened to
+    # contain a fragment that matched it. This is a pure reorder — every
+    # banner block after this point is unchanged, only moved past this line.
+    referenced = re.findall(r"\[([^\]]+)\]", answer)
+
     if _unverified_quotes:
         logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
                         len(_unverified_quotes))
@@ -3233,18 +3551,6 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"be verified verbatim against the retrieved source text — treat as paraphrase, not "
             f"exact quote: {_preview}]"
         )
-
-    if _misattributed:
-        # The corrective retry above already had its shot at fixing this via a
-        # full regeneration; for whatever survives, try a deterministic,
-        # in-place label fix before falling back to a warning — the correct
-        # document is already known (it's how the mismatch was detected), so a
-        # regeneration isn't needed to fix a same-type wrong-number citation.
-        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
-        if _n_fixed:
-            _misattributed = _verify_citation_attribution(answer, wiki_content)
-            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
-                       _n_fixed, len(_misattributed))
 
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
@@ -3298,12 +3604,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"Check the References section names the document you actually meant.]"
         )
 
+    # The question named a counterparty that couldn't be pinned to one document —
+    # the answer came from a broad search that may have surfaced a sibling of the
+    # same type. Warn deterministically (the model can't see that its source was a
+    # best-guess rather than the document the user meant).
+    if scope_warning:
+        answer += f"\n\n[SCOPE WARNING: {scope_warning}]"
+
     # Scope was inferred rather than stated by the question — say so, always.
     if scope_note:
         answer += f"\n\n[SCOPE NOTE: {scope_note}]"
-
-    # Extract [Reference] from the answer
-    referenced = re.findall(r"\[([^\]]+)\]", answer)
 
     # Map each selected page to its real document identifier — the SOURCE_DOC
     # filename (e.g. "...Legal Opinions (1)_Legal Opinion 6 (1).pdf"), not the
@@ -3324,7 +3634,42 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # identifier and is immune to the collision because two distinct documents
     # never share the same filename.
     canonical_files: dict[str, str] = {}  # cleaned display name -> raw source_doc
-    for page in pages.values():
+    # Pages are also titled with a short SYNTHESIZED identifier — "Dynamic
+    # Injunction Framework – LO-Tata – Legal Opinion" carries "LO-Tata" — and the
+    # model frequently cites bracket-style using THAT identifier ("[LO-Tata –
+    # Dynamic Injunction Framework; ...]") instead of the real filename shown in
+    # the context's own "[From: ...]" label right below the title (confirmed
+    # live: this left files_used empty for two answers whose bracket citations
+    # never matched canonical_files at all, silently falling through to the
+    # arbitrary "first 3 selected pages" last resort below — which rendered
+    # NDA 7 as the References list for an answer that never once cited NDA 7).
+    # Index those identifiers too, using the same extractor _doc_identifier_part
+    # already uses for entity-matching, so a "LO-Tata"-style citation resolves to
+    # its real document exactly like a filename-style citation does.
+    # Some pages never got a distinctive synthesized ID at ingest time and just
+    # repeat the bare document TYPE as their "identifier" instead — e.g. a title
+    # like "Assignment Clause Recommendation – Legal Opinion (Legal Opinion)"
+    # makes _doc_identifier_part return "Legal Opinion", not a real per-document
+    # code. That generic word appears on MANY unrelated documents, so indexing
+    # it would make ANY citation mentioning "Legal Opinion" (or "Court
+    # Judgment", etc.) false-match whichever one of those documents happened to
+    # be written into the dict last (confirmed live: a compound citation
+    # bracket containing the bare words "Legal Opinion" and "Court Judgment"
+    # pulled in two topically unrelated documents — a Sentinel IP work-for-hire
+    # opinion and a Delaware trade-secrets judgment — neither actually cited).
+    # A generic type word can never distinguish one document from another, so
+    # exclude it from the identifier index entirely rather than let it resolve
+    # to an arbitrary single document.
+    _GENERIC_TYPE_IDENTIFIERS = {
+        "nda", "service agreement", "master services agreement", "msa",
+        "shareholders agreement", "shareholder agreement", "sha",
+        "joint venture agreement", "jva", "court judgment", "legal opinion",
+        "legal opinions", "judgment", "petition", "affidavit", "arbitration notice",
+        "complaint", "lease", "licence", "license", "deed", "memorandum",
+        "settlement", "agreement", "contract",
+    }
+    identifier_files: dict[str, str] = {}  # short doc identifier -> raw source_doc
+    for title, page in pages.items():
         if not isinstance(page, dict):
             continue
         sd = page.get("source_doc", "")
@@ -3333,6 +3678,9 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         clean = re.sub(r'^[a-f0-9-]{36}_', '', sd.replace("\\", "/").rsplit("/", 1)[-1])
         clean = os.path.splitext(clean)[0]
         canonical_files[clean] = sd
+        ident = _doc_identifier_part(title)
+        if len(ident) >= 4 and ident.lower() not in _GENERIC_TYPE_IDENTIFIERS:
+            identifier_files[ident.lower()] = sd
 
     pages_used_dedup = []
     files_used = []
@@ -3363,6 +3711,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 if cn_norm in t_norm or (len(t_norm) >= 6 and t_norm in cn_norm):
                     if sd not in files_used:
                         files_used.append(sd)
+            # Forward-only, same as canonical_files above: the identifier
+            # ("LO-Tata") is short and distinctive by construction (>=4 chars,
+            # ingest-synthesized per document), so checking it appears IN the
+            # citation text is safe — the reverse direction isn't needed since
+            # citation text is never shorter than a 4-char identifier in a way
+            # that would matter.
+            for ident, sd in identifier_files.items():
+                if ident in t_norm and sd not in files_used:
+                    files_used.append(sd)
 
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
@@ -4201,7 +4558,15 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     """
     if not config.USE_DATABASE:
         return []
-    if _CARRYOVER_TYPE_RE.search(question):
+    # Same underscore normalisation as _numbered_docs_in — \b doesn't fire
+    # between "sha" and "_01" since "_" is a \w char, so "sha_01" silently
+    # bypassed this guard and fell through to a stale carried-over document
+    # from an earlier, unrelated turn (confirmed live: "sha_01" reply to a
+    # disambiguation prompt for the SHA-GridEdge question landed on whatever
+    # document the PRIOR unrelated comparison had answered, with no scope
+    # warning, because both the type-word guard and _DOC_NAME_PATTERN missed
+    # the underscore-joined shorthand).
+    if _CARRYOVER_TYPE_RE.search(question.replace('_', ' ')):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
@@ -4218,7 +4583,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     return []
 
 
-def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> dict:
+def resolve_scope(question: str, session_id: str, pages: dict | None = None,
+                  chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
 
     Consolidates the three previously-scattered scope signals — named-document
@@ -4255,9 +4621,19 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> 
     except Exception:
         mentioned = set()
     if mentioned:
+        # A numbered reference ("SHA 1") can match BOTH the real document and a
+        # synthetic Test_* sibling of the same type+number — both get pinned, and
+        # the answer LLM tends to answer from whichever is richer (usually the
+        # synthetic one) with no indication it switched. Detect the collision so
+        # the answer can warn; a read-only overlay, target_docs is unchanged.
+        try:
+            collisions = _numbered_doc_collisions(question, _distinct_source_docs(pages))
+        except Exception:
+            collisions = []
         return {"scope": "single_doc", "target_docs": sorted(mentioned),
                 "target_family": None, "is_broad": False,
-                "confidence": 0.9, "method": "file"}
+                "confidence": 0.9, "method": "file",
+                "doc_collisions": collisions}
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
     # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
@@ -4342,22 +4718,60 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None) -> 
         return {"scope": "corpus", "target_docs": [], "target_family": None,
                 "is_broad": True, "confidence": 0.6, "method": "broad"}
 
-    # 4. Conversational carryover — the question names no document, no party, no
-    #    entity, no family, and isn't broad. If the conversation is demonstrably
-    #    already about ONE document, stay there rather than silently widening to
-    #    the whole corpus. Runs last, so it can only claim questions every real
-    #    detector above has already passed on (see _carryover_scope for guards).
-    carried = _carryover_scope(question, session_id)
-    if carried:
-        logger.info("Scope carried over from the conversation: %s",
-                    _norm_doc_name(carried[0]))
-        return {"scope": "single_doc", "target_docs": carried,
-                "target_family": None, "is_broad": False,
-                "confidence": 0.55, "method": "carryover"}
+    # Did the question NAME a specific counterparty that simply couldn't be
+    # pinned to one document? Reaching here means every detector above passed —
+    # including the party-content match, which returns empty when the named
+    # party spans too many documents to disambiguate (an umbrella name like
+    # "Tata Sons Private Limited" appearing across many NDAs/SHAs/JVAs/
+    # Judgments). Computed BEFORE carryover, and used to GATE it below: a
+    # question that names a party is a fresh topic reference, even when that
+    # name is too ambiguous to resolve to one document — it must never be
+    # confused with "names no document at all" and silently answered from
+    # whatever document the previous, unrelated question happened to land on
+    # (confirmed live: a Judgment-thread's carried scope kept answering brand-new
+    # Legal-Opinion questions about Tata Sons/Consumer Products/Motors from the
+    # stale Judgment 6 context, because none of those questions contained an
+    # explicit document-TYPE word for _CARRYOVER_TYPE_RE to catch).
+    unresolved_party = ""
+    try:
+        _cands = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+        _cands = [c for c in _cands if len(c) >= 4]
+        if _cands:
+            unresolved_party = _cands[0]
+    except Exception:
+        unresolved_party = ""
+
+    # 4. Conversational carryover — the question names no document, no party
+    #    (resolved OR unresolved), no entity, no family, and isn't broad. If the
+    #    conversation is demonstrably already about ONE document, stay there
+    #    rather than silently widening to the whole corpus. Runs last, so it can
+    #    only claim questions every real detector above has already passed on
+    #    (see _carryover_scope for guards) AND that named no party at all —
+    #    unresolved_party being non-empty means this IS a fresh topic reference,
+    #    just an ambiguous one, so it falls through to the corpus-default branch
+    #    below (which discloses the ambiguity via a [SCOPE WARNING]) instead of
+    #    ever reaching carryover.
+    # Carryover reads THIS conversation's recent scope, so it must use the chat
+    # session (where the thread's messages are stored), NOT the wiki/doc session
+    # (where pages live). They diverge when a fixed main wiki is served: retrieval
+    # runs against the doc session, but each chat thread's answers are saved under
+    # its own session_id. Reading the doc session here made carryover inherit a
+    # stale answer frozen in the ingest session (confirmed live: every no-doc
+    # question in every new chat defaulted to a July-17 JVA7 answer). Falls back
+    # to session_id when no separate chat session is passed (dev single-session).
+    if not unresolved_party:
+        carried = _carryover_scope(question, chat_session_id or session_id)
+        if carried:
+            logger.info("Scope carried over from the conversation: %s",
+                        _norm_doc_name(carried[0]))
+            return {"scope": "single_doc", "target_docs": carried,
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.55, "method": "carryover"}
 
     # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
     return {"scope": "corpus", "target_docs": [], "target_family": None,
-            "is_broad": False, "confidence": 0.5, "method": "default"}
+            "is_broad": False, "confidence": 0.5, "method": "default",
+            "unresolved_party": unresolved_party}
 
 
 def classify_query(question: str, session_id: str) -> dict:

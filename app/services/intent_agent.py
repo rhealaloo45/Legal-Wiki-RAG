@@ -98,6 +98,20 @@ _RX_BETWEEN_PARTIES = re.compile(
     r'[^.?!;]+\band\b',
     re.IGNORECASE,
 )
+# A third false trigger: "board composition structured between Tata Power and
+# the founders", "equity split between the two shareholders", "seats divided
+# between X and Y" — this describes how ONE document internally apportions
+# something (board seats, equity, duties) between two parties/constituencies,
+# not a request to compare two documents. The verb immediately before
+# "between" signals an internal allocation, not a second document's identity
+# (confirmed live: "How is the board composition structured between Tata
+# Power Renewable Energy Limited and the founders" on a single-document SHA
+# review forced a comparison template that rendered a "Not applicable — no
+# second document in corpus" table instead of just answering the question).
+_RX_BETWEEN_ALLOCATION = re.compile(
+    r'\b(?:structured|split|divided|allocated|apportioned|distributed|shared|balanced)\s+between\b',
+    re.IGNORECASE,
+)
 _RX_OBLIGATION = re.compile(
     r'(?:'
     r'what\s+are\s+(?:the|our)\s+obligations'       # "what are the/our obligations"
@@ -129,11 +143,46 @@ _RX_RISK = re.compile(
 # (confirmed live on the SteelLoop Reserved-Matters question). This guard fires
 # only when approval/consent is governance-qualified.
 _RX_GOVERNANCE_APPROVAL = re.compile(
+    # "written" alone (not just "prior written") is a genuine governance qualifier
+    # too — "without Tata's written approval" is a personnel-control clause a
+    # factual/risk_assessment question asks ABOUT, not a request to assess risk
+    # (confirmed live: SA6 personnel-clause question got forced into a full
+    # Accept/Reject/Negotiate essay off this single bare "approval" hit). Kept
+    # narrow: this only suppresses risk intent when approval/consent is the ONLY
+    # _RX_RISK signal (enforced by _is_governance_approval_only's subset check
+    # below) — a question with an actual risk cue alongside it still classifies
+    # as risk regardless of this guard.
     r'\b(?:board|shareholders?|members?|majority|unanimous|special\s+majority|'
-    r'statutory|regulatory|prior\s+written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
+    r'statutory|regulatory|prior\s+written|written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
     r'|\b(?:approval|approve|consent)\s+(?:of|by|from)\s+(?:the\s+)?(?:board|shareholders?|members?)\b',
     re.IGNORECASE,
 )
+
+
+# "advise|advisory" in _RX_RISK is meant to catch an advice-request ("please
+# advise", "your advisory on this") — but it also matches a party's own NAME
+# when the corpus contains an entity like "Helios Grid Advisory Private
+# Limited" (confirmed live: a plain payment-terms/TDS/GST lookup question got
+# forced into a full risk-assessment essay purely because the counterparty's
+# name contains the word "Advisory"). "Advisory" immediately followed by a
+# corporate suffix is a company name, not a verb (same suffix list wiki.py's
+# _PARTY_NAME_RE uses for the same purpose — kept local here to avoid a
+# cross-module import for one shared string).
+_RX_ADVISORY_ENTITY = re.compile(
+    r'\badvisory\b\s+(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
+    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_advisory_entity_name_only(q: str) -> bool:
+    """True when the ONLY _RX_RISK signal is 'advise'/'advisory' and that word
+    is immediately followed by a corporate suffix — i.e. it's part of a party's
+    name, not a request for advice. Same subset-guard shape as
+    _is_governance_approval_only: a question that ALSO carries a real risk cue
+    still classifies as risk regardless of this guard."""
+    hits = {m.group(0).lower() for m in _RX_RISK.finditer(q)}
+    return hits <= {"advise", "advisory"} and bool(_RX_ADVISORY_ENTITY.search(q))
 
 
 def _is_governance_approval_only(q: str) -> bool:
@@ -172,9 +221,11 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
     if _RX_COMPARISON.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
-            and not _RX_BETWEEN_PARTIES.search(q):
+            and not _RX_BETWEEN_PARTIES.search(q) \
+            and not _RX_BETWEEN_ALLOCATION.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_RISK.search(q) and not _is_governance_approval_only(q):
+    if _RX_RISK.search(q) and not _is_governance_approval_only(q) \
+            and not _is_advisory_entity_name_only(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
     if _RX_OBLIGATION.search(q):
         return {"intent": "obligation", "confidence": 0.85, "method": "regex"}
@@ -218,7 +269,11 @@ def get_query_strategy(intent: str) -> dict:
 class QueryState(TypedDict, total=False):
     # Input
     question: str
-    session_id: str
+    session_id: str          # wiki/doc session — where pages & documents live (retrieval)
+    chat_session_id: str     # per-thread chat session — where THIS conversation's
+                             # messages are stored (carryover + conversation history).
+                             # Diverges from session_id whenever a fixed main wiki is
+                             # served; falls back to session_id when unset.
     target_doc: str
     is_followup: bool
     exclude_cached_answers: bool
@@ -379,13 +434,23 @@ def check_disambiguation_node(state: QueryState) -> dict:
 
 
 def check_clarification_node(state: QueryState) -> dict:
+    # Must read the per-thread chat session, not the shared wiki/doc session —
+    # build_conversation_context(state["session_id"]) pulled "recent conversation"
+    # text from EVERY chat thread that has ever queried this wiki (confirmed live:
+    # a fresh SHA-GridEdge question was answered about "joint venture deadlock /
+    # arbitral institution", content from an unrelated earlier thread's question,
+    # because generate_answer_node's own chat_session_id fallback never runs —
+    # it only fires when conversation_context is still unset, and this node
+    # always sets it first). resolve_scope already gets this right via its own
+    # chat_session_id param; mirror that here.
+    chat_sid = state.get("chat_session_id") or state["session_id"]
     if state.get("is_followup") or wiki._question_names_a_document(state["question"], []) \
             or not config.ENABLE_CLARIFICATION:
-        conv = wiki.build_conversation_context(state["session_id"])
+        conv = wiki.build_conversation_context(chat_sid)
         return {"needs_clarification": False, "conversation_context": conv}
 
     _emit({"stage": "clarification", "status": "active", "message": "Checking for ambiguity…"})
-    conv = wiki.build_conversation_context(state["session_id"])
+    conv = wiki.build_conversation_context(chat_sid)
     try:
         amb = wiki.check_ambiguity(state["question"], state["session_id"], conv)
     except Exception as e:
@@ -416,7 +481,8 @@ def resolve_scope_node(state: QueryState) -> dict:
     """
     logger.info("[AGENT] resolve_scope_node")
     try:
-        decision = wiki.resolve_scope(state["question"], state["session_id"])
+        decision = wiki.resolve_scope(state["question"], state["session_id"],
+                                      chat_session_id=state.get("chat_session_id"))
     except Exception as e:
         logger.error("resolve_scope failed, defaulting to corpus: %s", e)
         decision = {"scope": "corpus", "target_docs": [], "target_family": None,
@@ -430,7 +496,8 @@ def resolve_scope_node(state: QueryState) -> dict:
 def retrieve_context_node(state: QueryState) -> dict:
     logger.info("[AGENT] retrieve_context_node: intent=%s", state.get("intent"))
     _emit({"stage": "retrieving", "status": "active", "message": "Retrieving relevant pages…"})
-    conv = state.get("conversation_context") or wiki.build_conversation_context(state["session_id"])
+    conv = state.get("conversation_context") or wiki.build_conversation_context(
+        state.get("chat_session_id") or state["session_id"])
     hints = get_query_strategy(state["intent"])
     # Phase 2: forward the resolved scope's family filter + broad flag into
     # retrieval. Only "family" scope narrows the vector search; everything else
@@ -497,6 +564,40 @@ def generate_answer_node(state: QueryState) -> dict:
             f"or use \"across all …\" to search every document."
         )
 
+    # The question named a specific counterparty the pipeline could not pin to
+    # one document (the name spans too many documents to disambiguate), so scope
+    # fell through to a broad corpus search. The answer may be sourced from a
+    # same-type sibling rather than the exact document the user meant — warn.
+    _scope_warning = ""
+    _unresolved = _scope.get("unresolved_party") if _scope.get("method") == "default" else ""
+    if _unresolved:
+        _scope_warning = (
+            f"The question named \"{_unresolved}\" but that party appears in several "
+            f"documents, so no single document could be confirmed as the one you meant. "
+            f"The answer below was drawn from a broad search and may reflect a "
+            f"different document of the same type — check the References section, and "
+            f"if it's the wrong one, name the document by its number (e.g. \"NDA 7\") "
+            f"or its distinctive counterparty."
+        )
+
+    # A numbered document reference matched BOTH the real document and a synthetic
+    # Test_* stand-in of the same number — both were pinned into context and the
+    # answer may have been drawn from the fictional stand-in rather than the real
+    # document (confirmed live: a GridEdge SHA question answered from Test_SHA_01's
+    # invented parties). Warn so the reader can verify which document the facts
+    # actually came from.
+    _collisions = _scope.get("doc_collisions") or []
+    if _collisions and not _scope_warning:
+        _names = ", ".join(f'"{c}"' for c in _collisions[:3])
+        _scope_warning = (
+            f"For {_names}, this corpus contains BOTH a real document and a "
+            f"synthetic \"Test_\" stand-in of the same number — both were searched, "
+            f"so some facts below (party names, figures, clause numbers) may come "
+            f"from the fictional stand-in rather than the real document. Verify each "
+            f"cited figure against the document named in the References section "
+            f"before relying on it."
+        )
+
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
@@ -504,7 +605,7 @@ def generate_answer_node(state: QueryState) -> dict:
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
-            scope_note=_scope_note,
+            scope_note=_scope_note, scope_warning=_scope_warning,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -585,6 +686,213 @@ Scoring guide:
 - 70-89: Most facts grounded, minor factual extrapolations
 - 50-69: Some factual claims lack context support
 - 0-49: Significant fabricated facts"""
+
+
+_CLAIM_PATTERNS = [
+    re.compile(r'\$\s?\d[\d,]*(?:\.\d+)?'),                                    # currency
+    re.compile(r'\b\d[\d,]*(?:\.\d+)?\s?%'),                                   # percentages
+    re.compile(r'\b\d+\s*(?:day|days|month|months|year|years|week|weeks)\b', re.I),  # durations
+    re.compile(r'\b(?:January|February|March|April|May|June|July|August|'
+               r'September|October|November|December)\s+\d{1,2},?\s+\d{4}\b', re.I),  # long dates
+    re.compile(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b'),                                # numeric dates
+    re.compile(r'\b\d{4}-\d{2}-\d{2}\b'),                                      # ISO dates
+    # doc refs — the identifier MUST start with a digit ("Clause 5.3") or an
+    # uppercase roman numeral ("Section IV"), never a bare following word.
+    # Without this, "Clause"/"Schedule" followed by ANY word matched ordinary
+    # prose continuations like "clause allowing", "schedule of", "clause
+    # tailored" as if they were checkable document references (confirmed live:
+    # a risk-assessment answer's own sentence "the explicit liberty clause
+    # allowing plaintiffs..." produced a fake claim "clause allowing" that
+    # then, correctly but meaninglessly, never matched context — one of
+    # several junk matches that dragged a well-grounded answer's deterministic
+    # score down to 20%). Split into two case-sensitivity-matched patterns
+    # rather than one re.I pattern: under re.I, a lowercase "in" or "is" would
+    # satisfy a case-insensitive [IVXLC] lookahead (I matches i), letting the
+    # exact same junk back in through the roman-numeral branch.
+    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+(?=\d)[\dA-Za-z.]+\b', re.I),  # doc refs (numeric)
+    re.compile(r'\b(?:Section|Clause|Article|Exhibit|Schedule|Appendix)\s+(?=[IVXLC]+\b)[IVXLC]+\b'),   # doc refs (roman numeral, case-sensitive)
+    re.compile(r'\b(?:[A-Z][a-zA-Z&\'-]+(?:\s+[A-Z][a-zA-Z&\'-]+){1,3})\b'),    # multi-word proper nouns
+]
+
+# Words that pattern-match as "proper nouns" (capitalized phrases) but are
+# generic legal boilerplate, not a fact that could be fabricated — checking
+# these against context is noise, not signal.
+_CLAIM_STOPWORDS = {
+    "the agreement", "this agreement", "the document", "this document",
+    "the parties", "the party", "the company", "the effective date",
+    "not covered", "not applicable", "not stated", "not specified",
+}
+
+
+# A heading line marking the start of a Recommendations-type section — the
+# ASSESSMENT_PROMPT's own rules explicitly exempt this content from grounding
+# ("Your analysis may go beyond the text; your facts may not"), but the model's
+# own invented sub-headings for its suggested framework ("Dynamic Injunction
+# Protocol", "Domain Additions", proposed cadences like "10 business days")
+# still pattern-match as checkable claims, since the extractor has no concept
+# of "which section of the answer is this in." Confirmed live: a well-grounded
+# risk-assessment answer scored 20% deterministically because most of its
+# extracted "claims" were the model's own Recommendations-section headings and
+# proposed numbers, none of which were ever meant to appear in the source
+# context. Cutting claim extraction off at this heading is a narrower,
+# lower-risk alternative to trying to classify every sentence — the FACTS
+# section (which precedes Recommendations in every ASSESSMENT/OBLIGATION/
+# COMPARISON template) still gets fully checked.
+_RECOMMENDATIONS_HEADING_RE = re.compile(
+    r'(?im)^[ \t]*(?:\d+[.)]\s*|[*\-•]\s*)?\**'
+    r'(?:recommendations?|recommended\s+stance|next\s+steps|'
+    r'practical\s+(?:steps|caveats|next\s+steps|impact\s+and\s+decision\s+guidance)|'
+    r'action\s+items|concrete\s+next\s+steps|what\s+to\s+do\s+next|operational\s+playbook|'
+    r'key\s+(?:negotiation\s+points|concrete\s+drafting\s+positions)|'
+    r'acceptance\s*/\s*rejection\s*/\s*negotiation\s+stance)\**'
+    r'(?:\s*\([^)]{0,60}\))?[ \t]*:?[ \t]*$'
+)
+
+
+def _extract_claims(text: str) -> list[str]:
+    """Pull out checkable factual atoms (amounts, dates, durations, doc
+    references, proper nouns) from an answer, deduplicated and stripped of
+    generic boilerplate phrases that aren't really factual claims.
+
+    Stops scanning at the first Recommendations-type heading — see
+    _RECOMMENDATIONS_HEADING_RE — so the model's own suggested framework
+    (proposed cadences, invented sub-heading names) never gets checked against
+    the source context as if it were a claim about what the context says."""
+    cutoff = _RECOMMENDATIONS_HEADING_RE.search(text)
+    if cutoff:
+        text = text[:cutoff.start()]
+    claims: list[str] = []
+    seen = set()
+    for pattern in _CLAIM_PATTERNS:
+        for m in pattern.finditer(text):
+            claim = m.group(0).strip()
+            key = claim.lower()
+            if key in seen or key in _CLAIM_STOPWORDS or len(key) < 3:
+                continue
+            seen.add(key)
+            claims.append(claim)
+    return claims
+
+
+def _claim_grounded(claim: str, context_norm: str) -> bool:
+    """Normalize and substring-match a single claim against the flattened
+    context. Exact-enough for numbers/dates; good-enough for proper nouns
+    (a real fabrication swaps the name/number outright, it doesn't just
+    reformat whitespace)."""
+    norm = re.sub(r'\s+', ' ', claim.strip().lower())
+    norm = re.sub(r'[,.]', '', norm)
+    return norm in context_norm
+
+
+def _deterministic_grounding(context: str, answer: str) -> dict:
+    """Zero-cost grounding score: extract factual claims from the answer and
+    check each one's literal presence in the retrieved context. Catches the
+    most common fabrication shape (wrong number/date/party name) without an
+    LLM call. Cannot catch claims that are semantically wrong while reusing
+    real numbers/names already in context — that gap is what the LLM
+    escalation in _check_grounding_hybrid exists for."""
+    claims = _extract_claims(answer)
+    if not claims:
+        return {"grounding_score": None, "ungrounded_claims": [], "summary":
+                 "No checkable factual claims (amounts/dates/names) found in answer.",
+                 "total_claims": 0, "method": "deterministic"}
+
+    context_norm = re.sub(r'\s+', ' ', context.lower())
+    context_norm = re.sub(r'[,.]', '', context_norm)
+    ungrounded = [c for c in claims if not _claim_grounded(c, context_norm)]
+    score = round(100 * (len(claims) - len(ungrounded)) / len(claims))
+    return {
+        "grounding_score": score,
+        "ungrounded_claims": ungrounded[:8],
+        "summary": f"{len(claims) - len(ungrounded)}/{len(claims)} checkable claims verified against context (deterministic).",
+        "total_claims": len(claims),
+        "method": "deterministic",
+    }
+
+
+# Escalation bands per intent — comparison/obligation/risk_assessment answers
+# synthesize across many sources and are more prone to claims that are
+# factually-real-but-logically-wrong (right number, wrong clause it's
+# attached to), which the deterministic pass can't detect. Bias those
+# intents toward escalating to the LLM judge more readily: lower min-claims
+# floor and a wider "ambiguous" band around the score.
+#
+# escalate_high was 95 for those three, so nearly EVERY answer escalated (real
+# answers rarely score above 95 deterministically) — the "deterministic first
+# to save cost" barely saved anything for them, and each escalation is a full
+# (sometimes reasoning-truncated, retried) LLM call for a DECORATIVE score that
+# gates nothing. Lowered to 85: an answer that already verifies ≥85% of its
+# checkable claims is well-grounded enough to trust without paying for the
+# judge.
+#
+# escalate_low was previously 35 with the STATED intent that "a low
+# deterministic score on these paraphrase-heavy intents is often just
+# reworded-but-real quotes, so surfacing it raw would mislead — those still
+# escalate to get a truer number." But the escalation condition is
+# `escalate_low < score < escalate_high` — a score AT OR BELOW escalate_low
+# never satisfies that and is trusted raw, the opposite of the stated intent.
+# Confirmed live: a well-grounded risk-assessment answer scored 20%
+# deterministically (mostly claim-extraction noise, see _extract_claims) and
+# was never escalated because 20 < 35; once escalated by hand to the LLM judge
+# it scored 92%. Raised to 15 — only a near-zero deterministic score (which
+# realistically means almost every extracted claim failed, not just noisy
+# extraction) is now trusted without a second look; anything above that gets
+# the LLM judge's nuance. Costs more escalations for these three intents, by
+# design — the whole point is these are the intents where a low raw score is
+# least likely to mean what it says.
+_GROUNDING_THRESHOLDS = {
+    "default":         {"min_claims": 3, "escalate_low": 50, "escalate_high": 85},
+    "comparison":      {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
+    "obligation":      {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
+    "risk_assessment": {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
+}
+
+
+def _check_grounding_hybrid(question: str, context: str, answer: str, intent: str = "factual") -> dict:
+    """Deterministic grounding check first (free); escalate to the LLM judge
+    only when the deterministic signal is too thin or too ambiguous to trust."""
+    if not context or not answer or len(answer) < 20:
+        return {"grounding_score": None, "ungrounded_claims": [], "summary": "Skipped — insufficient content."}
+
+    # Drafting answers are NEW clause language written to order, not facts
+    # retrieved from the context — so claim-by-claim matching against the
+    # source is structurally the wrong metric and always scores low
+    # (confirmed live: good drafted clauses scored 25–46% grounding, which
+    # reads as a quality warning when it is nothing of the sort). The part of
+    # a drafting answer that CAN be verified — its "Source Clauses" verbatim
+    # quotes — is already checked by _verify_answer_citations in
+    # wiki.generate_answer, so skip the grounding score here rather than
+    # surface a misleading number.
+    if intent == "drafting":
+        return {"grounding_score": None, "ungrounded_claims": [],
+                "summary": "Not scored — drafted clause language is newly authored text, not retrieved facts (source-clause citations are verified separately).",
+                "method": "skipped-drafting"}
+
+    det = _deterministic_grounding(context, answer)
+    thresholds = _GROUNDING_THRESHOLDS.get(intent, _GROUNDING_THRESHOLDS["default"])
+    score = det["grounding_score"]
+
+    needs_escalation = (
+        det["total_claims"] < thresholds["min_claims"]
+        or (score is not None and thresholds["escalate_low"] < score < thresholds["escalate_high"])
+    )
+
+    if needs_escalation:
+        logger.info(
+            "[GROUNDING] Deterministic pass inconclusive (claims=%d, score=%s) — escalating to LLM judge",
+            det["total_claims"], score,
+        )
+        llm_result = _check_grounding(question, context, answer, intent=intent)
+        if llm_result.get("grounding_score") is not None:
+            llm_result["method"] = "llm"
+            return llm_result
+        # LLM check failed outright — fall back to the deterministic read
+        # rather than surfacing nothing.
+        return det
+
+    logger.info("[GROUNDING] Deterministic pass sufficient (claims=%d, score=%s) — skipped LLM call",
+                det["total_claims"], score)
+    return det
 
 
 def _check_grounding(question: str, context: str, answer: str, intent: str = "factual") -> dict:
@@ -671,7 +979,7 @@ def validate_response_node(state: QueryState) -> dict:
     grounding = {"grounding_score": None, "ungrounded_claims": [], "summary": "Disabled."}
     if config.ENABLE_ANSWER_VALIDATION:
         _emit({"stage": "validating", "status": "active", "message": "Checking answer grounding…"})
-        grounding = _check_grounding(
+        grounding = _check_grounding_hybrid(
             state["question"],
             state.get("wiki_context", ""),
             answer,
@@ -734,7 +1042,8 @@ def get_query_graph():
 
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
-                     is_followup: bool = False, exclude_cached_answers: bool = False):
+                     is_followup: bool = False, exclude_cached_answers: bool = False,
+                     chat_session_id: str = ""):
     """Run the query graph and yield stage event dicts in real time.
 
     Each yielded dict is a custom stage event emitted by a node. The terminal
@@ -747,6 +1056,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     state: QueryState = {
         "question": question,
         "session_id": session_id,
+        "chat_session_id": chat_session_id or session_id,
         "target_doc": target_doc or "",
         "is_followup": bool(is_followup),
         "exclude_cached_answers": bool(exclude_cached_answers),

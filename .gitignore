@@ -297,3 +297,27 @@ backups/
 
 # Deployment working notes (same genre as PLAN.md / checklist.md above)
 deployment_test.md
+
+# Credentials / secrets — never commit these regardless of where they land
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
+*.env.*
+!app/.env.example
+
+# Client / corpus documents — real ingest source material must never be
+# committed alongside the app; only app/data/ was covered before, this
+# catches a PDF/CSV dropped anywhere else in the repo by mistake.
+*.pdf
+*.docx
+*.csv
+*.sqlite
+*.sqlite3
+*.dump
+
+# Ad-hoc scratch output from live debugging (out.txt, tmp_*.txt, etc.)
+out.txt
+tmp_*.*
+scratch_*.*
