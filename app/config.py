@@ -112,6 +112,27 @@ MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in contex
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
 MAX_TOTAL_CONTEXT_CHARS      = 60_000 # Cap on the combined wiki_content sent per LLM call (prevents context-window overflow on broad queries that match many similar documents)
 ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too common (reused across many docs) to force-scope the query to it
+
+# Draft mode — budgeted so a full generate-or-refine call stays under 12k
+# tokens total (classify + retrieval + this call's input + output combined),
+# not just the completion cap in isolation. Raised from an initial 10k
+# target: measured full_document refine (the most expensive case — it both
+# sends and regenerates a whole document) at 7.4k-8.6k tokens across most
+# runs, one outlier at 10.36k on reasoning-token variance alone. 12k gives
+# that case real headroom instead of sitting right on the edge.
+MAX_DRAFT_WIKI_CONTEXT_CHARS = 4_000  # ~1000 tokens of grounding context — was 8000, halved to leave room for output
+# On the active reasoning model (gpt-5-nano), hidden reasoning tokens count
+# against max_completion_tokens before any visible text — a cap set below
+# that reasoning floor returns EMPTY output with finish_reason="length",
+# not a shorter draft (confirmed live: 1800 and 4500, the original values
+# here, both went blank on real prompts; measured thresholds directly —
+# clause-type failed at 2500, succeeded at 3200; full_document failed at
+# 4096, succeeded at 5500). Same failure mode already documented elsewhere
+# in this file for MAX_TOKENS_ANSWER / MAX_TOKENS_RERANK. These floors carry
+# real margin above the measured minimums, not the minimums themselves,
+# since reasoning-token spend isn't deterministic run to run.
+MAX_TOKENS_DRAFT_SHORT       = 4_096  # clause / communication / letter — matches MAX_TOKENS_ANSWER's proven-safe floor for this model
+MAX_TOKENS_DRAFT_LONG        = 7_000  # full_document / tracker — measured safe at 5500, this adds ~1500 tokens of margin against run-to-run variance
 AMBIGUITY_DOC_SAMPLE_CAP     = 40    # Doc sample size shown to the check_ambiguity() LLM prompt — type-diverse, not a raw head-slice
 PAGE_SELECTION_PREFILTER_N   = 150   # BM25 candidates sent to LLM for final selection (from potentially 1000s of pages)
 VECTOR_SEARCH_TOP_K          = 15    # Nearest-neighbour results from pgvector (Phase 3)
