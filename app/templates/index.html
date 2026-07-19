@@ -602,6 +602,46 @@
       background: var(--green)
     }
 
+    /* Generic "how is this calculated" hover popover on the Confidence /
+       Grounding badges — always the same short explanatory text, not tied to
+       the specific answer. A single shared element positioned `fixed` via JS
+       (see showMetricInfo/hideMetricInfo) rather than CSS-only :hover +
+       absolute — the badges sit inside the scrolling chat list, whose
+       overflow clips an absolutely-positioned child instead of letting it
+       float above the page (confirmed live: popover rendered but was cut off
+       at the scroll container's edge). */
+    .metric-info {
+      cursor: help;
+      border-bottom: 1px dashed var(--border-strong);
+    }
+
+    #metric-popover {
+      display: none;
+      position: fixed;
+      width: 200px;
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-md);
+      box-shadow: 0 6px 20px rgba(20, 20, 40, 0.16);
+      padding: 8px 10px;
+      z-index: 70;
+      white-space: normal;
+      pointer-events: none;
+    }
+
+    .metric-popover-title {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 3px;
+    }
+
+    .metric-popover-desc {
+      font-size: 11px;
+      line-height: 1.45;
+      color: var(--text-secondary);
+    }
+
     .answer-actions {
       display: flex;
       align-items: center;
@@ -3128,6 +3168,12 @@
 
       </div>
 
+      <!-- Confidence / Grounding "how is this calculated" popover — shared, fixed-position -->
+      <div id="metric-popover">
+        <div class="metric-popover-title" id="metric-popover-title"></div>
+        <div class="metric-popover-desc" id="metric-popover-desc"></div>
+      </div>
+
       <!-- LOG OVERLAY -->
       <!-- TUTORIAL — spotlight coachmark -->
       <div id="tutorial-backdrop" class="tutorial-backdrop" style="display:none" onclick="closeTutorial()"></div>
@@ -3273,6 +3319,42 @@
     let totalFilesQueued = 0;
     let currentDocs = [];
     let currentResultReferences = [];
+
+    // ============================================================
+    // Confidence / Grounding badge — generic "how is this calculated" popover
+    // ============================================================
+    const METRIC_INFO = {
+      confidence: { title: 'Confidence', desc: 'How well a model judges the retrieved context supports this answer.' },
+      grounding:  { title: 'Grounding', desc: '% of the answer\'s checkable claims verified against the source text.' },
+    };
+
+    function metricInfo(label, score, key) {
+      return `<span class="metric-info" onmouseenter="showMetricInfo(event,'${key}')" onmouseleave="hideMetricInfo()">${label}: ${score}%</span>`;
+    }
+
+    function showMetricInfo(evt, key) {
+      const info = METRIC_INFO[key];
+      if (!info) return;
+      const pop = document.getElementById('metric-popover');
+      document.getElementById('metric-popover-title').textContent = info.title;
+      document.getElementById('metric-popover-desc').textContent = info.desc;
+      pop.style.display = 'block';
+
+      const r = evt.target.getBoundingClientRect();
+      const popW = 200, gap = 8;
+      const popH = pop.offsetHeight || 50;
+      // Prefer opening below the badge (avoids the scroll-container's top
+      // edge); flip above only when there's genuinely no room below.
+      const below = (window.innerHeight - r.bottom) > (popH + gap) || r.top < popH + gap;
+      pop.style.top = (below ? r.bottom + gap : r.top - popH - gap) + 'px';
+      let left = r.left + r.width / 2 - popW / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - popW - 8));
+      pop.style.left = left + 'px';
+    }
+
+    function hideMetricInfo() {
+      document.getElementById('metric-popover').style.display = 'none';
+    }
 
     // ============================================================
     // Toast Helper
@@ -4251,10 +4333,6 @@
         desc: 'Standing rules the assistant follows on every answer — tone, formatting, things to always check or flag. Open this to review or customise them.',
       },
       {
-        target: 'tour-graph-btn', icon: 'ti-topology-star-ring', title: 'Knowledge graph',
-        desc: 'A visual map of how entities, parties, and documents connect across the corpus — useful for spotting relationships a text search alone would miss.',
-      },
-      {
         target: 'tour-files-btn', icon: 'ti-folder-open', title: 'File explorer',
         desc: 'Browse every document that has been ingested, grouped into folders. Click a folder to open it, then click any file to jump straight to it.',
       },
@@ -5151,9 +5229,7 @@
         let gColor = 'var(--green)';
         if (gScore < 50) gColor = 'var(--red)';
         else if (gScore < 70) gColor = 'var(--amber)';
-        const gClaims = (grounding.ungrounded_claims || []);
-        const gTip = gClaims.length ? gClaims.join('; ') : (grounding.summary || '');
-        groundingBadge = `<span class="conf" title="${gTip.replace(/"/g,'&quot;')}"><span class="conf-dot" style="background:${gColor}"></span>Grounding: ${gScore}%</span>`;
+        groundingBadge = `<span class="conf"><span class="conf-dot" style="background:${gColor}"></span>${metricInfo('Grounding', gScore, 'grounding')}</span>`;
       }
 
       const div = document.createElement('div');
@@ -5164,7 +5240,7 @@
             <div class="answer-tags">
               ${intentBadge}
               <span class="tag-synth">SYNTHESIZED</span>
-              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>Confidence: ${score}%</span>
+              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
               ${groundingBadge}
             </div>
             <div class="answer-actions">
