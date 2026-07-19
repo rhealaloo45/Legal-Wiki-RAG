@@ -1919,6 +1919,60 @@
       cursor: pointer
     }
 
+    /* Draft rich-text toolbar */
+    .draft-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      padding: 6px 14px;
+      border-bottom: 0.5px solid var(--border);
+      background: var(--bg-surface);
+      flex-shrink: 0;
+    }
+
+    .draft-tb-btn {
+      width: 26px;
+      height: 26px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: none;
+      background: transparent;
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .draft-tb-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .draft-tb-btn.active {
+      background: var(--accent-light);
+      color: var(--accent);
+    }
+
+    .draft-tb-sep {
+      width: 0.5px;
+      height: 18px;
+      background: var(--border-strong);
+      margin: 0 4px;
+      flex-shrink: 0;
+    }
+
+    .draft-tb-heading {
+      font-size: 12px;
+      color: var(--text-primary);
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 4px 6px;
+      cursor: pointer;
+      font-family: var(--font-sans);
+    }
+
     table.mtbl {
       width: 100%;
       border-collapse: collapse;
@@ -3086,6 +3140,24 @@
                   <button class="exp-btn" id="draft-export-btn"><i class="ti ti-download"
                       style="font-size:12px"></i>Export DOCX</button>
                 </div>
+              </div>
+              <div class="draft-toolbar" id="draft-toolbar">
+                <select class="draft-tb-heading" onchange="draftFormatBlock(this.value); this.selectedIndex=0">
+                  <option value="" selected disabled>Style</option>
+                  <option value="P">Paragraph</option>
+                  <option value="H1">Heading 1</option>
+                  <option value="H2">Heading 2</option>
+                  <option value="H3">Heading 3</option>
+                </select>
+                <span class="draft-tb-sep"></span>
+                <button type="button" class="draft-tb-btn" title="Bold" onmousedown="event.preventDefault()" onclick="draftExec('bold')"><i class="ti ti-bold"></i></button>
+                <button type="button" class="draft-tb-btn" title="Italic" onmousedown="event.preventDefault()" onclick="draftExec('italic')"><i class="ti ti-italic"></i></button>
+                <button type="button" class="draft-tb-btn" title="Underline" onmousedown="event.preventDefault()" onclick="draftExec('underline')"><i class="ti ti-underline"></i></button>
+                <button type="button" class="draft-tb-btn" title="Strikethrough" onmousedown="event.preventDefault()" onclick="draftExec('strikeThrough')"><i class="ti ti-strikethrough"></i></button>
+                <span class="draft-tb-sep"></span>
+                <button type="button" class="draft-tb-btn" title="Bullet list" onmousedown="event.preventDefault()" onclick="draftExec('insertUnorderedList')"><i class="ti ti-list"></i></button>
+                <button type="button" class="draft-tb-btn" title="Numbered list" onmousedown="event.preventDefault()" onclick="draftExec('insertOrderedList')"><i class="ti ti-list-numbers"></i></button>
+                <button type="button" class="draft-tb-btn" title="Link" onmousedown="event.preventDefault()" onclick="draftInsertLink()"><i class="ti ti-link"></i></button>
               </div>
               <div id="draft-content-area"
                 style="flex: 1; overflow: auto; padding: 24px 32px; white-space: pre-wrap; font-family: var(--font-sans); font-size: 13px; line-height: 1.8; color: var(--text-primary); outline: none;"
@@ -6137,9 +6209,83 @@
       return html.join('');
     }
 
+    // ============================================================
+    // Draft rich-text toolbar — native execCommand on the contenteditable
+    // draft-content-area. Deprecated API, but still broadly supported in
+    // Chromium and is the fastest path to Word-style formatting on a plain
+    // contenteditable div without pulling in an editor library; revisit if
+    // this needs to survive long-term across browsers.
+    //
+    // The heading <select> can't be stopped from stealing focus the way the
+    // toolbar buttons are (onmousedown preventDefault works for buttons, not
+    // for a native select's own focus/open behavior) — by the time onchange
+    // fires, window.getSelection() has already collapsed, so formatBlock had
+    // nothing to apply to (confirmed live: heading dropdown silently did
+    // nothing). Continuously save the live selection while the user is
+    // actually in the editor, and restore it right before any toolbar
+    // command runs, so a dropdown pick still acts on the text that was
+    // selected a moment ago.
+    // ============================================================
+    let _draftSavedRange = null;
+
+    function _saveDraftSelection() {
+      const area = document.getElementById('draft-content-area');
+      const sel = window.getSelection();
+      if (sel.rangeCount > 0 && area.contains(sel.anchorNode)) {
+        _draftSavedRange = sel.getRangeAt(0).cloneRange();
+      }
+    }
+
+    function _restoreDraftSelection() {
+      const area = document.getElementById('draft-content-area');
+      area.focus();
+      if (_draftSavedRange) {
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(_draftSavedRange);
+      }
+    }
+
+    function draftExec(cmd) {
+      _restoreDraftSelection();
+      document.execCommand(cmd, false, null);
+      document.getElementById('draft-local-badge').classList.remove('d-none');
+      updateDraftToolbarState();
+      _saveDraftSelection();
+    }
+
+    function draftFormatBlock(tag) {
+      _restoreDraftSelection();
+      // Bracketed form ("<h1>") — the bare tag name works in Chromium but
+      // Firefox requires the brackets; bracketed works in both.
+      document.execCommand('formatBlock', false, '<' + tag + '>');
+      document.getElementById('draft-local-badge').classList.remove('d-none');
+      _saveDraftSelection();
+    }
+
+    function draftInsertLink() {
+      const url = prompt('Link URL:');
+      if (!url) return;
+      _restoreDraftSelection();
+      document.execCommand('createLink', false, url);
+      document.getElementById('draft-local-badge').classList.remove('d-none');
+      _saveDraftSelection();
+    }
+
+    function updateDraftToolbarState() {
+      const map = { bold: 'Bold', italic: 'Italic', underline: 'Underline', strikeThrough: 'Strikethrough' };
+      document.querySelectorAll('#draft-toolbar .draft-tb-btn[title]').forEach(btn => {
+        const cmd = Object.keys(map).find(k => map[k] === btn.title);
+        if (!cmd) return;
+        try { btn.classList.toggle('active', document.queryCommandState(cmd)); } catch (e) {}
+      });
+    }
+
     document.getElementById('draft-content-area').addEventListener('input', () => {
       document.getElementById('draft-local-badge').classList.remove('d-none');
     });
+    document.getElementById('draft-content-area').addEventListener('keyup', () => { updateDraftToolbarState(); _saveDraftSelection(); });
+    document.getElementById('draft-content-area').addEventListener('mouseup', () => { updateDraftToolbarState(); _saveDraftSelection(); });
 
     document.getElementById('run-draft-btn').addEventListener('click', async () => {
       const q = document.getElementById('draft-q').value.trim();

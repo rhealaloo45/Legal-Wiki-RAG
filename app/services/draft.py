@@ -11,6 +11,7 @@ from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+import config
 from services import llm
 from services import wiki
 
@@ -202,14 +203,23 @@ def get_draft_context(session_id: str, prompt: str) -> dict:
             
         mentioned_files = wiki._detect_mentioned_files(prompt, pages)
         file_pages = wiki._pages_from_files(pages, mentioned_files) if mentioned_files else []
-        
+
         pages_for_llm = pages
         if file_pages:
             if len(pages) <= 20:
                 other = [t for t in pages if t not in file_pages]
                 selected_titles = file_pages + other
             else:
-                llm_selected = wiki._select_relevant_pages(pages_for_llm, prompt)
+                # _select_relevant_pages returns (titles, usage_dict) — was
+                # unpacked as a bare list here, so `for t in llm_selected`
+                # iterated the 2-tuple's two ELEMENTS (the list object, then
+                # the dict object) instead of page titles, and neither is
+                # ever `in pages`, silently producing zero supplementary
+                # pages. session_id also wasn't passed through, so this
+                # always paid for the BM25+LLM fallback selection instead of
+                # the free pgvector search path (see _select_relevant_pages'
+                # own docstring: vector search requires session_id).
+                llm_selected, _usage = wiki._select_relevant_pages(pages_for_llm, prompt, session_id)
                 seen = set(file_pages)
                 supplementary = [t for t in llm_selected if t not in seen]
                 selected_titles = file_pages + supplementary
@@ -219,7 +229,16 @@ def get_draft_context(session_id: str, prompt: str) -> dict:
             if len(pages) <= 20:
                 selected_titles = list(pages.keys())
             else:
-                selected_titles = wiki._select_relevant_pages(pages_for_llm, prompt)[:15]
+                # Same tuple bug as above: `[:15]` on a 2-tuple is a no-op
+                # slice returning the tuple unchanged, so `selected_titles`
+                # became (titles, usage_dict) — the loop below then found
+                # nothing `in pages` and get_draft_context silently returned
+                # has_context=True with EMPTY content. This is the common
+                # path (>20 pages, no specific document named in the
+                # prompt), so drafting was losing wiki grounding entirely
+                # here in production.
+                llm_selected, _usage = wiki._select_relevant_pages(pages_for_llm, prompt, session_id)
+                selected_titles = llm_selected[:15]
 
         wiki_parts = []
         source_pages = []
@@ -245,8 +264,7 @@ def get_draft_context(session_id: str, prompt: str) -> dict:
                 source_pages.append({"title": title, "source": source_doc})
                 
         wiki_content = "\n".join(wiki_parts)
-        # Limit to ~8000 chars roughly
-        wiki_content = wiki_content[:8000]
+        wiki_content = wiki_content[:config.MAX_DRAFT_WIKI_CONTEXT_CHARS]
         return {"has_context": True, "context": wiki_content, "source_pages": source_pages}
     except Exception as e:
         logger.error(f"Failed to get draft context: {e}")
@@ -298,8 +316,17 @@ def _run_draft_job(job_id: str, session_id: str, prompt: str, use_wiki: bool = T
             wiki_instructions = f"\nRelevant Wiki Knowledge:\n{context_dict['context']}\n\nAdditional instructions:\n- Use wiki knowledge as drafting precedent\n- Reuse terminology already found in the wiki\n- Reuse defined terms when appropriate\n- Maintain consistency with existing agreements\n- Surface conflicts through drafting notes\n"
         
         final_prompt = template.format(stance_instruction=stance_inst, wiki_instructions=wiki_instructions, prompt=prompt)
-        
-        result, _ = llm.ask(final_prompt)
+
+        # Uncapped before — a reasoning-model call with no max_tokens has no
+        # ceiling on hidden reasoning + visible output, and a full_document/
+        # tracker draft could run well past a 10k-token overall budget for
+        # this call. Bounded per draft type; short types get less since
+        # their whole point is brevity.
+        draft_max_tokens = (
+            config.MAX_TOKENS_DRAFT_LONG if draft_type in ("full_document", "tracker")
+            else config.MAX_TOKENS_DRAFT_SHORT
+        )
+        result, _ = llm.ask(final_prompt, max_tokens=draft_max_tokens)
         
         with lock:
             DRAFT_STORE[job_id]["status"] = "complete"
@@ -327,13 +354,15 @@ def _run_refine_job(job_id: str, session_id: str, instruction: str):
             current_v = DRAFT_STORE[job_id]["current_version"]
             current_text = DRAFT_STORE[job_id]["versions"][current_v]["text"]
             meta = DRAFT_STORE[job_id].get("metadata", {})
-            has_wiki = meta.get("has_wiki_context", False)
-            orig_context = meta.get("original_context", "")
-            
-        wiki_refine_text = ""
-        if has_wiki and orig_context:
-            wiki_refine_text = f"\n\nORIGINAL WIKI CONTEXT FOR CONSISTENCY:\n{orig_context}\n"
+            draft_type = meta.get("type", "clause")
 
+        # The original wiki context used to be re-sent in full on every
+        # refine ("ORIGINAL WIKI CONTEXT FOR CONSISTENCY") — but that
+        # grounding is already baked into current_text from the generation
+        # pass; re-including it here just doubles the input cost on every
+        # refine for no benefit the existing draft text doesn't already
+        # provide. Dropped entirely — refine only needs the draft + the
+        # instruction.
         refine_prompt = (
             "You are an expert legal editor modifying an existing draft. "
             "Preserve existing structure, numbering, unaffected clauses, and drafting notes. "
@@ -341,10 +370,16 @@ def _run_refine_job(job_id: str, session_id: str, instruction: str):
             "Do not add explanation or commentary outside of the draft text.\n\n"
             f"EXISTING DRAFT:\n{current_text}\n\n"
             f"REFINEMENT INSTRUCTIONS:\n{instruction}"
-            f"{wiki_refine_text}"
         )
-        
-        result, _ = llm.ask(refine_prompt)
+
+        # Same per-type cap as generation — a refine echoes the whole draft
+        # back, so this bounds the call to roughly 2x the type's own budget
+        # (current_text ≈ up to the cap already, plus the new completion).
+        refine_max_tokens = (
+            config.MAX_TOKENS_DRAFT_LONG if draft_type in ("full_document", "tracker")
+            else config.MAX_TOKENS_DRAFT_SHORT
+        )
+        result, _ = llm.ask(refine_prompt, max_tokens=refine_max_tokens)
         
         with lock:
             new_v = current_v + 1
