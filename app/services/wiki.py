@@ -1725,6 +1725,68 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
     return matched
 
 
+# A synthetic corpus document, named "Test_<TYPE>_<NN>" (e.g. "Test_SHA_01",
+# "Test_JVA_04", "Test_Opinion_35"). These sit ALONGSIDE the real documents in
+# the same upload folder ("Legal AI - Test_Shareholder Agreements (1)"), and the
+# real ones are NOT so-named (they are "Shareholder Agreement 1_redacted", "NDA 7
+# _Redacted", "Court Case Document 5", "Tata Brand Judgment 6", etc.). The user's
+# convention is that the real documents are the ones that matter; the Test_* files
+# are fictional stand-ins. NOTE the leading separator class instead of \b — the
+# uploader underscore-joins the folder path into source_doc, so the marker is
+# preceded by "_" (a word char), and \b never fires between "_" and "test".
+_SYNTHETIC_DOC_RE = re.compile(r'(?:^|[_ /\\-])test_[a-z]+_\d+(?![a-z])', re.I)
+
+
+def _is_synthetic_test_doc(source_doc: str) -> bool:
+    """True when source_doc is a synthetic "Test_<TYPE>_<NN>" stand-in, not a
+    real corpus document."""
+    base = re.sub(r'^[a-f0-9-]{36}_', '', source_doc.replace("\\", "/").rsplit("/", 1)[-1])
+    return bool(_SYNTHETIC_DOC_RE.search(base))
+
+
+def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
+    """Human-readable labels for each numbered reference in the question that
+    matches BOTH a real document and a synthetic Test_* sibling.
+
+    "SHA 1" matches the real "Shareholder Agreement 1_redacted" AND the synthetic
+    "Test_SHA_01" (same type + number, different naming scheme) — both get pinned
+    into context, and the answer LLM then silently answers from whichever has the
+    richer content, usually the synthetic one, with no indication it switched
+    documents (confirmed live: a GridEdge SHA question was answered entirely from
+    Test_SHA_01's fictional Aether/Helios/Apex parties and $1,000,000 veto
+    threshold, none of which belong to the real GridEdge agreement). Mirrors the
+    per-number matching loop in _numbered_docs_in so the collision is detected
+    against the exact same references the user named — no behaviour change to the
+    matcher itself, this is a read-only overlay used to warn the user.
+    """
+    collisions: list[str] = []
+    for num_match in _DOC_NAME_PATTERN.finditer(question):
+        t = re.sub(r'\s+', ' ', num_match.group(1).lower()).strip()
+        type_core = _DOC_TYPE_CORE.get(t, t.split()[0])
+        nums = [num_match.group(2)]
+        tail = question[num_match.end():]
+        while True:
+            m = re.match(r'\s*(?:,|&|and)\s*(\d+)', tail)
+            if not m:
+                break
+            nums.append(m.group(1))
+            tail = tail[m.end():]
+        for doc_num in nums:
+            num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            hits = [
+                sd for sd in doc_names
+                if re.search(num_re, _norm_doc_name(sd))
+                and (not type_core or type_core in _norm_doc_name(sd))
+            ]
+            has_synthetic = any(_is_synthetic_test_doc(sd) for sd in hits)
+            has_real = any(not _is_synthetic_test_doc(sd) for sd in hits)
+            if has_synthetic and has_real:
+                label = f"{t} {doc_num}"
+                if label not in collisions:
+                    collisions.append(label)
+    return collisions
+
+
 def _uploaded_doc_names(session_id: str) -> set[str]:
     """Every document UPLOADED to this session, read from the upload directory.
 
@@ -3444,6 +3506,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
 
+    if _misattributed:
+        # The corrective retry above already had its shot at fixing this via a
+        # full regeneration; for whatever survives, try a deterministic,
+        # in-place label fix before falling back to a warning — the correct
+        # document is already known (it's how the mismatch was detected), so a
+        # regeneration isn't needed to fix a same-type wrong-number citation.
+        # Runs BEFORE any [WARNING] banner is appended below — it's a genuine
+        # in-place fix to the answer's own citation text, not a banner, so it
+        # must land before the reference-extraction snapshot two blocks down.
+        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
+        if _n_fixed:
+            _misattributed = _verify_citation_attribution(answer, wiki_content)
+            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
+                       _n_fixed, len(_misattributed))
+
+    # Snapshot the answer's own [N]/[From: ...] citation markers BEFORE any
+    # [CITATION WARNING]/[ATTRIBUTION WARNING]/[SCOPE WARNING]/[SCOPE NOTE]
+    # banner gets appended below. Those banners are themselves bracket-shaped
+    # text (and routinely mention document names/quotes while explaining what
+    # went wrong), so extracting references AFTER they land let the banner's
+    # own prose get scanned as if it were a citation and substring-matched
+    # against document identifiers — confirmed live: a comparison's References
+    # section rendered "Tata Brand Judgment 2" though the answer never once
+    # discussed that document, because the warning text below happened to
+    # contain a fragment that matched it. This is a pure reorder — every
+    # banner block after this point is unchanged, only moved past this line.
+    referenced = re.findall(r"\[([^\]]+)\]", answer)
+
     if _unverified_quotes:
         logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
                         len(_unverified_quotes))
@@ -3455,18 +3545,6 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"be verified verbatim against the retrieved source text — treat as paraphrase, not "
             f"exact quote: {_preview}]"
         )
-
-    if _misattributed:
-        # The corrective retry above already had its shot at fixing this via a
-        # full regeneration; for whatever survives, try a deterministic,
-        # in-place label fix before falling back to a warning — the correct
-        # document is already known (it's how the mismatch was detected), so a
-        # regeneration isn't needed to fix a same-type wrong-number citation.
-        answer, _n_fixed = _autocorrect_citation_attribution(answer, wiki_content)
-        if _n_fixed:
-            _misattributed = _verify_citation_attribution(answer, wiki_content)
-            logger.info("Citation autocorrect: fixed %d misattributed citation(s) in place, %d remaining",
-                       _n_fixed, len(_misattributed))
 
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
@@ -3530,9 +3608,6 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Scope was inferred rather than stated by the question — say so, always.
     if scope_note:
         answer += f"\n\n[SCOPE NOTE: {scope_note}]"
-
-    # Extract [Reference] from the answer
-    referenced = re.findall(r"\[([^\]]+)\]", answer)
 
     # Map each selected page to its real document identifier — the SOURCE_DOC
     # filename (e.g. "...Legal Opinions (1)_Legal Opinion 6 (1).pdf"), not the
@@ -4532,9 +4607,19 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     except Exception:
         mentioned = set()
     if mentioned:
+        # A numbered reference ("SHA 1") can match BOTH the real document and a
+        # synthetic Test_* sibling of the same type+number — both get pinned, and
+        # the answer LLM tends to answer from whichever is richer (usually the
+        # synthetic one) with no indication it switched. Detect the collision so
+        # the answer can warn; a read-only overlay, target_docs is unchanged.
+        try:
+            collisions = _numbered_doc_collisions(question, _distinct_source_docs(pages))
+        except Exception:
+            collisions = []
         return {"scope": "single_doc", "target_docs": sorted(mentioned),
                 "target_family": None, "is_broad": False,
-                "confidence": 0.9, "method": "file"}
+                "confidence": 0.9, "method": "file",
+                "doc_collisions": collisions}
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
     # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
