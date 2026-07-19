@@ -4591,7 +4591,14 @@
     function coerceTables(text) {
       const lines = text.split('\n');
       const out = [];
-      const isTabRow = l => l.indexOf('\t') >= 0 && l.split('\t').length >= 2;
+      // Require >=2 NON-EMPTY cells, not just >=2 cells after split — a single
+      // leading-indent tab ("\tDuty") splits into ["", "Duty"], which is length 2
+      // but is one value on its own line, not a real multi-column row. Without
+      // this, a vertical one-field-per-line answer (a genuine model formatting
+      // miss — nano failing to emit its own pipe table) got coerced into a
+      // garbled 2-column table with a permanently empty first column instead of
+      // being left as plain text (confirmed live on an obligations-table answer).
+      const isTabRow = l => l.split('\t').map(c => c.trim()).filter(c => c !== '').length >= 2;
       const isPipeRow = l => { const t = l.trim(); return t.indexOf('|') >= 0 && t.split('|').filter(s => s.trim() !== '').length >= 2; };
       const isDelim = l => /^[\s|:\-]+$/.test(l) && l.indexOf('-') >= 0;
       const pipeRow = (cells, ncol) => { const c = cells.slice(); while (c.length < ncol) c.push(''); return '| ' + c.map(x => x.replace(/\|/g, '\\|')).join(' | ') + ' |'; };

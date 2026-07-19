@@ -143,11 +143,46 @@ _RX_RISK = re.compile(
 # (confirmed live on the SteelLoop Reserved-Matters question). This guard fires
 # only when approval/consent is governance-qualified.
 _RX_GOVERNANCE_APPROVAL = re.compile(
+    # "written" alone (not just "prior written") is a genuine governance qualifier
+    # too — "without Tata's written approval" is a personnel-control clause a
+    # factual/risk_assessment question asks ABOUT, not a request to assess risk
+    # (confirmed live: SA6 personnel-clause question got forced into a full
+    # Accept/Reject/Negotiate essay off this single bare "approval" hit). Kept
+    # narrow: this only suppresses risk intent when approval/consent is the ONLY
+    # _RX_RISK signal (enforced by _is_governance_approval_only's subset check
+    # below) — a question with an actual risk cue alongside it still classifies
+    # as risk regardless of this guard.
     r'\b(?:board|shareholders?|members?|majority|unanimous|special\s+majority|'
-    r'statutory|regulatory|prior\s+written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
+    r'statutory|regulatory|prior\s+written|written|requisite)\b\s+\w*\s*\b(?:approval|approve|consent)\b'
     r'|\b(?:approval|approve|consent)\s+(?:of|by|from)\s+(?:the\s+)?(?:board|shareholders?|members?)\b',
     re.IGNORECASE,
 )
+
+
+# "advise|advisory" in _RX_RISK is meant to catch an advice-request ("please
+# advise", "your advisory on this") — but it also matches a party's own NAME
+# when the corpus contains an entity like "Helios Grid Advisory Private
+# Limited" (confirmed live: a plain payment-terms/TDS/GST lookup question got
+# forced into a full risk-assessment essay purely because the counterparty's
+# name contains the word "Advisory"). "Advisory" immediately followed by a
+# corporate suffix is a company name, not a verb (same suffix list wiki.py's
+# _PARTY_NAME_RE uses for the same purpose — kept local here to avoid a
+# cross-module import for one shared string).
+_RX_ADVISORY_ENTITY = re.compile(
+    r'\badvisory\b\s+(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
+    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_advisory_entity_name_only(q: str) -> bool:
+    """True when the ONLY _RX_RISK signal is 'advise'/'advisory' and that word
+    is immediately followed by a corporate suffix — i.e. it's part of a party's
+    name, not a request for advice. Same subset-guard shape as
+    _is_governance_approval_only: a question that ALSO carries a real risk cue
+    still classifies as risk regardless of this guard."""
+    hits = {m.group(0).lower() for m in _RX_RISK.finditer(q)}
+    return hits <= {"advise", "advisory"} and bool(_RX_ADVISORY_ENTITY.search(q))
 
 
 def _is_governance_approval_only(q: str) -> bool:
@@ -189,7 +224,8 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
             and not _RX_BETWEEN_PARTIES.search(q) \
             and not _RX_BETWEEN_ALLOCATION.search(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
-    if _RX_RISK.search(q) and not _is_governance_approval_only(q):
+    if _RX_RISK.search(q) and not _is_governance_approval_only(q) \
+            and not _is_advisory_entity_name_only(q):
         return {"intent": "risk_assessment", "confidence": 0.9, "method": "regex"}
     if _RX_OBLIGATION.search(q):
         return {"intent": "obligation", "confidence": 0.85, "method": "regex"}

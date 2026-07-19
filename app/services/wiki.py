@@ -2491,25 +2491,33 @@ def _strict_verification_corpus(context: str) -> str:
     return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
 
 
-# A reference/citation line ending in a QUOTE-WRAPPED placeholder standing in for
-# a real excerpt the model didn't have — e.g. `... Liability and Indemnity — "Not
-# provided in excerpt"` or `... Section 2.3. Quote: (not provided here)`. The
-# ANSWER/ASSESSMENT/COMPARISON prompts already ban this, but gpt-5-nano at low
-# reasoning effort re-emits it intermittently (confirmed live across batches:
-# JVA6 came back clean once, then NDA 7 regressed to the em-dash form). The set of
+# A reference/citation line ending in a placeholder standing in for a real
+# excerpt the model didn't have — e.g. `... Liability and Indemnity — "Not
+# provided in excerpt"`, `... Section 2.3. Quote: (not provided here)`, a
+# BARE `| Quote: not provided in excerpt` with no wrapping quotes/parens at all,
+# or a double-wrapped `— "(none)"` (parens nested inside the outer quote marks)
+# (confirmed live: nano varies the format across every batch — wrapped, bare,
+# double-wrapped). The ANSWER/ASSESSMENT/COMPARISON prompts already ban this,
+# but gpt-5-nano at low reasoning effort re-emits it intermittently. The set of
 # stand-in phrases is finite and none is ever a legitimate quote, so strip it
-# deterministically rather than depend on model compliance. Requires the phrase to
-# be WRAPPED in quotes/parens — a bare "not available" in prose is left untouched.
+# deterministically rather than depend on model compliance. Two branches: after
+# an explicit "Quote:" label the wrapper is OPTIONAL (the label alone
+# disambiguates intent from ordinary prose); without that label the wrapper is
+# REQUIRED (otherwise a genuine unwrapped sentence like "the clause is not
+# available" would be eaten). An optional inner "(...)" is tolerated either way.
 _PLACEHOLDER_QUOTE_RE = re.compile(
     r'(?im)'
     r'[ \t]*(?:[|—–-][ \t]*)?'                 # optional leading separator (pipe / dash)
-    r'(?:Quote[ \t]*:[ \t]*)?'                  # optional "Quote:" label
-    r'[("“\']'                                    # REQUIRED opening wrapper (quote or paren)
-    r'[ \t]*'
+    r'(?:'
+    r'Quote[ \t]*:[ \t]*[("“\']?'               # "Quote:" label — wrapper optional after it
+    r'|[("“\']'                                   # no label — wrapper REQUIRED
+    r')'
+    r'[ \t]*\(?[ \t]*'                          # optional inner paren ("(none)" inside outer quotes)
     r'(?:not[ \t]+provided(?:[ \t]+in[ \t]+excerpt|[ \t]+here)?'
-    r'|not[ \t]+available|not[ \t]+applicable|n/?a|none[ \t]+provided)'
+    r'|not[ \t]+available|not[ \t]+applicable|n/?a|none(?:[ \t]+provided)?|nil)'
+    r'[ \t]*\)?'
     r'[ \t]*\.?'
-    r'[)"”\']'                                    # closing wrapper
+    r'[)"”\']?'                                   # closing wrapper (optional to match either branch)
     r'[ \t]*$'
 )
 
