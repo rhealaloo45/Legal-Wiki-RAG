@@ -570,6 +570,24 @@ def generate_answer_node(state: QueryState) -> dict:
             f"or its distinctive counterparty."
         )
 
+    # A numbered document reference matched BOTH the real document and a synthetic
+    # Test_* stand-in of the same number — both were pinned into context and the
+    # answer may have been drawn from the fictional stand-in rather than the real
+    # document (confirmed live: a GridEdge SHA question answered from Test_SHA_01's
+    # invented parties). Warn so the reader can verify which document the facts
+    # actually came from.
+    _collisions = _scope.get("doc_collisions") or []
+    if _collisions and not _scope_warning:
+        _names = ", ".join(f'"{c}"' for c in _collisions[:3])
+        _scope_warning = (
+            f"For {_names}, this corpus contains BOTH a real document and a "
+            f"synthetic \"Test_\" stand-in of the same number — both were searched, "
+            f"so some facts below (party names, figures, clause numbers) may come "
+            f"from the fictional stand-in rather than the real document. Verify each "
+            f"cited figure against the document named in the References section "
+            f"before relying on it."
+        )
+
     try:
         wr = wiki.generate_answer(
             state["question"], state.get("wiki_context", ""),
