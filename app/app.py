@@ -14,6 +14,7 @@ Routes:
 """
 
 import os
+import re
 import sys
 import uuid
 import time
@@ -914,6 +915,25 @@ def query_route():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+# Matches the document-type folder segment inside an underscore-flattened
+# source_doc name (e.g. "...Court Case Documents (1)_Court Case Document 1
+# (1).pdf"), regardless of what the TOP-level upload folder is called — used
+# by /files's reconstruction fallback below, which previously hardcoded one
+# specific top-level name and un-suffixed subfolder names that matched
+# neither this corpus's real prefix ("Legal AI - Test"/"Legal AI - Raja") nor
+# its "(1)"-suffixed subfolder names, so every file fell through to a single
+# flat level with no folder grouping at all (confirmed live on the deployed
+# instance, whose wiki arrived via DB import rather than the app's own
+# /upload flow — so it never has a `sessions.json` entry with file_paths,
+# and always hits this fallback).
+_DOC_TYPE_FOLDER_RE = re.compile(
+    r'(Court\s+Case\s+Documents?|Joint\s+Venture\s+Agreements?|Judgments?|'
+    r'Legal\s+Opinions?|NDA|Service\s+Agreements?|Shareholders?\s+Agreements?)'
+    r'(?:\s*\(\d+\))?',
+    re.IGNORECASE,
+)
+
+
 @app.route("/files")
 def file_structure():
     """Return nested file tree of successfully uploaded files."""
@@ -960,29 +980,25 @@ def file_structure():
                     if indexed_docs and fname not in indexed_docs:
                         continue
                     rel_name = fname[len(prefix):]
-                    
-                    # Reconstruction logic for existing folders
+
+                    # Reconstruct "<top folder>/<doc-type folder>/<filename>"
+                    # by locating the doc-type segment wherever it falls —
+                    # works for any top-level folder name, not just one
+                    # hardcoded string. Underscores are the flattening
+                    # separator only at the boundary right around that match;
+                    # trimming just there (not a blind split on every "_")
+                    # keeps underscores that are part of the filename itself
+                    # intact (e.g. "Test_CCD_01.txt").
                     reconstructed = False
-                    top_dir = "Legal AI Tool - Tata Group"
-                    subdirs = [
-                        "Court Case Documents",
-                        "Joint Venture Agreements",
-                        "Judgments",
-                        "Legal Opinions",
-                        "NDA",
-                        "Service Agreement",
-                        "Shareholder Agreements"
-                    ]
-                    
-                    if rel_name.startswith(f"{top_dir}_"):
-                        rest = rel_name[len(top_dir)+1:]
-                        for subdir in subdirs:
-                            if rest.startswith(f"{subdir}_"):
-                                file_part = rest[len(subdir)+1:]
-                                paths.add(f"{top_dir}/{subdir}/{file_part}")
-                                reconstructed = True
-                                break
-                    
+                    m = _DOC_TYPE_FOLDER_RE.search(rel_name)
+                    if m:
+                        top = rel_name[:m.start()].rstrip('_')
+                        type_folder = m.group(0)
+                        file_part = rel_name[m.end():].lstrip('_')
+                        if top and file_part:
+                            paths.add(f"{top}/{type_folder}/{file_part}")
+                            reconstructed = True
+
                     if not reconstructed:
                         paths.add(rel_name.replace("\\", "/"))
                         
