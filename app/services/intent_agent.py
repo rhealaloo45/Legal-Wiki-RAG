@@ -434,13 +434,23 @@ def check_disambiguation_node(state: QueryState) -> dict:
 
 
 def check_clarification_node(state: QueryState) -> dict:
+    # Must read the per-thread chat session, not the shared wiki/doc session —
+    # build_conversation_context(state["session_id"]) pulled "recent conversation"
+    # text from EVERY chat thread that has ever queried this wiki (confirmed live:
+    # a fresh SHA-GridEdge question was answered about "joint venture deadlock /
+    # arbitral institution", content from an unrelated earlier thread's question,
+    # because generate_answer_node's own chat_session_id fallback never runs —
+    # it only fires when conversation_context is still unset, and this node
+    # always sets it first). resolve_scope already gets this right via its own
+    # chat_session_id param; mirror that here.
+    chat_sid = state.get("chat_session_id") or state["session_id"]
     if state.get("is_followup") or wiki._question_names_a_document(state["question"], []) \
             or not config.ENABLE_CLARIFICATION:
-        conv = wiki.build_conversation_context(state["session_id"])
+        conv = wiki.build_conversation_context(chat_sid)
         return {"needs_clarification": False, "conversation_context": conv}
 
     _emit({"stage": "clarification", "status": "active", "message": "Checking for ambiguity…"})
-    conv = wiki.build_conversation_context(state["session_id"])
+    conv = wiki.build_conversation_context(chat_sid)
     try:
         amb = wiki.check_ambiguity(state["question"], state["session_id"], conv)
     except Exception as e:
@@ -714,10 +724,43 @@ _CLAIM_STOPWORDS = {
 }
 
 
+# A heading line marking the start of a Recommendations-type section — the
+# ASSESSMENT_PROMPT's own rules explicitly exempt this content from grounding
+# ("Your analysis may go beyond the text; your facts may not"), but the model's
+# own invented sub-headings for its suggested framework ("Dynamic Injunction
+# Protocol", "Domain Additions", proposed cadences like "10 business days")
+# still pattern-match as checkable claims, since the extractor has no concept
+# of "which section of the answer is this in." Confirmed live: a well-grounded
+# risk-assessment answer scored 20% deterministically because most of its
+# extracted "claims" were the model's own Recommendations-section headings and
+# proposed numbers, none of which were ever meant to appear in the source
+# context. Cutting claim extraction off at this heading is a narrower,
+# lower-risk alternative to trying to classify every sentence — the FACTS
+# section (which precedes Recommendations in every ASSESSMENT/OBLIGATION/
+# COMPARISON template) still gets fully checked.
+_RECOMMENDATIONS_HEADING_RE = re.compile(
+    r'(?im)^[ \t]*(?:\d+[.)]\s*|[*\-•]\s*)?\**'
+    r'(?:recommendations?|recommended\s+stance|next\s+steps|'
+    r'practical\s+(?:steps|caveats|next\s+steps|impact\s+and\s+decision\s+guidance)|'
+    r'action\s+items|concrete\s+next\s+steps|what\s+to\s+do\s+next|operational\s+playbook|'
+    r'key\s+(?:negotiation\s+points|concrete\s+drafting\s+positions)|'
+    r'acceptance\s*/\s*rejection\s*/\s*negotiation\s+stance)\**'
+    r'(?:\s*\([^)]{0,60}\))?[ \t]*:?[ \t]*$'
+)
+
+
 def _extract_claims(text: str) -> list[str]:
     """Pull out checkable factual atoms (amounts, dates, durations, doc
     references, proper nouns) from an answer, deduplicated and stripped of
-    generic boilerplate phrases that aren't really factual claims."""
+    generic boilerplate phrases that aren't really factual claims.
+
+    Stops scanning at the first Recommendations-type heading — see
+    _RECOMMENDATIONS_HEADING_RE — so the model's own suggested framework
+    (proposed cadences, invented sub-heading names) never gets checked against
+    the source context as if it were a claim about what the context says."""
+    cutoff = _RECOMMENDATIONS_HEADING_RE.search(text)
+    if cutoff:
+        text = text[:cutoff.start()]
     claims: list[str] = []
     seen = set()
     for pattern in _CLAIM_PATTERNS:
@@ -780,15 +823,28 @@ def _deterministic_grounding(context: str, answer: str) -> dict:
 # (sometimes reasoning-truncated, retried) LLM call for a DECORATIVE score that
 # gates nothing. Lowered to 85: an answer that already verifies ≥85% of its
 # checkable claims is well-grounded enough to trust without paying for the
-# judge. escalate_low stays low ON PURPOSE — a low deterministic score on these
-# paraphrase-heavy intents is often just reworded-but-real quotes, so surfacing
-# it raw would mislead (same trap as drafting grounding); those still escalate
-# to get a truer number.
+# judge.
+#
+# escalate_low was previously 35 with the STATED intent that "a low
+# deterministic score on these paraphrase-heavy intents is often just
+# reworded-but-real quotes, so surfacing it raw would mislead — those still
+# escalate to get a truer number." But the escalation condition is
+# `escalate_low < score < escalate_high` — a score AT OR BELOW escalate_low
+# never satisfies that and is trusted raw, the opposite of the stated intent.
+# Confirmed live: a well-grounded risk-assessment answer scored 20%
+# deterministically (mostly claim-extraction noise, see _extract_claims) and
+# was never escalated because 20 < 35; once escalated by hand to the LLM judge
+# it scored 92%. Raised to 15 — only a near-zero deterministic score (which
+# realistically means almost every extracted claim failed, not just noisy
+# extraction) is now trusted without a second look; anything above that gets
+# the LLM judge's nuance. Costs more escalations for these three intents, by
+# design — the whole point is these are the intents where a low raw score is
+# least likely to mean what it says.
 _GROUNDING_THRESHOLDS = {
     "default":         {"min_claims": 3, "escalate_low": 50, "escalate_high": 85},
-    "comparison":      {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
-    "obligation":      {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
-    "risk_assessment": {"min_claims": 2, "escalate_low": 35, "escalate_high": 85},
+    "comparison":      {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
+    "obligation":      {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
+    "risk_assessment": {"min_claims": 2, "escalate_low": 15, "escalate_high": 85},
 }
 
 

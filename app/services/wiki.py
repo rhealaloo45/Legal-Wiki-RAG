@@ -1688,6 +1688,12 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
     generic retrieval, which pulled an unrelated document instead).
     """
     matched: set[str] = set()
+    # Underscore-normalise before matching: the corpus's own synthetic filenames
+    # are underscore-joined ("Test_SHA_01.txt"), and users echo that shorthand
+    # back ("sha_01") — but "_" is a \w char, so it doesn't satisfy the \s*
+    # gap between type and number in _DOC_NAME_PATTERN and the match silently
+    # fails, same length so match.end() offsets used below stay valid.
+    question = question.replace('_', ' ')
     for num_match in _DOC_NAME_PATTERN.finditer(question):
         t = num_match.group(1).lower()
         t = re.sub(r'\s+', ' ', t).strip()
@@ -4552,7 +4558,15 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     """
     if not config.USE_DATABASE:
         return []
-    if _CARRYOVER_TYPE_RE.search(question):
+    # Same underscore normalisation as _numbered_docs_in — \b doesn't fire
+    # between "sha" and "_01" since "_" is a \w char, so "sha_01" silently
+    # bypassed this guard and fell through to a stale carried-over document
+    # from an earlier, unrelated turn (confirmed live: "sha_01" reply to a
+    # disambiguation prompt for the SHA-GridEdge question landed on whatever
+    # document the PRIOR unrelated comparison had answered, with no scope
+    # warning, because both the type-word guard and _DOC_NAME_PATTERN missed
+    # the underscore-joined shorthand).
+    if _CARRYOVER_TYPE_RE.search(question.replace('_', ' ')):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
