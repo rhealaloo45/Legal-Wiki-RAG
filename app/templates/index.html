@@ -988,6 +988,50 @@
       background: var(--bg-base)
     }
 
+    /* Medium-icon file grid, shown inside an expanded folder */
+    .ftree-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      padding: 10px 14px 14px;
+    }
+
+    .ftree-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      width: 92px;
+      padding: 10px 6px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      gap: 8px;
+      text-align: center;
+      transition: background .1s
+    }
+
+    .ftree-card:hover {
+      background: var(--bg-hover)
+    }
+
+    .ftree-card-icon {
+      font-size: 34px;
+      line-height: 1
+    }
+
+    .ftree-card-icon .ti-file-type-pdf { color: var(--red) }
+    .ftree-card-icon .ti-file-text { color: var(--text-muted) }
+
+    .ftree-card-name {
+      font-size: 11px;
+      color: var(--text-primary);
+      line-height: 1.35;
+      display: -webkit-box;
+      -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      word-break: break-word;
+    }
+
     .folder-name {
       font-size: 12px;
       font-weight: 500;
@@ -1154,6 +1198,183 @@
       display: flex;
       align-items: center;
       gap: 6px
+    }
+
+    /* TUTORIAL — spotlight coachmark that points at the real button */
+    .tutorial-backdrop {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 60;
+      background: transparent;
+    }
+
+    /* The "hole" is a transparent box the size/position of the target element;
+       its oversized box-shadow paints the dimmed surround, so only the target
+       itself stays lit. */
+    .tutorial-spotlight {
+      position: fixed;
+      border-radius: var(--radius-md);
+      box-shadow: 0 0 0 9999px rgba(15, 15, 30, 0.6);
+      transition: top .25s ease, left .25s ease, width .25s ease, height .25s ease;
+      pointer-events: none;
+      z-index: 61;
+    }
+
+    .tutorial-popover {
+      position: fixed;
+      background: var(--bg-surface);
+      border-radius: var(--radius-lg);
+      border: 0.5px solid var(--border);
+      width: 280px;
+      max-width: 90vw;
+      overflow: hidden;
+      box-shadow: 0 8px 32px rgba(20, 20, 40, 0.22);
+      z-index: 62;
+      transition: top .25s ease, left .25s ease;
+    }
+
+    .tutorial-arrow {
+      position: fixed;
+      width: 10px;
+      height: 10px;
+      background: var(--bg-surface);
+      border: 0.5px solid var(--border);
+      z-index: 61;
+      transition: top .25s ease, left .25s ease;
+    }
+
+    .tutorial-arrow.dir-bottom { border-top: none; border-left: none; transform: rotate(45deg); }
+    .tutorial-arrow.dir-top    { border-bottom: none; border-right: none; transform: rotate(45deg); }
+    .tutorial-arrow.dir-left   { border-top: none; border-right: none; transform: rotate(45deg); }
+    .tutorial-arrow.dir-right  { border-bottom: none; border-left: none; transform: rotate(45deg); }
+
+    .tutorial-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px 0;
+    }
+
+    .tutorial-step-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--accent);
+      letter-spacing: 0.03em;
+    }
+
+    .tutorial-body {
+      padding: 8px 16px 14px;
+    }
+
+    .tutorial-title {
+      font-family: var(--font-heading);
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 5px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tutorial-title i {
+      color: var(--accent);
+      font-size: 14px;
+    }
+
+    .tutorial-desc {
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+    }
+
+    .tutorial-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      border-top: 0.5px solid var(--border);
+    }
+
+    .tutorial-dots {
+      display: flex;
+      gap: 5px;
+    }
+
+    .tutorial-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--border-strong);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tutorial-dot.active {
+      width: 13px;
+      border-radius: 3px;
+      background: var(--accent);
+    }
+
+    .tutorial-nav {
+      display: flex;
+      gap: 6px;
+    }
+
+    .tutorial-btn {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 5px 11px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      border: 0.5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+    }
+
+    .tutorial-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .tutorial-btn.primary {
+      background: var(--btn-primary);
+      color: #fff;
+      border: none;
+    }
+
+    .tutorial-btn.primary:hover {
+      opacity: 0.9;
+    }
+
+    .tutorial-skip {
+      font-size: 11px;
+      color: var(--text-muted);
+      cursor: pointer;
+      background: none;
+      border: none;
+    }
+
+    .tutorial-skip:hover {
+      color: var(--text-secondary);
+    }
+
+    .help-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: var(--radius-md);
+      border: 0.5px solid var(--border);
+      background: var(--bg-surface);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .help-btn:hover {
+      background: var(--accent-light);
+      color: var(--accent);
     }
 
     /* FILE PICKER MODAL */
@@ -2327,19 +2548,21 @@
         <div class="provider-status-btn" onclick="toggleProviderModal()" title="LLM &amp; Embedding providers">
           <span class="provider-status-dot"></span>Enabled
         </div>
-        <div class="graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
+        <div class="graph-btn" id="tour-graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
             class="ti ti-file-description"></i></div>
-        <div class="icon-btn" aria-label="rules" onclick="toggleRules()" title="Instructions"><i
+        <div class="icon-btn" id="tour-rules-btn" aria-label="rules" onclick="toggleRules()" title="Instructions"><i
             class="ti ti-list-check"></i></div>
+        <div class="help-btn" aria-label="help" onclick="startTutorial()" title="Take the tour"><i
+            class="ti ti-help-circle"></i></div>
       </div>
     </div>
 
     <div class="layout">
       <div class="sidebar" id="sidebar">
         {% if production_mode %}
-        <button class="new-btn" onclick="newChat()"><i class="ti ti-plus" style="font-size:13px"></i>New
+        <button class="new-btn" id="tour-newchat-btn" onclick="newChat()"><i class="ti ti-plus" style="font-size:13px"></i>New
           chat</button>
         {% endif %}
         {% if not ingest_disabled %}
@@ -2364,7 +2587,7 @@
           -->
           <div class="tab" data-target="draft" onclick="switchTab('draft',this)"><i class="ti ti-writing"
               style="font-size:13px"></i>Draft</div>
-          <div class="tab" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open"
+          <div class="tab" id="tour-files-btn" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open"
               style="font-size:13px"></i>Files</div>
         </div>
 
@@ -2906,6 +3129,29 @@
       </div>
 
       <!-- LOG OVERLAY -->
+      <!-- TUTORIAL — spotlight coachmark -->
+      <div id="tutorial-backdrop" class="tutorial-backdrop" style="display:none" onclick="closeTutorial()"></div>
+      <div id="tutorial-spotlight" class="tutorial-spotlight" style="display:none"></div>
+      <div id="tutorial-arrow" class="tutorial-arrow" style="display:none"></div>
+      <div id="tutorial-popover" class="tutorial-popover" style="display:none" onclick="event.stopPropagation()">
+        <div class="tutorial-top">
+          <span class="tutorial-step-label" id="tutorial-step-label">STEP 1 OF 4</span>
+          <div class="close-btn" onclick="closeTutorial()"><i class="ti ti-x"></i></div>
+        </div>
+        <div class="tutorial-body">
+          <div class="tutorial-title"><i class="ti" id="tutorial-icon"></i><span id="tutorial-title-text"></span></div>
+          <div class="tutorial-desc" id="tutorial-desc"></div>
+        </div>
+        <div class="tutorial-footer">
+          <div class="tutorial-dots" id="tutorial-dots"></div>
+          <div class="tutorial-nav">
+            <button class="tutorial-skip" id="tutorial-skip-btn" onclick="closeTutorial()">Skip</button>
+            <button class="tutorial-btn" id="tutorial-back-btn" onclick="tutorialBack()" style="display:none">Back</button>
+            <button class="tutorial-btn primary" id="tutorial-next-btn" onclick="tutorialNext()">Next</button>
+          </div>
+        </div>
+      </div>
+
       <div id="log-overlay" class="log-overlay" style="display:none" onclick="if(event.target===this)toggleLog()">
         <div class="log-modal" onclick="event.stopPropagation()">
           <div class="log-modal-top">
@@ -2991,12 +3237,6 @@
                 <div class="provider-option active" data-val="azure" onclick="setProvider('azure')">
                   <i class="ti ti-cloud"></i> Azure
                 </div>
-                <div class="provider-option" data-val="openrouter" onclick="setProvider('openrouter')">
-                  <i class="ti ti-router"></i> OpenRouter
-                </div>
-                <div class="provider-option" data-val="nvidia" onclick="setProvider('nvidia')">
-                  <i class="ti ti-bolt"></i> NVIDIA
-                </div>
               </div>
             </div>
             <div>
@@ -3004,12 +3244,6 @@
               <div class="provider-toggle" id="embeddingToggle" style="width:100%">
                 <div class="provider-option active" data-val="azure" onclick="setEmbeddingProvider('azure')">
                   <i class="ti ti-cloud"></i> Azure
-                </div>
-                <div class="provider-option" data-val="openrouter" onclick="setEmbeddingProvider('openrouter')">
-                  <i class="ti ti-router"></i> OpenRouter
-                </div>
-                <div class="provider-option" data-val="nvidia" onclick="setEmbeddingProvider('nvidia')">
-                  <i class="ti ti-bolt"></i> NVIDIA
                 </div>
               </div>
             </div>
@@ -4003,6 +4237,136 @@
       const o = document.getElementById('provider-overlay');
       o.style.display = (o.style.display === 'none') ? 'flex' : 'none';
     }
+
+    // ============================================================
+    // Tutorial — spotlight coachmark that points at the real button
+    // ============================================================
+    const TUTORIAL_STEPS = [
+      {
+        target: 'tour-newchat-btn', icon: 'ti-plus', title: 'New chat',
+        desc: 'Every question you ask lives in a chat thread. Start a new chat for a fresh conversation any time — it still searches the same underlying document set, so nothing about your documents is lost.',
+      },
+      {
+        target: 'tour-rules-btn', icon: 'ti-list-check', title: 'Instructions',
+        desc: 'Standing rules the assistant follows on every answer — tone, formatting, things to always check or flag. Open this to review or customise them.',
+      },
+      {
+        target: 'tour-graph-btn', icon: 'ti-topology-star-ring', title: 'Knowledge graph',
+        desc: 'A visual map of how entities, parties, and documents connect across the corpus — useful for spotting relationships a text search alone would miss.',
+      },
+      {
+        target: 'tour-files-btn', icon: 'ti-folder-open', title: 'File explorer',
+        desc: 'Browse every document that has been ingested, grouped into folders. Click a folder to open it, then click any file to jump straight to it.',
+      },
+    ];
+    let tutorialStep = 0;
+    let tutorialActiveSteps = TUTORIAL_STEPS;
+    const TUTORIAL_STORAGE_KEY = 'lexwiki_tutorial_seen_v1';
+
+    function startTutorial() {
+      // Skip any step whose target isn't in the DOM right now (e.g. "New chat"
+      // only renders in production_mode) rather than pointing an arrow at nothing.
+      tutorialActiveSteps = TUTORIAL_STEPS.filter(s => document.getElementById(s.target));
+      if (!tutorialActiveSteps.length) return;
+      tutorialStep = 0;
+      document.getElementById('tutorial-backdrop').style.display = 'block';
+      document.getElementById('tutorial-spotlight').style.display = 'block';
+      document.getElementById('tutorial-arrow').style.display = 'block';
+      document.getElementById('tutorial-popover').style.display = 'block';
+      renderTutorialStep();
+      window.addEventListener('resize', renderTutorialStep);
+    }
+
+    function renderTutorialStep() {
+      const s = tutorialActiveSteps[tutorialStep];
+      const el = document.getElementById(s.target);
+      if (!el) { tutorialNext(); return; }
+
+      document.getElementById('tutorial-step-label').textContent =
+        `STEP ${tutorialStep + 1} OF ${tutorialActiveSteps.length}`;
+      document.getElementById('tutorial-icon').className = 'ti ' + s.icon;
+      document.getElementById('tutorial-title-text').textContent = s.title;
+      document.getElementById('tutorial-desc').textContent = s.desc;
+
+      const dots = document.getElementById('tutorial-dots');
+      dots.innerHTML = tutorialActiveSteps.map((_, i) =>
+        `<div class="tutorial-dot${i === tutorialStep ? ' active' : ''}" onclick="tutorialGoTo(${i})"></div>`
+      ).join('');
+
+      document.getElementById('tutorial-back-btn').style.display = tutorialStep === 0 ? 'none' : 'inline-block';
+      document.getElementById('tutorial-skip-btn').style.display =
+        tutorialStep === tutorialActiveSteps.length - 1 ? 'none' : 'inline-block';
+      document.getElementById('tutorial-next-btn').textContent =
+        tutorialStep === tutorialActiveSteps.length - 1 ? 'Done' : 'Next';
+
+      positionTutorialAround(el);
+    }
+
+    // Spotlight hugs the target's own box; popover + arrow sit below it,
+    // flipping above when there isn't enough room underneath (e.g. a topbar
+    // button near the bottom of a short viewport wouldn't be — n/a here, but
+    // kept defensive since target positions vary by panel state).
+    function positionTutorialAround(el) {
+      const r = el.getBoundingClientRect();
+      const pad = 6;
+      const spot = document.getElementById('tutorial-spotlight');
+      spot.style.top = (r.top - pad) + 'px';
+      spot.style.left = (r.left - pad) + 'px';
+      spot.style.width = (r.width + pad * 2) + 'px';
+      spot.style.height = (r.height + pad * 2) + 'px';
+
+      const popover = document.getElementById('tutorial-popover');
+      const arrow = document.getElementById('tutorial-arrow');
+      const popW = 280, gap = 14;
+      const spaceBelow = window.innerHeight - r.bottom;
+      const below = spaceBelow > 180 || spaceBelow > (r.top);
+      const popH = popover.offsetHeight || 140;
+
+      let top = below ? r.bottom + gap : r.top - popH - gap;
+      top = Math.max(8, Math.min(top, window.innerHeight - popH - 8));
+      let left = r.left + r.width / 2 - popW / 2;
+      left = Math.max(8, Math.min(left, window.innerWidth - popW - 8));
+
+      popover.style.top = top + 'px';
+      popover.style.left = left + 'px';
+
+      const arrowLeft = Math.max(r.left + r.width / 2 - 5, left + 14);
+      arrow.className = 'tutorial-arrow ' + (below ? 'dir-bottom' : 'dir-top');
+      arrow.style.left = Math.min(arrowLeft, left + popW - 20) + 'px';
+      arrow.style.top = (below ? r.bottom + gap - 5 : r.top - gap - 5) + 'px';
+    }
+
+    function tutorialNext() {
+      if (tutorialStep >= tutorialActiveSteps.length - 1) { closeTutorial(); return; }
+      tutorialStep++;
+      renderTutorialStep();
+    }
+
+    function tutorialBack() {
+      if (tutorialStep === 0) return;
+      tutorialStep--;
+      renderTutorialStep();
+    }
+
+    function tutorialGoTo(i) {
+      tutorialStep = i;
+      renderTutorialStep();
+    }
+
+    function closeTutorial() {
+      document.getElementById('tutorial-backdrop').style.display = 'none';
+      document.getElementById('tutorial-spotlight').style.display = 'none';
+      document.getElementById('tutorial-arrow').style.display = 'none';
+      document.getElementById('tutorial-popover').style.display = 'none';
+      window.removeEventListener('resize', renderTutorialStep);
+      try { localStorage.setItem(TUTORIAL_STORAGE_KEY, '1'); } catch (e) {}
+    }
+
+    (function maybeShowTutorialOnFirstOpen() {
+      try {
+        if (!localStorage.getItem(TUTORIAL_STORAGE_KEY)) startTutorial();
+      } catch (e) {}
+    })();
 
     async function toggleRuleEnabled(id, enabled) {
       try {
@@ -5285,36 +5649,43 @@
         const totalFiles = countFiles(tree);
         document.getElementById('files-count-badge').textContent = `${totalFiles} file${totalFiles !== 1 ? 's' : ''}`;
 
-        // Render recursive tree
+        // Render recursive tree — the root folder ("Legal AI - Test") starts
+        // OPEN so the library isn't a single dead-end click; every folder
+        // beneath it (Court Case Documents, NDA, ...) starts COLLAPSED. A
+        // folder's own file children render together as one medium-icon grid
+        // (not stacked rows), matching the reference file-explorer layout.
         function renderNode(node, depth) {
           let html = '';
           const indent = depth * 18;
-          // Sort: folders first, then files
-          const keys = Object.keys(node).sort((a, b) => {
-            const aIsDir = node[a] !== 'file', bIsDir = node[b] !== 'file';
-            if (aIsDir && !bIsDir) return -1;
-            if (!aIsDir && bIsDir) return 1;
-            return a.localeCompare(b);
-          });
-          for (const k of keys) {
-            if (node[k] === 'file') {
+          const keys = Object.keys(node).sort((a, b) => a.localeCompare(b));
+          const folderKeys = keys.filter(k => node[k] !== 'file');
+          const fileKeys = keys.filter(k => node[k] === 'file');
+          const openByDefault = depth === 0;
+
+          for (const k of folderKeys) {
+            const childCount = countFiles(node[k]);
+            const folderId = 'fold_' + Math.random().toString(36).slice(2, 8);
+            const chevron = openByDefault ? 'ti-chevron-down' : 'ti-chevron-right';
+            const childDisplay = openByDefault ? '' : 'none';
+            html += `<div class="ftree-row folder-row" style="padding-left:${14 + indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
+              + `<i class="ti ${chevron} ftree-icon fold-chevron" style="color:var(--accent)"></i>`
+              + `<span class="folder-name">${k}</span>`
+              + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
+              + `</div>`;
+            html += `<div id="${folderId}" style="display:${childDisplay}">${renderNode(node[k], depth + 1)}</div>`;
+          }
+
+          if (fileKeys.length) {
+            html += `<div class="ftree-grid" style="padding-left:${indent}px">`;
+            for (const k of fileKeys) {
               const ext = k.split('.').pop().toLowerCase();
               const icon = ext === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text';
-              html += `<div class="ftree-row" style="padding-left:${14 + indent}px">`
-                + `<i class="ti ${icon} ftree-icon" style="color:var(--text-muted)"></i>`
-                + `<span class="ftree-name">${k}</span>`
-                + `<button class="ftree-open" onclick="openDoc('${k.replace(/'/g, "\\'")}')">Open</button>`
+              html += `<div class="ftree-card" onclick="openDoc('${k.replace(/'/g, "\\'")}')" title="${k.replace(/"/g, '&quot;')}">`
+                + `<span class="ftree-card-icon"><i class="ti ${icon}"></i></span>`
+                + `<span class="ftree-card-name">${k}</span>`
                 + `</div>`;
-            } else {
-              const childCount = countFiles(node[k]);
-              const folderId = 'fold_' + Math.random().toString(36).slice(2, 8);
-              html += `<div class="ftree-row folder-row" style="padding-left:${14 + indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
-                + `<i class="ti ti-chevron-down ftree-icon fold-chevron" style="color:var(--accent)"></i>`
-                + `<span class="folder-name">${k}</span>`
-                + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
-                + `</div>`;
-              html += `<div id="${folderId}">${renderNode(node[k], depth + 1)}</div>`;
             }
+            html += `</div>`;
           }
           return html;
         }
