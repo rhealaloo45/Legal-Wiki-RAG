@@ -189,32 +189,30 @@ If `DATABASE_URL` is **not set**, the app falls back to file-based storage (`dat
 - FTS cross-referencing
 - Metadata caching
 
-#### Useful Docker commands
+#### Docker Operations (Opik & Legal-Wiki-RAG)
+
+For comprehensive instructions, see [DOCKER_INSTRUCTIONS.md](file:///c:/Users/MrAmanPanda/Desktop/Eval-Opik/Legal-Wiki-RAG/DOCKER_INSTRUCTIONS.md).
 
 ```bash
-# Check container status
-docker ps -a | grep legal-wiki-pg
+# Start Opik Tracing Stack
+docker compose -f docker-compose.opik.yml up -d      # http://localhost:5173
 
-# View logs
-docker logs legal-wiki-pg
+# Start Legal-Wiki-RAG Full Stack
+docker compose up -d --build                          # http://localhost:5001
 
-# Stop / start
-docker stop legal-wiki-pg
-docker start legal-wiki-pg
-
-# Connect with psql (inside container)
-docker exec -it legal-wiki-pg psql -U postgres -d legal_wiki
-
-# Remove container and data (destructive)
-docker rm -f legal-wiki-pg
+# Stop Stacks
+docker compose down                                  # Stops Legal-Wiki-RAG
+docker compose -f docker-compose.opik.yml down        # Stops Opik Stack
 ```
 
-### Run
+### Run (Local Python Mode)
 
 ```bash
+# Run Postgres + Opik in Docker, then run Python app locally:
+docker compose up -d db
+docker compose -f docker-compose.opik.yml up -d
 cd app
-python app.py
-# Open http://localhost:5001
+python app.py                                         # http://127.0.0.1:5001
 ```
 
 ---

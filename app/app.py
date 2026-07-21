@@ -43,6 +43,15 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024  # 256 MB total upload limit (folder uploads)
 
+@app.after_request
+def _flush_opik_tracker(response):
+    try:
+        import opik
+        opik.flush_tracker()
+    except Exception:
+        pass
+    return response
+
 # Stores for Review/Compare modes
 REVIEW_STORE = {}
 COMPARE_STORE = {}

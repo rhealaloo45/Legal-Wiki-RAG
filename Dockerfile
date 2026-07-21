@@ -5,15 +5,12 @@
 FROM python:3.11-slim
 
 # ── OS-level dependencies ──────────────────────────────────────────────────────
-# • libgl1 / libglib2.0-0  → PyMuPDF / OpenCV shared libs
-# • tesseract-ocr           → pytesseract OCR backend
-# • gcc / libpq-dev         → psycopg2-binary native build (fallback)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 \
+# All Python deps use pre-compiled binary wheels — no compiler or native headers needed.
+# libglib2.0-0 is a lightweight shim some glib-linked wheels dlopen at runtime.
+RUN find /etc/apt -name "*.sources" -o -name "*.list" \
+        | xargs sed -i 's|http://deb.debian.org|https://deb.debian.org|g; s|http://security.debian.org|https://security.debian.org|g' \
+    && apt-get update && apt-get install -y --no-install-recommends \
         libglib2.0-0 \
-        tesseract-ocr \
-        gcc \
-        libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python dependencies ────────────────────────────────────────────────────────

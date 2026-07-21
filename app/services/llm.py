@@ -7,6 +7,7 @@ import logging
 import re
 from openai import OpenAI, RateLimitError
 import config
+from services import opik_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,11 @@ def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None,
     return kwargs
 
 
+@opik_tracing.track(
+    type="llm",
+    name="llm.ask",
+    metadata={"pipeline": "wiki"},
+)
 def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False,
         reasoning_effort: str = None) -> tuple[str, dict]:
     """Send a prompt to the selected LLM and return the response text and usage dict.
@@ -184,6 +190,11 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         logger.error(f"LLM call failed: {e}")
         raise RuntimeError(f"LLM unavailable: {e}") from e
 
+@opik_tracing.track(
+    type="llm",
+    name="llm.fast_ask",
+    metadata={"pipeline": "fast"},
+)
 def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
     """Lightweight LLM call for bulk extraction tasks (cell extraction, column inference,
     aspect identification, outlier detection).
