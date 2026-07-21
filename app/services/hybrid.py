@@ -1,9 +1,11 @@
 import logging
 from services import llm
+from services import opik_tracing
 
 logger = logging.getLogger(__name__)
 
 
+@opik_tracing.track(name="hybrid.generate_answer", type="general")
 def generate_answer(question: str, rag_context: str, chunks: list, wiki_context: str, titles: list) -> dict:
     """Generate an answer using both RAG and Wiki context."""
     if not chunks and not wiki_context:

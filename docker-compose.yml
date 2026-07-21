@@ -50,6 +50,9 @@ services:
       # Override DATABASE_URL so it points at the compose db service
       DATABASE_URL: postgresql://postgres:pw@db:5432/legal_wiki
       PORT: 5001
+      # ── Opik tracing ─────────────────────────────────────────────────────────
+      OPIK_URL_OVERRIDE: http://host.docker.internal:5173/api
+      OPIK_PROJECT_NAME: legal-wiki-rag
     ports:
       - "5001:5001"
     volumes:

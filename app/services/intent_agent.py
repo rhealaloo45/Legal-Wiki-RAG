@@ -25,6 +25,7 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 
 try:
+    # pyrefly: ignore [missing-import]
     from langgraph.config import get_stream_writer
 except Exception:  # pragma: no cover - older langgraph
     get_stream_writer = None
@@ -32,6 +33,7 @@ except Exception:  # pragma: no cover - older langgraph
 import config
 from services import wiki
 from services import llm
+from services import opik_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -958,6 +960,7 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
     return {"grounding_score": None, "ungrounded_claims": [], "summary": "Check failed."}
 
 
+@opik_tracing.track(type="general", name="validate_response")
 def validate_response_node(state: QueryState) -> dict:
     logger.info("[AGENT] validate_response_node: intent=%s", state.get("intent"))
     wr = state.get("answer_result") or {}
@@ -991,9 +994,24 @@ def validate_response_node(state: QueryState) -> dict:
                "message": f"Grounding: {grounding.get('grounding_score', '?')}%"})
 
     wr["validation"] = {"valid": valid, "warning": warning, "grounding": grounding}
+
+    # ── Opik LLM-as-judge evaluations ─────────────────────────────────────────
+    # Runs Hallucination, AnswerRelevance, ContextPrecision judges and logs
+    # scores to the active Opik span. Safe no-op when Opik is disabled.
+    if answer and len(answer) >= 20:
+        opik_scores = opik_tracing.run_evals(
+            question=state["question"],
+            answer=answer,
+            context=state.get("wiki_context", ""),
+            intent=intent,
+        )
+        if opik_scores:
+            wr["validation"]["opik_evals"] = opik_scores
+
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
     return {"answer_result": wr, "validation": {"valid": valid, "warning": warning, "grounding": grounding}}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1041,17 +1059,20 @@ def get_query_graph():
     return _QUERY_GRAPH
 
 
+@opik_tracing.track(name="run_query_stream", type="general")
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
                      is_followup: bool = False, exclude_cached_answers: bool = False,
                      chat_session_id: str = ""):
-    """Run the query graph and yield stage event dicts in real time.
+    """Run the query graph and yield stage event dicts in real time."""
+    try:
+        from opik import opik_context
+        opik_context.update_current_trace(
+            input={"question": question, "session_id": session_id, "target_doc": target_doc},
+            tags=["legal-rag", "langgraph"]
+        )
+    except Exception:
+        pass
 
-    Each yielded dict is a custom stage event emitted by a node. The terminal
-    'complete' / 'disambiguation' / 'clarification' event carries the payload
-    the frontend renders. app.py wraps each dict as a Server-Sent Event.
-
-    exclude_cached_answers: QA/testing option — see wiki.get_context().
-    """
     graph = get_query_graph()
     state: QueryState = {
         "question": question,
@@ -1063,4 +1084,15 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
+        if isinstance(chunk, dict) and chunk.get("stage") in ("complete", "answer") and chunk.get("payload"):
+            try:
+                from opik import opik_context
+                payload = chunk.get("payload") or {}
+                ans = payload.get("answer", "")
+                intent = payload.get("intent", "")
+                opik_context.update_current_trace(
+                    output={"answer": ans, "intent": intent}
+                )
+            except Exception:
+                pass
         yield chunk

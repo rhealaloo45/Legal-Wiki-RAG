@@ -16,3 +16,6 @@ pgvector
 # Phase 4.7 — Intent classifier agent (LangGraph orchestration)
 langgraph>=1.0
 langchain-core
+# Opik — LLM tracing and evaluation (self-hosted)
+opik
+litellm==1.83.9

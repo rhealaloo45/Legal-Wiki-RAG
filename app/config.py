@@ -185,3 +185,14 @@ ENABLE_RERANK = os.getenv("ENABLE_RERANK", "false").lower() == "true"
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
+
+# ---------------------------------------------------------------------------
+# Opik (Comet ML) — self-hosted LLM tracing and evaluation.
+# Set OPIK_URL_OVERRIDE to the backend API URL to enable tracing.
+# Example (Docker Compose, from inside the web container):
+#   OPIK_URL_OVERRIDE=http://host.docker.internal:8080
+# When unset, all Opik calls are no-ops and the app runs unchanged.
+# ---------------------------------------------------------------------------
+OPIK_URL_OVERRIDE  = os.getenv("OPIK_URL_OVERRIDE", "")
+OPIK_PROJECT_NAME  = os.getenv("OPIK_PROJECT_NAME", "legal-wiki-rag")
+ENABLE_OPIK        = bool(OPIK_URL_OVERRIDE)
