@@ -16,3 +16,6 @@ pgvector
 # Phase 4.7 — Intent classifier agent (LangGraph orchestration)
 langgraph>=1.0
 langchain-core
+# Offline RAG evaluation (Groundedness/Relevance/Retrieval against Azure OpenAI judge)
+azure-ai-evaluation
+azure-identity
