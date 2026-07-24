@@ -772,6 +772,23 @@
       overflow-x: auto;
     }
 
+    /* Shown under the answer when the question asked for a decision
+       ("should I sign this?") rather than a document fact. */
+    .advice-notice {
+      margin: 0 24px 16px;
+      padding: 10px 14px;
+      border-left: 3px solid var(--amber);
+      background: var(--amber-light);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--amber)
+    }
+
+    .advice-notice strong {
+      font-weight: 600
+    }
+
     .answer-body table {
       width: 100%;
       border-collapse: collapse;
@@ -5307,6 +5324,11 @@
       });
 
       const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
+      // Set by the backend only when the question asked for a decision rather
+      // than a document fact — sits between the answer and its sources.
+      const adviceHtml = wikiResult.advice_notice
+        ? `<div class="advice-notice"><strong>Not legal advice.</strong> ${escapeHtmlRule(wikiResult.advice_notice)}</div>`
+        : '';
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
       const tt = wikiResult.token_total || {};
       const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
@@ -5345,6 +5367,7 @@
             </div>
           </div>
           <div class="answer-body">${md}</div>
+          ${adviceHtml}
           ${cardsBlockHtml}
         </div>
       </div>`;
@@ -5545,7 +5568,10 @@
 
     async function doQuery() {
       const q = $qInput.value.trim();
-      if (!q || q.length < 3) return;
+      // Empty only. The old `< 3` floor silently swallowed "hi" and "ok" — the
+      // Ask button did nothing at all, with no message and no error — which is
+      // exactly the input the greeting fast-path exists to handle.
+      if (!q) return;
       $qInput.value = '';
       _pendingQuestion = q;
       _pendingTargetDoc = '';
@@ -5640,6 +5666,11 @@
               elapsed_ms: 0,
               intent: meta.intent || '',
               intent_label: meta.intent_label || '',
+              // Render flags, persisted alongside the message — a help/greeting
+              // reply must not come back as a normal answer card on reload, and
+              // the not-legal-advice notice must survive it.
+              meta_answer: meta.meta_answer || false,
+              advice_notice: meta.advice_notice || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
             const meta = msg.metadata || {};
