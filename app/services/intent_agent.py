@@ -1096,12 +1096,16 @@ def _is_meta_query(question: str) -> bool:
     return not _RX_META_DOC_HINT.search(q[m.end():])
 
 
-def _corpus_summary(session_id: str) -> str:
+def _corpus_summary(session_id: str, max_families: int = 0) -> str:
     """One line describing what's actually loaded, or '' if it can't be read.
 
     Reads the real corpus rather than hardcoding a document list, so the answer
     stays true for any session — including a client's own upload of categories
     this codebase's type regexes have never seen.
+
+    max_families caps how many types are named (0 = all). A real corpus can have
+    a dozen, which is orientation in a help answer but a wall of text in a
+    one-line greeting.
     """
     try:
         from services import db as _db
@@ -1115,8 +1119,40 @@ def _corpus_summary(session_id: str) -> str:
         return ""
     parts = [f"**{n_docs} documents** are currently loaded"]
     if families:
-        parts.append("covering " + ", ".join(families))
+        shown, rest = families, 0
+        if max_families and len(families) > max_families:
+            shown, rest = families[:max_families], len(families) - max_families
+        listed = ", ".join(shown)
+        parts.append(f"covering {listed} and {rest} other types" if rest
+                     else f"covering {listed}")
     return " ".join(parts) + "."
+
+
+def _canned_payload(answer: str, label: str, method: str) -> dict:
+    """Shape a zero-token canned reply like a normal `answer_result`.
+
+    Same key set app.py and the frontend already read, so nothing downstream
+    needs to special-case a canned turn beyond the `meta_answer` render flag.
+    """
+    return {
+        "answer": answer,
+        "meta_answer": True,       # frontend: render without confidence/grounding/refs
+        "intent": "factual",
+        "intent_label": label,
+        "intent_confidence": 1.0,
+        "intent_method": method,
+        "confidence_score": 100,
+        "pages_used": [],
+        "files_used": [],
+        "selected_titles": [],
+        "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "validation": {"valid": True, "warning": None, "grounding": {}},
+        # Deliberately blank: a canned turn resolved no document scope, so it must
+        # not become the scope the NEXT turn inherits via wiki._carryover_scope.
+        "scope_method": "",
+        "scope_docs": [],
+        "_debug_context": "",
+    }
 
 
 def _meta_answer(session_id: str) -> dict:
@@ -1143,28 +1179,145 @@ def _meta_answer(session_id: str) -> dict:
         "**Tips**\n\n"
         "- Name the document where you can — it makes answers faster and more precise.\n"
         "- Browse everything that's loaded under the **Files** tab.\n"
-        "- Every answer cites the document and clause it came from, so you can verify it."
+        "- Every answer cites the document and clause it came from, so you can verify it.\n"
+        "- I report what the documents say. I'm not a lawyer and this isn't legal advice."
     )
 
-    return {
-        "answer": answer,
-        "meta_answer": True,       # frontend: render without confidence/grounding/refs
-        "intent": "factual",
-        "intent_label": "Help",
-        "intent_confidence": 1.0,
-        "intent_method": "meta-regex",
-        "confidence_score": 100,
-        "pages_used": [],
-        "files_used": [],
-        "selected_titles": [],
-        "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "validation": {"valid": True, "warning": None, "grounding": {}},
-        # Deliberately blank: a meta turn resolved no document scope, so it must
-        # not become the scope the NEXT turn inherits via wiki._carryover_scope.
-        "scope_method": "",
-        "scope_docs": [],
-        "_debug_context": "",
-    }
+    return _canned_payload(answer, "Help", "meta-regex")
+
+
+# ---------------------------------------------------------------------------
+# Greetings, thanks, sign-offs
+# ---------------------------------------------------------------------------
+# Same failure shape as the meta questions above and cheaper to trigger: "hi"
+# has no answer anywhere in a legal corpus, so it retrieved unrelated contracts
+# and reported 0% confidence at full token cost.
+#
+# Every pattern here is a FULL match on the whole message (each ends in `$`),
+# unlike the prefix-anchored meta patterns — so "hello, what does clause 5 say?"
+# does not match and goes to the graph as a normal question. `[\s\W]*` at both
+# ends absorbs punctuation and emoji ("hi!!", "thanks :)") but never letters.
+_RX_GREETING = re.compile(
+    r'^[\s\W]*(?:hi+|hey+|hell?o+|hiya|heya|greetings|namaste|'
+    r'good\s+(?:morning|afternoon|evening|day))'
+    r'(?:\s+(?:there|team|all|folks|everyone))?[\s\W]*$',
+    re.IGNORECASE,
+)
+
+# Checked before _RX_ACK so "ok thanks" reads as thanks, not a bare ack.
+_RX_THANKS = re.compile(
+    r'^[\s\W]*'
+    r'(?:(?:ok(?:ay)?|alright|cool|nice|great|perfect|awesome|excellent)\W+)?'
+    r'(?:thanks|thank\s+you|thankyou|thx|ty|cheers|much\s+appreciated|appreciate\s+it)'
+    r'(?:\s+(?:a\s+lot|so\s+much|very\s+much|again))?[\s\W]*$',
+    re.IGNORECASE,
+)
+
+_RX_FAREWELL = re.compile(
+    r'^[\s\W]*'
+    r'(?:bye|goodbye|good\s?bye|see\s+(?:you|ya)(?:\s+later)?|'
+    r'that(?:\'|’)?s\s+all(?:\s+for\s+now)?|that\s+is\s+all|'
+    r'no\s+more\s+questions|nothing\s+else)'
+    r'[\s\W]*$',
+    re.IGNORECASE,
+)
+
+# Deliberately excludes "yes"/"no"/"sure" — those are plausible replies to a
+# clarification prompt, where swallowing them would break the flow.
+_RX_ACK = re.compile(
+    r'^[\s\W]*'
+    r'(?:ok(?:ay)?|cool|nice|great|perfect|awesome|excellent|alright|'
+    r'got\s+it|understood|noted|makes\s+sense|sounds\s+good|fair\s+enough)'
+    r'[\s\W]*$',
+    re.IGNORECASE,
+)
+
+
+def _social_query_kind(question: str) -> str:
+    """'greeting' | 'thanks' | 'farewell' | 'ack' | '' — whole-message match only."""
+    q = (question or "").strip()
+    # A real question is never this short; the cap is a second guard on top of
+    # the `$` anchors so no long message can reach the patterns at all.
+    if not q or len(q) > 60:
+        return ""
+    if _RX_GREETING.match(q):
+        return "greeting"
+    if _RX_THANKS.match(q):
+        return "thanks"
+    if _RX_FAREWELL.match(q):
+        return "farewell"
+    if _RX_ACK.match(q):
+        return "ack"
+    return ""
+
+
+def _social_answer(kind: str, session_id: str) -> dict:
+    """Canned reply to a greeting / thanks / sign-off — no LLM call, no tokens."""
+    if kind == "greeting":
+        corpus = _corpus_summary(session_id, max_families=4)
+        answer = (
+            "Hello — I answer questions about the legal documents in this workspace."
+            + (f" {corpus}" if corpus else "")
+            + "\n\nAsk me about any of them, for example *\"What are the termination "
+              "rights in Service Agreement 2?\"* — or type **help** for the full list "
+              "of what I can do."
+        )
+    elif kind == "thanks":
+        answer = ("You're welcome. Ask me anything else about the documents in this "
+                  "workspace whenever you're ready.")
+    elif kind == "farewell":
+        answer = "Goodbye — come back whenever you need something from these documents."
+    else:
+        answer = ("Ready when you are. Ask another question about the documents, or "
+                  "type **help** to see what I can do.")
+
+    return _canned_payload(answer, "Help", f"social-{kind}")
+
+
+# ---------------------------------------------------------------------------
+# Legal-advice framing
+# ---------------------------------------------------------------------------
+# "Should I sign this?" is usually answerable from the documents — the
+# termination clause, the liability cap — so this must NOT short-circuit or
+# refuse. What it changes is the framing: the user asked for a decision and gets
+# back a document summary, and nothing on screen said which of the two it is.
+#
+# Detection is regex-only (0 tokens) and its only effect is an `advice_notice`
+# string on the payload that the frontend renders under the answer, so a false
+# positive costs one banner and cannot alter the answer itself.
+_RX_ADVICE_SEEKING = re.compile(
+    r'\b(?:'
+    r'(?:should|shall|must|ought\s+to|can|could|may|do|am|are|will|would)\s+'
+    r'(?:i|we|my\s+client|our\s+client)\b'
+    r'|what\s+(?:should|would|do)\s+(?:i|we|you)\s+(?:do|recommend|advise|suggest)'
+    r'|what\s+are\s+(?:my|our)\s+(?:options|rights|chances)'
+    r'|(?:my|our)\s+(?:legal\s+)?(?:rights|options|exposure|liability|risk)\b'
+    r'|do\s+(?:i|we)\s+have\s+(?:a|any)\s+(?:case|claim|grounds|defence|defense)'
+    r'|(?:advise|advice)\s+(?:me|us)\b'
+    r'|what\s+would\s+you\s+(?:do|recommend|advise)'
+    # Allows a noun between the pronoun and the adjective ("is this CLAUSE
+    # enforceable"). `valid until/from/for` is excluded — that is a question
+    # about the term length, not about legal validity.
+    r'|(?:is|are|was|would|will)\s+(?:this|it|that|these|those|the)\s+(?:[\w\'’-]+\s+){0,3}'
+    r'(?:legally\s+)?(?:enforceable|binding|lawful|valid\b(?!\s+(?:until|from|till|through|for)\b))'
+    r'|is\s+(?:this|it|that)\s+legal\b'
+    r'|(?:hold|stand)\s+up\s+in\s+court'
+    r'|(?:can|could|would)\s+(?:they|he|she|the\s+other\s+party|the\s+counterparty)\s+sue'
+    r'|is\s+(?:this|it)\s+a\s+good\s+(?:deal|idea)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+_ADVICE_NOTICE = (
+    "This answers what the documents say, not what you should do. It is not legal "
+    "advice, does not account for facts, jurisdiction or case law outside this "
+    "workspace, and should be reviewed by a qualified lawyer before you act on it."
+)
+
+
+def _is_advice_seeking(question: str) -> bool:
+    """True when the question asks for a decision rather than a document fact."""
+    return bool(_RX_ADVICE_SEEKING.search(question or ""))
 
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
@@ -1178,6 +1331,17 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
 
     exclude_cached_answers: QA/testing option — see wiki.get_context().
     """
+    # Greetings and sign-offs short-circuit before the graph. Unlike the meta
+    # path below this one DOES run on follow-ups — "thanks" after an answer is
+    # exactly when it happens — and it is safe there because every pattern is a
+    # whole-message match.
+    social = _social_query_kind(question)
+    if social:
+        logger.info("[AGENT] social fast-path (%s, 0 tokens): %r", social, (question or "")[:40])
+        yield {"stage": "complete", "status": "done", "type": "answer",
+               "payload": _social_answer(social, session_id), "message": "Done"}
+        return
+
     # Meta questions short-circuit before the graph — no classify, no retrieve,
     # no generate, no validate. Skipped for follow-ups, where a bare "help" is
     # far more likely to be an answer to a previous prompt than a fresh request
@@ -1187,6 +1351,12 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         yield {"stage": "complete", "status": "done", "type": "answer",
                "payload": _meta_answer(session_id), "message": "Done"}
         return
+
+    # Decided once, up front: the notice is attached to the terminal answer event
+    # below rather than inside a node, so no graph node's behaviour changes.
+    advice_seeking = _is_advice_seeking(question)
+    if advice_seeking:
+        logger.info("[AGENT] advice-seeking phrasing — attaching disclaimer")
 
     graph = get_query_graph()
     state: QueryState = {
@@ -1199,4 +1369,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
+        if (advice_seeking and chunk.get("type") == "answer"
+                and isinstance(chunk.get("payload"), dict)):
+            chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
         yield chunk

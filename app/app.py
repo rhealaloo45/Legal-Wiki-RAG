@@ -886,6 +886,12 @@ def query_route():
                                         # carryover (wiki._carryover_scope).
                                         "scope_method": wiki_result.get("scope_method", ""),
                                         "scope_docs": wiki_result.get("scope_docs", []),
+                                        # Render flags — without these a reloaded
+                                        # thread shows a help/greeting reply as a
+                                        # normal answer card, and drops the
+                                        # not-legal-advice notice entirely.
+                                        "meta_answer": wiki_result.get("meta_answer", False),
+                                        "advice_notice": wiki_result.get("advice_notice", ""),
                                     })
                     _update_session_history(session_id, question)
                     try:
