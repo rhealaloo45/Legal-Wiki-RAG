@@ -1041,6 +1041,132 @@ def get_query_graph():
     return _QUERY_GRAPH
 
 
+# ---------------------------------------------------------------------------
+# Meta / capability questions
+# ---------------------------------------------------------------------------
+# A question ABOUT the assistant is not a question about a document. Every one
+# of the five intents assumes "some page in the corpus answers this", so a meta
+# question fell through to `factual`, ran full retrieval against a legal corpus
+# that contains nothing about itself, and produced the worst possible first
+# impression: "The retrieved context does not contain information regarding the
+# types of questions that could be asked", 0% confidence, three unrelated
+# documents listed as References, ~8.2k tokens burned. Confirmed live — it was
+# literally the first thing a pilot tester typed.
+#
+# Anchored at ^ and kept deliberately narrow: these must never swallow a real
+# document question. "What can you tell me about the indemnity clause" does NOT
+# match (the `can you` branch requires do/help/answer/handle, not `tell`), and
+# nothing here matches mid-sentence.
+_RX_META_QUERY = re.compile(
+    r'^\s*(?:'
+    r'help[\s!.?]*$|\?+\s*$'
+    r'|what\s+(?:kind|kinds|type|types|sort|sorts)\s+of\s+(?:questions?|things?|queries)\b'
+    r'|what\s+(?:questions?|things?)\s+(?:can|could|should)\s+i\s+ask\b'
+    r'|what\s+can\s+(?:you|this|it|lexwiki)\s+(?:do|help|answer|handle)\b'
+    r'|what\s+can\s+i\s+ask\b'
+    r'|what\s+are\s+(?:you|your\s+capabilities)\b'
+    r'|who\s+are\s+you\b'
+    r'|how\s+(?:do|can)\s+i\s+use\s+(?:you|this|it|lexwiki)\b'
+    r'|how\s+does\s+(?:this|it|lexwiki)\s+work\b'
+    r'|(?:give|show)\s+me\s+(?:some\s+)?(?:example|sample)\s+questions?\b'
+    r'|what\s+(?:documents?|files?|data)\s+(?:do\s+you\s+have|are\s+(?:there|loaded|available))\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Disqualifier: the opener above may be followed by harmless filler ("...could I
+# ask TO YOU?"), but if the rest of the question names a document, clause or
+# legal concept it is a real retrieval question wearing a meta-sounding opener
+# ("what documents do you have to deliver under clause 5") and must go to the
+# graph. Anything matching this vetoes the fast path.
+_RX_META_DOC_HINT = re.compile(
+    r'\b(?:clause|section|article|agreement|contract|nda|sha|jva?|deed|schedule|annex|'
+    r'party|parties|obligation|termination|indemnit|liabilit|confidential|warrant|'
+    r'breach|dispute|governing\s+law|judgment|opinion|deliver|pay|notice|about)\b',
+    re.IGNORECASE,
+)
+
+
+def _is_meta_query(question: str) -> bool:
+    """True for questions about the assistant itself rather than the documents."""
+    q = question or ""
+    m = _RX_META_QUERY.match(q)
+    if not m:
+        return False
+    return not _RX_META_DOC_HINT.search(q[m.end():])
+
+
+def _corpus_summary(session_id: str) -> str:
+    """One line describing what's actually loaded, or '' if it can't be read.
+
+    Reads the real corpus rather than hardcoding a document list, so the answer
+    stays true for any session — including a client's own upload of categories
+    this codebase's type regexes have never seen.
+    """
+    try:
+        from services import db as _db
+        families = sorted(f for f in (_db.list_doc_families(session_id) or []) if f)
+        n_docs = len(_db.get_source_docs(session_id) or [])
+    except Exception as e:
+        logger.warning("Meta answer: corpus summary unavailable: %s", e)
+        return ""
+
+    if not n_docs:
+        return ""
+    parts = [f"**{n_docs} documents** are currently loaded"]
+    if families:
+        parts.append("covering " + ", ".join(families))
+    return " ".join(parts) + "."
+
+
+def _meta_answer(session_id: str) -> dict:
+    """Canned capability answer — no LLM call, no retrieval, no tokens."""
+    corpus = _corpus_summary(session_id)
+    corpus_line = f"{corpus}\n\n" if corpus else ""
+
+    answer = (
+        "I answer questions about the legal documents loaded into this "
+        f"workspace. {corpus_line}"
+        "**What I can do**\n\n"
+        "- **Find facts** — pull a specific clause, definition, party, date or figure "
+        "out of a named document.\n"
+        "- **List obligations** — set out duties, deadlines and compliance requirements.\n"
+        "- **Compare documents** — put two or more agreements side by side and show "
+        "where they differ.\n"
+        "- **Assess risk** — flag unusual or one-sided terms and give a go/no-go view.\n"
+        "- **Draft** — produce clause language, letters or trackers in the Draft tab.\n\n"
+        "**Example questions**\n\n"
+        "- *What are the termination rights in Service Agreement 2?*\n"
+        "- *List every notice obligation and its deadline under NDA 3.*\n"
+        "- *Compare the confidentiality clauses in NDA 1 and NDA 4.*\n"
+        "- *Are there any red flags in the SunBridge joint venture agreement?*\n\n"
+        "**Tips**\n\n"
+        "- Name the document where you can — it makes answers faster and more precise.\n"
+        "- Browse everything that's loaded under the **Files** tab.\n"
+        "- Every answer cites the document and clause it came from, so you can verify it."
+    )
+
+    return {
+        "answer": answer,
+        "meta_answer": True,       # frontend: render without confidence/grounding/refs
+        "intent": "factual",
+        "intent_label": "Help",
+        "intent_confidence": 1.0,
+        "intent_method": "meta-regex",
+        "confidence_score": 100,
+        "pages_used": [],
+        "files_used": [],
+        "selected_titles": [],
+        "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "validation": {"valid": True, "warning": None, "grounding": {}},
+        # Deliberately blank: a meta turn resolved no document scope, so it must
+        # not become the scope the NEXT turn inherits via wiki._carryover_scope.
+        "scope_method": "",
+        "scope_docs": [],
+        "_debug_context": "",
+    }
+
+
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
                      is_followup: bool = False, exclude_cached_answers: bool = False,
                      chat_session_id: str = ""):
@@ -1052,6 +1178,16 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
 
     exclude_cached_answers: QA/testing option — see wiki.get_context().
     """
+    # Meta questions short-circuit before the graph — no classify, no retrieve,
+    # no generate, no validate. Skipped for follow-ups, where a bare "help" is
+    # far more likely to be an answer to a previous prompt than a fresh request
+    # for capabilities.
+    if not is_followup and _is_meta_query(question):
+        logger.info("[AGENT] meta query fast-path (0 tokens): %r", (question or "")[:80])
+        yield {"stage": "complete", "status": "done", "type": "answer",
+               "payload": _meta_answer(session_id), "message": "Done"}
+        return
+
     graph = get_query_graph()
     state: QueryState = {
         "question": question,
