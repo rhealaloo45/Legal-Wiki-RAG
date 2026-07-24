@@ -5238,6 +5238,30 @@
     }
 
     function appendAnswerMsg(wikiResult) {
+      // Meta/help answers describe the tool, not a document — Confidence,
+      // Grounding and References are all meaningless for them and previously
+      // rendered as "0%" next to a list of unrelated documents.
+      if (wikiResult.meta_answer) {
+        currentResultReferences = [];
+        const helpDiv = document.createElement('div');
+        helpDiv.className = 'chat-msg chat-msg-assistant';
+        helpDiv.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
+          <div class="answer-card" style="margin-bottom:0">
+            <div class="answer-topbar">
+              <div class="answer-tags"><span class="tag-synth">HELP</span></div>
+              <div class="answer-actions">
+                <button class="act-btn" onclick="copyAnswerFromEl(this)"><i class="ti ti-copy"></i>Copy</button>
+              </div>
+            </div>
+            <div class="answer-body">${renderMarkdown(wikiResult.answer || '')}</div>
+          </div>
+        </div>`;
+        $chatThread.appendChild(helpDiv);
+        window._lastAnswer = wikiResult.answer || '';
+        scrollChatToBottom();
+        return;
+      }
+
       const score = wikiResult.confidence_score || 0;
       let confDot = 'var(--green)';
       if (score < 50) confDot = 'var(--red)';
