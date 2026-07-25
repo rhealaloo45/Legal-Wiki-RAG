@@ -363,6 +363,26 @@ def _run_schema_statements(conn, text) -> None:
             )
         """))
 
+        # Clause number -> wiki page mapping. Ingest builds page titles from the
+        # source's clause headings but strips the leading number ("5. Return,
+        # Destruction..." becomes "Return, Destruction... – ..."), which made
+        # every ask-by-clause-number question unanswerable even when the source
+        # is numbered. Populated by backfill_clause_map.py from the original
+        # PDFs; read at query time to pin retrieval. One clause may map to
+        # several pages (ingest splits compound clauses like "Remedies, Term,
+        # and Governing Law" into separate topic pages), hence page_title in
+        # the primary key.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clause_map (
+                session_id  TEXT NOT NULL,
+                source_doc  TEXT NOT NULL,
+                clause_num  TEXT NOT NULL,
+                heading     TEXT NOT NULL,
+                page_title  TEXT NOT NULL,
+                PRIMARY KEY (session_id, source_doc, clause_num, page_title)
+            )
+        """))
+
         conn.commit()
 
 
@@ -1344,3 +1364,47 @@ def list_doc_families(session_id: str) -> list[str]:
             {"sid": session_id},
         )
         return [row.doc_family for row in rows]
+
+
+def lookup_clause(session_id: str, doc_hint: str, clause_num: str) -> list[dict]:
+    """Resolve a clause number to its heading and wiki page(s) for one document.
+
+    doc_hint is whatever name the scope resolver produced — it may be the full
+    source_doc or a fragment of it, so match by containment either way. Returns
+    [] when the document is unnumbered or the number does not exist, and the
+    caller distinguishes those two cases via doc_clause_numbers().
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT heading, page_title
+                FROM clause_map
+                WHERE session_id = :sid AND clause_num = :num
+                  AND (source_doc ILIKE '%' || :doc || '%'
+                       OR :doc ILIKE '%' || source_doc || '%')
+            """),
+            {"sid": session_id, "num": clause_num, "doc": doc_hint},
+        )
+        return [{"heading": r.heading, "page_title": r.page_title} for r in rows]
+
+
+def doc_clause_numbers(session_id: str, doc_hint: str) -> list[str]:
+    """Every clause number the map knows for a document ([] = unnumbered source)."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT clause_num
+                FROM clause_map
+                WHERE session_id = :sid
+                  AND (source_doc ILIKE '%' || :doc || '%'
+                       OR :doc ILIKE '%' || source_doc || '%')
+            """),
+            {"sid": session_id, "doc": doc_hint},
+        )
+        nums = [r.clause_num for r in rows]
+        # "1" < "10" < "2" under string sort; sort numerically by dotted parts.
+        return sorted(nums, key=lambda n: [int(p) for p in n.split(".")])
