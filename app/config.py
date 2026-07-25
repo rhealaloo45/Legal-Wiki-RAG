@@ -176,6 +176,13 @@ PROGRESS_STORE = {}
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
+# Deterministic string-count check of the question's legal topics against the
+# retrieved pages. Independent of ENABLE_ANSWER_VALIDATION on purpose — the LLM
+# grounding check scored a confirmed fabrication at 90% and endorsed the invented
+# clause in its summary, so this is the only signal that caught it. Costs no LLM
+# call and never rewrites an answer, only appends a warning. Kept as a flag so it
+# can be turned off from App Service settings without a redeploy.
+ENABLE_TERM_CHECK = os.getenv("ENABLE_TERM_CHECK", "true").lower() == "true"
 MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning models (nano) the 900-token first pass routinely spent the whole budget on hidden reasoning and truncated (finish_reason=length), forcing a wasted retry at 1800 before any visible JSON — starting at 1500 skips that discarded first call on big answers. The escalating-budget ladder in _check_grounding still doubles from here (1500→3000→6000→12000) for the largest contexts.
 
 # Optional LLM reranking pass (Phase 3). RRF fusion is always on (free); this adds

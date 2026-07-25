@@ -892,6 +892,16 @@ def query_route():
                                         # not-legal-advice notice entirely.
                                         "meta_answer": wiki_result.get("meta_answer", False),
                                         "advice_notice": wiki_result.get("advice_notice", ""),
+                                        # Deterministic term-presence warning. Must
+                                        # persist for the same reason as the notice
+                                        # above: the caution has to survive a reload,
+                                        # or a reopened thread shows the unverified
+                                        # answer with nothing marking it.
+                                        "context_warning": wiki_result.get("context_warning", ""),
+                                        "context_note": wiki_result.get("context_note", ""),
+                                        # Was set on the live payload but never stored,
+                                        # so every reloaded answer rendered "0.0s".
+                                        "elapsed_ms": wiki_result.get("elapsed_ms", 0),
                                     })
                     _update_session_history(session_id, question)
                     try:
