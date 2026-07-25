@@ -5442,8 +5442,11 @@
       // anything, the pages just use wording it didn't cite. Amber, and phrased
       // as an observation — an answer can cover a topic thoroughly and still
       // correctly report one mechanism missing.
+      // No hardcoded heading — each note supplies its own lead-in, because one
+      // heading cannot fit both "the pages also use this wording" and "ask by
+      // subject rather than clause number".
       const ctxNoteHtml = wikiResult.context_note
-        ? `<div class="context-note"><strong>Also in these pages.</strong> ${renderMarkdown(wikiResult.context_note)}</div>`
+        ? `<div class="context-note">${renderMarkdown(wikiResult.context_note)}</div>`
         : '';
 
       // Counts, not a verdict. Every figure is a string match or a tally of what

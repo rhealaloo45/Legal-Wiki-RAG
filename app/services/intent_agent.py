@@ -1130,11 +1130,14 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
                                and any(rx.search(s) for _, rx in rxs) for s in sentences):
             missed = [name for name, rx in rxs if rx.search(ctx) and not rx.search(ans)]
             if missed:
+                # Each note carries its own lead-in. The frontend used to hardcode
+                # one heading for every note, which read as a non-sequitur on the
+                # clause-number case below.
                 notes.append(
-                    f"On **{label}**, the retrieved pages also use the wording "
-                    f"**{', '.join(missed[:3])}**, which this answer does not cite. "
-                    f"If your question turns on that, re-ask naming it against a single "
-                    f"named document."
+                    f"**Also in these pages.** On **{label}**, the retrieved pages also "
+                    f"use the wording **{', '.join(missed[:3])}**, which this answer does "
+                    f"not cite. If your question turns on that, re-ask naming it against "
+                    f"a single named document."
                 )
 
     m = _RX_CLAUSE_NUMBER_Q.search(q)
@@ -1152,11 +1155,16 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
             ctx, re.IGNORECASE | re.MULTILINE,
         )
         if not looks_numbered:
+            # Phrased as how to search, not as what the system lacks. The
+            # information is the same either way, but "numbering is not retained"
+            # reads as a defect report to a client, and the note exists to stop a
+            # reader concluding the clause does not exist — not to apologise.
             notes.append(
-                f"Pages in this workspace are stored under topic headings and the "
-                f"original clause numbering is not retained, so **clause {num}** cannot "
-                f"be matched by number. This does not mean the clause is absent — "
-                f"ask by subject instead (e.g. \"the termination clause\")."
+                f"**Try asking by subject.** Documents here are indexed by topic "
+                f"rather than by clause number, so **clause {num}** has nothing to "
+                f"match against — this is not a finding that the clause is missing. "
+                f"Name the subject instead (e.g. \"the termination clause\" or "
+                f"\"the indemnity clause\") and it will be found if it is there."
             )
 
     facts = {
