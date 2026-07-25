@@ -618,7 +618,9 @@
     #metric-popover {
       display: none;
       position: fixed;
-      width: 200px;
+      /* 200px wrapped the counts onto three lines each; the positioning code
+         measures offsetWidth, so widening here needs no JS change. */
+      width: 234px;
       background: var(--bg-surface);
       border: 0.5px solid var(--border);
       border-radius: var(--radius-md);
@@ -809,30 +811,28 @@
       font-weight: 600
     }
 
-    /* Deterministic counts strip, sits directly under the answer header.
-       Quiet by default — it is reference material, not an alert — with only
-       the failing figure picking up colour. */
-    .answer-facts {
-      margin: 0 24px 12px;
-      font-size: 11.5px;
-      line-height: 1.7;
-      color: var(--text-muted, #6b6b6b);
+    /* Deterministic counts, shown inside the Confidence hover popover rather
+       than on the answer card: they are reference material for someone already
+       questioning the score, and a permanent strip above the answer read as a
+       criticism of it before the reader had read a word. */
+    .metric-popover-facts {
+      margin-top: 7px;
+      padding-top: 7px;
+      border-top: 0.5px solid var(--border);
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
       font-variant-numeric: tabular-nums
     }
 
-    .answer-facts b {
+    .metric-popover-facts b {
       font-weight: 600;
-      color: var(--text, #222)
+      color: var(--text-primary)
     }
 
-    .answer-facts .fact-bad,
-    .answer-facts .fact-bad b {
+    .metric-popover-facts .fact-bad,
+    .metric-popover-facts .fact-bad b {
       color: var(--red)
-    }
-
-    .fact-sep {
-      margin: 0 8px;
-      opacity: .45
     }
 
     /* Amber sibling of .context-warning: not a suspected fabrication, just
@@ -3332,6 +3332,7 @@
       <div id="metric-popover">
         <div class="metric-popover-title" id="metric-popover-title"></div>
         <div class="metric-popover-desc" id="metric-popover-desc"></div>
+        <div id="metric-popover-facts"></div>
       </div>
 
       <!-- LOG OVERLAY -->
@@ -3488,7 +3489,33 @@
     };
 
     function metricInfo(label, score, key) {
-      return `<span class="metric-info" onmouseenter="showMetricInfo(event,'${key}')" onmouseleave="hideMetricInfo()">${label}: ${score}%</span>`;
+      return `<span class="metric-info" data-metric="${key}" onmouseenter="showMetricInfo(event,'${key}')" onmouseleave="hideMetricInfo()">${label}: ${score}%</span>`;
+    }
+
+    // Deterministic counts shown under the Confidence description on hover.
+    // Attached to the element as a property by appendAnswerMsg rather than
+    // serialised into an attribute: escapeHtmlRule() does not escape quotes,
+    // so JSON in a double-quoted attribute would break on the first one.
+    function answerFactsHtml(af) {
+      if (!af) return '';
+      const lines = [];
+      if (af.pages) {
+        lines.push(`<b>${af.pages}</b> page${af.pages === 1 ? '' : 's'}` +
+          (af.documents ? ` from <b>${af.documents}</b> document${af.documents === 1 ? '' : 's'}` : ''));
+      }
+      if (af.topics_asked) {
+        const missing = af.topics_missing || [];
+        lines.push(`<span class="${missing.length ? 'fact-bad' : ''}">topics present: ` +
+          `<b>${af.topics_found}/${af.topics_asked}</b>` +
+          (missing.length ? ` — no mention of ${escapeHtmlRule(missing.join(', '))}` : '') + `</span>`);
+      }
+      if (af.quotes_total) {
+        const verified = af.quotes_total - (af.quotes_unverified || 0);
+        lines.push(`<span class="${af.quotes_unverified ? 'fact-bad' : ''}">quotes verbatim: ` +
+          `<b>${verified}/${af.quotes_total}</b></span>`);
+      }
+      if (!lines.length) return '';
+      return `<div class="metric-popover-facts">${lines.map(l => `<div>${l}</div>`).join('')}</div>`;
     }
 
     function showMetricInfo(evt, key) {
@@ -3497,10 +3524,14 @@
       const pop = document.getElementById('metric-popover');
       document.getElementById('metric-popover-title').textContent = info.title;
       document.getElementById('metric-popover-desc').textContent = info.desc;
+      document.getElementById('metric-popover-facts').innerHTML =
+        answerFactsHtml(evt.currentTarget._answerFacts);
       pop.style.display = 'block';
 
       const r = evt.target.getBoundingClientRect();
-      const popW = 200, gap = 8;
+      // Measured, not assumed: the box grows when the facts block is present.
+      const popW = pop.offsetWidth || 200;
+      const gap = 8;
       const popH = pop.offsetHeight || 50;
       // Prefer opening below the badge (avoids the scroll-container's top
       // edge); flip above only when there's genuinely no room below.
@@ -5415,32 +5446,12 @@
         ? `<div class="context-note"><strong>Also in these pages.</strong> ${renderMarkdown(wikiResult.context_note)}</div>`
         : '';
 
-      // Counts, not a verdict. Every figure here is a string match or a tally of
-      // what retrieval returned, so it cannot be wrong the way the confidence
+      // Counts, not a verdict. Every figure is a string match or a tally of what
+      // retrieval returned, so none can be wrong the way the confidence
       // percentage can — that number is the model grading itself and correlates
-      // +0.13 with an independent judge. "0/2 topics" tells a reader what to do;
-      // "38%" does not.
+      // +0.13 with an independent judge. Rendered on hover over Confidence
+      // (see answerFactsHtml), which is exactly when someone wants them.
       const af = wikiResult.answer_facts || {};
-      const factBits = [];
-      if (af.pages) {
-        factBits.push(`<b>${af.pages}</b> page${af.pages === 1 ? '' : 's'}` +
-          (af.documents ? ` from <b>${af.documents}</b> document${af.documents === 1 ? '' : 's'}` : ''));
-      }
-      if (af.topics_asked) {
-        const missing = af.topics_missing || [];
-        factBits.push(`<span class="${missing.length ? 'fact-bad' : ''}">` +
-          `topics present in those pages: <b>${af.topics_found}/${af.topics_asked}</b>` +
-          (missing.length ? ` — no mention of ${escapeHtmlRule(missing.join(', '))}` : '') +
-          `</span>`);
-      }
-      if (af.quotes_total) {
-        const verified = af.quotes_total - (af.quotes_unverified || 0);
-        factBits.push(`<span class="${af.quotes_unverified ? 'fact-bad' : ''}">` +
-          `quotes found verbatim: <b>${verified}/${af.quotes_total}</b></span>`);
-      }
-      const factsHtml = factBits.length
-        ? `<div class="answer-facts">${factBits.join('<span class="fact-sep">·</span>')}</div>`
-        : '';
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
       const tt = wikiResult.token_total || {};
       const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
@@ -5478,14 +5489,20 @@
               <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
             </div>
           </div>
-          ${factsHtml}
+          <div class="answer-body">${md}</div>
           ${ctxWarnHtml}
           ${ctxNoteHtml}
-          <div class="answer-body">${md}</div>
           ${adviceHtml}
           ${cardsBlockHtml}
         </div>
       </div>`;
+      // Attach the counts to this card's Confidence badge so the shared popover
+      // can read them on hover. Set as a property, not an attribute — the values
+      // include free text (missing topic names) that would need attribute
+      // escaping escapeHtmlRule() doesn't do.
+      const confEl = div.querySelector('.metric-info[data-metric="confidence"]');
+      if (confEl) confEl._answerFacts = af;
+
       $chatThread.appendChild(div);
       window._lastAnswer = parsed.cleanText;
       scrollChatToBottom();
