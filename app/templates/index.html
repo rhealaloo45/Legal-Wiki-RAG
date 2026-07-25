@@ -789,6 +789,51 @@
       font-weight: 600
     }
 
+    /* Deterministic term-presence caution. Sits ABOVE the answer and uses the
+       red scale rather than amber: the amber notice says "verify before acting",
+       this one says "part of what follows may not be in the document at all". */
+    .context-warning {
+      margin: 0 24px 14px;
+      padding: 11px 14px;
+      border-left: 3px solid var(--red);
+      background: var(--red-light);
+      border: 1px solid var(--red-border);
+      border-left-width: 3px;
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--red)
+    }
+
+    .context-warning strong {
+      font-weight: 600
+    }
+
+    /* Amber sibling of .context-warning: not a suspected fabrication, just
+       wording in the pages the answer didn't cite. */
+    .context-note {
+      margin: 0 24px 14px;
+      padding: 10px 14px;
+      border-left: 3px solid var(--amber);
+      background: var(--amber-light);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--amber)
+    }
+
+    .context-note strong {
+      font-weight: 600
+    }
+
+    /* renderMarkdown wraps its output in <p>; strip the block margins so a
+       one-line caution doesn't sit in a tall box. */
+    .context-warning p,
+    .context-note p {
+      display: inline;
+      margin: 0
+    }
+
     .answer-body table {
       width: 100%;
       border-collapse: collapse;
@@ -5329,6 +5374,20 @@
       const adviceHtml = wikiResult.advice_notice
         ? `<div class="advice-notice"><strong>Not legal advice.</strong> ${escapeHtmlRule(wikiResult.advice_notice)}</div>`
         : '';
+      // Set when a topic the question asked about is missing from (or, inversely,
+      // present in) the retrieved pages in a way the answer contradicts. Rendered
+      // above the answer, not below it — the reader needs the caution before the
+      // content, not after they have already believed it.
+      const ctxWarnHtml = wikiResult.context_warning
+        ? `<div class="context-warning"><strong>Check this answer.</strong> ${renderMarkdown(wikiResult.context_warning)}</div>`
+        : '';
+      // Milder sibling of the above: the answer is not suspected of inventing
+      // anything, the pages just use wording it didn't cite. Amber, and phrased
+      // as an observation — an answer can cover a topic thoroughly and still
+      // correctly report one mechanism missing.
+      const ctxNoteHtml = wikiResult.context_note
+        ? `<div class="context-note"><strong>Also in these pages.</strong> ${renderMarkdown(wikiResult.context_note)}</div>`
+        : '';
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
       const tt = wikiResult.token_total || {};
       const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
@@ -5366,6 +5425,8 @@
               <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
             </div>
           </div>
+          ${ctxWarnHtml}
+          ${ctxNoteHtml}
           <div class="answer-body">${md}</div>
           ${adviceHtml}
           ${cardsBlockHtml}
@@ -5663,9 +5724,13 @@
               files_used: meta.files_used || [],
               token_total: meta.token_total || {},
               validation: meta.validation || {},
-              elapsed_ms: 0,
+              elapsed_ms: meta.elapsed_ms || 0,
               intent: meta.intent || '',
               intent_label: meta.intent_label || '',
+              // Deterministic term-presence caution. Without this a reopened
+              // thread shows an answer flagged as unverified with nothing on it.
+              context_warning: meta.context_warning || '',
+              context_note: meta.context_note || '',
               // Render flags, persisted alongside the message — a help/greeting
               // reply must not come back as a normal answer card on reload, and
               // the not-legal-advice notice must survive it.

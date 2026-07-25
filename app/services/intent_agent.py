@@ -958,6 +958,199 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
     return {"grounding_score": None, "ungrounded_claims": [], "summary": "Check failed."}
 
 
+# ---------------------------------------------------------------------------
+# Deterministic term-presence check
+#
+# Exists because the LLM grounding check above cannot be trusted as a gate: it
+# scored a confirmed fabrication (a comparison answer that asserted an
+# indemnification clause the retrieved pages never mention — 0 occurrences in
+# context, 8 in the answer) at 90%, and its summary explicitly called the
+# invented clause accurate. The judge hallucinated alongside the generator.
+#
+# A string count cannot be talked into anything, which is exactly why it catches
+# what the judge missed. It only ever ATTACHES A WARNING — it never rewrites or
+# suppresses an answer, because the corpus already has a real "wrongly said the
+# document is silent" failure mode and a suppressing gate would worsen it.
+# ---------------------------------------------------------------------------
+
+# Curated, not extracted from the question. Picking "the topic" out of arbitrary
+# phrasing is a guess; matching against a fixed legal vocabulary is not. Each
+# entry lists the alternates real drafting uses instead of the obvious word —
+# without these, an agreement that says "hold harmless" and never "indemnify"
+# would be scored as silent on indemnity.
+# Alternates are kept as a LIST, not one alternation, so each can be counted
+# separately. That is what makes the under-read signal precise: the useful thing
+# to tell a reader is not "this topic exists somewhere" but "the pages say
+# ARBITRATION and your answer never mentions it".
+# Every alternate carries its own plain-English label. Paired rather than derived,
+# because the under-read message quotes the wording back to the reader and a raw
+# pattern ("applicable\\s+law") in the UI is worse than no message at all.
+_TOPIC_TERMS: dict[str, list[tuple[str, str]]] = {
+    "indemnity": [
+        (r"indemnif\w*", "indemnification"), (r"indemnit\w*", "indemnity"),
+        (r"hold\s+harmless", "hold harmless")],
+    "payment": [
+        (r"payment\w*", "payment"), (r"\bpay\b", "pay"), (r"\bfees?\b", "fees"),
+        (r"invoice\w*", "invoicing"), (r"consideration", "consideration"),
+        (r"remunerat\w*", "remuneration")],
+    "termination": [
+        (r"terminat\w*", "termination"), (r"expir\w*", "expiry"),
+        (r"exit\s+(?:right|mechanic|trigger)\w*", "exit mechanics"),
+        (r"(?:call|put)\s+option", "call/put options"),
+        (r"wind[-\s]?(?:up|down)", "wind-up")],
+    "confidentiality": [
+        (r"confidential\w*", "confidentiality"),
+        (r"non[-\s]?disclosure", "non-disclosure"), (r"secrec\w*", "secrecy")],
+    "governing law": [
+        (r"governing\s+law", "governing law"), (r"governed\s+by", "governed by"),
+        (r"applicable\s+law", "applicable law"),
+        (r"choice\s+of\s+law", "choice of law")],
+    "dispute resolution": [
+        (r"dispute\w*", "disputes"), (r"arbitrat\w*", "arbitration"),
+        (r"mediat\w*", "mediation"), (r"litigat\w*", "litigation"),
+        (r"jurisdiction", "jurisdiction"), (r"\bforum\b", "forum"),
+        (r"escalat\w*", "escalation"), (r"deadlock", "deadlock")],
+    "liability": [
+        (r"liabilit\w*", "liability"), (r"liable", "liable"),
+        (r"\bcap(?:ped|s)?\b", "liability cap")],
+    "warranty": [
+        (r"warrant\w*", "warranties"), (r"represent\w*", "representations")],
+    "force majeure": [
+        (r"force\s+majeure", "force majeure"), (r"act\s+of\s+god", "act of God")],
+    "intellectual property": [
+        (r"intellectual\s+property", "intellectual property"), (r"\bIP\b", "IP"),
+        (r"copyright", "copyright"), (r"trademark", "trade marks"),
+        (r"patent", "patents")],
+    "non-compete": [
+        (r"non[-\s]?compet\w*", "non-compete"),
+        (r"restraint\s+of\s+trade", "restraint of trade"),
+        (r"exclusivit\w*", "exclusivity")],
+    "assignment": [
+        (r"assign\w*", "assignment"), (r"novat\w*", "novation"),
+        (r"transfer\s+of\s+rights", "transfer of rights")],
+    "notice": [
+        (r"notice\s+period", "notice period"), (r"written\s+notice", "written notice"),
+        (r"notif\w*", "notification")],
+}
+
+# An answer conceding it found nothing. Used in both directions: it suppresses a
+# fabrication flag (conceding absence is not asserting a clause) and it is the
+# trigger for the under-read flag.
+_RX_ABSENCE_CLAIM = re.compile(
+    r"not\s+(?:addressed|covered|specified|stated|mentioned|provided|present|included|found)"
+    # "do not contain" as well as "does not" — the plural is what real answers use
+    # when they talk about "the documents", and missing it made the check silent
+    # on exactly those phrasings.
+    r"|(?:does|do|did)\s+not\s+(?:address|cover|specify|state|mention|contain|include|provide)"
+    r"|(?:is|are)\s+silent\s+on"
+    r"|\bno\s+(?:such\s+|explicit\s+|express\s+|defined\s+)*"
+    r"(?:clause|provision|section|mechanism|reference|requirement|term)s?\b"
+    r"|not\s+in\s+the\s+(?:retrieved|provided)\s+(?:context|document|pages)",
+    re.IGNORECASE,
+)
+
+# A positive assertion about what a document says, as opposed to a mention of the
+# topic in passing. Operative legal verbs are the tell.
+_RX_OPERATIVE = re.compile(
+    r"\bshall\b|\bmust\b|\bwill\b|\bagrees?\s+to\b|\bis\s+required\b|\bundertakes?\b"
+    r"|\bentitled\s+to\b|\bobligated\b|\bcovenants?\b|[\"“][^\"”]{20,}[\"”]",
+    re.IGNORECASE,
+)
+
+_RX_CLAUSE_NUMBER_Q = re.compile(
+    r"\bclause\s+(\d+(?:\.\d+)*)|\bsection\s+(\d+(?:\.\d+)*)|\barticle\s+(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+
+
+def _check_term_presence(question: str, context: str, answer: str) -> tuple[str, str]:
+    """Compare the question's legal topics against context and answer by string count.
+
+    Returns (alert, note) — two severities, because they mean different things
+    to a reader and merging them made the milder one overclaim:
+
+    - alert (fabrication): the topic appears in no retrieved page, yet the answer
+      makes an operative statement about it. Part of the answer may not come from
+      any document. Serious.
+    - note (under-read): the pages use wording the answer never cites, alongside
+      an absence claim. Phrased as the OBSERVATION only — "the pages also use X"
+      — never as "the answer reports nothing on X". An answer can discuss a topic
+      at length and still correctly say one sub-mechanism is missing; the earlier
+      wording called such answers empty, which was simply false.
+    - note (clause number): numbering is discarded at ingest, so a clause-number
+      question can never match. Say so, rather than let "not addressed" read as
+      "the clause does not exist".
+    """
+    q, ctx, ans = question or "", context or "", answer or ""
+    if not ctx or not ans:
+        return "", ""
+
+    alerts: list[str] = []
+    notes: list[str] = []
+    sentences = re.split(r"(?<=[.!?])\s+|\n", ans)
+
+    for label, alternates in _TOPIC_TERMS.items():
+        rxs = [(name, re.compile(pat, re.IGNORECASE)) for pat, name in alternates]
+        if not any(rx.search(q) for _, rx in rxs):
+            continue
+        in_ctx = sum(len(rx.findall(ctx)) for _, rx in rxs)
+        in_ans = sum(len(rx.findall(ans)) for _, rx in rxs)
+
+        if in_ctx == 0 and in_ans >= 2:
+            # Sentence-level so a passing mention doesn't trip it — only an
+            # operative statement about a topic the pages never raise.
+            asserted = [s for s in sentences
+                        if any(rx.search(s) for _, rx in rxs)
+                        and _RX_OPERATIVE.search(s)
+                        and not _RX_ABSENCE_CLAIM.search(s)]
+            if asserted:
+                alerts.append(
+                    f"**{label}** is not mentioned anywhere in the pages retrieved for "
+                    f"this answer, yet the answer states terms for it. Treat every "
+                    f"{label} detail below as unverified."
+                )
+            continue
+
+        # Under-read: the answer declares the document silent on this topic while
+        # the pages use a phrasing the answer never picked up. Naming that phrasing
+        # is the whole point — "it mentions arbitration" is actionable, "the topic
+        # appears somewhere" is not.
+        if in_ctx >= 1 and any(_RX_ABSENCE_CLAIM.search(s)
+                               and any(rx.search(s) for _, rx in rxs) for s in sentences):
+            missed = [name for name, rx in rxs if rx.search(ctx) and not rx.search(ans)]
+            if missed:
+                notes.append(
+                    f"On **{label}**, the retrieved pages also use the wording "
+                    f"**{', '.join(missed[:3])}**, which this answer does not cite. "
+                    f"If your question turns on that, re-ask naming it against a single "
+                    f"named document."
+                )
+
+    m = _RX_CLAUSE_NUMBER_Q.search(q)
+    if m and _RX_ABSENCE_CLAIM.search(ans):
+        num = next(g for g in m.groups() if g)
+        n = re.escape(num)
+        # Must look like a CLAUSE reference, not any stray digit. The first
+        # version tested `\b5[\.\s)]`, which "within 5 business days" satisfies —
+        # so the note never fired on a real corpus. Accept "Clause 5", "5.2",
+        # or a "5." / "5)" heading at the start of a line, nothing else.
+        looks_numbered = re.search(
+            rf"(?:clause|section|article|art\.|cl\.)\s*{n}\b"
+            rf"|^\s*{n}[.)]\s"
+            rf"|\b{n}\.\d",
+            ctx, re.IGNORECASE | re.MULTILINE,
+        )
+        if not looks_numbered:
+            notes.append(
+                f"Pages in this workspace are stored under topic headings and the "
+                f"original clause numbering is not retained, so **clause {num}** cannot "
+                f"be matched by number. This does not mean the clause is absent — "
+                f"ask by subject instead (e.g. \"the termination clause\")."
+            )
+
+    return " ".join(alerts), " ".join(notes)
+
+
 def validate_response_node(state: QueryState) -> dict:
     logger.info("[AGENT] validate_response_node: intent=%s", state.get("intent"))
     wr = state.get("answer_result") or {}
@@ -991,6 +1184,18 @@ def validate_response_node(state: QueryState) -> dict:
                "message": f"Grounding: {grounding.get('grounding_score', '?')}%"})
 
     wr["validation"] = {"valid": valid, "warning": warning, "grounding": grounding}
+
+    # Deliberately outside the ENABLE_ANSWER_VALIDATION block: this costs no LLM
+    # call, and it is the only check that caught the confirmed fabrication.
+    if config.ENABLE_TERM_CHECK:
+        ctx_alert, ctx_note = _check_term_presence(
+            state["question"], state.get("wiki_context", ""), answer)
+        if ctx_alert or ctx_note:
+            logger.info("[AGENT] term-presence alert=%r note=%r",
+                        ctx_alert[:110], ctx_note[:110])
+        wr["context_warning"] = ctx_alert   # red — may not come from any document
+        wr["context_note"] = ctx_note       # amber — worth a second look
+
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
     return {"answer_result": wr, "validation": {"valid": valid, "warning": warning, "grounding": grounding}}
