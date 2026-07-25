@@ -899,6 +899,10 @@ def query_route():
                                         # answer with nothing marking it.
                                         "context_warning": wiki_result.get("context_warning", ""),
                                         "context_note": wiki_result.get("context_note", ""),
+                                        # Deterministic counts shown beside the
+                                        # confidence percentage; must survive a
+                                        # reload like the banners do.
+                                        "answer_facts": wiki_result.get("answer_facts", {}),
                                         # Was set on the live payload but never stored,
                                         # so every reloaded answer rendered "0.0s".
                                         "elapsed_ms": wiki_result.get("elapsed_ms", 0),

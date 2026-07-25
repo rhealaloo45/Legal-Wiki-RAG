@@ -809,6 +809,32 @@
       font-weight: 600
     }
 
+    /* Deterministic counts strip, sits directly under the answer header.
+       Quiet by default — it is reference material, not an alert — with only
+       the failing figure picking up colour. */
+    .answer-facts {
+      margin: 0 24px 12px;
+      font-size: 11.5px;
+      line-height: 1.7;
+      color: var(--text-muted, #6b6b6b);
+      font-variant-numeric: tabular-nums
+    }
+
+    .answer-facts b {
+      font-weight: 600;
+      color: var(--text, #222)
+    }
+
+    .answer-facts .fact-bad,
+    .answer-facts .fact-bad b {
+      color: var(--red)
+    }
+
+    .fact-sep {
+      margin: 0 8px;
+      opacity: .45
+    }
+
     /* Amber sibling of .context-warning: not a suspected fabrication, just
        wording in the pages the answer didn't cite. */
     .context-note {
@@ -5388,6 +5414,33 @@
       const ctxNoteHtml = wikiResult.context_note
         ? `<div class="context-note"><strong>Also in these pages.</strong> ${renderMarkdown(wikiResult.context_note)}</div>`
         : '';
+
+      // Counts, not a verdict. Every figure here is a string match or a tally of
+      // what retrieval returned, so it cannot be wrong the way the confidence
+      // percentage can — that number is the model grading itself and correlates
+      // +0.13 with an independent judge. "0/2 topics" tells a reader what to do;
+      // "38%" does not.
+      const af = wikiResult.answer_facts || {};
+      const factBits = [];
+      if (af.pages) {
+        factBits.push(`<b>${af.pages}</b> page${af.pages === 1 ? '' : 's'}` +
+          (af.documents ? ` from <b>${af.documents}</b> document${af.documents === 1 ? '' : 's'}` : ''));
+      }
+      if (af.topics_asked) {
+        const missing = af.topics_missing || [];
+        factBits.push(`<span class="${missing.length ? 'fact-bad' : ''}">` +
+          `topics present in those pages: <b>${af.topics_found}/${af.topics_asked}</b>` +
+          (missing.length ? ` — no mention of ${escapeHtmlRule(missing.join(', '))}` : '') +
+          `</span>`);
+      }
+      if (af.quotes_total) {
+        const verified = af.quotes_total - (af.quotes_unverified || 0);
+        factBits.push(`<span class="${af.quotes_unverified ? 'fact-bad' : ''}">` +
+          `quotes found verbatim: <b>${verified}/${af.quotes_total}</b></span>`);
+      }
+      const factsHtml = factBits.length
+        ? `<div class="answer-facts">${factBits.join('<span class="fact-sep">·</span>')}</div>`
+        : '';
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
       const tt = wikiResult.token_total || {};
       const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
@@ -5425,6 +5478,7 @@
               <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
             </div>
           </div>
+          ${factsHtml}
           ${ctxWarnHtml}
           ${ctxNoteHtml}
           <div class="answer-body">${md}</div>
@@ -5731,6 +5785,7 @@
               // thread shows an answer flagged as unverified with nothing on it.
               context_warning: meta.context_warning || '',
               context_note: meta.context_note || '',
+              answer_facts: meta.answer_facts || {},
               // Render flags, persisted alongside the message — a help/greeting
               // reply must not come back as a normal answer card on reload, and
               // the not-legal-advice notice must survive it.
