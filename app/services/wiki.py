@@ -3855,6 +3855,20 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "usage": usage,
         "confidence_score": confidence["score"],
         "confidence_reason": confidence["reason"],
+        # Counts, not a predicted score. _verify_answer_citations is a substring
+        # check against the exact context the model was given, so these numbers
+        # are true by construction — unlike confidence_score, which is the
+        # generating model's own self-report and correlates +0.13 with an
+        # independent judge (i.e. not at all). Surfaced so a reader has something
+        # actionable to look at instead of a percentage that means nothing.
+        # `total` counts every quoted span; quotes that merely echo a page title
+        # or the question are skipped by the verifier rather than failed, so they
+        # count as verified here, which matches what they are.
+        "citation_check": {
+            "total": len(_QUOTE_SPAN_RE.findall(answer)),
+            "unverified": len(_unverified_quotes),
+            "misattributed": len(_misattributed),
+        },
         "token_breakdown": token_breakdown,
         "token_total": token_total,
     }

@@ -1063,11 +1063,17 @@ _RX_CLAUSE_NUMBER_Q = re.compile(
 )
 
 
-def _check_term_presence(question: str, context: str, answer: str) -> tuple[str, str]:
+def _check_term_presence(question: str, context: str, answer: str) -> tuple[str, str, dict]:
     """Compare the question's legal topics against context and answer by string count.
 
-    Returns (alert, note) — two severities, because they mean different things
-    to a reader and merging them made the milder one overclaim:
+    Returns (alert, note, facts). `facts` carries topics_asked / topics_found —
+    of the legal topics the question raised, how many appear anywhere in the
+    retrieved pages. It is a count, not a judgement, which is the point: every
+    predicted score in this pipeline correlates ~0 with an independent judge, so
+    the UI needs at least one number that is true by construction.
+
+    alert and note are two severities, because they mean different things to a
+    reader and merging them made the milder one overclaim:
 
     - alert (fabrication): the topic appears in no retrieved page, yet the answer
       makes an operative statement about it. Part of the answer may not come from
@@ -1083,10 +1089,12 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
     """
     q, ctx, ans = question or "", context or "", answer or ""
     if not ctx or not ans:
-        return "", ""
+        return "", "", {}
 
     alerts: list[str] = []
     notes: list[str] = []
+    asked: list[str] = []
+    found: list[str] = []
     sentences = re.split(r"(?<=[.!?])\s+|\n", ans)
 
     for label, alternates in _TOPIC_TERMS.items():
@@ -1095,6 +1103,9 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
             continue
         in_ctx = sum(len(rx.findall(ctx)) for _, rx in rxs)
         in_ans = sum(len(rx.findall(ans)) for _, rx in rxs)
+        asked.append(label)
+        if in_ctx:
+            found.append(label)
 
         if in_ctx == 0 and in_ans >= 2:
             # Sentence-level so a passing mention doesn't trip it — only an
@@ -1148,7 +1159,13 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
                 f"ask by subject instead (e.g. \"the termination clause\")."
             )
 
-    return " ".join(alerts), " ".join(notes)
+    facts = {
+        "topics_asked": len(asked),
+        "topics_found": len(found),
+        # Named so the UI can say WHICH topic is missing rather than "2/3".
+        "topics_missing": [t for t in asked if t not in found],
+    }
+    return " ".join(alerts), " ".join(notes), facts
 
 
 def validate_response_node(state: QueryState) -> dict:
@@ -1188,13 +1205,28 @@ def validate_response_node(state: QueryState) -> dict:
     # Deliberately outside the ENABLE_ANSWER_VALIDATION block: this costs no LLM
     # call, and it is the only check that caught the confirmed fabrication.
     if config.ENABLE_TERM_CHECK:
-        ctx_alert, ctx_note = _check_term_presence(
+        ctx_alert, ctx_note, term_facts = _check_term_presence(
             state["question"], state.get("wiki_context", ""), answer)
         if ctx_alert or ctx_note:
             logger.info("[AGENT] term-presence alert=%r note=%r",
                         ctx_alert[:110], ctx_note[:110])
         wr["context_warning"] = ctx_alert   # red — may not come from any document
         wr["context_note"] = ctx_note       # amber — worth a second look
+
+        # Counts the reader can act on, shown beside the confidence percentage
+        # rather than replacing it. Every one is derived by string match or by
+        # counting what retrieval returned, so none of them is a prediction that
+        # could be wrong the way confidence_score routinely is.
+        cite = wr.get("citation_check") or {}
+        wr["answer_facts"] = {
+            "pages": len(wr.get("selected_titles") or wr.get("pages_used") or []),
+            "documents": len(wr.get("files_used") or []),
+            "topics_asked": term_facts.get("topics_asked", 0),
+            "topics_found": term_facts.get("topics_found", 0),
+            "topics_missing": term_facts.get("topics_missing", []),
+            "quotes_total": cite.get("total", 0),
+            "quotes_unverified": cite.get("unverified", 0) + cite.get("misattributed", 0),
+        }
 
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
