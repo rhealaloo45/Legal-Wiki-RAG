@@ -613,7 +613,26 @@ def generate_answer_node(state: QueryState) -> dict:
     _cl = state.get("clause_lookup") or {}
     _clause_directive = ""
     if _cl.get("hits"):
-        _cl_heads = ", ".join(f'"{h}"' for h in sorted({x["heading"] for x in _cl["hits"]}))
+        _cl_names = sorted({x["heading"] for x in _cl["hits"]})
+        # Two renderings of the same headings, deliberately not shared: the
+        # scope_note copy is human-facing display text with quote marks for
+        # readability, never re-examined by anything. The directive copy feeds
+        # the GENERATION PROMPT, and _clause_directive's first version quoted
+        # the heading in its own worked example ('"Clause 5 (\"Heading\")..."')
+        # — the model followed the example literally, wrapped the heading in
+        # quotation marks in its real answer, and _verify_answer_citations
+        # flagged that quote as an unverified excerpt: it checks quoted spans
+        # against _known_page_titles(), which stores the FULL title including
+        # the " – Party (Doc)" suffix that clause_map's bare heading omits, so
+        # the two never matched (confirmed live: real content, correct
+        # citation, still flagged as a false-positive citation warning).
+        # Plain parentheses read just as naturally and never enter the
+        # quote-verification path at all, which is the safer fix — it doesn't
+        # touch _known_page_titles' matching logic, which handles several
+        # other confirmed edge cases (unicode hyphens, trailing punctuation)
+        # that a change here risks disturbing.
+        _cl_heads = ", ".join(f'"{h}"' for h in _cl_names)
+        _cl_heads_plain = ", ".join(_cl_names)
         _scope_note = ((_scope_note + " ") if _scope_note else "") + (
             f"In this document's own numbering, clause {_cl['num']} is the section "
             f"titled {_cl_heads}."
@@ -621,10 +640,12 @@ def generate_answer_node(state: QueryState) -> dict:
         _clause_directive = (
             f"The question asks about clause {_cl['num']} by number. In this "
             f"document the clause numbers are not printed in the page text, but "
-            f"clause {_cl['num']} IS present: it is the section titled {_cl_heads}. "
-            f"Do NOT answer 'not addressed' — answer the question from that "
-            f"section's content, and open the answer by naming the mapping, e.g. "
-            f"\"Clause {_cl['num']} ({_cl_heads}) provides...\"."
+            f"clause {_cl['num']} IS present: it is the section titled "
+            f"{_cl_heads_plain} (this is a section name, not a verbatim quote — do "
+            f"not put it in quotation marks). Do NOT answer 'not addressed' — "
+            f"answer the question from that section's content, and open the "
+            f"answer by naming the mapping without quotation marks, e.g. "
+            f"Clause {_cl['num']} ({_cl_heads_plain}) provides..."
         )
 
     # The question named a specific counterparty the pipeline could not pin to
@@ -1213,10 +1234,46 @@ def _check_term_presence(question: str, context: str, answer: str,
         }
 
     m = _RX_CLAUSE_NUMBER_Q.search(q)
-    if m and _RX_ABSENCE_CLAIM.search(ans):
+    if m:
         num = next(g for g in m.groups() if g)
         n = re.escape(num)
         cl = clause_lookup or {}
+
+        # Out-of-range is a FACT from clause_map, independent of what the model
+        # said — deliberately NOT gated on _RX_ABSENCE_CLAIM. Confirmed live
+        # (clause 12 of a document mapped 1-8): scope resolves this document
+        # alongside its Test_ synthetic stand-in, retrieval pulled a page from
+        # the stand-in, and the model answered from it confidently — "Clause 12
+        # — Term, Survival, and Governing Law (NDA-GreenSteel — NDA)" — with no
+        # absence language anywhere, so a gated check never runs at all. Since
+        # the map already proves the number doesn't belong to the real
+        # document, waiting for the model to agree was the bug, not a
+        # legitimate gate.
+        if cl.get("doc_numbers") and num not in cl["doc_numbers"]:
+            nums = cl["doc_numbers"]
+            hedged = _RX_ABSENCE_CLAIM.search(ans)
+            msg = (
+                f"**No clause {num} in this document.** Its source is numbered "
+                f"**{nums[0]}–{nums[-1]}**, and clause {num} is not among those "
+                f"sections."
+            )
+            if hedged:
+                notes.append(msg)
+            else:
+                # The model answered as if clause N were real, with no hedge at
+                # all — a stronger signal than a topic gap, since it means
+                # content was very likely drawn from a different document
+                # sharing this one's scope (the same real/Test_ collision the
+                # SCOPE WARNING already names, here pinned to a specific number).
+                alerts.append(
+                    msg + " The answer above did not flag this, so treat its "
+                    "content as unverified against this document."
+                )
+            return _done()
+
+        if not _RX_ABSENCE_CLAIM.search(ans):
+            return _done()   # answered without hedging and the number checks out (or is unmapped) — nothing to add
+
         if cl.get("hits"):
             # The map resolved the number but the answer still claimed absence —
             # tell the reader exactly where the clause lives.
@@ -1225,16 +1282,6 @@ def _check_term_presence(question: str, context: str, answer: str,
                 f"**Clause {num} does exist in this document** — it is the section "
                 f"titled **{heads}**. If the answer above missed it, re-ask naming "
                 f"that section."
-            )
-            return _done()
-        if cl.get("doc_numbers"):
-            # Map knows this document's numbering and the asked number isn't in it
-            # — a precise range beats a generic disclaimer.
-            nums = cl["doc_numbers"]
-            notes.append(
-                f"**No clause {num} in this document.** Its source is numbered "
-                f"**{nums[0]}–{nums[-1]}**, and clause {num} is not among those "
-                f"sections."
             )
             return _done()
         # Must look like a CLAUSE reference, not any stray digit. The first
