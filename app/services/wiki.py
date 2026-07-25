@@ -3002,7 +3002,7 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "", clause_directive: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
     scope_note: a plain-English disclosure of HOW the scope was decided, when it
@@ -3101,6 +3101,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "one of them.\n\n"
     ) if unconfirmed_doc_reference else ""
 
+    # Clause-number mapping from clause_map (intent_agent). Same placement
+    # rationale as the note above: scope_note is display-only (appended to the
+    # finished answer), and anything embedded mid-prompt near the question gets
+    # diluted — verified live when this mapping was passed via scope_note and
+    # the model answered "not covered" with the mapped section sitting in its
+    # own context. Prepending is the one placement that reliably lands.
+    _clause_directive_note = (
+        f"CLAUSE NUMBER MAPPING: {clause_directive}\n\n"
+    ) if clause_directive else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -3110,7 +3120,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
-    prompt = _unconfirmed_doc_note + prompt_template.format(
+    prompt = _unconfirmed_doc_note + _clause_directive_note + prompt_template.format(
         context=wiki_content,
         question=question,
         conversation_block=conv_block,

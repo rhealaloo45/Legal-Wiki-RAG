@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - older langgraph
 import config
 from services import wiki
 from services import llm
+from services import db
 
 logger = logging.getLogger(__name__)
 
@@ -293,6 +294,7 @@ class QueryState(TypedDict, total=False):
     wiki_context: str
     selected_titles: list
     retrieval_meta: dict
+    clause_lookup: dict      # clause-number -> heading/page mapping result (or None)
     answer_result: dict
     validation: dict
 
@@ -509,8 +511,45 @@ def retrieve_context_node(state: QueryState) -> dict:
     # match) — pin retrieval to them so a topically-similar page from another
     # agreement can't crowd out the document the user actually named.
     _force_docs = scope.get("target_docs") if scope.get("scope") == "single_doc" else None
+
+    # Clause-number resolution. Ingest strips the leading number when it builds
+    # page titles ("5. Return, Destruction..." -> "Return, Destruction..."), so
+    # "what does clause 5 say" matches nothing even when the source is numbered.
+    # clause_map (backfilled from the original PDFs) restores the link: on a hit
+    # the retrieval query is augmented with the real heading so BM25/vector land
+    # on the right page, and generate_answer discloses the mapping. On a miss the
+    # lookup result still flows to validate_response so the note can say
+    # "numbered 1-8, no clause 12" instead of something generic.
+    clause_lookup = None
+    _q_for_retrieval = state["question"]
+    _cm = _RX_CLAUSE_NUMBER_Q.search(state["question"])
+    if _cm:
+        _cnum = next(g for g in _cm.groups() if g)
+        _cdocs = (_force_docs or ([state["target_doc"]] if state.get("target_doc") else None)
+                  or scope.get("target_docs") or [])
+        if _cdocs:
+            # Scope can resolve to several documents (real PDF + its Test_
+            # stand-in); take the first one the map knows anything about.
+            _hits, _nums, _cdoc = [], [], _cdocs[0]
+            for _cand in _cdocs:
+                try:
+                    _hits = db.lookup_clause(state["session_id"], _cand, _cnum)
+                    _nums = db.doc_clause_numbers(state["session_id"], _cand)
+                except Exception as _cl_err:   # e.g. map not backfilled yet — degrade silently
+                    logger.warning("clause_map lookup failed: %s", _cl_err)
+                    break
+                if _hits or _nums:
+                    _cdoc = _cand
+                    break
+            clause_lookup = {"num": _cnum, "doc": _cdoc, "hits": _hits, "doc_numbers": _nums}
+            if _hits:
+                _headings = ", ".join(sorted({h["heading"] for h in _hits}))
+                _q_for_retrieval = (f'{state["question"]} (in this document clause '
+                                    f'{_cnum} is titled "{_headings}")')
+                logger.info("[AGENT] clause_map hit: clause %s -> %s", _cnum, _headings)
+
     res = wiki.get_context(
-        state["question"], state["session_id"],
+        _q_for_retrieval, state["session_id"],
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
         doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
@@ -526,6 +565,7 @@ def retrieve_context_node(state: QueryState) -> dict:
             "page_selection_usage": res.get("page_selection_usage", {}),
         },
         "conversation_context": conv,
+        "clause_lookup": clause_lookup,
     }
 
 
@@ -562,6 +602,29 @@ def generate_answer_node(state: QueryState) -> dict:
             f"\"{_carried}\" — the document already under discussion in this "
             f"conversation. To scope it differently, name a document explicitly, "
             f"or use \"across all …\" to search every document."
+        )
+
+    # The clause map resolved the asked-for number to a real section of this
+    # document. Two channels, deliberately separate: scope_note is DISPLAY-ONLY
+    # (wiki appends it under the finished answer), so it gets the short
+    # disclosure; the instruction goes via clause_directive, which wiki prepends
+    # to the prompt itself — passing the instruction through scope_note was
+    # verified live to change nothing, because the model never sees it.
+    _cl = state.get("clause_lookup") or {}
+    _clause_directive = ""
+    if _cl.get("hits"):
+        _cl_heads = ", ".join(f'"{h}"' for h in sorted({x["heading"] for x in _cl["hits"]}))
+        _scope_note = ((_scope_note + " ") if _scope_note else "") + (
+            f"In this document's own numbering, clause {_cl['num']} is the section "
+            f"titled {_cl_heads}."
+        )
+        _clause_directive = (
+            f"The question asks about clause {_cl['num']} by number. In this "
+            f"document the clause numbers are not printed in the page text, but "
+            f"clause {_cl['num']} IS present: it is the section titled {_cl_heads}. "
+            f"Do NOT answer 'not addressed' — answer the question from that "
+            f"section's content, and open the answer by naming the mapping, e.g. "
+            f"\"Clause {_cl['num']} ({_cl_heads}) provides...\"."
         )
 
     # The question named a specific counterparty the pipeline could not pin to
@@ -606,6 +669,7 @@ def generate_answer_node(state: QueryState) -> dict:
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
             scope_note=_scope_note, scope_warning=_scope_warning,
+            clause_directive=_clause_directive,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -1063,7 +1127,8 @@ _RX_CLAUSE_NUMBER_Q = re.compile(
 )
 
 
-def _check_term_presence(question: str, context: str, answer: str) -> tuple[str, str, dict]:
+def _check_term_presence(question: str, context: str, answer: str,
+                         clause_lookup: dict | None = None) -> tuple[str, str, dict]:
     """Compare the question's legal topics against context and answer by string count.
 
     Returns (alert, note, facts). `facts` carries topics_asked / topics_found —
@@ -1140,10 +1205,38 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
                     f"a single named document."
                 )
 
+    def _done() -> tuple[str, str, dict]:
+        return " ".join(alerts), " ".join(notes), {
+            "topics_asked": len(asked),
+            "topics_found": len(found),
+            "topics_missing": [t for t in asked if t not in found],
+        }
+
     m = _RX_CLAUSE_NUMBER_Q.search(q)
     if m and _RX_ABSENCE_CLAIM.search(ans):
         num = next(g for g in m.groups() if g)
         n = re.escape(num)
+        cl = clause_lookup or {}
+        if cl.get("hits"):
+            # The map resolved the number but the answer still claimed absence —
+            # tell the reader exactly where the clause lives.
+            heads = ", ".join(sorted({h["heading"] for h in cl["hits"]}))
+            notes.append(
+                f"**Clause {num} does exist in this document** — it is the section "
+                f"titled **{heads}**. If the answer above missed it, re-ask naming "
+                f"that section."
+            )
+            return _done()
+        if cl.get("doc_numbers"):
+            # Map knows this document's numbering and the asked number isn't in it
+            # — a precise range beats a generic disclaimer.
+            nums = cl["doc_numbers"]
+            notes.append(
+                f"**No clause {num} in this document.** Its source is numbered "
+                f"**{nums[0]}–{nums[-1]}**, and clause {num} is not among those "
+                f"sections."
+            )
+            return _done()
         # Must look like a CLAUSE reference, not any stray digit. The first
         # version tested `\b5[\.\s)]`, which "within 5 business days" satisfies —
         # so the note never fired on a real corpus. Accept "Clause 5", "5.2",
@@ -1167,13 +1260,7 @@ def _check_term_presence(question: str, context: str, answer: str) -> tuple[str,
                 f"\"the indemnity clause\") and it will be found if it is there."
             )
 
-    facts = {
-        "topics_asked": len(asked),
-        "topics_found": len(found),
-        # Named so the UI can say WHICH topic is missing rather than "2/3".
-        "topics_missing": [t for t in asked if t not in found],
-    }
-    return " ".join(alerts), " ".join(notes), facts
+    return _done()
 
 
 def validate_response_node(state: QueryState) -> dict:
@@ -1214,7 +1301,8 @@ def validate_response_node(state: QueryState) -> dict:
     # call, and it is the only check that caught the confirmed fabrication.
     if config.ENABLE_TERM_CHECK:
         ctx_alert, ctx_note, term_facts = _check_term_presence(
-            state["question"], state.get("wiki_context", ""), answer)
+            state["question"], state.get("wiki_context", ""), answer,
+            clause_lookup=state.get("clause_lookup"))
         if ctx_alert or ctx_note:
             logger.info("[AGENT] term-presence alert=%r note=%r",
                         ctx_alert[:110], ctx_note[:110])
