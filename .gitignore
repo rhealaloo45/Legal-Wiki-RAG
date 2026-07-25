@@ -225,8 +225,9 @@ app/.env
 app/sessions.json
 app/build_ui.py
 
-# Generated eval dataset (rebuilt from app/data/logs/rag_query_log.json on demand)
+# Generated eval datasets (rebuilt from app/data/logs/rag_query_log.json on demand)
 app/eval/eval_dataset.jsonl
+app/eval/ground_truth_dataset.jsonl
 
 # Node Modules (puppeteer test)
 node_modules/
