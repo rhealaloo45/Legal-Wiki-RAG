@@ -838,17 +838,18 @@ def query_route():
                 logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
 
                 if etype == "disambiguation":
+                    # Deliberately never forwards a document list — see
+                    # intent_agent.check_disambiguation_node. Only the message
+                    # and the original question (so a page reload can still
+                    # resolve a typed reply) leave the server.
                     payload = ev.get("payload", {})
                     _store_chat_msg(session_id, "assistant", payload.get("message", ""),
                                     "disambiguation",
-                                    {"documents": payload.get("documents", []),
-                                     "raw_documents": payload.get("raw_documents", [])})
+                                    {"original_question": payload.get("original_question", question)})
                     final_emitted = True
                     yield _sse({
                         "type": "disambiguation",
                         "message": payload.get("message", ""),
-                        "documents": payload.get("documents", []),
-                        "raw_documents": payload.get("raw_documents", []),
                         "total_elapsed_ms": round((time.time() - t0) * 1000),
                     })
 

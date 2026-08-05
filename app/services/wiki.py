@@ -5034,6 +5034,11 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
     prompt = (
         "You are a legal assistant triage system. Determine if the user's question "
         "is clear enough to answer directly or needs ONE clarifying question.\n\n"
+        "If it does, phrase clarification_question the way a knowledgeable colleague "
+        "would ask across a desk — plain, direct, a little informal — not like a form "
+        "or a system prompt. Avoid phrasing like \"Please specify\" or \"Could you "
+        "clarify the scope of your request\"; prefer something like \"Are you asking "
+        "about the payment terms or the whole agreement?\"\n\n"
         "A question needs clarification when:\n"
         "- It could mean multiple very different things\n"
         "- The scope is unclear (e.g., 'summarize' without specifying focus area)\n"
