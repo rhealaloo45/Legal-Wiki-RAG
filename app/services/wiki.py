@@ -4543,6 +4543,22 @@ _CARRYOVER_TYPE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "Which agreement/contract/notice ..." (a superlative/comparison pick FROM the
+# set already established by the prior turn, e.g. "Which agreement has the
+# strictest requirement?") is not a type pivot the way "the agreement" or
+# "this notice" is — it's referring back to the same set, not naming a new
+# document type. Without this exception _CARRYOVER_TYPE_RE's bare
+# agreement/contract/notice words fire on it, carryover bails to [], and the
+# question (which usually carries no other topical anchor of its own) falls
+# through to a fully unscoped corpus search — confirmed live: this is exactly
+# what turned a confidentiality-comparison thread's third turn into an answer
+# about an unrelated Shareholder Agreement's waiver clause.
+_COMPARATIVE_TYPE_REF_RE = re.compile(
+    r'\bwhich\s+(?:\w+\s+){0,2}(?:nda|agreement|contract|notice|judgment|judgement|'
+    r'opinion|petition|lease)s?\b',
+    re.IGNORECASE,
+)
+
 
 # Scope-resolution methods that pinned specific documents and are therefore safe
 # to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
@@ -4590,7 +4606,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     # document the PRIOR unrelated comparison had answered, with no scope
     # warning, because both the type-word guard and _DOC_NAME_PATTERN missed
     # the underscore-joined shorthand).
-    if _CARRYOVER_TYPE_RE.search(question.replace('_', ' ')):
+    if (_CARRYOVER_TYPE_RE.search(question.replace('_', ' '))
+            and not _COMPARATIVE_TYPE_REF_RE.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
