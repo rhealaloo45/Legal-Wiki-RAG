@@ -5209,6 +5209,11 @@
     let _pendingQuestion = '';
     let _pendingTargetDoc = '';
     let _isFollowup = false;
+    // Set to 'disambiguation' or 'clarification' while a prompt of that kind
+    // is awaiting a typed reply — doQuery() checks this to combine the next
+    // message with _pendingQuestion instead of treating it as a fresh
+    // top-level question. Cleared once that reply is sent.
+    let _pendingClarifyMode = '';
 
     $askBtn.addEventListener('click', doQuery);
     $qInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery(); } });
@@ -5249,6 +5254,21 @@
             i = j; continue;
           }
         }
+        // (a2) already-valid table (header immediately followed by a real
+        // delimiter row) — pass the WHOLE table through unchanged. Without
+        // this, case (b) below re-examines each subsequent body row on its
+        // own terms, and since a body row is never itself followed by
+        // another delimiter, it misreads the table's OWN first body row as a
+        // second table missing its delimiter — injecting a bogus extra
+        // "|---|---|" row right after it (confirmed live: a perfectly valid
+        // 5-row obligation table got a spurious delimiter row spliced in
+        // after its first data row, corrupting an already-correct table).
+        if (isPipeRow(lines[i]) && i + 1 < lines.length && isDelim(lines[i + 1])) {
+          out.push(lines[i]); out.push(lines[i + 1]);
+          let j = i + 2;
+          while (j < lines.length && isPipeRow(lines[j]) && !isDelim(lines[j])) { out.push(lines[j]); j++; }
+          i = j; continue;
+        }
         // (b) pipe block missing its delimiter row → inject one
         if (isPipeRow(lines[i]) && !(i + 1 < lines.length && isDelim(lines[i + 1]))) {
           let j = i; const block = [];
@@ -5266,12 +5286,78 @@
       return out.join('\n');
     }
 
+    // The model writes major section headings as "1) Heading", "2) Heading", ...
+    // — each followed by its OWN un-indented bullet sub-list at column 0, which
+    // under CommonMark is sibling content, not nested inside the numbered item,
+    // so it breaks list continuity. marked therefore parses every "N) Heading"
+    // as its OWN separate single-item <ol> (confirmed via window._lastAnswer:
+    // the raw text is genuinely sequential — "1) Parties", "2) Governing law",
+    // "3) Indemnification" — no duplicate numbers at all). The bug isn't in
+    // marked's output or in the model's numbering — it's `.answer-body ol`'s
+    // CSS counter (`counter-reset: answer-item`), which restarts at 0 for
+    // EVERY <ol> regardless of that list's real `start` value, so an isolated
+    // single-item list numbered "2)" or "5)" still visually shows "1" (confirmed
+    // live: a 3-section answer with correctly sequential 1)/2)/3) source text
+    // still rendered every heading as "1"). Fixing the CSS counter itself isn't
+    // viable — it can't distinguish "isolated heading" from "genuine tight
+    // numbered list" (both are just <ol> elements to it) — so the fix has to
+    // happen here, on the text, before marked ever sees it.
+    //
+    // Detection: a "N) Text" line is a SECTION HEADING (not a real list item)
+    // when the next non-blank line after it is NOT itself another "N) Text"
+    // line — i.e. something else (typically a bullet) sits in between. A
+    // genuine tight list ("1) step one\n2) step two\n3) step three", nothing
+    // else between items) is left completely untouched — those already render
+    // correctly and the CSS counter genuinely applies to one real contiguous
+    // list in that case.
+    function coerceSectionHeadingNumbers(text) {
+      const lines = text.split('\n');
+      const headingRe = /^(\d+)\)[ \t]+(.+)$/;
+      const isHeadingLine = i => headingRe.test(lines[i]);
+
+      // Group heading-pattern lines into "runs" — a run is 2+ such lines with
+      // ONLY blank lines between them (a genuine tight list, e.g. "1) step
+      // one\n2) step two\n3) step three", with or without blank lines between
+      // items — that's real list content and stays untouched, including its
+      // LAST item, which has no following line at all and must not be
+      // mistaken for an isolated heading just because nothing comes after it).
+      // A run of length 1 — a heading line with anything other than blank
+      // lines before AND after it (typically its own bullet sub-list) — is a
+      // section heading wearing list-item clothing, not a real list item.
+      const runs = [];
+      let i = 0;
+      while (i < lines.length) {
+        if (!isHeadingLine(i)) { i++; continue; }
+        const run = [i];
+        let j = i + 1;
+        while (true) {
+          let k = j;
+          while (k < lines.length && lines[k].trim() === '') k++;
+          if (k < lines.length && isHeadingLine(k)) { run.push(k); j = k + 1; }
+          else break;
+        }
+        runs.push(run);
+        i = run[run.length - 1] + 1;
+      }
+
+      let anyHeading = false;
+      for (const run of runs) {
+        if (run.length >= 2) continue;   // genuine tight list — leave alone
+        const idx = run[0];
+        const m = lines[idx].match(headingRe);
+        lines[idx] = `**${m[2]}**`;
+        anyHeading = true;
+      }
+      return anyHeading ? lines.join('\n') : text;
+    }
+
     function renderMarkdown(text) {
       if (!text) return '';
       // Strip ```text / ```markdown / ``` fences so clause drafts render
       // as formatted prose instead of monospace code blocks.
       text = text.replace(/```(?:text|markdown|plaintext)?\s*\n/g, '')
                  .replace(/\n```\s*/g, '\n');
+      text = coerceSectionHeadingNumbers(text);
       text = coerceTables(text);
       try { return marked.parse(text, { breaks: true, gfm: true }); }
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
@@ -5517,16 +5603,22 @@
     let _disambigRawDocuments = [];
 
     function appendDisambiguationMsg(message, documents, rawDocuments) {
-      _disambigDocuments = documents;
-      _disambigRawDocuments = rawDocuments;
+      // The "Browse documents" picker button is deliberately disabled, not
+      // deleted (see openDisambigPicker() and its callers below, left intact
+      // but now unreachable) — the reader must resolve which document they
+      // mean by typing a reply naturally, not by picking from a list of every
+      // document name in the corpus. If either of these is ever wanted back,
+      // uncomment the two lines below and the <button> markup.
+      // _disambigDocuments = documents;
+      // _disambigRawDocuments = rawDocuments;
 
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-system';
       div.innerHTML = `<div class="chat-bubble">
-        <div style="margin-bottom:8px">${message}</div>
-        <button class="disambig-browse-btn" onclick="openDisambigPicker()">
-          <i class="ti ti-folder-open" style="font-size:13px;margin-right:6px"></i>Browse documents (${documents.length})
-        </button>
+        <div>${message}</div>
+        <!-- <button class="disambig-browse-btn" onclick="openDisambigPicker()">
+          <i class="ti ti-folder-open" style="font-size:13px;margin-right:6px"></i>Browse documents (${(documents || []).length})
+        </button> -->
       </div>`;
       $chatThread.appendChild(div);
       scrollChatToBottom();
@@ -5708,10 +5800,27 @@
       // exactly the input the greeting fast-path exists to handle.
       if (!q) return;
       $qInput.value = '';
+      appendUserMsg(q);
+
+      // A disambiguation/clarification prompt is awaiting this exact reply —
+      // combine it with the question that triggered the prompt instead of
+      // sending it as a fresh top-level question. Without this, a typed
+      // reply like "the NDA with Acme" goes out alone, and the original
+      // question ("can we terminate this?") is lost entirely — the backend
+      // re-resolution logic in check_disambiguation_node has nothing to
+      // re-run against. Mirrors what selectClarification()/selectDisambigDoc()
+      // already do for the old button-based flows.
+      if (_pendingClarifyMode) {
+        const combined = _pendingQuestion + ' ' + q;
+        _pendingClarifyMode = '';
+        _isFollowup = true;
+        await doQueryInternal(combined, _pendingTargetDoc, true);
+        return;
+      }
+
       _pendingQuestion = q;
       _pendingTargetDoc = '';
       _isFollowup = false;
-      appendUserMsg(q);
       await doQueryInternal(q, '', false);
     }
 
@@ -5724,10 +5833,12 @@
         if (t === 'error') {
           removeProgressStages(); appendSystemMsg('Error: ' + (ev.error || 'unknown'));
         } else if (t === 'disambiguation') {
-          removeProgressStages();
-          appendDisambiguationMsg(ev.message, ev.documents, ev.raw_documents || ev.documents);
+          removeProgressStages(); _pendingQuestion = question;
+          _pendingClarifyMode = 'disambiguation';
+          appendDisambiguationMsg(ev.message);
         } else if (t === 'clarification') {
           removeProgressStages(); _pendingQuestion = question;
+          _pendingClarifyMode = 'clarification';
           appendClarificationMsg(ev.message, ev.options);
         } else if (t === 'answer') {
           removeProgressStages(); appendAnswerMsg(ev.wiki);

@@ -422,11 +422,19 @@ def check_disambiguation_node(state: QueryState) -> dict:
         result = {"needs_disambiguation": False}
 
     if result.get("needs_disambiguation"):
-        docs = result.get("documents", [])
-        clean = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
-        msg = ("I'd like to help, but could you specify which document you're referring to? "
-               "Please select one below, or upload a new document.")
-        data = {"message": msg, "documents": clean, "raw_documents": docs}
+        # Deliberately does NOT name any candidate document here (no picker,
+        # no list) — the reader must not learn what's in the corpus from a
+        # disambiguation prompt alone. Resolution now depends entirely on the
+        # user's own next message naming the document (counterparty, type, or
+        # number); that free-text reply gets appended to the original question
+        # and re-run through this same node, which resolves it via the
+        # existing fuzzy entity/filename matching above — no new matching
+        # logic, only a different UI shell around it.
+        msg = ("Which agreement are you asking about? You can name the "
+               "counterparty, the type of agreement, or a document number "
+               "(e.g. \"the NDA with Acme\" or \"Service Agreement 2\") and "
+               "I'll pull up the right one.")
+        data = {"message": msg, "original_question": state["question"]}
         _emit({"stage": "disambiguation", "status": "done",
                "message": "Needs document selection",
                "type": "disambiguation", "payload": data})
@@ -1613,26 +1621,24 @@ def _meta_answer(session_id: str) -> dict:
     corpus_line = f"{corpus}\n\n" if corpus else ""
 
     answer = (
-        "I answer questions about the legal documents loaded into this "
+        "I'm here to help you work through the documents loaded into this "
         f"workspace. {corpus_line}"
-        "**What I can do**\n\n"
-        "- **Find facts** — pull a specific clause, definition, party, date or figure "
-        "out of a named document.\n"
-        "- **List obligations** — set out duties, deadlines and compliance requirements.\n"
-        "- **Compare documents** — put two or more agreements side by side and show "
-        "where they differ.\n"
-        "- **Assess risk** — flag unusual or one-sided terms and give a go/no-go view.\n"
-        "- **Draft** — produce clause language, letters or trackers in the Draft tab.\n\n"
-        "**Example questions**\n\n"
+        "Ask me to pull a specific clause, definition, party, date, or figure out of "
+        "a document; list out obligations and deadlines; put a few agreements "
+        "side by side and show where they differ; flag unusual or one-sided terms; "
+        "or draft clause language, letters, and trackers over in the Draft tab.\n\n"
+        "A few examples of what that looks like:\n\n"
         "- *What are the termination rights in Service Agreement 2?*\n"
         "- *List every notice obligation and its deadline under NDA 3.*\n"
         "- *Compare the confidentiality clauses in NDA 1 and NDA 4.*\n"
         "- *Are there any red flags in the SunBridge joint venture agreement?*\n\n"
-        "**Tips**\n\n"
-        "- Name the document where you can — it makes answers faster and more precise.\n"
-        "- Browse everything that's loaded under the **Files** tab.\n"
-        "- Every answer cites the document and clause it came from, so you can verify it.\n"
-        "- I report what the documents say. I'm not a lawyer and this isn't legal advice."
+        "One thing that helps: if you already know which document you mean, just say "
+        "so — it gets you a faster, more precise answer. You can browse everything "
+        "that's loaded under the **Files** tab, and every answer comes with a "
+        "citation back to the clause it's based on, so you can double-check it "
+        "yourself.\n\n"
+        "One honest caveat: I can tell you what the documents say, but I'm not a "
+        "lawyer, and this isn't legal advice."
     )
 
     return _canned_payload(answer, "Help", "meta-regex")
