@@ -414,6 +414,40 @@ def check_disambiguation_node(state: QueryState) -> dict:
         )
         # fall through to classify_query below
 
+    # Phase 2: an ordinary conversational follow-up ("who can terminate it",
+    # "why", "does the same apply to the other party") carries no document
+    # reference at all, so it used to fall straight through to
+    # classify_query() below every single time — and that LLM ambiguity
+    # judgment has no memory of the conversation, so it re-asked which
+    # document 2-3 times per thread even immediately after the document was
+    # unambiguously resolved (confirmed live: a 10-turn thread got stuck
+    # asking from turn 3 onward and never recovered for the rest of the
+    # conversation). Skip straight to resolve_scope/retrieve — which already
+    # inherits the same carryover scope via wiki._carryover_scope() — when
+    # BOTH hold:
+    #   (a) wiki._carryover_scope() itself agrees a scope can be inherited —
+    #       already conservative and battle-tested: refuses to carry over if
+    #       the question names any document TYPE, is broad/collective
+    #       phrasing, or the prior turn's own scope wasn't cleanly resolved.
+    #   (b) the question doesn't match _VAGUE_DOC_PATTERN ("this document",
+    #       "the agreement") — this is a SEPARATE, deliberately redundant
+    #       check: _carryover_scope's own type-word gate (_CARRYOVER_TYPE_RE)
+    #       does not include the word "document", only named types (NDA,
+    #       service agreement, ...), so "top 10 risks in THIS DOCUMENT" — the
+    #       exact phrase that caused the original documented bug this
+    #       function's is_followup comment above describes — would NOT be
+    #       blocked by _carryover_scope alone. Re-checking the vague pattern
+    #       here directly is what actually reopens that guard; skipping it
+    #       would silently reintroduce the original bug instead of just
+    #       fixing the new one.
+    if not wiki._VAGUE_DOC_PATTERN.search(state["question"]):
+        try:
+            if wiki._carryover_scope(state["question"], state["session_id"]):
+                logger.info("[AGENT] disambiguation skipped (carryover scope established)")
+                return {"needs_disambiguation": False}
+        except Exception as e:
+            logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
+
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
         result = wiki.classify_query(state["question"], state["session_id"])
