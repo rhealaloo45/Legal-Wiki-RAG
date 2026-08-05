@@ -1440,7 +1440,12 @@ def get_query_graph():
 _RX_META_QUERY = re.compile(
     r'^\s*(?:'
     r'help[\s!.?]*$|\?+\s*$'
-    r'|what\s+(?:kind|kinds|type|types|sort|sorts)\s+of\s+(?:questions?|things?|queries)\b'
+    # Up to 3 modifier words allowed between "of" and "questions" — "what kind
+    # of NDA related questions can I ask" is still a meta question (asking
+    # about capability, scoped to a topic), not a document question; the
+    # _RX_META_DOC_HINT veto below still disqualifies it if a legal term shows
+    # up AFTER this whole opener instead of as a modifier inside it.
+    r'|what\s+(?:kind|kinds|type|types|sort|sorts)\s+of\s+(?:\w+[\s-]+){0,3}?(?:questions?|things?|queries)\b'
     r'|what\s+(?:questions?|things?)\s+(?:can|could|should)\s+i\s+ask\b'
     r'|what\s+can\s+(?:you|this|it|lexwiki)\s+(?:do|help|answer|handle)\b'
     r'|what\s+can\s+i\s+ask\b'
@@ -1474,6 +1479,73 @@ def _is_meta_query(question: str) -> bool:
     if not m:
         return False
     return not _RX_META_DOC_HINT.search(q[m.end():])
+
+
+# LLM fallback for meta questions the regex misses ("what should I be asking
+# you about?" — no fixed opener the regex above anticipated). Gated hard
+# before it ever calls the model:
+#   1. Must clear _RX_META_DOC_HINT with ZERO legal vocabulary anywhere in the
+#      message (not just after an opener) — the same veto the regex path
+#      uses, just applied to the whole message instead of a tail. A real
+#      document question always contains at least one of these words, so it
+#      can never reach the LLM call; this is what makes the fallback provably
+#      unable to turn a real question into a canned reply.
+#   2. Must look like a question (starts with a wh-word/aux verb, or ends in
+#      "?") — filters out ordinary short statements that reach this point.
+#   3. Must be short — genuine meta questions are short; a long message this
+#      deep into the checks is never one.
+# Failing any gate skips the LLM call entirely and falls through to the
+# normal graph, identical to today's regex-only behaviour — so the worst
+# case this fallback can produce is unchanged from the status quo.
+_META_LLM_MAX_LEN = 120
+
+_RX_QUESTION_LIKE = re.compile(
+    r'^\s*(?:what|how|who|why|can|could|do|does|is|are)\b|\?\s*$', re.IGNORECASE,
+)
+
+_META_LLM_PROMPT = (
+    "Decide whether this message is asking about the ASSISTANT itself — its "
+    "capabilities, how to use it, or what kinds of questions it can answer — "
+    "rather than asking about the content of any legal document.\n\n"
+    'Message: "{question}"\n\n'
+    'Respond with ONLY one word: "meta" or "document".'
+)
+
+
+def _is_meta_query_llm(question: str) -> bool:
+    """Cheap last-resort LLM check for a meta question the regex missed.
+
+    Only ever called after the message has already cleared the zero-legal-
+    vocabulary gate in _is_meta_query_extended, so a real document question
+    can't reach this call in the first place — it can only fail to catch a
+    genuine meta question (same as today's regex-only behaviour), never
+    mistake a real one for meta.
+    """
+    try:
+        raw, _ = llm.ask(
+            _META_LLM_PROMPT.format(question=question),
+            fast=True, max_tokens=config.MAX_TOKENS_META_CLASSIFY,
+        )
+        return raw.strip().lower().startswith("meta")
+    except Exception as e:
+        logger.warning("Meta LLM fallback failed: %s", e)
+        return False
+
+
+def _is_meta_query_extended(question: str) -> bool:
+    """_is_meta_query, plus a gated LLM fallback for phrasing the regex misses."""
+    if _is_meta_query(question):
+        return True
+    if not config.ENABLE_META_LLM_FALLBACK:
+        return False
+    q = (question or "").strip()
+    if not q or len(q) > _META_LLM_MAX_LEN:
+        return False
+    if _RX_META_DOC_HINT.search(q):
+        return False
+    if not _RX_QUESTION_LIKE.search(q):
+        return False
+    return _is_meta_query_llm(q)
 
 
 def _corpus_summary(session_id: str, max_families: int = 0) -> str:
@@ -1726,8 +1798,8 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # no generate, no validate. Skipped for follow-ups, where a bare "help" is
     # far more likely to be an answer to a previous prompt than a fresh request
     # for capabilities.
-    if not is_followup and _is_meta_query(question):
-        logger.info("[AGENT] meta query fast-path (0 tokens): %r", (question or "")[:80])
+    if not is_followup and _is_meta_query_extended(question):
+        logger.info("[AGENT] meta query fast-path: %r", (question or "")[:80])
         yield {"stage": "complete", "status": "done", "type": "answer",
                "payload": _meta_answer(session_id), "message": "Done"}
         return

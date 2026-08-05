@@ -106,6 +106,10 @@ MAX_TOKENS_ANSWER_BROAD      = 8192  # Comparison/risk/obligation intents span m
 MAX_TOKENS_DISAMBIGUATION    = 200   # Classify if query targets an unspecified document
 MAX_TOKENS_AMBIGUITY_CHECK   = 300   # Determine if query needs clarification
 MAX_TOKENS_INTENT_CLASSIFY   = 150   # Classify lawyer intent (factual/risk/comparison/obligation/drafting)
+MAX_TOKENS_META_CLASSIFY     = 150   # Meta-question LLM fallback — single-word answer, but Azure
+                                      # reasoning models can spend the whole budget on hidden
+                                      # reasoning before emitting it (same pitfall as intent-classify
+                                      # above); matched to that budget rather than a tighter one.
 MAX_TOKENS_MATTER_REFERENCE  = 60    # One-off backfill: extract matter/case/docket reference string, or "null"
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
@@ -183,6 +187,13 @@ ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower()
 # call and never rewrites an answer, only appends a warning. Kept as a flag so it
 # can be turned off from App Service settings without a redeploy.
 ENABLE_TERM_CHECK = os.getenv("ENABLE_TERM_CHECK", "true").lower() == "true"
+# Cheap LLM fallback for meta/capability questions ("what should I be asking
+# you?") that don't match the regex fast-path's known phrasings. Hard-gated
+# in intent_agent._is_meta_query_extended to messages with ZERO legal
+# vocabulary anywhere in them, so a real document question can never reach
+# this call — see that function's docstring. Flag exists so it can be turned
+# off from App Service settings without a redeploy if it ever misfires.
+ENABLE_META_LLM_FALLBACK = os.getenv("ENABLE_META_LLM_FALLBACK", "true").lower() == "true"
 MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning models (nano) the 900-token first pass routinely spent the whole budget on hidden reasoning and truncated (finish_reason=length), forcing a wasted retry at 1800 before any visible JSON — starting at 1500 skips that discarded first call on big answers. The escalating-budget ladder in _check_grounding still doubles from here (1500→3000→6000→12000) for the largest contexts.
 
 # Optional LLM reranking pass (Phase 3). RRF fusion is always on (free); this adds
