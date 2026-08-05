@@ -1141,6 +1141,16 @@ def get_recent_answer_scope(session_id: str, n: int = 1) -> list[dict]:
 
     Answers written before this metadata existed yield method="" and are
     therefore never inherited from.
+
+    Also returns ``files`` (the answer's ``files_used``) for the ONE case the
+    recorded scope cannot serve: a "broad"/"default" turn resolves no
+    target_docs at all, so a comparative follow-up after a multi-document
+    answer ("which agreement has the strictest requirement?") has nothing to
+    inherit and silently widens to the whole corpus. ``files`` records what the
+    previous answer actually drew on, which is the set such a question refers
+    back to. Kept as a SEPARATE key so the count-based reasoning above still
+    never governs the single-document carryover path — see
+    wiki._carryover_comparative_set for the guards on its use.
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -1161,9 +1171,11 @@ def get_recent_answer_scope(session_id: str, n: int = 1) -> list[dict]:
         for r in rows:
             md = r.metadata if isinstance(r.metadata, dict) else {}
             docs = md.get("scope_docs")
+            files = md.get("files_used")
             out.append({
                 "method": str(md.get("scope_method") or ""),
                 "docs": [str(x) for x in docs if x] if isinstance(docs, list) else [],
+                "files": [str(x) for x in files if x] if isinstance(files, list) else [],
             })
         return out
 

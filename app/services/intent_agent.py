@@ -445,6 +445,12 @@ def check_disambiguation_node(state: QueryState) -> dict:
             if wiki._carryover_scope(state["question"], state["session_id"]):
                 logger.info("[AGENT] disambiguation skipped (carryover scope established)")
                 return {"needs_disambiguation": False}
+            # Same reasoning for a comparative follow-up after a multi-document
+            # turn ("which of those…"): the set is already established by the
+            # conversation, so asking which document they mean is noise.
+            if wiki._carryover_comparative_set(state["question"], state["session_id"]):
+                logger.info("[AGENT] disambiguation skipped (comparison set established)")
+                return {"needs_disambiguation": False}
         except Exception as e:
             logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
 
@@ -644,6 +650,19 @@ def generate_answer_node(state: QueryState) -> dict:
             f"\"{_carried}\" — the document already under discussion in this "
             f"conversation. To scope it differently, name a document explicitly, "
             f"or use \"across all …\" to search every document."
+        )
+    elif _scope.get("method") == "carryover-set" and _scope.get("target_docs"):
+        # Same disclosure duty as the single-document carryover above: the
+        # comparison was silently limited to the documents the previous turn
+        # covered, which the user never named in this question.
+        _set_docs = _scope["target_docs"]
+        _set_names = ", ".join(f'"{wiki._norm_doc_name(d)}"' for d in _set_docs[:4])
+        _more = f" and {len(_set_docs) - 4} more" if len(_set_docs) > 4 else ""
+        _scope_note = (
+            f"This question named no document, so it was answered by comparing the "
+            f"{len(_set_docs)} document(s) already under discussion in this "
+            f"conversation — {_set_names}{_more}. To compare a different set, name "
+            f"the documents explicitly, or use \"across all …\" to search every document."
         )
 
     # The clause map resolved the asked-for number to a real section of this

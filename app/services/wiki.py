@@ -19,6 +19,7 @@ import re
 import logging
 import threading
 import concurrent.futures
+from functools import lru_cache
 
 import config
 from services import llm
@@ -2657,6 +2658,81 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     return unverified
 
 
+# Markdown emphasis the model writes INSIDE a quoted span, plus unicode
+# space/apostrophe variants that differ from the source only visually. Folded
+# ONLY for the severity classification below — never for verification itself.
+# The distinction matters: relaxing what counts as verified would let altered
+# text pass as an exact quote, whereas relaxing severity classification only
+# decides how an already-flagged quote is described to the reader.
+_SEVERITY_FOLD_RE = re.compile(r'[*_`]+')
+_UNICODE_SPACE_RE = re.compile(r'[          ]')
+_APOSTROPHE_VARIANTS_RE = re.compile(r'[‘’‛ʼ]')
+
+
+def _norm_for_severity(s: str) -> str:
+    """_norm_for_match plus markdown-emphasis and unicode space/apostrophe folding.
+
+    Confirmed live: a genuine passage was reported as absent from context purely
+    because the model bolded a word inside its own quotation marks
+    ("...ordinary business **under-performance** from...").
+    """
+    s = _UNICODE_SPACE_RE.sub(' ', s)
+    s = _APOSTROPHE_VARIANTS_RE.sub("'", s)
+    s = _SEVERITY_FOLD_RE.sub('', s)
+    return _norm_for_match(s)
+
+
+def _split_unverified_by_severity(unverified: list[str], context: str,
+                                  question: str = "") -> tuple[list[str], list[str]]:
+    """Split flagged quotes into (absent, prose_sourced) by how serious they are.
+
+    _verify_answer_citations deliberately verifies only against each page's
+    ingest-verified **Supporting Quotes** block (see _block_verification_text) —
+    the rest of a page is LLM-synthesized descriptive prose, so letting a quote
+    match it would let synthesized text pass as a genuine document excerpt.
+
+    That strictness is right, but it collapses two very different failures into
+    one alarming banner. Measured over 400 logged answers: only 27% of retrieved
+    context sits inside a Supporting Quotes block at all (32.7% of pages have
+    none), so the answer LLM routinely quotes real retrieved material that has
+    no verifiable counterpart — and 55.8% of answers carried a CITATION WARNING,
+    which trains the reader to ignore it and buries the rare genuine fabrication.
+
+    Two outcomes, kept separate so each can be reported at its true severity:
+      absent        — the text appears NOWHERE in the retrieved context. This is
+                      the fabrication signal the check exists for; unchanged.
+      prose_sourced — the text IS in the retrieved context, just in synthesized
+                      page prose rather than a verified quote block. Real content,
+                      wrong provenance claim: it's a paraphrase presented as an
+                      exact quote, not an invention.
+
+    Verification itself is NOT loosened — nothing that failed before passes now.
+    This only decides how a failure is described.
+    """
+    if not unverified:
+        return [], []
+    ctx_norm = _norm_for_severity(context)
+    question_norm = _norm_for_severity(question) if question else ""
+
+    def _in_full_context(text: str) -> bool:
+        tn = _norm_for_severity(text)
+        if tn in ctx_norm or (question_norm and tn in question_norm):
+            return True
+        # Same ellipsis-splice allowance the strict check makes: a citation may
+        # legitimately join non-adjacent spans, so each piece counts separately.
+        segments = _quote_segments(text)
+        return bool(segments) and all(
+            _norm_for_severity(s) in ctx_norm or
+            (question_norm and _norm_for_severity(s) in question_norm)
+            for s in segments
+        )
+
+    absent, prose_sourced = [], []
+    for q in unverified:
+        (prose_sourced if _in_full_context(q) else absent).append(q)
+    return absent, prose_sourced
+
+
 def _nearest_verbatim_span(quote: str, context: str) -> str | None:
     """The context span a flagged (paraphrased) quote most closely paraphrases.
 
@@ -3177,6 +3253,25 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     _FINAL_ANSWER_HEADING_RE = re.compile(
         r'(?im)^[ \t]*(?:#{1,3}\s*)?\*{0,2}Final\s+Answer\*{0,2}\s*:?\s*$'
     )
+    # The same self-organizing habit also shows up as an ad-hoc TAG — the model
+    # wraps its user-facing answer in <final> or <final answer> (and sometimes
+    # closes it). Nothing in any prompt asks for this, so it is purely a symptom
+    # to strip; confirmed live: answers rendered to the user beginning with a
+    # literal "<final>" / "<final answer>" line.
+    #
+    # OPEN and CLOSE are kept separate for the positional split, exactly like the
+    # <reasoning> tags above. _FINAL_TAG_ANY_RE deliberately DOES allow the
+    # optional slash that proved catastrophic there — but only because it is used
+    # to delete the TAG TEXT ITSELF (a zero-content edit), never to substitute out
+    # the region between two tags. That distinction is what makes it safe: it
+    # cannot remove answer content no matter which tags are present or missing.
+    _FINAL_TAG_OPEN_RE = re.compile(r'<\s*final(?:[ \t]+answer)?\s*>', re.I)
+    _FINAL_TAG_CLOSE_RE = re.compile(r'<\s*/\s*final(?:[ \t]+answer)?\s*>', re.I)
+    _FINAL_TAG_ANY_RE = re.compile(r'<\s*/?\s*final(?:[ \t]+answer)?\s*>', re.I)
+    # Floor for accepting the inside of a <final> block as the whole answer.
+    # Below this the block is more likely a stray/mid-sentence tag than a real
+    # wrapper, so the text is left alone and only the tag characters come off.
+    _FINAL_TAG_MIN_INNER = 50
 
     def _run_generation_pass(gen_prompt: str, token_budget: int = None,
                              reasoning_effort: str = None) -> tuple[str, dict, int, str]:
@@ -3300,6 +3395,32 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
 
             # Always strip any stray CONFIDENCE lines that leaked into the answer
             pass_answer = re.sub(_CONFIDENCE_LINE_RE, '', pass_answer).strip()
+
+            # Unwrap an ad-hoc <final>…</final> answer tag. Positional, mirroring
+            # the <reasoning> split: content after the open tag (bounded by the
+            # close tag when one exists) becomes the answer, so any draft the
+            # model left BEFORE the tag is dropped along with the tag itself.
+            # Guarded by a length floor — if the inside is too short to be a real
+            # answer the text is kept as-is and only the tag characters come off
+            # in the sweep below, so this can never amputate content.
+            _ft_open = _FINAL_TAG_OPEN_RE.search(pass_answer)
+            if _ft_open:
+                _ft_close = _FINAL_TAG_CLOSE_RE.search(pass_answer, _ft_open.end())
+                _inner = (
+                    pass_answer[_ft_open.end():_ft_close.start()] if _ft_close
+                    else pass_answer[_ft_open.end():]
+                ).strip()
+                if len(_inner) >= _FINAL_TAG_MIN_INNER:
+                    if _ft_open.start() > 0:
+                        logger.warning(
+                            "Answer wrapped in a <final> tag after %d chars of draft — "
+                            "kept %d chars from inside the tag",
+                            _ft_open.start(), len(_inner),
+                        )
+                    pass_answer = _inner
+            # Sweep any remaining <final>/</final> tags. Removes only the tag
+            # characters, never content between them (see _FINAL_TAG_ANY_RE note).
+            pass_answer = _FINAL_TAG_ANY_RE.sub('', pass_answer).strip()
 
             # Drop a duplicated self-revision: if a "Final Answer" heading
             # appears after a substantial chunk of prior content, the model
@@ -3551,16 +3672,38 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     referenced = re.findall(r"\[([^\]]+)\]", answer)
 
     if _unverified_quotes:
-        logger.warning("Citation-integrity check: %d quoted span(s) not found verbatim in context",
-                        len(_unverified_quotes))
-        _preview = "; ".join(
-            f'"{q[:80]}..."' if len(q) > 80 else f'"{q}"' for q in _unverified_quotes[:3]
+        # Report at true severity. Text found nowhere in the retrieved context is
+        # a possible fabrication and keeps the hard warning; text that IS in the
+        # context but outside a verified quote block is a real passage with an
+        # overstated provenance claim, which gets a note instead. Splitting these
+        # is what makes the hard warning meaningful again — it previously fired
+        # on 55.8% of answers, the overwhelming majority for the benign reason.
+        _absent_quotes, _prose_quotes = _split_unverified_by_severity(
+            _unverified_quotes, wiki_content, question
         )
-        answer += (
-            f"\n\n[CITATION WARNING: {len(_unverified_quotes)} quoted passage(s) above could not "
-            f"be verified verbatim against the retrieved source text — treat as paraphrase, not "
-            f"exact quote: {_preview}]"
+        logger.warning(
+            "Citation-integrity check: %d quoted span(s) unverified (%d absent from "
+            "context, %d sourced from page prose outside a verified quote block)",
+            len(_unverified_quotes), len(_absent_quotes), len(_prose_quotes),
         )
+
+        def _preview_of(quotes: list[str]) -> str:
+            return "; ".join(
+                f'"{q[:80]}..."' if len(q) > 80 else f'"{q}"' for q in quotes[:3]
+            )
+
+        if _absent_quotes:
+            answer += (
+                f"\n\n[CITATION WARNING: {len(_absent_quotes)} quoted passage(s) above do not "
+                f"appear anywhere in the retrieved source text — do not rely on them as quotes "
+                f"without checking the document: {_preview_of(_absent_quotes)}]"
+            )
+        if _prose_quotes:
+            answer += (
+                f"\n\n[CITATION NOTE: {len(_prose_quotes)} passage(s) above match the retrieved "
+                f"material but not its verified excerpts — read them as paraphrase rather than "
+                f"exact wording: {_preview_of(_prose_quotes)}]"
+            )
 
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
@@ -3678,7 +3821,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "complaint", "lease", "licence", "license", "deed", "memorandum",
         "settlement", "agreement", "contract",
     }
-    identifier_files: dict[str, str] = {}  # short doc identifier -> raw source_doc
+    # Collect identifier -> ALL documents claiming it, then keep only the ones a
+    # single document owns. Assigning straight into a dict silently kept whichever
+    # document was written LAST, so a non-distinctive identifier (a bare party name
+    # like "Tata", or a case name cited by every judgment that discusses it) mapped
+    # to an arbitrary document and dragged it into files_used for any answer whose
+    # citation happened to contain that word. Measured on the live corpus: 63 of 466
+    # identifiers were claimed by more than one document, "aether-helios" by ten.
+    _ident_claims: dict[str, set[str]] = {}
     for title, page in pages.items():
         if not isinstance(page, dict):
             continue
@@ -3690,7 +3840,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         canonical_files[clean] = sd
         ident = _doc_identifier_part(title)
         if len(ident) >= 4 and ident.lower() not in _GENERIC_TYPE_IDENTIFIERS:
-            identifier_files[ident.lower()] = sd
+            _ident_claims.setdefault(ident.lower(), set()).add(sd)
+    # short doc identifier -> raw source_doc, distinctive identifiers only
+    identifier_files: dict[str, str] = {
+        ident: next(iter(docs)) for ident, docs in _ident_claims.items()
+        if len(docs) == 1
+    }
 
     pages_used_dedup = []
     files_used = []
@@ -3728,7 +3883,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             # citation text is never shorter than a 4-char identifier in a way
             # that would matter.
             for ident, sd in identifier_files.items():
-                if ident in t_norm and sd not in files_used:
+                if sd not in files_used and _identifier_in_citation(ident, t_norm):
                     files_used.append(sd)
 
     # Fallback: if no inline citations were found, populate files_used.
@@ -4166,6 +4321,28 @@ _ENTITY_EXCLUDE = {
 }
 
 
+@lru_cache(maxsize=2048)
+def _identifier_boundary_re(ident: str) -> re.Pattern:
+    """Match a document identifier only as a whole token in citation text.
+
+    A plain substring test let a SHORTER identifier match inside a longer one:
+    "tata" is a substring of "sa-tata", so a citation reading
+    "[From: SA-Tata - Service Agreement, Clause 8.3]" attributed the answer to
+    the "Tata"-identified document as well — confirmed live, this is why an
+    unrelated Judgment appeared alongside the Service Agreement in files_used.
+
+    \\b is not sufficient here: identifiers legitimately contain hyphens, and
+    "-" is a non-word character, so \\btata\\b still fires inside "sa-tata".
+    The lookarounds below treat hyphens and digits as part of the token, so an
+    identifier only matches when nothing identifier-like abuts it on either side.
+    """
+    return re.compile(r'(?<![a-z0-9-])' + re.escape(ident) + r'(?![a-z0-9-])')
+
+
+def _identifier_in_citation(ident: str, citation_text_lower: str) -> bool:
+    return bool(_identifier_boundary_re(ident).search(citation_text_lower))
+
+
 def _doc_identifier_part(title: str) -> str:
     """Return the document-identifier portion of a page title.
 
@@ -4564,8 +4741,11 @@ _COMPARATIVE_TYPE_REF_RE = re.compile(
 # to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
 # on. "carryover" is included so a multi-turn thread stays on the same document
 # rather than only the first follow-up working — the type-word and broad-phrasing
-# guards remain the exits, and every carried turn discloses itself.
-_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "entity", "carryover"})
+# guards remain the exits, and every carried turn discloses itself. "carryover-set"
+# is included for the same reason: a comparison thread that established its set
+# should keep it for subsequent follow-ups, not only the turn that resolved it.
+_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "entity",
+                                     "carryover", "carryover-set"})
 
 
 def _carryover_scope(question: str, session_id: str) -> list[str]:
@@ -4622,6 +4802,65 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     if last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"):
         return list(last["docs"])
     return []
+
+
+# Explicit references back to a set the conversation just established —
+# "which of those", "among these", "out of them". The counterpart to
+# _COMPARATIVE_TYPE_REF_RE ("which agreement…"), which names the type instead
+# of pointing at the set.
+_SET_REFERENCE_RE = re.compile(
+    r'\b(?:of|among|amongst|between|from)\s+(?:those|them|these|the\s+(?:two|three|four))\b',
+    re.IGNORECASE,
+)
+
+# Upper bound on an inherited comparison set. A previous turn that touched more
+# documents than this was a corpus-wide sweep, not "the set we are discussing" —
+# inheriting it would pin retrieval to a large arbitrary list rather than narrow
+# anything, so those fall through to the existing corpus default instead.
+_COMPARATIVE_SET_MAX = 12
+
+
+def _carryover_comparative_set(question: str, session_id: str) -> list[str]:
+    """The documents a comparative follow-up is comparing, when it names none.
+
+    Fills the gap _carryover_scope cannot: that function inherits the previous
+    turn's RESOLVED scope, but a "broad"/"default" turn resolves no documents at
+    all. So after a multi-document answer, a comparative follow-up
+    ("Which agreement has the strictest requirement?") had nothing to inherit
+    and fell through to an unscoped corpus search — confirmed live: the third
+    turn of a Tata confidentiality thread came back comparing waiver clauses in
+    two unrelated Shareholder Agreements, having quietly abandoned both the
+    topic and the documents under discussion.
+
+    Inherits the previous answer's files_used, which is what such a question
+    refers back to ("which of THOSE"). Deliberately narrow — every condition
+    must hold:
+      * the question explicitly refers to a set (a comparative type reference
+        or an "of those/among these" pointer), so an ordinary follow-up is
+        never affected,
+      * the previous turn genuinely spanned SEVERAL documents (a single-document
+        thread is already handled by _carryover_scope),
+      * that span is small enough to be a set someone is choosing between,
+        not a corpus-wide sweep.
+    Anything else returns [] and the pre-existing corpus default stands, so this
+    can only narrow a question that had no scope of its own.
+    """
+    if not config.USE_DATABASE:
+        return []
+    if not (_COMPARATIVE_TYPE_REF_RE.search(question)
+            or _SET_REFERENCE_RE.search(question)):
+        return []
+    try:
+        recent = _db.get_recent_answer_scope(session_id, n=1)
+    except Exception as e:
+        logger.error("_carryover_comparative_set: could not read recent answer scope: %s", e)
+        return []
+    if not recent:
+        return []
+    files = recent[0].get("files") or []
+    if not 2 <= len(files) <= _COMPARATIVE_SET_MAX:
+        return []
+    return list(files)
 
 
 def resolve_scope(question: str, session_id: str, pages: dict | None = None,
@@ -4808,6 +5047,22 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             return {"scope": "single_doc", "target_docs": carried,
                     "target_family": None, "is_broad": False,
                     "confidence": 0.55, "method": "carryover"}
+
+        # 4b. Comparative follow-up after a MULTI-document turn. The single-
+        #     document carryover above cannot help here: the previous turn
+        #     resolved no target_docs (it was broad/default), so without this the
+        #     question widens to the whole corpus and drifts off both the topic
+        #     and the documents under discussion. Same "single_doc" shape as the
+        #     party-multi branch above, which likewise pins several documents, so
+        #     retrieval scopes to exactly the set being compared.
+        carried_set = _carryover_comparative_set(question, chat_session_id or session_id)
+        if carried_set:
+            logger.info("Comparison set carried over from the conversation: %d document(s): %s",
+                        len(carried_set),
+                        ", ".join(_norm_doc_name(d) for d in carried_set[:4]))
+            return {"scope": "single_doc", "target_docs": carried_set,
+                    "target_family": None, "is_broad": False,
+                    "confidence": 0.5, "method": "carryover-set"}
 
     # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
     return {"scope": "corpus", "target_docs": [], "target_family": None,

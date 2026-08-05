@@ -3722,8 +3722,8 @@
 
       const lines = refsContent.split('\n');
       const refs = [];
-      // Backend-appended banners ([CITATION WARNING], [ATTRIBUTION WARNING],
-      // [SCOPE WARNING], [SCOPE NOTE]) are added AFTER the model's References
+      // Backend-appended banners ([CITATION WARNING], [CITATION NOTE],
+      // [ATTRIBUTION WARNING], [SCOPE WARNING], [SCOPE NOTE]) are added AFTER the model's References
       // section, so they land inside refsContent here. They start with "[" but
       // not a digit, so the [N] parser below skips them — silently dropping the
       // one signal that tells the user a quote couldn't be verified or the wrong
@@ -3731,7 +3731,7 @@
       // body (confirmed live: a 16-unverified-quote answer showed no warning at
       // all because its References heading triggered this extraction).
       const banners = [];
-      const bannerRe = /^\[(?:CITATION WARNING|ATTRIBUTION WARNING|SCOPE WARNING|SCOPE NOTE)\b/i;
+      const bannerRe = /^\[(?:CITATION WARNING|CITATION NOTE|ATTRIBUTION WARNING|SCOPE WARNING|SCOPE NOTE)\b/i;
 
       for (const line of lines) {
         const trimmed = line.trim();
