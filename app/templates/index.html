@@ -594,6 +594,14 @@
       background: var(--amber-light)
     }
 
+    /* Neutral, not red: "the documents don't cover this" is a correct, useful
+       result, not an error — it just isn't an answer, so it must not wear the
+       green confidence styling either. */
+    .tag-notcovered {
+      color: var(--text-secondary);
+      background: rgba(0, 0, 0, 0.05)
+    }
+
     .conf {
       display: flex;
       align-items: center;
@@ -5601,6 +5609,19 @@
         groundingBadge = `<span class="conf"><span class="conf-dot" style="background:${gColor}"></span>${metricInfo('Grounding', gScore, 'grounding')}</span>`;
       }
 
+      // The backend flags an answer that LEADS with "the documents don't cover
+      // this". Both percentages are literally correct on such an answer — the
+      // model is confident in its REFUSAL, and the refusal accurately describes
+      // the context — but rendered in the normal badge row they read as
+      // "here is an answer, and I'm 92% sure of it" next to a non-answer. Show
+      // a plain NOT COVERED tag instead of two green metrics.
+      const notCovered = !!wikiResult.not_covered;
+      const metricsHtml = notCovered
+        ? '<span class="tag-synth tag-notcovered">NOT COVERED</span>'
+        : `<span class="tag-synth">SYNTHESIZED</span>
+              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
+              ${groundingBadge}`;
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
@@ -5608,9 +5629,7 @@
           <div class="answer-topbar">
             <div class="answer-tags">
               ${intentBadge}
-              <span class="tag-synth">SYNTHESIZED</span>
-              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
-              ${groundingBadge}
+              ${metricsHtml}
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
@@ -5962,6 +5981,7 @@
               // the not-legal-advice notice must survive it.
               meta_answer: meta.meta_answer || false,
               general_knowledge: meta.general_knowledge || false,
+              not_covered: meta.not_covered || false,
               advice_notice: meta.advice_notice || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
