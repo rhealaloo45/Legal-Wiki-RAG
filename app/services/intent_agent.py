@@ -2112,14 +2112,24 @@ _RX_GK_DOC_REF = re.compile(
 
 # Hard block, checked before anything else can let a question through. This is
 # the gate that keeps the carve-out from becoming a legal-advice channel, so it
-# is deliberately over-broad: it blocks "what is compliance" and "what is legal
-# advice" along with the cases it exists for, and blocking those costs only a
-# fall-through to the normal pipeline.
+# is deliberately over-broad: it blocks "what is legal advice" along with the
+# cases it exists for, and blocking those costs only a fall-through to the
+# normal pipeline.
 #
 # First-person framing is the signal. A genuine general-knowledge question
 # needs no "I" or "my" — "explain to me what novation is" survives (the block
 # is on first-person SUBJECTS and possessives, not the object of "tell/explain
 # me"), while "what does novation mean for my contract" does not.
+#
+# A former line here also bare-matched compl(y|ies|iant|iance) — no
+# self-reference required — reasoning that a "fall-through" was a harmless
+# cost. Confirmed live it was not: "what is compliance?" fell through, named no
+# document, disambiguated three times, and finally answered from an unrelated
+# document instead of the one the conversation had just established. Removed;
+# every self-referential compliance phrasing this was meant to catch ("are we
+# compliant", "is our data GDPR compliant") is already covered by the pronoun
+# lines above, since it always pairs "compliant/comply" with my/our/we/are-we —
+# the bare word alone was doing no real work, only causing this failure.
 _RX_GK_ADVICE_BLOCK = re.compile(
     r'\b(?:my|mine|our|ours|myself|ourselves)\b'
     r"|\b(?:i|we)\s*(?:'m|'re|'ve|'ll|'d)\b"
@@ -2132,8 +2142,7 @@ _RX_GK_ADVICE_BLOCK = re.compile(
     r'|\bwhat\s+should\b'
     r'|\badvi[cs]e\b|\brecommend\w*\b'
     r'|\bsue\b|\bsuing\b|\blawsuit\b'
-    r'|\bapplies?\s+to\s+(?:me|us)\b'
-    r'|\bcompl(?:y|ies|iant|iance)\b',
+    r'|\bapplies?\s+to\s+(?:me|us)\b',
     re.IGNORECASE,
 )
 
