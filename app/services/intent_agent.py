@@ -2272,6 +2272,39 @@ _RX_GK_STRIP_TAIL = re.compile(
 )
 
 
+def _general_knowledge_aside(question: str) -> str:
+    """Short general definition to sit BESIDE a document-grounded answer.
+
+    Returns "" on any failure — the aside is an addition, so losing it must
+    never cost the user the grounded answer it accompanies.
+    """
+    from services.prompts import GENERAL_KNOWLEDGE_ASIDE_PROMPT
+
+    try:
+        raw, _ = llm.ask(
+            GENERAL_KNOWLEDGE_ASIDE_PROMPT.format(question=question),
+            max_tokens=config.MAX_TOKENS_GENERAL_KNOWLEDGE,
+        )
+    except Exception as e:
+        logger.error("General-knowledge aside failed: %s", e)
+        return ""
+    text = _RX_GK_STRIP_TAIL.sub("", (raw or "").strip()).strip()
+    if not text:
+        return ""
+    # A citation marker here would be a lie — nothing was retrieved for this
+    # text. Strip rather than render one next to genuinely cited prose.
+    text = re.sub(r'\[\d+\]', '', text).strip()
+    if len(text) > _GK_ASIDE_MAX_CHARS:
+        text = text[:_GK_ASIDE_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return text
+
+
+# The aside is a margin note beside a real answer. A long one starts competing
+# with the cited content for attention, which is exactly the confusion the
+# separate field exists to prevent.
+_GK_ASIDE_MAX_CHARS = 900
+
+
 def _general_knowledge_answer(question: str, method: str) -> dict | None:
     """Answer a general legal-knowledge question — no retrieval, no citations.
 
@@ -2369,6 +2402,29 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         return
 
     gk_method = _general_knowledge_kind(question)
+
+    # "What does indemnify mean?" asked cold is a general question. Asked three
+    # turns into a thread about one agreement, the user wants BOTH: how their
+    # document uses the term, and what it means generally. Taking the standalone
+    # path there answers only half and silently drops the document they were
+    # discussing.
+    #
+    # So when the thread already has a document, the question goes to the normal
+    # pipeline — grounded and cited exactly as before, with the prompts
+    # untouched — and the general meaning is attached afterwards as a separate
+    # field. Keeping it out of the grounded prompt is deliberate: a labelled
+    # aside woven INTO cited prose is how a general sentence ends up wearing a
+    # citation number it has no right to.
+    gk_aside_wanted = False
+    if gk_method:
+        _gk_chat_sid = chat_session_id or session_id
+        try:
+            if wiki.has_established_document_scope(_gk_chat_sid):
+                gk_aside_wanted = True
+                gk_method = ""
+        except Exception as e:
+            logger.warning("Could not check document scope for GK aside: %s", e)
+
     if gk_method:
         logger.info("[AGENT] general-knowledge fast-path (%s): %r",
                     gk_method, (question or "")[:80])
@@ -2400,7 +2456,16 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
-        if (advice_seeking and chunk.get("type") == "answer"
-                and isinstance(chunk.get("payload"), dict)):
-            chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
+        if chunk.get("type") == "answer" and isinstance(chunk.get("payload"), dict):
+            if advice_seeking:
+                chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
+            # Attached to the finished payload, never merged into the answer
+            # text — the separation between cited and general content is
+            # structural, not a formatting convention the model has to honour.
+            if gk_aside_wanted:
+                _aside = _general_knowledge_aside(question)
+                if _aside:
+                    chunk["payload"]["general_knowledge_note"] = _aside
+                    logger.info("[AGENT] attached general-knowledge aside (%d chars)",
+                                len(_aside))
         yield chunk

@@ -807,6 +807,30 @@
       font-weight: 600
     }
 
+    /* General meaning of a term, beside a grounded answer. Neutral grey, not
+       amber or red: it is not a caution about the answer, it is a different
+       KIND of content. The muted styling and the left rule are what mark it as
+       an aside rather than part of the cited body above it. */
+    .gk-note {
+      margin: 14px 24px 0;
+      padding: 10px 14px;
+      border-left: 3px solid var(--border-strong);
+      background: rgba(0, 0, 0, 0.03);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary)
+    }
+
+    .gk-note strong {
+      font-weight: 600;
+      color: var(--text-primary)
+    }
+
+    .gk-note em {
+      color: var(--text-muted)
+    }
+
     /* Deterministic term-presence caution. Sits ABOVE the answer and uses the
        red scale rather than amber: the amber notice says "verify before acting",
        this one says "part of what follows may not be in the document at all". */
@@ -5560,6 +5584,16 @@
       });
 
       const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
+      // A definitional question asked inside a document thread: the answer above
+      // is grounded and cited as normal, and this is the term's general meaning,
+      // generated separately with no document context. Rendered as its own
+      // labelled block, never merged into the answer body — that separation is
+      // what stops a general sentence sitting in cited prose and inheriting its
+      // authority. escapeHtmlRule, not renderMarkdown, so nothing in it can
+      // produce a citation-looking marker.
+      const gkNoteHtml = wikiResult.general_knowledge_note
+        ? `<div class="gk-note"><strong>What this term means generally.</strong> ${escapeHtmlRule(wikiResult.general_knowledge_note)} <em>Not from your documents.</em></div>`
+        : '';
       // Set by the backend only when the question asked for a decision rather
       // than a document fact — sits between the answer and its sources.
       const adviceHtml = wikiResult.advice_notice
@@ -5638,6 +5672,7 @@
             </div>
           </div>
           <div class="answer-body">${md}</div>
+          ${gkNoteHtml}
           ${ctxWarnHtml}
           ${ctxNoteHtml}
           ${adviceHtml}
@@ -5982,6 +6017,7 @@
               meta_answer: meta.meta_answer || false,
               general_knowledge: meta.general_knowledge || false,
               not_covered: meta.not_covered || false,
+              general_knowledge_note: meta.general_knowledge_note || '',
               advice_notice: meta.advice_notice || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
