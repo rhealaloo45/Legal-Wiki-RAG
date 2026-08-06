@@ -586,6 +586,14 @@
       border-radius: 4px
     }
 
+    /* Green reads as "verified against the documents", which is exactly what a
+       general-knowledge answer is not. Amber matches the other cautionary
+       banners rather than the confident ones. */
+    .tag-general {
+      color: var(--amber);
+      background: var(--amber-light)
+    }
+
     .conf {
       display: flex;
       align-items: center;
@@ -5468,16 +5476,28 @@
       // rendered as "0%" next to a list of unrelated documents.
       if (wikiResult.meta_answer) {
         currentResultReferences = [];
+        // General-knowledge answers share this render path — they have no
+        // confidence, grounding or References either — but must not be mistaken
+        // for a document-backed answer, so they carry their own tag and a
+        // banner above the text rather than the HELP tag.
+        const isGeneral = !!wikiResult.general_knowledge;
+        const gkTag = isGeneral
+          ? '<span class="tag-synth tag-general">GENERAL KNOWLEDGE</span>'
+          : '<span class="tag-synth">HELP</span>';
+        const gkBanner = isGeneral
+          ? `<div class="context-note"><strong>Not from your documents.</strong> This answers a general legal concept from background knowledge. Nothing here was retrieved from or checked against the files in this workspace.</div>`
+          : '';
         const helpDiv = document.createElement('div');
         helpDiv.className = 'chat-msg chat-msg-assistant';
         helpDiv.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
           <div class="answer-card" style="margin-bottom:0">
             <div class="answer-topbar">
-              <div class="answer-tags"><span class="tag-synth">HELP</span></div>
+              <div class="answer-tags">${gkTag}</div>
               <div class="answer-actions">
                 <button class="act-btn" onclick="copyAnswerFromEl(this)"><i class="ti ti-copy"></i>Copy</button>
               </div>
             </div>
+            ${gkBanner}
             <div class="answer-body">${renderMarkdown(wikiResult.answer || '')}</div>
           </div>
         </div>`;
@@ -5941,6 +5961,7 @@
               // reply must not come back as a normal answer card on reload, and
               // the not-legal-advice notice must survive it.
               meta_answer: meta.meta_answer || false,
+              general_knowledge: meta.general_knowledge || false,
               advice_notice: meta.advice_notice || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
