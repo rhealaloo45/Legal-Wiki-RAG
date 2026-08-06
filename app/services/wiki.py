@@ -4747,6 +4747,37 @@ _COMPARATIVE_TYPE_REF_RE = re.compile(
 _CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "entity",
                                      "carryover", "carryover-set"})
 
+# How many answers back to look for the turn whose scope should be inherited.
+# NOT a widening of what may be inherited — see _last_document_turn. Bounded so a
+# run of canned turns eventually ends the thread's scope rather than dragging a
+# document along forever.
+_CARRYOVER_LOOKBACK = 4
+
+
+def _last_document_turn(recent: list[dict]) -> dict | None:
+    """The newest answer that was a DOCUMENT turn, skipping canned ones.
+
+    Canned turns — help, greetings, and general legal knowledge — deliberately
+    record a blank scope (intent_agent._canned_payload), because a turn that
+    resolved no document must never BECOME the scope the next turn inherits.
+    But the readers below only ever looked at the single newest answer, so a
+    blank-scope turn sitting in that slot also BLOCKED inheritance from the real
+    document turn before it. Confirmed live: three turns correctly pinned to
+    Service Agreement 2, then "by the way, what is novation?", and the next
+    question — "what does that mean for the termination clause?" — came back
+    asking "Which agreement are you asking about?", having lost a scope the
+    conversation had plainly established.
+
+    Skips ONLY blank-method entries. Any entry with a real method terminates the
+    scan even when it is not inheritable (a "broad" turn means the user
+    deliberately widened, and reaching past it to an older document would be the
+    topic-drift failure this module exists to prevent — not a fix for it).
+    """
+    for entry in recent or []:
+        if entry.get("method"):
+            return entry
+    return None
+
 
 def _carryover_scope(question: str, session_id: str) -> list[str]:
     """The document this conversation is already about, when the question names none.
@@ -4792,13 +4823,13 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
     try:
-        recent = _db.get_recent_answer_scope(session_id, n=1)
+        recent = _db.get_recent_answer_scope(session_id, n=_CARRYOVER_LOOKBACK)
     except Exception as e:
         logger.error("_carryover_scope: could not read recent answer scope: %s", e)
         return []
-    if not recent:
+    last = _last_document_turn(recent)
+    if not last:
         return []
-    last = recent[0]
     if last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"):
         return list(last["docs"])
     return []
@@ -4851,13 +4882,14 @@ def _carryover_comparative_set(question: str, session_id: str) -> list[str]:
             or _SET_REFERENCE_RE.search(question)):
         return []
     try:
-        recent = _db.get_recent_answer_scope(session_id, n=1)
+        recent = _db.get_recent_answer_scope(session_id, n=_CARRYOVER_LOOKBACK)
     except Exception as e:
         logger.error("_carryover_comparative_set: could not read recent answer scope: %s", e)
         return []
-    if not recent:
+    last = _last_document_turn(recent)
+    if not last:
         return []
-    files = recent[0].get("files") or []
+    files = last.get("files") or []
     if not 2 <= len(files) <= _COMPARATIVE_SET_MAX:
         return []
     return list(files)
@@ -5344,32 +5376,55 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
     return {"needs_clarification": False}
 
 
+# How much of the conversation the ANSWER MODEL gets to see. Distinct from scope
+# carryover, which is unbounded (a "carryover" turn is itself inheritable, so the
+# document chains forward indefinitely). That asymmetry was the real gap: by turn
+# 8 retrieval still targeted the right document while the model could no longer
+# see the turn where "the second one" was named.
+#
+# Widened 6→10 messages (3 exchanges → 5). Deliberately modest: this text feeds
+# the answer prompt, and more prior conversation is also more opportunity for the
+# model to answer FROM the conversation instead of from the retrieved documents —
+# the drift failure mode this codebase has repeatedly had to close. Answers stay
+# clipped to a short trail rather than reproduced in full, so the window grows in
+# turns without growing much in tokens.
+_CONV_CONTEXT_MESSAGES = 10
+_CONV_CONTEXT_BUDGET = 3000
+_CONV_ANSWER_CLIP = 300
+
+
 def build_conversation_context(session_id: str) -> str:
     """Build a conversation context string from recent chat messages."""
     if not config.USE_DATABASE:
         return ""
     try:
-        recent = _db.get_recent_context(session_id, n=6)
+        recent = _db.get_recent_context(session_id, n=_CONV_CONTEXT_MESSAGES)
     except Exception:
         return ""
 
     if not recent:
         return ""
 
+    # Built NEWEST-FIRST, then reversed. The previous version walked oldest→newest
+    # and broke at the budget, so whenever the budget actually bound it kept the
+    # OLDEST messages and dropped the most recent ones — backwards for resolving
+    # "that clause"/"the second one", which always refer to the latest turns. The
+    # bug was mostly dormant at n=6 (~1.1k chars, well under budget) and starts
+    # firing as soon as the window widens, so it is fixed here first.
     parts = []
     total_chars = 0
-    for msg in recent:
+    for msg in reversed(recent):
         role = "User" if msg["role"] == "user" else "Assistant"
         content = msg["content"]
-        if msg["msg_type"] == "answer" and len(content) > 300:
-            content = content[:300] + "..."
+        if msg["msg_type"] == "answer" and len(content) > _CONV_ANSWER_CLIP:
+            content = content[:_CONV_ANSWER_CLIP] + "..."
         line = f"{role}: {content}"
-        if total_chars + len(line) > 2000:
+        if total_chars + len(line) > _CONV_CONTEXT_BUDGET:
             break
         parts.append(line)
         total_chars += len(line)
 
-    return "\n".join(parts)
+    return "\n".join(reversed(parts))
 
 
 def _keyword_fallback_pages(pages: dict, question: str, n: int = 25) -> list[str]:
