@@ -57,6 +57,31 @@ _RX_DRAFTING = re.compile(
     r'propose\s+(?:a|an|new|revised)\s+clause|word(?:ing)?\s+for\s+(?:a|an|the))\b',
     re.IGNORECASE,
 )
+# Drafting a document that does not exist yet, as opposed to redrafting one that
+# does. The distinction decides whether "which document do you mean?" is even an
+# answerable question (see check_disambiguation_node): "redline the indemnity
+# clause" refers to an existing document and SHOULD be disambiguated, whereas
+# "draft a new agreement" / "tips for drafting one" refers to nothing in the
+# corpus and can never be resolved by any reply.
+#
+# Deliberately narrow — requires an explicit newness marker ("a new ..."/"from
+# scratch"), a how-to framing, or a request for drafting GUIDANCE (steps/tips/
+# advice), rather than treating every drafting question as document-free. A bare
+# "redraft the termination clause" matches none of these and still disambiguates.
+_RX_DRAFTING_NEW_DOC = re.compile(
+    r'\b(?:'
+    r'draft(?:ing)?\s+(?:a|an)\s+new\b'
+    r'|(?:a|an)\s+new\s+(?:agreement|contract|nda|deed|lease|licen[cs]e|mou|'
+    r'memorandum|policy|clause)\b'
+    r'|from\s+scratch\b'
+    r'|how\s+(?:to|do\s+i|should\s+i|would\s+i)\s+(?:go\s+about\s+)?draft'
+    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points)\b'
+    r'[^.?!]{0,60}\bdraft'
+    r'|\bdraft(?:ing)?\b[^.?!]{0,60}\b(?:steps|tips|advice|guidance|pointers|'
+    r'best\s+practices|keep\s+in\s+mind)\b'
+    r')',
+    re.IGNORECASE,
+)
 _RX_COMPARISON = re.compile(
     r'\b(compare|comparison|differ(?:s|ence|ences)?|versus|vs\.?|'
     r'side[- ]by[- ]side|contrast|how\s+do\s+.+\s+differ)\b',
@@ -347,6 +372,23 @@ def check_disambiguation_node(state: QueryState) -> dict:
         logger.info("[AGENT] disambiguation skipped (doc named)")
         return {"needs_disambiguation": False}
 
+    # Drafting something NEW has no existing document to resolve to, so asking
+    # "which agreement are you asking about?" is unanswerable by construction —
+    # the prompt promises to "pull up the right one", but for a counterparty that
+    # isn't in the corpus at all no reply can ever satisfy it. Confirmed live: a
+    # request to draft a Jaguar Land Rover manufacturing agreement re-asked the
+    # same question on every turn, including when the user answered it with the
+    # counterparty name, and never escaped.
+    #
+    # This only suppresses the PROMPT, not document scoping: resolve_scope runs
+    # afterwards regardless and still pins any document the question does name,
+    # so "how to draft a clause like the one in Service Agreement 2" is still
+    # answered against SA2 — it just isn't interrogated first.
+    if state.get("intent") == "drafting" and _RX_DRAFTING_NEW_DOC.search(state["question"]):
+        logger.info("[AGENT] disambiguation skipped (drafting a new document — "
+                    "no existing document to resolve)")
+        return {"needs_disambiguation": False}
+
     if wiki._question_names_a_document(state["question"], []):
         # _question_names_a_document is a pure pattern match ("type + number",
         # e.g. "service agreement 1") — it has no way to check whether such a
@@ -441,14 +483,26 @@ def check_disambiguation_node(state: QueryState) -> dict:
     #       would silently reintroduce the original bug instead of just
     #       fixing the new one.
     if not wiki._VAGUE_DOC_PATTERN.search(state["question"]):
+        # Carryover must read THIS thread's messages, which live under the CHAT
+        # session — not the wiki/doc session, which is shared by every thread
+        # served off the same fixed main wiki and therefore holds every answer
+        # ever generated against that corpus. resolve_scope already documents
+        # this hazard at length and passes chat_session_id for exactly this
+        # reason; this call was left on session_id, so in a brand-new thread
+        # _carryover_scope found some unrelated older answer and reported a
+        # scope "established" by a conversation that never happened — silently
+        # skipping disambiguation on genuinely ambiguous questions (confirmed
+        # live: a fresh-session "Redraft the indemnity clause" logged
+        # "carryover scope established" with no prior turn in that thread).
+        _chat_sid = state.get("chat_session_id") or state["session_id"]
         try:
-            if wiki._carryover_scope(state["question"], state["session_id"]):
+            if wiki._carryover_scope(state["question"], _chat_sid):
                 logger.info("[AGENT] disambiguation skipped (carryover scope established)")
                 return {"needs_disambiguation": False}
             # Same reasoning for a comparative follow-up after a multi-document
             # turn ("which of those…"): the set is already established by the
             # conversation, so asking which document they mean is noise.
-            if wiki._carryover_comparative_set(state["question"], state["session_id"]):
+            if wiki._carryover_comparative_set(state["question"], _chat_sid):
                 logger.info("[AGENT] disambiguation skipped (comparison set established)")
                 return {"needs_disambiguation": False}
         except Exception as e:
