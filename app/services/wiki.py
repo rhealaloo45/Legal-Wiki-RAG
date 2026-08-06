@@ -4736,6 +4736,21 @@ _PARTY_NAME_RE = re.compile(
     r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
 )
 
+# A company name typed in shorthand ALL-CAPS carries no corporate suffix at all
+# ("TATA POWER SOLAR", "JLR EUROPE") — _PARTY_NAME_RE's suffix anchor never
+# fires on it. Without a second detector, resolve_scope's unresolved_party gate
+# (below) sees no party name, treats the question as scopeless, and carries the
+# PREVIOUS document's stale scope forward instead of searching for the company
+# actually named — guaranteeing "not covered" for a real company the corpus may
+# well have documents about, since retrieval never actually looked for it.
+# Confirmed live: three turns into a Service Agreement 2 thread, "what
+# information do we have about TATA POWER SOLAR" answered "not covered" while
+# scoped to SA2, having never searched for Tata Power Solar at all. Requires 2+
+# ALL-CAPS words specifically (not just Title Case) — ordinary capitalised legal
+# vocabulary a user copies from a document ("Confidential Information", "Force
+# Majeure") is essentially never typed in all caps, so this stays narrow.
+_BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
+
 
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
@@ -5201,6 +5216,8 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     try:
         _cands = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
         _cands = [c for c in _cands if len(c) >= 4]
+        if not _cands:
+            _cands = [m.group(0).strip() for m in _BARE_ALLCAPS_ENTITY_RE.finditer(question)]
         if _cands:
             unresolved_party = _cands[0]
     except Exception:
