@@ -1618,6 +1618,26 @@ _RX_QUESTION_LIKE = re.compile(
     r'^\s*(?:what|how|who|why|can|could|do|does|is|are)\b|\?\s*$', re.IGNORECASE,
 )
 
+# Regulatory/compliance framing is never a question about the assistant, but it
+# clears every gate above: no meta opener, none of _RX_META_DOC_HINT's legal
+# vocabulary ("GDPR" and "compliant" are in neither list), question-like, short.
+# So it reached the LLM tiebreak — which is a coin flip on it. Measured on "are
+# we GDPR compliant": 3/8 runs answered "meta" and returned the capabilities
+# blurb, a total non-sequitur to someone asking about compliance.
+#
+# Applied ONLY in _is_meta_query_extended, gating the LLM fallback. Deliberately
+# not added to _RX_META_DOC_HINT, which is also applied to the tail of a matched
+# meta opener — a word like "law" or "policy" there would start vetoing genuine
+# capability questions ("what can you do with legal documents").
+_RX_META_COMPLIANCE = re.compile(
+    r'\b(?:compl(?:y|ies|iant|iance)|non[\s-]?compliance'
+    r'|gdpr|hipaa|ccpa|dpdp|sox|pci|ferpa'
+    r'|regulat(?:ion|ions|ory|ed)|statutor(?:y|ily)'
+    r'|audit(?:s|ed|ing)?|penalt(?:y|ies)|liable|exposure'
+    r')\b',
+    re.IGNORECASE,
+)
+
 _META_LLM_PROMPT = (
     "Decide whether this message is asking about the ASSISTANT itself — its "
     "capabilities, how to use it, or what kinds of questions it can answer — "
@@ -1657,6 +1677,8 @@ def _is_meta_query_extended(question: str) -> bool:
     if not q or len(q) > _META_LLM_MAX_LEN:
         return False
     if _RX_META_DOC_HINT.search(q):
+        return False
+    if _RX_META_COMPLIANCE.search(q):
         return False
     if not _RX_QUESTION_LIKE.search(q):
         return False
