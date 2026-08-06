@@ -2591,6 +2591,55 @@ _PLACEHOLDER_QUOTE_RE = re.compile(
 )
 
 
+# A refusal renders through the same badge row as a real answer, so
+# "Not addressed in the provided documents" arrived on screen wearing
+# "Confidence: 92% · Grounding: 100%". Both numbers are literally correct — the
+# model is confident IN ITS REFUSAL, and the refusal accurately describes what
+# the context holds — but a reader skimming sees a green high-confidence badge
+# attached to a non-answer and reads it as "here is an answer, and I'm sure of
+# it". Detected here rather than in the frontend so the judgement lives with the
+# text it describes and survives a reload.
+#
+# Anchored to the OPENING of the answer. A substantive answer routinely says
+# "the context does not address X" about one sub-point midway through; only an
+# answer that LEADS with it is a refusal.
+_RX_NOT_COVERED_OPENER = re.compile(
+    r'^\s*(?:[#*_>\-\s]*)?(?:'
+    r'not\s+(?:addressed|covered|found|available|specified|mentioned|provided)'
+    r'|no\s+(?:relevant\s+)?(?:information|provision|clause|content|text|mention)'
+    r'|(?:this|the)\s+(?:retrieved\s+)?context\s+(?:does\s+not|doesn\'t)\s+'
+    r'(?:contain|address|cover|include|provide)'
+    r'|the\s+provided\s+documents?\s+(?:do|does)\s+not\s+'
+    r'(?:contain|address|cover|include)'
+    r'|(?:i\s+)?(?:could|can)\s+not\s+find'
+    r')',
+    re.IGNORECASE,
+)
+
+# How far in to look. The opener can sit behind a short heading the model
+# emitted first ("Final answer:", "PART I —"), but not behind real content.
+_NOT_COVERED_SCAN_CHARS = 220
+
+
+def _is_not_covered_answer(answer: str) -> bool:
+    """True when the answer LEADS with 'the documents don't cover this'.
+
+    Drives a render flag only — it never changes the answer, the confidence
+    score, or what was retrieved. A false positive costs one suppressed badge.
+    """
+    if not answer:
+        return False
+    head = answer.lstrip()[:_NOT_COVERED_SCAN_CHARS]
+    if _RX_NOT_COVERED_OPENER.match(head):
+        return True
+    # Allow one short lead-in line ("Final answer:", "Answer:") before the
+    # refusal — the reasoning-model outputs frequently open with one.
+    first_break = head.find("\n")
+    if 0 < first_break <= 60:
+        return bool(_RX_NOT_COVERED_OPENER.match(head[first_break:].lstrip()))
+    return False
+
+
 def _strip_placeholder_quotes(answer: str) -> str:
     """Remove quote-wrapped placeholder stand-ins (e.g. "Not provided in excerpt")
     from the ends of reference/citation lines. Leaves the rest of the line — the
@@ -3950,6 +3999,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         confidence_score = 45
     confidence = {"score": confidence_score, "reason": confidence_reason}
 
+    not_covered = _is_not_covered_answer(answer)
+
     # Log query
     _log_event(session_id, "QUERY", f"Q: {question[:60]}... | BM25 Shortlist: {bm25_count} | Pages selected: {len(selected_titles)} | Confidence: {confidence['score']}")
 
@@ -4020,6 +4071,10 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "usage": usage,
         "confidence_score": confidence["score"],
         "confidence_reason": confidence["reason"],
+        # Render flag: the answer leads with "the documents don't cover this",
+        # so the confidence/grounding badges describe a refusal, not an answer,
+        # and must not be shown as though they rated one.
+        "not_covered": not_covered,
         # Counts, not a predicted score. _verify_answer_citations is a substring
         # check against the exact context the model was given, so these numbers
         # are true by construction — unlike confidence_score, which is the
