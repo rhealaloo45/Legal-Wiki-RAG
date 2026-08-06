@@ -2098,7 +2098,15 @@ _RX_GK_DOC_REF = re.compile(
     r'|here|above|earlier|previous(?:ly)?|mentioned|aforesaid'
     r')\b'
     r'|\b[a-z]{2,}\s*[-_]?\s*\d{1,3}\b'     # "agreement 2", "sa 01", "nda3"
-    r'|\b\d+(?:\.\d+)+\b',                   # clause numbers — 5.2.1
+    r'|\b\d+(?:\.\d+)+\b'                    # clause numbers — 5.2.1
+    # A demonstrative/possessive next to "agreement"/"contract" points at a
+    # specific document ("in THIS contract", "OUR agreement") even though
+    # neither bare word is a reliable veto on its own — "what is a service
+    # agreement" is a genuine general question. Confirmed live: "what does
+    # force majeure mean in this contract" cleared every other gate and was
+    # answered as a textbook definition, never touching retrieval, silently
+    # discarding the one word in the question that pointed at an actual file.
+    r'|\b(?:this|that|these|those|our|my|the)\s+(?:agreements?|contracts?)\b',
     re.IGNORECASE,
 )
 
