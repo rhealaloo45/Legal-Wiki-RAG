@@ -225,8 +225,13 @@ app/.env
 app/sessions.json
 app/build_ui.py
 
-# Generated eval dataset (rebuilt from app/data/logs/rag_query_log.json on demand)
-app/eval/eval_dataset.jsonl
+# Generated eval datasets (rebuilt from app/data/logs/rag_query_log.json on
+# demand) — real client clause text ends up in these. Glob, not exact names:
+# a suffixed variant ("eval_dataset 998.jsonl") slipped past the old exact-name
+# rule and got committed with real Tata Service Agreement content in it
+# (scrubbed from history via git filter-repo on 2026-07-27).
+app/eval/*dataset*.jsonl
+app/eval/*dataset*.csv
 
 # Node Modules (puppeteer test)
 node_modules/
@@ -265,6 +270,7 @@ FLOWCHART.md
 flow.png
 structure.md
 checklist.md
+implementation_list.md
 phases.md
 questions.txt
 
