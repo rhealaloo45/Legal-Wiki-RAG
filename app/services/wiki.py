@@ -4893,6 +4893,26 @@ def _last_document_turn(recent: list[dict]) -> dict | None:
     return None
 
 
+def has_established_document_scope(session_id: str) -> bool:
+    """True when this conversation is already pinned to specific document(s).
+
+    Used to decide whether a definitional question asked mid-thread ("what does
+    indemnify mean") should be answered purely generally, or from the document
+    under discussion with a general-knowledge aside attached. Reads the same
+    recorded scope as _carryover_scope, and skips canned turns the same way, so
+    the two cannot disagree about whether a thread has a document.
+    """
+    if not config.USE_DATABASE:
+        return False
+    try:
+        recent = _db.get_recent_answer_scope(session_id, n=_CARRYOVER_LOOKBACK)
+    except Exception as e:
+        logger.error("has_established_document_scope: could not read scope: %s", e)
+        return False
+    last = _last_document_turn(recent)
+    return bool(last and last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"))
+
+
 def _carryover_scope(question: str, session_id: str) -> list[str]:
     """The document this conversation is already about, when the question names none.
 

@@ -894,6 +894,7 @@ def query_route():
                                         "meta_answer": wiki_result.get("meta_answer", False),
                                         "general_knowledge": wiki_result.get("general_knowledge", False),
                                         "not_covered": wiki_result.get("not_covered", False),
+                                        "general_knowledge_note": wiki_result.get("general_knowledge_note", ""),
                                         "advice_notice": wiki_result.get("advice_notice", ""),
                                         # Deterministic term-presence warning. Must
                                         # persist for the same reason as the notice
