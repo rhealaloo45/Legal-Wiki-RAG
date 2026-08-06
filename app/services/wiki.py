@@ -4850,6 +4850,24 @@ _COMPARATIVE_TYPE_REF_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A bare backward-referencing pronoun standing in for the parties already
+# established this thread ("draft a shareholder agreement WITH THEM") is not
+# naming a new document TYPE the way "the shareholder agreement" is — it is
+# asking for a new instrument between the SAME parties. Without this exception
+# _CARRYOVER_TYPE_RE's bare "shareholders agreement" match vetoes carryover,
+# retrieval falls through to an unscoped corpus search for "shareholder
+# agreement", and drafting silently borrows an unrelated real document's party
+# names instead of the parties actually under discussion. Confirmed live: "help
+# me draft a new shareholder agreement with them", asked right after a Tata
+# Power Renewable Energy / Helios Grid Advisory service-agreement summary,
+# drafted for "SolarNexus Semiconductor Holdings LLC" and "Zephyr Systems
+# LLC" — names that never appeared anywhere in the conversation — with no
+# disclosure that "them" hadn't actually resolved to anything.
+_BACKREF_PRONOUN_RE = re.compile(
+    r'\b(?:with|for|between|among)\s+(?:them|him|her|these\s+parties|those\s+parties)\b',
+    re.IGNORECASE,
+)
+
 
 # Scope-resolution methods that pinned specific documents and are therefore safe
 # to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
@@ -4952,7 +4970,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     # warning, because both the type-word guard and _DOC_NAME_PATTERN missed
     # the underscore-joined shorthand).
     if (_CARRYOVER_TYPE_RE.search(question.replace('_', ' '))
-            and not _COMPARATIVE_TYPE_REF_RE.search(question)):
+            and not _COMPARATIVE_TYPE_REF_RE.search(question)
+            and not _BACKREF_PRONOUN_RE.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
