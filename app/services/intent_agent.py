@@ -1908,6 +1908,119 @@ def _is_advice_seeking(question: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Personal legal predicaments
+# ---------------------------------------------------------------------------
+# The subject-match rule in the answer prompts is a judgement the model re-makes
+# on every request, and it fails on phrasings where the mismatch is subtle.
+# Measured: "…my ITR legal issue…my personal income tax return filing" refuses
+# 3/3, but the shorter "can u advice me ragarding my ITR legal issue i have been
+# facing this year" leaked 3/3 — each time opening "the context DOES address the
+# question's subject" and then serving corporate joint-venture tax-structuring
+# advice (retain a Big Four firm, review your 704(b) allocations) to someone
+# asking about their own tax return. Every sentence true of those opinions; the
+# advice still wrong, because a company's tax structuring is not a person's tax
+# filing and "tax" was the only thing connecting them.
+#
+# A third prompt revision would only move which phrasings fail. This is a
+# deterministic gate instead, and it sits with the other pre-checks rather than
+# inside the pipeline: a question about the user's OWN personal legal
+# predicament is not a question about the documents at all, so there is nothing
+# for retrieval to do and no answer that could be grounded.
+#
+# Deliberately NOT built on the term-presence check above — that mechanism is
+# documented as warning-only on purpose, because the corpus has a real "wrongly
+# said the document is silent" failure and a suppressing gate would worsen it.
+#
+# All three conditions must hold, which is what keeps it off real questions:
+#   1. the matter is a personal-life legal domain this corpus does not hold,
+#   2. it is framed as the USER'S OWN (not "my client's", not a document's),
+#   3. the question names no document.
+
+# Legal domains belonging to an individual's private life. A corpus of
+# commercial agreements, judgments and opinions holds none of them.
+_RX_PERSONAL_DOMAIN = re.compile(
+    r'\b(?:'
+    r'itr\b|income[\s-]?tax[\s-]?return|tax[\s-]?return|tax[\s-]?filing|form\s*16'
+    r'|divorce|alimony|custody|maintenance\s+petition|matrimonial'
+    r'|landlord|tenant|rent\s+agreement|eviction'
+    r'|visa|immigration|passport|citizenship|green\s+card'
+    r'|\bwill\b\s+(?:and|&)\s+testament|probate|inheritance|succession\s+certificate'
+    r'|personal\s+injury|accident\s+claim|insurance\s+claim'
+    r'|criminal\s+case|\bfir\b|bail|police\s+complaint'
+    r'|consumer\s+(?:court|complaint|forum)'
+    r'|provident\s+fund|gratuity|pension'
+    r'|my\s+(?:salary|employer|boss|landlord|marriage|property|flat|house)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# The matter must be the USER'S OWN. "My client's divorce" is professional use
+# and stays in the normal pipeline; so does any third-party framing.
+_RX_PERSONAL_OWNERSHIP = re.compile(
+    r'\b(?:my|mine|i|me|myself|we|our|us)\b',
+    re.IGNORECASE,
+)
+
+# Professional framing that disqualifies condition 2 — a lawyer asking on behalf
+# of someone else is doing exactly what this tool is for.
+_RX_ON_BEHALF = re.compile(
+    r'\b(?:my|our)\s+client|\bthe\s+client\b|\bon\s+behalf\s+of\b',
+    re.IGNORECASE,
+)
+
+# Any document reference sends it back to the pipeline — "what does my tax
+# indemnity say in SA 2" is a document question wearing personal phrasing.
+_RX_PERSONAL_DOC_REF = re.compile(
+    r'\b(?:clause|section|article|schedule|annexures?|annexes?|exhibit|appendix'
+    # "files" plural only — bare "file" is usually the VERB here ("file an FIR",
+    # "file my return"), and vetoing on it sent personal matters back into the
+    # pipeline, which is the exact failure this gate exists to stop.
+    r'|agreements?|contracts?|nda|sha|jva|msa|sow|deed|documents?|files'
+    r'|workspace|corpus|judgment|opinion|pleading)\b'
+    r'|\b[a-z]{2,}\s*[-_]?\s*\d{1,3}\b',
+    re.IGNORECASE,
+)
+
+
+def _is_personal_matter(question: str) -> bool:
+    """True when the question is about the user's own private legal predicament."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if not _RX_PERSONAL_DOMAIN.search(q):
+        return False
+    if _RX_ON_BEHALF.search(q):
+        return False
+    if not _RX_PERSONAL_OWNERSHIP.search(q):
+        return False
+    if _RX_PERSONAL_DOC_REF.search(q):
+        return False
+    return True
+
+
+def _personal_matter_answer(session_id: str) -> dict:
+    """Canned scope reply — no LLM call, no retrieval, no tokens.
+
+    Says plainly that this is outside what the workspace can answer, rather than
+    reaching for the nearest corporate document and reasoning from it.
+    """
+    corpus = _corpus_summary(session_id, max_families=4)
+    answer = (
+        "That sounds like a matter about your own situation, and it isn't something "
+        "I can help with here.\n\n"
+        "I can only tell you what the documents loaded into this workspace say"
+        + (f" — {corpus[0].lower() + corpus[1:]}" if corpus else ".")
+        + "\n\nThose are commercial legal documents, so they contain nothing about a "
+        "personal matter like this, and answering from them would mean applying "
+        "terms written for an entirely different situation to yours. For something "
+        "affecting you personally, please speak to a qualified lawyer or adviser "
+        "who can look at your actual facts.\n\n"
+        "If you did mean a document in this workspace, name it and I'll pull it up."
+    )
+    return _canned_payload(answer, "Out of scope", "personal-matter")
+
+
+# ---------------------------------------------------------------------------
 # General legal knowledge
 # ---------------------------------------------------------------------------
 # "What is arbitration?" has no answer in a corpus of executed contracts — they
@@ -2245,6 +2358,16 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # safe because the gates require a named legal concept as the subject and
     # veto every demonstrative, so a follow-up that depends on the previous turn
     # ("what does that mean?") can never match.
+    # A question about the user's own personal legal predicament has no answer
+    # in a corpus of commercial agreements, and letting it reach retrieval is
+    # how corporate tax-structuring advice ended up answering a personal tax
+    # question. Runs on follow-ups too — that is exactly how it was reported.
+    if _is_personal_matter(question):
+        logger.info("[AGENT] personal-matter fast-path (0 tokens): %r", (question or "")[:80])
+        yield {"stage": "complete", "status": "done", "type": "answer",
+               "payload": _personal_matter_answer(session_id), "message": "Done"}
+        return
+
     gk_method = _general_knowledge_kind(question)
     if gk_method:
         logger.info("[AGENT] general-knowledge fast-path (%s): %r",
