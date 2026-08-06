@@ -4714,6 +4714,19 @@
       // stale citation state instead of leaving the old messages on screen.
       $chatThread.innerHTML = '';
       currentResultReferences = [];
+      // _pendingQuestion/_pendingClarifyMode are set when a disambiguation or
+      // clarification prompt is shown, and only cleared once the user replies
+      // to it (see the combined-reply branch below). If that prompt is left
+      // unanswered and the user starts a new chat instead, these were never
+      // reset — so the FIRST message of the brand-new, unrelated thread got
+      // silently concatenated with the old pending question before being
+      // sent, with no visible sign to the user that this happened. Confirmed
+      // live: a plain confidentiality question in a fresh chat came back with
+      // intent=drafting and content about an unrelated prior "Jaguar Land
+      // Rover manufacturing agreement" question, because that question was
+      // still pending from an earlier, unanswered disambiguation prompt.
+      _pendingQuestion = '';
+      _pendingClarifyMode = '';
       loadSessions();
       loadFileTree();
       loadGraph();
@@ -4800,6 +4813,13 @@
       switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
 
       document.getElementById('top-session-name').textContent = "Resumed Session";
+      // Same reset newChat() does, and for the same reason — see its comment.
+      // Switching to a different past session while a disambiguation/
+      // clarification prompt is unanswered has the identical hazard: the next
+      // message typed lands in the newly-resumed thread but still silently
+      // carries the old pending question from whatever was active before.
+      _pendingQuestion = '';
+      _pendingClarifyMode = '';
       loadSessions();
       loadFileTree();
       loadGraph();
