@@ -1885,6 +1885,300 @@ def _is_advice_seeking(question: str) -> bool:
     return bool(_RX_ADVICE_SEEKING.search(question or ""))
 
 
+# ---------------------------------------------------------------------------
+# General legal knowledge
+# ---------------------------------------------------------------------------
+# "What is arbitration?" has no answer in a corpus of executed contracts — they
+# USE the concept, they do not define it — so it retrieved whatever mentioned
+# the word and reported "not covered" at full token cost. Same shape as the meta
+# and social fast-paths above: a question the pipeline structurally cannot
+# answer, recognised before the pipeline runs.
+#
+# Unlike those two, this path costs an LLM call, and its answer is the ONLY
+# output in this system with no document behind it — nothing for
+# _verify_answer_citations to check, no grounding score that would mean
+# anything. That asymmetry drives every design decision here:
+#
+#   * the gates are deterministic regex, in a fixed order, and the LLM tiebreak
+#     runs LAST and only on questions that have already cleared every one of
+#     them — so it can never pull a document question onto this path,
+#   * failing any gate means falling through to the normal pipeline, which is
+#     exactly today's behaviour, so a miss costs nothing new,
+#   * the answer itself is capped and labelled, structurally (a render flag the
+#     frontend reads) rather than trusting the model to say so in prose.
+#
+# It runs BEFORE resolve_scope and carryover deliberately. Placed later, a
+# genuinely general question asked mid-thread ("by the way, what is novation?")
+# would inherit the scope of the document under discussion and be answered as
+# though that document defined the term.
+
+# Definitional / explanatory openers. Anchored at ^ — nothing here matches
+# mid-sentence, so a real question that happens to contain "what is" further in
+# ("tell me the notice period and what is the cure window") never matches.
+_RX_GK_OPENER = re.compile(
+    r'^\s*'
+    r'(?:(?:so|and|but|also|ok(?:ay)?|btw|by\s+the\s+way|just|hey|hi)\b[\s,]*){0,2}'
+    r'(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?'
+    r'(?:'
+    r"what(?:'s|’s|\s+is|\s+are|\s+does|\s+do)\b"
+    r'|what\s+exactly\s+(?:is|are|does|do)\b'
+    r'|what\s+do(?:es)?\s+(?:the\s+)?(?:term|word|phrase)\b'
+    r'|explain\b|define\b|describe\b'
+    r'|tell\s+me\s+(?:what|about|how)\b'
+    r'|how\s+(?:does|do|is|are)\b'
+    r'|(?:the\s+)?(?:meaning|definition|concept|purpose)\s+of\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Abstract framing consumed off the front of the subject so the definite-article
+# veto below doesn't reject "what is THE doctrine of frustration" — "the" there
+# points at a concept, not at a document.
+_RX_GK_SUBJECT_STRIP = re.compile(
+    r'^\s*(?:the\s+)?(?:doctrine|concept|principle|term|word|phrase|meaning|'
+    r'definition|purpose|idea|notion|rule)\s+of\s+',
+    re.IGNORECASE,
+)
+
+# The subject must be a bare concept. A definite article or a demonstrative
+# means the user is pointing at something specific — "what is THE governing
+# law", "what does THIS mean" — which is a document question in a workspace
+# full of documents, and belongs in the normal pipeline.
+_RX_GK_SUBJECT_VETO = re.compile(
+    r'^\s*(?:the|this|that|these|those|it|its|such|said|above|'
+    r'our|my|your|their|his|her)\b',
+    re.IGNORECASE,
+)
+
+# Anywhere in the question: a reference to the workspace's own material. Wider
+# than strictly necessary — "what is a force majeure clause" is vetoed by
+# `clause` even though it reads general — because the safe direction is the
+# document pipeline, which already answers that well.
+_RX_GK_DOC_REF = re.compile(
+    r'\b(?:'
+    r'clause|section|article|schedule|annexures?|annexes?|annex|exhibit|appendix|recital'
+    r'|documents?|files?|pages?|workspace|corpus|uploaded|attached'
+    r'|nda|sha|jva|msa|sow|deed'
+    r'|part(?:y|ies)|counterpart(?:y|ies)'
+    r'|here|above|earlier|previous(?:ly)?|mentioned|aforesaid'
+    r')\b'
+    r'|\b[a-z]{2,}\s*[-_]?\s*\d{1,3}\b'     # "agreement 2", "sa 01", "nda3"
+    r'|\b\d+(?:\.\d+)+\b',                   # clause numbers — 5.2.1
+    re.IGNORECASE,
+)
+
+# Hard block, checked before anything else can let a question through. This is
+# the gate that keeps the carve-out from becoming a legal-advice channel, so it
+# is deliberately over-broad: it blocks "what is compliance" and "what is legal
+# advice" along with the cases it exists for, and blocking those costs only a
+# fall-through to the normal pipeline.
+#
+# First-person framing is the signal. A genuine general-knowledge question
+# needs no "I" or "my" — "explain to me what novation is" survives (the block
+# is on first-person SUBJECTS and possessives, not the object of "tell/explain
+# me"), while "what does novation mean for my contract" does not.
+_RX_GK_ADVICE_BLOCK = re.compile(
+    r'\b(?:my|mine|our|ours|myself|ourselves)\b'
+    r"|\b(?:i|we)\s*(?:'m|'re|'ve|'ll|'d)\b"
+    r'|\b(?:i|we)\s+(?:am|are|was|were|have|had|has|need|want|think|face|faced|'
+    r"facing|got|get|do|don'?t|did|didn'?t|should|shall|can|could|may|might|must|"
+    r'will|would|filed?|signed?|received?|paid|owe|run|own|work|live)\b'
+    r'|\b(?:should|shall|can|could|may|must|do|does|did|will|would|am|are|is)\s+'
+    r'(?:i|we|one)\b'
+    r'|\bin\s+(?:my|our|this|that)\s+(?:case|situation|matter|position)\b'
+    r'|\bwhat\s+should\b'
+    r'|\badvi[cs]e\b|\brecommend\w*\b'
+    r'|\bsue\b|\bsuing\b|\blawsuit\b'
+    r'|\bapplies?\s+to\s+(?:me|us)\b'
+    r'|\bcompl(?:y|ies|iant|iance)\b',
+    re.IGNORECASE,
+)
+
+# Legal vocabulary the subject must contain for the regex path to fire. Not
+# exhaustive by design and never will be — the LLM tiebreak below exists
+# precisely to cover the terms this list misses ("what is laches"). Kept to
+# concepts, doctrines and procedures; deliberately excludes bare "law"/"legal",
+# which appear in far too many document questions to be a reliable signal.
+_RX_GK_LEGAL_TERM = re.compile(
+    r'\b(?:'
+    # Dispute resolution and procedure
+    r'arbitrat\w*|mediat\w*|conciliat\w*|litigat\w*|adjudicat\w*|tribunals?|'
+    r'injunct\w*|subpoenas?|depositions?|discovery|pleadings?|affidavits?|'
+    r'plaintiffs?|defendants?|appellants?|respondents?|claimants?|'
+    r'jurisdictions?|appeals?|writs?|decrees?|summons|'
+    r'class\s+action|due\s+process|burden\s+of\s+proof|statutes?\s+of\s+limitations?|'
+    r'limitation\s+period|res\s+judicata|locus\s+standi|prima\s+facie|'
+    # Contract law
+    r'contracts?|consideration|privity|novation|assignments?|'
+    r'rescission|rescind\w*|repudiat\w*|frustration|force\s+majeure|'
+    r'conditions?\s+precedent|indemnit\w*|indemnif\w*|warrant\w*|covenants?|'
+    r'guarantees?|suret\w*|liquidated\s+damages|specific\s+performance|'
+    r'severab\w*|waivers?|estoppel|breach\w*|boilerplate|'
+    r'non[\s-]?compete|non[\s-]?disclosure|confidentialit\w*|'
+    # Liability, tort, remedies
+    r'liabilit\w*|neglig\w*|torts?|damages|remed\w*|restitution|'
+    r'vicarious|strict\s+liability|duty\s+of\s+care|causation|mitigat\w*|'
+    r'unjust\s+enrichment|nuisance|defamation|misrepresentation|'
+    # Corporate and commercial
+    r'fiduciar\w*|due\s+diligence|escrow|liens?|mortgages?|pledges?|'
+    r'shareholders?|incorporat\w*|winding\s+up|insolvenc\w*|'
+    r'bankrupt\w*|liquidation|mergers?|acquisitions?|joint\s+ventures?|'
+    r'partnerships?|limited\s+liability|piercing\s+the\s+(?:corporate\s+)?veil|'
+    # Intellectual property
+    r'copyrights?|trade\s?marks?|patents?|trade\s+secrets?|'
+    r'intellectual\s+propert\w*|licens\w*|royalt\w*|infring\w*|moral\s+rights|'
+    # Property and employment
+    r'leases?|tenanc\w*|landlords?|easements?|freehold|leasehold|conveyanc\w*|'
+    r'redundanc\w*|wrongful\s+dismissal|'
+    # Jurisprudence
+    r'justice|equit\w*|jurisprudence|common\s+law|civil\s+law|'
+    r'legislation|precedents?|stare\s+decisis|rule\s+of\s+law|natural\s+justice|'
+    r'good\s+faith|bona\s+fide|ultra\s+vires|mens\s+rea|actus\s+reus'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# Same cap as the meta fallback, for the same reason: a genuine definitional
+# question is short, and a long message this deep into the gates is not one.
+_GK_LLM_MAX_LEN = 120
+
+_GK_LLM_PROMPT = (
+    "A user asked a definition-style question. Decide whether its subject is a "
+    "LEGAL term, doctrine, or procedure — something you would find in a law "
+    "dictionary or a legal textbook — or something else entirely.\n\n"
+    'Question: "{question}"\n\n'
+    'Respond with ONLY one word: "legal" or "other".'
+)
+
+
+def _gk_subject(question: str) -> str | None:
+    """The concept a definitional question is about, or None if it isn't one.
+
+    Returns the text after the opener, with abstract framing ("the doctrine
+    of…") removed. None means the question never looked definitional in the
+    first place, or its subject points at something specific rather than at a
+    concept.
+    """
+    m = _RX_GK_OPENER.match(question or "")
+    if not m:
+        return None
+    subject = _RX_GK_SUBJECT_STRIP.sub("", question[m.end():]).strip()
+    # Drop the trailing verb/punctuation a definitional question ends on, so
+    # "arbitration work?" reduces to the concept itself.
+    subject = re.sub(r'\s*(?:mean(?:s|ing)?|work(?:s)?|entail|involve(?:s)?)?\s*[?.!]*\s*$',
+                     '', subject, flags=re.IGNORECASE).strip()
+    if not subject or _RX_GK_SUBJECT_VETO.match(subject):
+        return None
+    return subject
+
+
+def _is_general_knowledge_llm(question: str) -> bool:
+    """Cheap tiebreak for a legal term the vocabulary regex doesn't list.
+
+    Only ever reached after every deterministic gate has passed — definitional
+    phrasing, no document reference, no advice framing, short. So the worst it
+    can do is decline to answer a general question (identical to today), never
+    divert a document question onto the general path.
+    """
+    try:
+        raw, _ = llm.ask(
+            _GK_LLM_PROMPT.format(question=question),
+            fast=True, max_tokens=config.MAX_TOKENS_META_CLASSIFY,
+        )
+        return raw.strip().lower().startswith("legal")
+    except Exception as e:
+        logger.warning("General-knowledge LLM tiebreak failed: %s", e)
+        return False
+
+
+def _general_knowledge_kind(question: str) -> str:
+    """'gk-regex' | 'gk-llm' | '' — which gate, if any, claims this question.
+
+    Every gate must pass. Order matters only for cost: the advice block runs
+    before the vocabulary check so an advice-seeking question is rejected
+    without ever being scored as legal.
+    """
+    if not config.ENABLE_GENERAL_KNOWLEDGE:
+        return ""
+    q = (question or "").strip()
+    if not q:
+        return ""
+    if _RX_GK_DOC_REF.search(q):
+        return ""
+    if _RX_GK_ADVICE_BLOCK.search(q) or _is_advice_seeking(q):
+        return ""
+    subject = _gk_subject(q)
+    if subject is None:
+        return ""
+    if _RX_GK_LEGAL_TERM.search(subject):
+        return "gk-regex"
+    if not config.ENABLE_GK_LLM_FALLBACK or len(q) > _GK_LLM_MAX_LEN:
+        return ""
+    return "gk-llm" if _is_general_knowledge_llm(q) else ""
+
+
+# Appended by code, not asked of the model. A label the model has to remember
+# to write is a label it will eventually omit, and this one carries the whole
+# distinction between a checkable answer and an unchecked one.
+_GK_FOOTER = (
+    "\n\n---\n\n*This is general legal information, not drawn from the documents "
+    "in this workspace and not checked against them. It is not legal advice — for "
+    "anything touching your own situation, consult a qualified lawyer.*"
+)
+
+# Belt-and-braces on the prompt's "no References section, no confidence score"
+# rules: the model has seen those sections in every other prompt in this file
+# and occasionally emits them out of habit. They are meaningless here — there
+# is nothing to reference — so they are stripped rather than rendered.
+_RX_GK_STRIP_TAIL = re.compile(
+    r'\n+\s*(?:#{1,4}\s*)?(?:\*\*)?(?:References?|Sources?|CONFIDENCE_SCORE|'
+    r'CONFIDENCE_REASON)\b.*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _general_knowledge_answer(question: str, method: str) -> dict | None:
+    """Answer a general legal-knowledge question — no retrieval, no citations.
+
+    Returns None if the call fails or comes back empty, in which case the caller
+    falls through to the normal pipeline rather than showing an error.
+    """
+    from services.prompts import GENERAL_KNOWLEDGE_PROMPT
+
+    try:
+        raw, usage = llm.ask(
+            GENERAL_KNOWLEDGE_PROMPT.format(question=question),
+            max_tokens=config.MAX_TOKENS_GENERAL_KNOWLEDGE,
+        )
+    except Exception as e:
+        logger.error("General-knowledge generation failed: %s", e)
+        return None
+
+    text = _RX_GK_STRIP_TAIL.sub("", (raw or "").strip()).strip()
+    if not text:
+        logger.warning("General-knowledge generation returned nothing — falling through")
+        return None
+
+    payload = _canned_payload(text + _GK_FOOTER, "General", method)
+    # Reuses the meta render path (no confidence, no grounding, no References —
+    # none of which exist here), and adds the flag the frontend keys the
+    # general-knowledge banner and tag off.
+    payload["general_knowledge"] = True
+    payload["confidence_score"] = 0        # not 100 — there is nothing to be confident against
+    payload["intent_confidence"] = 1.0
+    # llm.ask returns prompt/completion counts only — no total — so it is summed
+    # here rather than read with a .get that would silently report every
+    # general-knowledge answer as costing zero tokens.
+    _prompt_tok = (usage or {}).get("prompt_tokens", 0) or 0
+    _completion_tok = (usage or {}).get("completion_tokens", 0) or 0
+    payload["token_total"] = {
+        "prompt_tokens": _prompt_tok,
+        "completion_tokens": _completion_tok,
+        "total_tokens": _prompt_tok + _completion_tok,
+    }
+    return payload
+
+
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
                      is_followup: bool = False, exclude_cached_answers: bool = False,
                      chat_session_id: str = ""):
@@ -1916,6 +2210,33 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         yield {"stage": "complete", "status": "done", "type": "answer",
                "payload": _meta_answer(session_id), "message": "Done"}
         return
+
+    # General legal-knowledge questions ("what is arbitration") answer from a
+    # separate path with no retrieval — see _general_knowledge_kind. Placed here
+    # for a reason: everything below this line resolves document scope, and a
+    # general question that reaches resolve_scope inherits whatever document the
+    # thread was last about and gets answered as though that document defined
+    # the term.
+    #
+    # Unlike the meta path above, this DOES run on follow-ups — "by the way,
+    # what is novation?" mid-thread is exactly when these get asked. That is
+    # safe because the gates require a named legal concept as the subject and
+    # veto every demonstrative, so a follow-up that depends on the previous turn
+    # ("what does that mean?") can never match.
+    gk_method = _general_knowledge_kind(question)
+    if gk_method:
+        logger.info("[AGENT] general-knowledge fast-path (%s): %r",
+                    gk_method, (question or "")[:80])
+        yield {"stage": "generating", "status": "active",
+               "message": "Answering from general legal knowledge…"}
+        gk_payload = _general_knowledge_answer(question, gk_method)
+        if gk_payload:
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": gk_payload, "message": "Done"}
+            return
+        # Generation failed or came back empty — fall through to the normal
+        # pipeline rather than surfacing an error.
+        logger.info("[AGENT] general-knowledge path yielded nothing — using normal pipeline")
 
     # Decided once, up front: the notice is attached to the terminal answer event
     # below rather than inside a node, so no graph node's behaviour changes.

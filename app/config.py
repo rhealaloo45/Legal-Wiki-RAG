@@ -110,6 +110,11 @@ MAX_TOKENS_META_CLASSIFY     = 150   # Meta-question LLM fallback — single-wor
                                       # reasoning models can spend the whole budget on hidden
                                       # reasoning before emitting it (same pitfall as intent-classify
                                       # above); matched to that budget rather than a tighter one.
+MAX_TOKENS_GENERAL_KNOWLEDGE = 2048  # General legal-knowledge answers (no retrieval). The prompt caps the
+                                      # answer at 3-6 short paragraphs, so this is sized for that plus the
+                                      # hidden-reasoning overhead the Azure nano models spend before any
+                                      # visible text — deliberately well under MAX_TOKENS_ANSWER, since a
+                                      # long answer on this path is a symptom, not a feature.
 MAX_TOKENS_MATTER_REFERENCE  = 60    # One-off backfill: extract matter/case/docket reference string, or "null"
 MAX_TOKENS_COMPACTION        = 4096  # Re-synthesis of bloated pages (S3, Phase 4)
 MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in context
@@ -194,6 +199,22 @@ ENABLE_TERM_CHECK = os.getenv("ENABLE_TERM_CHECK", "true").lower() == "true"
 # this call — see that function's docstring. Flag exists so it can be turned
 # off from App Service settings without a redeploy if it ever misfires.
 ENABLE_META_LLM_FALLBACK = os.getenv("ENABLE_META_LLM_FALLBACK", "true").lower() == "true"
+# General legal-knowledge carve-out: "what is arbitration", "what does force
+# majeure mean" — settled concepts the corpus does not define and previously
+# got a bare "not covered". Answers from the model's own knowledge on a
+# separate path that never touches retrieval, carryover or the grounded
+# prompts, behind the deterministic gates in
+# intent_agent._general_knowledge_kind. Its answers are the only ones in this
+# system with no document to check them against, so it is a flag: turning it
+# off restores the previous refusal behaviour with no other effect.
+ENABLE_GENERAL_KNOWLEDGE = os.getenv("ENABLE_GENERAL_KNOWLEDGE", "true").lower() == "true"
+# Tiebreak LLM call for definitional questions whose subject is a legal term the
+# vocabulary regex doesn't list ("what is laches"). Hard-gated the same way as
+# the meta fallback — short, definitional phrasing, no document reference, no
+# advice framing — so it can only ever ADD a general answer for a question that
+# would otherwise have fallen through; it is never consulted for a question
+# heading to the document pipeline.
+ENABLE_GK_LLM_FALLBACK = os.getenv("ENABLE_GK_LLM_FALLBACK", "true").lower() == "true"
 MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning models (nano) the 900-token first pass routinely spent the whole budget on hidden reasoning and truncated (finish_reason=length), forcing a wasted retry at 1800 before any visible JSON — starting at 1500 skips that discarded first call on big answers. The escalating-budget ladder in _check_grounding still doubles from here (1500→3000→6000→12000) for the largest contexts.
 
 # Optional LLM reranking pass (Phase 3). RRF fusion is always on (free); this adds

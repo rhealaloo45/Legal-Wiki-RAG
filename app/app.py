@@ -892,6 +892,7 @@ def query_route():
                                         # normal answer card, and drops the
                                         # not-legal-advice notice entirely.
                                         "meta_answer": wiki_result.get("meta_answer", False),
+                                        "general_knowledge": wiki_result.get("general_knowledge", False),
                                         "advice_notice": wiki_result.get("advice_notice", ""),
                                         # Deterministic term-presence warning. Must
                                         # persist for the same reason as the notice
