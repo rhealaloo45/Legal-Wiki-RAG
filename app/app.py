@@ -838,17 +838,18 @@ def query_route():
                 logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
 
                 if etype == "disambiguation":
+                    # Deliberately never forwards a document list — see
+                    # intent_agent.check_disambiguation_node. Only the message
+                    # and the original question (so a page reload can still
+                    # resolve a typed reply) leave the server.
                     payload = ev.get("payload", {})
                     _store_chat_msg(session_id, "assistant", payload.get("message", ""),
                                     "disambiguation",
-                                    {"documents": payload.get("documents", []),
-                                     "raw_documents": payload.get("raw_documents", [])})
+                                    {"original_question": payload.get("original_question", question)})
                     final_emitted = True
                     yield _sse({
                         "type": "disambiguation",
                         "message": payload.get("message", ""),
-                        "documents": payload.get("documents", []),
-                        "raw_documents": payload.get("raw_documents", []),
                         "total_elapsed_ms": round((time.time() - t0) * 1000),
                     })
 
@@ -886,6 +887,29 @@ def query_route():
                                         # carryover (wiki._carryover_scope).
                                         "scope_method": wiki_result.get("scope_method", ""),
                                         "scope_docs": wiki_result.get("scope_docs", []),
+                                        # Render flags — without these a reloaded
+                                        # thread shows a help/greeting reply as a
+                                        # normal answer card, and drops the
+                                        # not-legal-advice notice entirely.
+                                        "meta_answer": wiki_result.get("meta_answer", False),
+                                        "general_knowledge": wiki_result.get("general_knowledge", False),
+                                        "not_covered": wiki_result.get("not_covered", False),
+                                        "general_knowledge_note": wiki_result.get("general_knowledge_note", ""),
+                                        "advice_notice": wiki_result.get("advice_notice", ""),
+                                        # Deterministic term-presence warning. Must
+                                        # persist for the same reason as the notice
+                                        # above: the caution has to survive a reload,
+                                        # or a reopened thread shows the unverified
+                                        # answer with nothing marking it.
+                                        "context_warning": wiki_result.get("context_warning", ""),
+                                        "context_note": wiki_result.get("context_note", ""),
+                                        # Deterministic counts shown beside the
+                                        # confidence percentage; must survive a
+                                        # reload like the banners do.
+                                        "answer_facts": wiki_result.get("answer_facts", {}),
+                                        # Was set on the live payload but never stored,
+                                        # so every reloaded answer rendered "0.0s".
+                                        "elapsed_ms": wiki_result.get("elapsed_ms", 0),
                                     })
                     _update_session_history(session_id, question)
                     try:

@@ -586,6 +586,22 @@
       border-radius: 4px
     }
 
+    /* Green reads as "verified against the documents", which is exactly what a
+       general-knowledge answer is not. Amber matches the other cautionary
+       banners rather than the confident ones. */
+    .tag-general {
+      color: var(--amber);
+      background: var(--amber-light)
+    }
+
+    /* Neutral, not red: "the documents don't cover this" is a correct, useful
+       result, not an error — it just isn't an answer, so it must not wear the
+       green confidence styling either. */
+    .tag-notcovered {
+      color: var(--text-secondary);
+      background: rgba(0, 0, 0, 0.05)
+    }
+
     .conf {
       display: flex;
       align-items: center;
@@ -618,7 +634,9 @@
     #metric-popover {
       display: none;
       position: fixed;
-      width: 200px;
+      /* 200px wrapped the counts onto three lines each; the positioning code
+         measures offsetWidth, so widening here needs no JS change. */
+      width: 234px;
       background: var(--bg-surface);
       border: 0.5px solid var(--border);
       border-radius: var(--radius-md);
@@ -770,6 +788,116 @@
       word-wrap: break-word;
       overflow-wrap: break-word;
       overflow-x: auto;
+    }
+
+    /* Shown under the answer when the question asked for a decision
+       ("should I sign this?") rather than a document fact. */
+    .advice-notice {
+      margin: 0 24px 16px;
+      padding: 10px 14px;
+      border-left: 3px solid var(--amber);
+      background: var(--amber-light);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--amber)
+    }
+
+    .advice-notice strong {
+      font-weight: 600
+    }
+
+    /* General meaning of a term, beside a grounded answer. Neutral grey, not
+       amber or red: it is not a caution about the answer, it is a different
+       KIND of content. The muted styling and the left rule are what mark it as
+       an aside rather than part of the cited body above it. */
+    .gk-note {
+      margin: 14px 24px 0;
+      padding: 10px 14px;
+      border-left: 3px solid var(--border-strong);
+      background: rgba(0, 0, 0, 0.03);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--text-secondary)
+    }
+
+    .gk-note strong {
+      font-weight: 600;
+      color: var(--text-primary)
+    }
+
+    .gk-note em {
+      color: var(--text-muted)
+    }
+
+    /* Deterministic term-presence caution. Sits ABOVE the answer and uses the
+       red scale rather than amber: the amber notice says "verify before acting",
+       this one says "part of what follows may not be in the document at all". */
+    .context-warning {
+      margin: 0 24px 14px;
+      padding: 11px 14px;
+      border-left: 3px solid var(--red);
+      background: var(--red-light);
+      border: 1px solid var(--red-border);
+      border-left-width: 3px;
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--red)
+    }
+
+    .context-warning strong {
+      font-weight: 600
+    }
+
+    /* Deterministic counts, shown inside the Confidence hover popover rather
+       than on the answer card: they are reference material for someone already
+       questioning the score, and a permanent strip above the answer read as a
+       criticism of it before the reader had read a word. */
+    .metric-popover-facts {
+      margin-top: 7px;
+      padding-top: 7px;
+      border-top: 0.5px solid var(--border);
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      font-variant-numeric: tabular-nums
+    }
+
+    .metric-popover-facts b {
+      font-weight: 600;
+      color: var(--text-primary)
+    }
+
+    .metric-popover-facts .fact-bad,
+    .metric-popover-facts .fact-bad b {
+      color: var(--red)
+    }
+
+    /* Amber sibling of .context-warning: not a suspected fabrication, just
+       wording in the pages the answer didn't cite. */
+    .context-note {
+      margin: 0 24px 14px;
+      padding: 10px 14px;
+      border-left: 3px solid var(--amber);
+      background: var(--amber-light);
+      border-radius: 0 6px 6px 0;
+      font-size: 12px;
+      line-height: 1.6;
+      color: var(--amber)
+    }
+
+    .context-note strong {
+      font-weight: 600
+    }
+
+    /* renderMarkdown wraps its output in <p>; strip the block margins so a
+       one-line caution doesn't sit in a tall box. */
+    .context-warning p,
+    .context-note p {
+      display: inline;
+      margin: 0
     }
 
     .answer-body table {
@@ -3244,6 +3372,7 @@
       <div id="metric-popover">
         <div class="metric-popover-title" id="metric-popover-title"></div>
         <div class="metric-popover-desc" id="metric-popover-desc"></div>
+        <div id="metric-popover-facts"></div>
       </div>
 
       <!-- LOG OVERLAY -->
@@ -3400,7 +3529,33 @@
     };
 
     function metricInfo(label, score, key) {
-      return `<span class="metric-info" onmouseenter="showMetricInfo(event,'${key}')" onmouseleave="hideMetricInfo()">${label}: ${score}%</span>`;
+      return `<span class="metric-info" data-metric="${key}" onmouseenter="showMetricInfo(event,'${key}')" onmouseleave="hideMetricInfo()">${label}: ${score}%</span>`;
+    }
+
+    // Deterministic counts shown under the Confidence description on hover.
+    // Attached to the element as a property by appendAnswerMsg rather than
+    // serialised into an attribute: escapeHtmlRule() does not escape quotes,
+    // so JSON in a double-quoted attribute would break on the first one.
+    function answerFactsHtml(af) {
+      if (!af) return '';
+      const lines = [];
+      if (af.pages) {
+        lines.push(`<b>${af.pages}</b> page${af.pages === 1 ? '' : 's'}` +
+          (af.documents ? ` from <b>${af.documents}</b> document${af.documents === 1 ? '' : 's'}` : ''));
+      }
+      if (af.topics_asked) {
+        const missing = af.topics_missing || [];
+        lines.push(`<span class="${missing.length ? 'fact-bad' : ''}">topics present: ` +
+          `<b>${af.topics_found}/${af.topics_asked}</b>` +
+          (missing.length ? ` — no mention of ${escapeHtmlRule(missing.join(', '))}` : '') + `</span>`);
+      }
+      if (af.quotes_total) {
+        const verified = af.quotes_total - (af.quotes_unverified || 0);
+        lines.push(`<span class="${af.quotes_unverified ? 'fact-bad' : ''}">quotes verbatim: ` +
+          `<b>${verified}/${af.quotes_total}</b></span>`);
+      }
+      if (!lines.length) return '';
+      return `<div class="metric-popover-facts">${lines.map(l => `<div>${l}</div>`).join('')}</div>`;
     }
 
     function showMetricInfo(evt, key) {
@@ -3409,10 +3564,14 @@
       const pop = document.getElementById('metric-popover');
       document.getElementById('metric-popover-title').textContent = info.title;
       document.getElementById('metric-popover-desc').textContent = info.desc;
+      document.getElementById('metric-popover-facts').innerHTML =
+        answerFactsHtml(evt.currentTarget._answerFacts);
       pop.style.display = 'block';
 
       const r = evt.target.getBoundingClientRect();
-      const popW = 200, gap = 8;
+      // Measured, not assumed: the box grows when the facts block is present.
+      const popW = pop.offsetWidth || 200;
+      const gap = 8;
       const popH = pop.offsetHeight || 50;
       // Prefer opening below the badge (avoids the scroll-container's top
       // edge); flip above only when there's genuinely no room below.
@@ -3603,8 +3762,8 @@
 
       const lines = refsContent.split('\n');
       const refs = [];
-      // Backend-appended banners ([CITATION WARNING], [ATTRIBUTION WARNING],
-      // [SCOPE WARNING], [SCOPE NOTE]) are added AFTER the model's References
+      // Backend-appended banners ([CITATION WARNING], [CITATION NOTE],
+      // [ATTRIBUTION WARNING], [SCOPE WARNING], [SCOPE NOTE]) are added AFTER the model's References
       // section, so they land inside refsContent here. They start with "[" but
       // not a digit, so the [N] parser below skips them — silently dropping the
       // one signal that tells the user a quote couldn't be verified or the wrong
@@ -3612,7 +3771,7 @@
       // body (confirmed live: a 16-unverified-quote answer showed no warning at
       // all because its References heading triggered this extraction).
       const banners = [];
-      const bannerRe = /^\[(?:CITATION WARNING|ATTRIBUTION WARNING|SCOPE WARNING|SCOPE NOTE)\b/i;
+      const bannerRe = /^\[(?:CITATION WARNING|CITATION NOTE|ATTRIBUTION WARNING|SCOPE WARNING|SCOPE NOTE)\b/i;
 
       for (const line of lines) {
         const trimmed = line.trim();
@@ -4595,6 +4754,19 @@
       // stale citation state instead of leaving the old messages on screen.
       $chatThread.innerHTML = '';
       currentResultReferences = [];
+      // _pendingQuestion/_pendingClarifyMode are set when a disambiguation or
+      // clarification prompt is shown, and only cleared once the user replies
+      // to it (see the combined-reply branch below). If that prompt is left
+      // unanswered and the user starts a new chat instead, these were never
+      // reset — so the FIRST message of the brand-new, unrelated thread got
+      // silently concatenated with the old pending question before being
+      // sent, with no visible sign to the user that this happened. Confirmed
+      // live: a plain confidentiality question in a fresh chat came back with
+      // intent=drafting and content about an unrelated prior "Jaguar Land
+      // Rover manufacturing agreement" question, because that question was
+      // still pending from an earlier, unanswered disambiguation prompt.
+      _pendingQuestion = '';
+      _pendingClarifyMode = '';
       loadSessions();
       loadFileTree();
       loadGraph();
@@ -4681,6 +4853,13 @@
       switchTab('ask', document.querySelector('.tab[data-target="ask"]'));
 
       document.getElementById('top-session-name').textContent = "Resumed Session";
+      // Same reset newChat() does, and for the same reason — see its comment.
+      // Switching to a different past session while a disambiguation/
+      // clarification prompt is unanswered has the identical hazard: the next
+      // message typed lands in the newly-resumed thread but still silently
+      // carries the old pending question from whatever was active before.
+      _pendingQuestion = '';
+      _pendingClarifyMode = '';
       loadSessions();
       loadFileTree();
       loadGraph();
@@ -5090,6 +5269,11 @@
     let _pendingQuestion = '';
     let _pendingTargetDoc = '';
     let _isFollowup = false;
+    // Set to 'disambiguation' or 'clarification' while a prompt of that kind
+    // is awaiting a typed reply — doQuery() checks this to combine the next
+    // message with _pendingQuestion instead of treating it as a fresh
+    // top-level question. Cleared once that reply is sent.
+    let _pendingClarifyMode = '';
 
     $askBtn.addEventListener('click', doQuery);
     $qInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doQuery(); } });
@@ -5130,6 +5314,21 @@
             i = j; continue;
           }
         }
+        // (a2) already-valid table (header immediately followed by a real
+        // delimiter row) — pass the WHOLE table through unchanged. Without
+        // this, case (b) below re-examines each subsequent body row on its
+        // own terms, and since a body row is never itself followed by
+        // another delimiter, it misreads the table's OWN first body row as a
+        // second table missing its delimiter — injecting a bogus extra
+        // "|---|---|" row right after it (confirmed live: a perfectly valid
+        // 5-row obligation table got a spurious delimiter row spliced in
+        // after its first data row, corrupting an already-correct table).
+        if (isPipeRow(lines[i]) && i + 1 < lines.length && isDelim(lines[i + 1])) {
+          out.push(lines[i]); out.push(lines[i + 1]);
+          let j = i + 2;
+          while (j < lines.length && isPipeRow(lines[j]) && !isDelim(lines[j])) { out.push(lines[j]); j++; }
+          i = j; continue;
+        }
         // (b) pipe block missing its delimiter row → inject one
         if (isPipeRow(lines[i]) && !(i + 1 < lines.length && isDelim(lines[i + 1]))) {
           let j = i; const block = [];
@@ -5147,12 +5346,78 @@
       return out.join('\n');
     }
 
+    // The model writes major section headings as "1) Heading", "2) Heading", ...
+    // — each followed by its OWN un-indented bullet sub-list at column 0, which
+    // under CommonMark is sibling content, not nested inside the numbered item,
+    // so it breaks list continuity. marked therefore parses every "N) Heading"
+    // as its OWN separate single-item <ol> (confirmed via window._lastAnswer:
+    // the raw text is genuinely sequential — "1) Parties", "2) Governing law",
+    // "3) Indemnification" — no duplicate numbers at all). The bug isn't in
+    // marked's output or in the model's numbering — it's `.answer-body ol`'s
+    // CSS counter (`counter-reset: answer-item`), which restarts at 0 for
+    // EVERY <ol> regardless of that list's real `start` value, so an isolated
+    // single-item list numbered "2)" or "5)" still visually shows "1" (confirmed
+    // live: a 3-section answer with correctly sequential 1)/2)/3) source text
+    // still rendered every heading as "1"). Fixing the CSS counter itself isn't
+    // viable — it can't distinguish "isolated heading" from "genuine tight
+    // numbered list" (both are just <ol> elements to it) — so the fix has to
+    // happen here, on the text, before marked ever sees it.
+    //
+    // Detection: a "N) Text" line is a SECTION HEADING (not a real list item)
+    // when the next non-blank line after it is NOT itself another "N) Text"
+    // line — i.e. something else (typically a bullet) sits in between. A
+    // genuine tight list ("1) step one\n2) step two\n3) step three", nothing
+    // else between items) is left completely untouched — those already render
+    // correctly and the CSS counter genuinely applies to one real contiguous
+    // list in that case.
+    function coerceSectionHeadingNumbers(text) {
+      const lines = text.split('\n');
+      const headingRe = /^(\d+)\)[ \t]+(.+)$/;
+      const isHeadingLine = i => headingRe.test(lines[i]);
+
+      // Group heading-pattern lines into "runs" — a run is 2+ such lines with
+      // ONLY blank lines between them (a genuine tight list, e.g. "1) step
+      // one\n2) step two\n3) step three", with or without blank lines between
+      // items — that's real list content and stays untouched, including its
+      // LAST item, which has no following line at all and must not be
+      // mistaken for an isolated heading just because nothing comes after it).
+      // A run of length 1 — a heading line with anything other than blank
+      // lines before AND after it (typically its own bullet sub-list) — is a
+      // section heading wearing list-item clothing, not a real list item.
+      const runs = [];
+      let i = 0;
+      while (i < lines.length) {
+        if (!isHeadingLine(i)) { i++; continue; }
+        const run = [i];
+        let j = i + 1;
+        while (true) {
+          let k = j;
+          while (k < lines.length && lines[k].trim() === '') k++;
+          if (k < lines.length && isHeadingLine(k)) { run.push(k); j = k + 1; }
+          else break;
+        }
+        runs.push(run);
+        i = run[run.length - 1] + 1;
+      }
+
+      let anyHeading = false;
+      for (const run of runs) {
+        if (run.length >= 2) continue;   // genuine tight list — leave alone
+        const idx = run[0];
+        const m = lines[idx].match(headingRe);
+        lines[idx] = `**${m[2]}**`;
+        anyHeading = true;
+      }
+      return anyHeading ? lines.join('\n') : text;
+    }
+
     function renderMarkdown(text) {
       if (!text) return '';
       // Strip ```text / ```markdown / ``` fences so clause drafts render
       // as formatted prose instead of monospace code blocks.
       text = text.replace(/```(?:text|markdown|plaintext)?\s*\n/g, '')
                  .replace(/\n```\s*/g, '\n');
+      text = coerceSectionHeadingNumbers(text);
       text = coerceTables(text);
       try { return marked.parse(text, { breaks: true, gfm: true }); }
       catch (e) { return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\\n/g, '<br>'); }
@@ -5243,16 +5508,28 @@
       // rendered as "0%" next to a list of unrelated documents.
       if (wikiResult.meta_answer) {
         currentResultReferences = [];
+        // General-knowledge answers share this render path — they have no
+        // confidence, grounding or References either — but must not be mistaken
+        // for a document-backed answer, so they carry their own tag and a
+        // banner above the text rather than the HELP tag.
+        const isGeneral = !!wikiResult.general_knowledge;
+        const gkTag = isGeneral
+          ? '<span class="tag-synth tag-general">GENERAL KNOWLEDGE</span>'
+          : '<span class="tag-synth">HELP</span>';
+        const gkBanner = isGeneral
+          ? `<div class="context-note"><strong>Not from your documents.</strong> This answers a general legal concept from background knowledge. Nothing here was retrieved from or checked against the files in this workspace.</div>`
+          : '';
         const helpDiv = document.createElement('div');
         helpDiv.className = 'chat-msg chat-msg-assistant';
         helpDiv.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
           <div class="answer-card" style="margin-bottom:0">
             <div class="answer-topbar">
-              <div class="answer-tags"><span class="tag-synth">HELP</span></div>
+              <div class="answer-tags">${gkTag}</div>
               <div class="answer-actions">
                 <button class="act-btn" onclick="copyAnswerFromEl(this)"><i class="ti ti-copy"></i>Copy</button>
               </div>
             </div>
+            ${gkBanner}
             <div class="answer-body">${renderMarkdown(wikiResult.answer || '')}</div>
           </div>
         </div>`;
@@ -5307,6 +5584,45 @@
       });
 
       const cardsBlockHtml = generateReferencedSourcesBlock(currentResultReferences);
+      // A definitional question asked inside a document thread: the answer above
+      // is grounded and cited as normal, and this is the term's general meaning,
+      // generated separately with no document context. Rendered as its own
+      // labelled block, never merged into the answer body — that separation is
+      // what stops a general sentence sitting in cited prose and inheriting its
+      // authority. escapeHtmlRule, not renderMarkdown, so nothing in it can
+      // produce a citation-looking marker.
+      const gkNoteHtml = wikiResult.general_knowledge_note
+        ? `<div class="gk-note"><strong>What this term means generally.</strong> ${escapeHtmlRule(wikiResult.general_knowledge_note)} <em>Not from your documents.</em></div>`
+        : '';
+      // Set by the backend only when the question asked for a decision rather
+      // than a document fact — sits between the answer and its sources.
+      const adviceHtml = wikiResult.advice_notice
+        ? `<div class="advice-notice"><strong>Not legal advice.</strong> ${escapeHtmlRule(wikiResult.advice_notice)}</div>`
+        : '';
+      // Set when a topic the question asked about is missing from (or, inversely,
+      // present in) the retrieved pages in a way the answer contradicts. Rendered
+      // above the answer, not below it — the reader needs the caution before the
+      // content, not after they have already believed it.
+      const ctxWarnHtml = wikiResult.context_warning
+        ? `<div class="context-warning"><strong>Check this answer.</strong> ${renderMarkdown(wikiResult.context_warning)}</div>`
+        : '';
+      // Milder sibling of the above: the answer is not suspected of inventing
+      // anything, the pages just use wording it didn't cite. Amber, and phrased
+      // as an observation — an answer can cover a topic thoroughly and still
+      // correctly report one mechanism missing.
+      // No hardcoded heading — each note supplies its own lead-in, because one
+      // heading cannot fit both "the pages also use this wording" and "ask by
+      // subject rather than clause number".
+      const ctxNoteHtml = wikiResult.context_note
+        ? `<div class="context-note">${renderMarkdown(wikiResult.context_note)}</div>`
+        : '';
+
+      // Counts, not a verdict. Every figure is a string match or a tally of what
+      // retrieval returned, so none can be wrong the way the confidence
+      // percentage can — that number is the model grading itself and correlates
+      // +0.13 with an independent judge. Rendered on hover over Confidence
+      // (see answerFactsHtml), which is exactly when someone wants them.
+      const af = wikiResult.answer_facts || {};
       const elapsed = (wikiResult.elapsed_ms / 1000).toFixed(1);
       const tt = wikiResult.token_total || {};
       const tokens = tt.total_tokens || ((tt.prompt_tokens || 0) + (tt.completion_tokens || 0)) || 0;
@@ -5327,6 +5643,19 @@
         groundingBadge = `<span class="conf"><span class="conf-dot" style="background:${gColor}"></span>${metricInfo('Grounding', gScore, 'grounding')}</span>`;
       }
 
+      // The backend flags an answer that LEADS with "the documents don't cover
+      // this". Both percentages are literally correct on such an answer — the
+      // model is confident in its REFUSAL, and the refusal accurately describes
+      // the context — but rendered in the normal badge row they read as
+      // "here is an answer, and I'm 92% sure of it" next to a non-answer. Show
+      // a plain NOT COVERED tag instead of two green metrics.
+      const notCovered = !!wikiResult.not_covered;
+      const metricsHtml = notCovered
+        ? '<span class="tag-synth tag-notcovered">NOT COVERED</span>'
+        : `<span class="tag-synth">SYNTHESIZED</span>
+              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
+              ${groundingBadge}`;
+
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
@@ -5334,9 +5663,7 @@
           <div class="answer-topbar">
             <div class="answer-tags">
               ${intentBadge}
-              <span class="tag-synth">SYNTHESIZED</span>
-              <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
-              ${groundingBadge}
+              ${metricsHtml}
             </div>
             <div class="answer-actions">
               <span class="answer-time">Tokens: ${tokens}</span>
@@ -5345,9 +5672,20 @@
             </div>
           </div>
           <div class="answer-body">${md}</div>
+          ${gkNoteHtml}
+          ${ctxWarnHtml}
+          ${ctxNoteHtml}
+          ${adviceHtml}
           ${cardsBlockHtml}
         </div>
       </div>`;
+      // Attach the counts to this card's Confidence badge so the shared popover
+      // can read them on hover. Set as a property, not an attribute — the values
+      // include free text (missing topic names) that would need attribute
+      // escaping escapeHtmlRule() doesn't do.
+      const confEl = div.querySelector('.metric-info[data-metric="confidence"]');
+      if (confEl) confEl._answerFacts = af;
+
       $chatThread.appendChild(div);
       window._lastAnswer = parsed.cleanText;
       scrollChatToBottom();
@@ -5359,16 +5697,22 @@
     let _disambigRawDocuments = [];
 
     function appendDisambiguationMsg(message, documents, rawDocuments) {
-      _disambigDocuments = documents;
-      _disambigRawDocuments = rawDocuments;
+      // The "Browse documents" picker button is deliberately disabled, not
+      // deleted (see openDisambigPicker() and its callers below, left intact
+      // but now unreachable) — the reader must resolve which document they
+      // mean by typing a reply naturally, not by picking from a list of every
+      // document name in the corpus. If either of these is ever wanted back,
+      // uncomment the two lines below and the <button> markup.
+      // _disambigDocuments = documents;
+      // _disambigRawDocuments = rawDocuments;
 
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-system';
       div.innerHTML = `<div class="chat-bubble">
-        <div style="margin-bottom:8px">${message}</div>
-        <button class="disambig-browse-btn" onclick="openDisambigPicker()">
-          <i class="ti ti-folder-open" style="font-size:13px;margin-right:6px"></i>Browse documents (${documents.length})
-        </button>
+        <div>${message}</div>
+        <!-- <button class="disambig-browse-btn" onclick="openDisambigPicker()">
+          <i class="ti ti-folder-open" style="font-size:13px;margin-right:6px"></i>Browse documents (${(documents || []).length})
+        </button> -->
       </div>`;
       $chatThread.appendChild(div);
       scrollChatToBottom();
@@ -5545,12 +5889,32 @@
 
     async function doQuery() {
       const q = $qInput.value.trim();
-      if (!q || q.length < 3) return;
+      // Empty only. The old `< 3` floor silently swallowed "hi" and "ok" — the
+      // Ask button did nothing at all, with no message and no error — which is
+      // exactly the input the greeting fast-path exists to handle.
+      if (!q) return;
       $qInput.value = '';
+      appendUserMsg(q);
+
+      // A disambiguation/clarification prompt is awaiting this exact reply —
+      // combine it with the question that triggered the prompt instead of
+      // sending it as a fresh top-level question. Without this, a typed
+      // reply like "the NDA with Acme" goes out alone, and the original
+      // question ("can we terminate this?") is lost entirely — the backend
+      // re-resolution logic in check_disambiguation_node has nothing to
+      // re-run against. Mirrors what selectClarification()/selectDisambigDoc()
+      // already do for the old button-based flows.
+      if (_pendingClarifyMode) {
+        const combined = _pendingQuestion + ' ' + q;
+        _pendingClarifyMode = '';
+        _isFollowup = true;
+        await doQueryInternal(combined, _pendingTargetDoc, true);
+        return;
+      }
+
       _pendingQuestion = q;
       _pendingTargetDoc = '';
       _isFollowup = false;
-      appendUserMsg(q);
       await doQueryInternal(q, '', false);
     }
 
@@ -5563,10 +5927,12 @@
         if (t === 'error') {
           removeProgressStages(); appendSystemMsg('Error: ' + (ev.error || 'unknown'));
         } else if (t === 'disambiguation') {
-          removeProgressStages();
-          appendDisambiguationMsg(ev.message, ev.documents, ev.raw_documents || ev.documents);
+          removeProgressStages(); _pendingQuestion = question;
+          _pendingClarifyMode = 'disambiguation';
+          appendDisambiguationMsg(ev.message);
         } else if (t === 'clarification') {
           removeProgressStages(); _pendingQuestion = question;
+          _pendingClarifyMode = 'clarification';
           appendClarificationMsg(ev.message, ev.options);
         } else if (t === 'answer') {
           removeProgressStages(); appendAnswerMsg(ev.wiki);
@@ -5637,9 +6003,22 @@
               files_used: meta.files_used || [],
               token_total: meta.token_total || {},
               validation: meta.validation || {},
-              elapsed_ms: 0,
+              elapsed_ms: meta.elapsed_ms || 0,
               intent: meta.intent || '',
               intent_label: meta.intent_label || '',
+              // Deterministic term-presence caution. Without this a reopened
+              // thread shows an answer flagged as unverified with nothing on it.
+              context_warning: meta.context_warning || '',
+              context_note: meta.context_note || '',
+              answer_facts: meta.answer_facts || {},
+              // Render flags, persisted alongside the message — a help/greeting
+              // reply must not come back as a normal answer card on reload, and
+              // the not-legal-advice notice must survive it.
+              meta_answer: meta.meta_answer || false,
+              general_knowledge: meta.general_knowledge || false,
+              not_covered: meta.not_covered || false,
+              general_knowledge_note: meta.general_knowledge_note || '',
+              advice_notice: meta.advice_notice || '',
             });
           } else if (msg.msg_type === 'disambiguation') {
             const meta = msg.metadata || {};
