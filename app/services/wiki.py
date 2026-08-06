@@ -2591,6 +2591,55 @@ _PLACEHOLDER_QUOTE_RE = re.compile(
 )
 
 
+# Pseudo-XML the model invents to organise its own output. Same family as the
+# <reasoning> and <final> handling inside _run_generation_pass, but for tags no
+# prompt ever mentions, so there is no fixed vocabulary to match. Confirmed live:
+# an answer rendered to the user beginning with a literal "</reasoning>", another
+# with a stray "</confidence>", and one wrapping its whole body in
+# "<Service Agreement 2 termination rights>…</Service Agreement 2 termination rights>".
+#
+# Content is always PRESERVED — every rule here deletes tag characters only, never
+# the text between them. That is what makes it safe to run on any answer: the
+# worst case is a tag left behind, never an amputated answer.
+
+# 1. Matched invented pair — <Foo Bar>…</Foo Bar> becomes the inner text. The
+#    backreference means only a genuine open/close pair is unwrapped.
+_PAIRED_PSEUDO_TAG_RE = re.compile(
+    r'<\s*([A-Za-z][^<>\n]{0,80}?)\s*>(.*?)<\s*/\s*\1\s*>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+# 2. Control words the model wraps around its own scaffolding, orphaned or not.
+#    Deliberately excludes <br>, which is legitimate and appears 384 times in
+#    logged markdown tables.
+_STRAY_CONTROL_TAG_RE = re.compile(
+    r'<\s*/?\s*(?:reasoning|confidence(?:_score|_reason)?|thinking|thought|'
+    r'scratchpad|plan|draft|analysis|answer|output|response|'
+    r'final(?:_answer|_output|_table)?|references?|sources?|citations?)\s*>',
+    re.IGNORECASE,
+)
+
+# 3. Any leftover tag whose NAME contains a space. No real HTML or markdown tag
+#    does; "<Service Agreement 2 termination rights>" is always a model invention.
+#    Catches the orphaned half of an invented pair that rule 1 could not match.
+_SPACED_PSEUDO_TAG_RE = re.compile(r'<\s*/?\s*[A-Za-z][^<>\n]*?\s+[^<>\n]*?>')
+
+
+def _strip_pseudo_tags(answer: str) -> str:
+    """Remove invented pseudo-XML tags, always keeping the text inside them."""
+    if not answer or "<" not in answer:
+        return answer
+    # Unwrap matched pairs repeatedly so nested inventions collapse fully.
+    for _ in range(3):
+        unwrapped = _PAIRED_PSEUDO_TAG_RE.sub(lambda m: m.group(2), answer)
+        if unwrapped == answer:
+            break
+        answer = unwrapped
+    answer = _STRAY_CONTROL_TAG_RE.sub('', answer)
+    answer = _SPACED_PSEUDO_TAG_RE.sub('', answer)
+    return answer.strip()
+
+
 # A refusal renders through the same badge row as a real answer, so
 # "Not addressed in the provided documents" arrived on screen wearing
 # "Confidence: 92% · Grounding: 100%". Both numbers are literally correct — the
@@ -3470,6 +3519,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             # Sweep any remaining <final>/</final> tags. Removes only the tag
             # characters, never content between them (see _FINAL_TAG_ANY_RE note).
             pass_answer = _FINAL_TAG_ANY_RE.sub('', pass_answer).strip()
+
+            # Same family, but for tags no prompt names — </confidence>,
+            # </reasoning>, "<Service Agreement 2 termination rights>". Runs
+            # after the fixed-vocabulary handling above so those keep their
+            # positional-split semantics; this only cleans up what is left.
+            _before_pseudo = pass_answer
+            pass_answer = _strip_pseudo_tags(pass_answer)
+            if pass_answer != _before_pseudo:
+                logger.info("Stripped invented pseudo-tag(s) from answer (%d -> %d chars)",
+                            len(_before_pseudo), len(pass_answer))
 
             # Drop a duplicated self-revision: if a "Final Answer" heading
             # appears after a substantial chunk of prior content, the model
