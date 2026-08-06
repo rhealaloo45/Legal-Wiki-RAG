@@ -32,6 +32,7 @@ except Exception:  # pragma: no cover - older langgraph
 import config
 from services import wiki
 from services import llm
+from services import db
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,31 @@ _RX_DRAFTING = re.compile(
     r'\b(draft|re-?draft|redline|re-?write|suggest(?:ed)?\s+(?:language|wording|clause)|'
     r'counter[- ]?proposal|alternative\s+(?:wording|language|clause)|'
     r'propose\s+(?:a|an|new|revised)\s+clause|word(?:ing)?\s+for\s+(?:a|an|the))\b',
+    re.IGNORECASE,
+)
+# Drafting a document that does not exist yet, as opposed to redrafting one that
+# does. The distinction decides whether "which document do you mean?" is even an
+# answerable question (see check_disambiguation_node): "redline the indemnity
+# clause" refers to an existing document and SHOULD be disambiguated, whereas
+# "draft a new agreement" / "tips for drafting one" refers to nothing in the
+# corpus and can never be resolved by any reply.
+#
+# Deliberately narrow — requires an explicit newness marker ("a new ..."/"from
+# scratch"), a how-to framing, or a request for drafting GUIDANCE (steps/tips/
+# advice), rather than treating every drafting question as document-free. A bare
+# "redraft the termination clause" matches none of these and still disambiguates.
+_RX_DRAFTING_NEW_DOC = re.compile(
+    r'\b(?:'
+    r'draft(?:ing)?\s+(?:a|an)\s+new\b'
+    r'|(?:a|an)\s+new\s+(?:agreement|contract|nda|deed|lease|licen[cs]e|mou|'
+    r'memorandum|policy|clause)\b'
+    r'|from\s+scratch\b'
+    r'|how\s+(?:to|do\s+i|should\s+i|would\s+i)\s+(?:go\s+about\s+)?draft'
+    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points)\b'
+    r'[^.?!]{0,60}\bdraft'
+    r'|\bdraft(?:ing)?\b[^.?!]{0,60}\b(?:steps|tips|advice|guidance|pointers|'
+    r'best\s+practices|keep\s+in\s+mind)\b'
+    r')',
     re.IGNORECASE,
 )
 _RX_COMPARISON = re.compile(
@@ -293,6 +319,7 @@ class QueryState(TypedDict, total=False):
     wiki_context: str
     selected_titles: list
     retrieval_meta: dict
+    clause_lookup: dict      # clause-number -> heading/page mapping result (or None)
     answer_result: dict
     validation: dict
 
@@ -343,6 +370,23 @@ def check_disambiguation_node(state: QueryState) -> dict:
     # known-entity mentions still skip via the checks inside classify_query().
     if state.get("target_doc"):
         logger.info("[AGENT] disambiguation skipped (doc named)")
+        return {"needs_disambiguation": False}
+
+    # Drafting something NEW has no existing document to resolve to, so asking
+    # "which agreement are you asking about?" is unanswerable by construction —
+    # the prompt promises to "pull up the right one", but for a counterparty that
+    # isn't in the corpus at all no reply can ever satisfy it. Confirmed live: a
+    # request to draft a Jaguar Land Rover manufacturing agreement re-asked the
+    # same question on every turn, including when the user answered it with the
+    # counterparty name, and never escaped.
+    #
+    # This only suppresses the PROMPT, not document scoping: resolve_scope runs
+    # afterwards regardless and still pins any document the question does name,
+    # so "how to draft a clause like the one in Service Agreement 2" is still
+    # answered against SA2 — it just isn't interrogated first.
+    if state.get("intent") == "drafting" and _RX_DRAFTING_NEW_DOC.search(state["question"]):
+        logger.info("[AGENT] disambiguation skipped (drafting a new document — "
+                    "no existing document to resolve)")
         return {"needs_disambiguation": False}
 
     if wiki._question_names_a_document(state["question"], []):
@@ -412,6 +456,58 @@ def check_disambiguation_node(state: QueryState) -> dict:
         )
         # fall through to classify_query below
 
+    # Phase 2: an ordinary conversational follow-up ("who can terminate it",
+    # "why", "does the same apply to the other party") carries no document
+    # reference at all, so it used to fall straight through to
+    # classify_query() below every single time — and that LLM ambiguity
+    # judgment has no memory of the conversation, so it re-asked which
+    # document 2-3 times per thread even immediately after the document was
+    # unambiguously resolved (confirmed live: a 10-turn thread got stuck
+    # asking from turn 3 onward and never recovered for the rest of the
+    # conversation). Skip straight to resolve_scope/retrieve — which already
+    # inherits the same carryover scope via wiki._carryover_scope() — when
+    # BOTH hold:
+    #   (a) wiki._carryover_scope() itself agrees a scope can be inherited —
+    #       already conservative and battle-tested: refuses to carry over if
+    #       the question names any document TYPE, is broad/collective
+    #       phrasing, or the prior turn's own scope wasn't cleanly resolved.
+    #   (b) the question doesn't match _VAGUE_DOC_PATTERN ("this document",
+    #       "the agreement") — this is a SEPARATE, deliberately redundant
+    #       check: _carryover_scope's own type-word gate (_CARRYOVER_TYPE_RE)
+    #       does not include the word "document", only named types (NDA,
+    #       service agreement, ...), so "top 10 risks in THIS DOCUMENT" — the
+    #       exact phrase that caused the original documented bug this
+    #       function's is_followup comment above describes — would NOT be
+    #       blocked by _carryover_scope alone. Re-checking the vague pattern
+    #       here directly is what actually reopens that guard; skipping it
+    #       would silently reintroduce the original bug instead of just
+    #       fixing the new one.
+    if not wiki._VAGUE_DOC_PATTERN.search(state["question"]):
+        # Carryover must read THIS thread's messages, which live under the CHAT
+        # session — not the wiki/doc session, which is shared by every thread
+        # served off the same fixed main wiki and therefore holds every answer
+        # ever generated against that corpus. resolve_scope already documents
+        # this hazard at length and passes chat_session_id for exactly this
+        # reason; this call was left on session_id, so in a brand-new thread
+        # _carryover_scope found some unrelated older answer and reported a
+        # scope "established" by a conversation that never happened — silently
+        # skipping disambiguation on genuinely ambiguous questions (confirmed
+        # live: a fresh-session "Redraft the indemnity clause" logged
+        # "carryover scope established" with no prior turn in that thread).
+        _chat_sid = state.get("chat_session_id") or state["session_id"]
+        try:
+            if wiki._carryover_scope(state["question"], _chat_sid):
+                logger.info("[AGENT] disambiguation skipped (carryover scope established)")
+                return {"needs_disambiguation": False}
+            # Same reasoning for a comparative follow-up after a multi-document
+            # turn ("which of those…"): the set is already established by the
+            # conversation, so asking which document they mean is noise.
+            if wiki._carryover_comparative_set(state["question"], _chat_sid):
+                logger.info("[AGENT] disambiguation skipped (comparison set established)")
+                return {"needs_disambiguation": False}
+        except Exception as e:
+            logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
+
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
         result = wiki.classify_query(state["question"], state["session_id"])
@@ -420,11 +516,19 @@ def check_disambiguation_node(state: QueryState) -> dict:
         result = {"needs_disambiguation": False}
 
     if result.get("needs_disambiguation"):
-        docs = result.get("documents", [])
-        clean = [re.sub(r'^[a-f0-9-]{36}_', '', d) for d in docs]
-        msg = ("I'd like to help, but could you specify which document you're referring to? "
-               "Please select one below, or upload a new document.")
-        data = {"message": msg, "documents": clean, "raw_documents": docs}
+        # Deliberately does NOT name any candidate document here (no picker,
+        # no list) — the reader must not learn what's in the corpus from a
+        # disambiguation prompt alone. Resolution now depends entirely on the
+        # user's own next message naming the document (counterparty, type, or
+        # number); that free-text reply gets appended to the original question
+        # and re-run through this same node, which resolves it via the
+        # existing fuzzy entity/filename matching above — no new matching
+        # logic, only a different UI shell around it.
+        msg = ("Which agreement are you asking about? You can name the "
+               "counterparty, the type of agreement, or a document number "
+               "(e.g. \"the NDA with Acme\" or \"Service Agreement 2\") and "
+               "I'll pull up the right one.")
+        data = {"message": msg, "original_question": state["question"]}
         _emit({"stage": "disambiguation", "status": "done",
                "message": "Needs document selection",
                "type": "disambiguation", "payload": data})
@@ -509,8 +613,45 @@ def retrieve_context_node(state: QueryState) -> dict:
     # match) — pin retrieval to them so a topically-similar page from another
     # agreement can't crowd out the document the user actually named.
     _force_docs = scope.get("target_docs") if scope.get("scope") == "single_doc" else None
+
+    # Clause-number resolution. Ingest strips the leading number when it builds
+    # page titles ("5. Return, Destruction..." -> "Return, Destruction..."), so
+    # "what does clause 5 say" matches nothing even when the source is numbered.
+    # clause_map (backfilled from the original PDFs) restores the link: on a hit
+    # the retrieval query is augmented with the real heading so BM25/vector land
+    # on the right page, and generate_answer discloses the mapping. On a miss the
+    # lookup result still flows to validate_response so the note can say
+    # "numbered 1-8, no clause 12" instead of something generic.
+    clause_lookup = None
+    _q_for_retrieval = state["question"]
+    _cm = _RX_CLAUSE_NUMBER_Q.search(state["question"])
+    if _cm:
+        _cnum = next(g for g in _cm.groups() if g)
+        _cdocs = (_force_docs or ([state["target_doc"]] if state.get("target_doc") else None)
+                  or scope.get("target_docs") or [])
+        if _cdocs:
+            # Scope can resolve to several documents (real PDF + its Test_
+            # stand-in); take the first one the map knows anything about.
+            _hits, _nums, _cdoc = [], [], _cdocs[0]
+            for _cand in _cdocs:
+                try:
+                    _hits = db.lookup_clause(state["session_id"], _cand, _cnum)
+                    _nums = db.doc_clause_numbers(state["session_id"], _cand)
+                except Exception as _cl_err:   # e.g. map not backfilled yet — degrade silently
+                    logger.warning("clause_map lookup failed: %s", _cl_err)
+                    break
+                if _hits or _nums:
+                    _cdoc = _cand
+                    break
+            clause_lookup = {"num": _cnum, "doc": _cdoc, "hits": _hits, "doc_numbers": _nums}
+            if _hits:
+                _headings = ", ".join(sorted({h["heading"] for h in _hits}))
+                _q_for_retrieval = (f'{state["question"]} (in this document clause '
+                                    f'{_cnum} is titled "{_headings}")')
+                logger.info("[AGENT] clause_map hit: clause %s -> %s", _cnum, _headings)
+
     res = wiki.get_context(
-        state["question"], state["session_id"],
+        _q_for_retrieval, state["session_id"],
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
         doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
@@ -526,6 +667,7 @@ def retrieve_context_node(state: QueryState) -> dict:
             "page_selection_usage": res.get("page_selection_usage", {}),
         },
         "conversation_context": conv,
+        "clause_lookup": clause_lookup,
     }
 
 
@@ -562,6 +704,63 @@ def generate_answer_node(state: QueryState) -> dict:
             f"\"{_carried}\" — the document already under discussion in this "
             f"conversation. To scope it differently, name a document explicitly, "
             f"or use \"across all …\" to search every document."
+        )
+    elif _scope.get("method") == "carryover-set" and _scope.get("target_docs"):
+        # Same disclosure duty as the single-document carryover above: the
+        # comparison was silently limited to the documents the previous turn
+        # covered, which the user never named in this question.
+        _set_docs = _scope["target_docs"]
+        _set_names = ", ".join(f'"{wiki._norm_doc_name(d)}"' for d in _set_docs[:4])
+        _more = f" and {len(_set_docs) - 4} more" if len(_set_docs) > 4 else ""
+        _scope_note = (
+            f"This question named no document, so it was answered by comparing the "
+            f"{len(_set_docs)} document(s) already under discussion in this "
+            f"conversation — {_set_names}{_more}. To compare a different set, name "
+            f"the documents explicitly, or use \"across all …\" to search every document."
+        )
+
+    # The clause map resolved the asked-for number to a real section of this
+    # document. Two channels, deliberately separate: scope_note is DISPLAY-ONLY
+    # (wiki appends it under the finished answer), so it gets the short
+    # disclosure; the instruction goes via clause_directive, which wiki prepends
+    # to the prompt itself — passing the instruction through scope_note was
+    # verified live to change nothing, because the model never sees it.
+    _cl = state.get("clause_lookup") or {}
+    _clause_directive = ""
+    if _cl.get("hits"):
+        _cl_names = sorted({x["heading"] for x in _cl["hits"]})
+        # Two renderings of the same headings, deliberately not shared: the
+        # scope_note copy is human-facing display text with quote marks for
+        # readability, never re-examined by anything. The directive copy feeds
+        # the GENERATION PROMPT, and _clause_directive's first version quoted
+        # the heading in its own worked example ('"Clause 5 (\"Heading\")..."')
+        # — the model followed the example literally, wrapped the heading in
+        # quotation marks in its real answer, and _verify_answer_citations
+        # flagged that quote as an unverified excerpt: it checks quoted spans
+        # against _known_page_titles(), which stores the FULL title including
+        # the " – Party (Doc)" suffix that clause_map's bare heading omits, so
+        # the two never matched (confirmed live: real content, correct
+        # citation, still flagged as a false-positive citation warning).
+        # Plain parentheses read just as naturally and never enter the
+        # quote-verification path at all, which is the safer fix — it doesn't
+        # touch _known_page_titles' matching logic, which handles several
+        # other confirmed edge cases (unicode hyphens, trailing punctuation)
+        # that a change here risks disturbing.
+        _cl_heads = ", ".join(f'"{h}"' for h in _cl_names)
+        _cl_heads_plain = ", ".join(_cl_names)
+        _scope_note = ((_scope_note + " ") if _scope_note else "") + (
+            f"In this document's own numbering, clause {_cl['num']} is the section "
+            f"titled {_cl_heads}."
+        )
+        _clause_directive = (
+            f"The question asks about clause {_cl['num']} by number. In this "
+            f"document the clause numbers are not printed in the page text, but "
+            f"clause {_cl['num']} IS present: it is the section titled "
+            f"{_cl_heads_plain} (this is a section name, not a verbatim quote — do "
+            f"not put it in quotation marks). Do NOT answer 'not addressed' — "
+            f"answer the question from that section's content, and open the "
+            f"answer by naming the mapping without quotation marks, e.g. "
+            f"Clause {_cl['num']} ({_cl_heads_plain}) provides..."
         )
 
     # The question named a specific counterparty the pipeline could not pin to
@@ -606,6 +805,7 @@ def generate_answer_node(state: QueryState) -> dict:
             state.get("conversation_context", ""), intent=intent,
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
             scope_note=_scope_note, scope_warning=_scope_warning,
+            clause_directive=_clause_directive,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -958,6 +1158,273 @@ def _check_grounding(question: str, context: str, answer: str, intent: str = "fa
     return {"grounding_score": None, "ungrounded_claims": [], "summary": "Check failed."}
 
 
+# ---------------------------------------------------------------------------
+# Deterministic term-presence check
+#
+# Exists because the LLM grounding check above cannot be trusted as a gate: it
+# scored a confirmed fabrication (a comparison answer that asserted an
+# indemnification clause the retrieved pages never mention — 0 occurrences in
+# context, 8 in the answer) at 90%, and its summary explicitly called the
+# invented clause accurate. The judge hallucinated alongside the generator.
+#
+# A string count cannot be talked into anything, which is exactly why it catches
+# what the judge missed. It only ever ATTACHES A WARNING — it never rewrites or
+# suppresses an answer, because the corpus already has a real "wrongly said the
+# document is silent" failure mode and a suppressing gate would worsen it.
+# ---------------------------------------------------------------------------
+
+# Curated, not extracted from the question. Picking "the topic" out of arbitrary
+# phrasing is a guess; matching against a fixed legal vocabulary is not. Each
+# entry lists the alternates real drafting uses instead of the obvious word —
+# without these, an agreement that says "hold harmless" and never "indemnify"
+# would be scored as silent on indemnity.
+# Alternates are kept as a LIST, not one alternation, so each can be counted
+# separately. That is what makes the under-read signal precise: the useful thing
+# to tell a reader is not "this topic exists somewhere" but "the pages say
+# ARBITRATION and your answer never mentions it".
+# Every alternate carries its own plain-English label. Paired rather than derived,
+# because the under-read message quotes the wording back to the reader and a raw
+# pattern ("applicable\\s+law") in the UI is worse than no message at all.
+_TOPIC_TERMS: dict[str, list[tuple[str, str]]] = {
+    "indemnity": [
+        (r"indemnif\w*", "indemnification"), (r"indemnit\w*", "indemnity"),
+        (r"hold\s+harmless", "hold harmless")],
+    "payment": [
+        (r"payment\w*", "payment"), (r"\bpay\b", "pay"), (r"\bfees?\b", "fees"),
+        (r"invoice\w*", "invoicing"), (r"consideration", "consideration"),
+        (r"remunerat\w*", "remuneration")],
+    "termination": [
+        (r"terminat\w*", "termination"), (r"expir\w*", "expiry"),
+        (r"exit\s+(?:right|mechanic|trigger)\w*", "exit mechanics"),
+        (r"(?:call|put)\s+option", "call/put options"),
+        (r"wind[-\s]?(?:up|down)", "wind-up")],
+    "confidentiality": [
+        (r"confidential\w*", "confidentiality"),
+        (r"non[-\s]?disclosure", "non-disclosure"), (r"secrec\w*", "secrecy")],
+    "governing law": [
+        (r"governing\s+law", "governing law"), (r"governed\s+by", "governed by"),
+        (r"applicable\s+law", "applicable law"),
+        (r"choice\s+of\s+law", "choice of law")],
+    "dispute resolution": [
+        (r"dispute\w*", "disputes"), (r"arbitrat\w*", "arbitration"),
+        (r"mediat\w*", "mediation"), (r"litigat\w*", "litigation"),
+        (r"jurisdiction", "jurisdiction"), (r"\bforum\b", "forum"),
+        (r"escalat\w*", "escalation"), (r"deadlock", "deadlock")],
+    "liability": [
+        (r"liabilit\w*", "liability"), (r"liable", "liable"),
+        (r"\bcap(?:ped|s)?\b", "liability cap")],
+    "warranty": [
+        (r"warrant\w*", "warranties"), (r"represent\w*", "representations")],
+    "force majeure": [
+        (r"force\s+majeure", "force majeure"), (r"act\s+of\s+god", "act of God")],
+    "intellectual property": [
+        (r"intellectual\s+property", "intellectual property"), (r"\bIP\b", "IP"),
+        (r"copyright", "copyright"), (r"trademark", "trade marks"),
+        (r"patent", "patents")],
+    "non-compete": [
+        (r"non[-\s]?compet\w*", "non-compete"),
+        (r"restraint\s+of\s+trade", "restraint of trade"),
+        (r"exclusivit\w*", "exclusivity")],
+    "assignment": [
+        (r"assign\w*", "assignment"), (r"novat\w*", "novation"),
+        (r"transfer\s+of\s+rights", "transfer of rights")],
+    "notice": [
+        (r"notice\s+period", "notice period"), (r"written\s+notice", "written notice"),
+        (r"notif\w*", "notification")],
+}
+
+# An answer conceding it found nothing. Used in both directions: it suppresses a
+# fabrication flag (conceding absence is not asserting a clause) and it is the
+# trigger for the under-read flag.
+_RX_ABSENCE_CLAIM = re.compile(
+    r"not\s+(?:addressed|covered|specified|stated|mentioned|provided|present|included|found)"
+    # "do not contain" as well as "does not" — the plural is what real answers use
+    # when they talk about "the documents", and missing it made the check silent
+    # on exactly those phrasings.
+    r"|(?:does|do|did)\s+not\s+(?:address|cover|specify|state|mention|contain|include|provide)"
+    r"|(?:is|are)\s+silent\s+on"
+    r"|\bno\s+(?:such\s+|explicit\s+|express\s+|defined\s+)*"
+    r"(?:clause|provision|section|mechanism|reference|requirement|term)s?\b"
+    r"|not\s+in\s+the\s+(?:retrieved|provided)\s+(?:context|document|pages)",
+    re.IGNORECASE,
+)
+
+# A positive assertion about what a document says, as opposed to a mention of the
+# topic in passing. Operative legal verbs are the tell.
+_RX_OPERATIVE = re.compile(
+    r"\bshall\b|\bmust\b|\bwill\b|\bagrees?\s+to\b|\bis\s+required\b|\bundertakes?\b"
+    r"|\bentitled\s+to\b|\bobligated\b|\bcovenants?\b|[\"“][^\"”]{20,}[\"”]",
+    re.IGNORECASE,
+)
+
+_RX_CLAUSE_NUMBER_Q = re.compile(
+    r"\bclause\s+(\d+(?:\.\d+)*)|\bsection\s+(\d+(?:\.\d+)*)|\barticle\s+(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
+)
+
+
+def _check_term_presence(question: str, context: str, answer: str,
+                         clause_lookup: dict | None = None) -> tuple[str, str, dict]:
+    """Compare the question's legal topics against context and answer by string count.
+
+    Returns (alert, note, facts). `facts` carries topics_asked / topics_found —
+    of the legal topics the question raised, how many appear anywhere in the
+    retrieved pages. It is a count, not a judgement, which is the point: every
+    predicted score in this pipeline correlates ~0 with an independent judge, so
+    the UI needs at least one number that is true by construction.
+
+    alert and note are two severities, because they mean different things to a
+    reader and merging them made the milder one overclaim:
+
+    - alert (fabrication): the topic appears in no retrieved page, yet the answer
+      makes an operative statement about it. Part of the answer may not come from
+      any document. Serious.
+    - note (under-read): the pages use wording the answer never cites, alongside
+      an absence claim. Phrased as the OBSERVATION only — "the pages also use X"
+      — never as "the answer reports nothing on X". An answer can discuss a topic
+      at length and still correctly say one sub-mechanism is missing; the earlier
+      wording called such answers empty, which was simply false.
+    - note (clause number): numbering is discarded at ingest, so a clause-number
+      question can never match. Say so, rather than let "not addressed" read as
+      "the clause does not exist".
+    """
+    q, ctx, ans = question or "", context or "", answer or ""
+    if not ctx or not ans:
+        return "", "", {}
+
+    alerts: list[str] = []
+    notes: list[str] = []
+    asked: list[str] = []
+    found: list[str] = []
+    sentences = re.split(r"(?<=[.!?])\s+|\n", ans)
+
+    for label, alternates in _TOPIC_TERMS.items():
+        rxs = [(name, re.compile(pat, re.IGNORECASE)) for pat, name in alternates]
+        if not any(rx.search(q) for _, rx in rxs):
+            continue
+        in_ctx = sum(len(rx.findall(ctx)) for _, rx in rxs)
+        in_ans = sum(len(rx.findall(ans)) for _, rx in rxs)
+        asked.append(label)
+        if in_ctx:
+            found.append(label)
+
+        if in_ctx == 0 and in_ans >= 2:
+            # Sentence-level so a passing mention doesn't trip it — only an
+            # operative statement about a topic the pages never raise.
+            asserted = [s for s in sentences
+                        if any(rx.search(s) for _, rx in rxs)
+                        and _RX_OPERATIVE.search(s)
+                        and not _RX_ABSENCE_CLAIM.search(s)]
+            if asserted:
+                alerts.append(
+                    f"**{label}** is not mentioned anywhere in the pages retrieved for "
+                    f"this answer, yet the answer states terms for it. Treat every "
+                    f"{label} detail below as unverified."
+                )
+            continue
+
+        # Under-read: the answer declares the document silent on this topic while
+        # the pages use a phrasing the answer never picked up. Naming that phrasing
+        # is the whole point — "it mentions arbitration" is actionable, "the topic
+        # appears somewhere" is not.
+        if in_ctx >= 1 and any(_RX_ABSENCE_CLAIM.search(s)
+                               and any(rx.search(s) for _, rx in rxs) for s in sentences):
+            missed = [name for name, rx in rxs if rx.search(ctx) and not rx.search(ans)]
+            if missed:
+                # Each note carries its own lead-in. The frontend used to hardcode
+                # one heading for every note, which read as a non-sequitur on the
+                # clause-number case below.
+                notes.append(
+                    f"**Also in these pages.** On **{label}**, the retrieved pages also "
+                    f"use the wording **{', '.join(missed[:3])}**, which this answer does "
+                    f"not cite. If your question turns on that, re-ask naming it against "
+                    f"a single named document."
+                )
+
+    def _done() -> tuple[str, str, dict]:
+        return " ".join(alerts), " ".join(notes), {
+            "topics_asked": len(asked),
+            "topics_found": len(found),
+            "topics_missing": [t for t in asked if t not in found],
+        }
+
+    m = _RX_CLAUSE_NUMBER_Q.search(q)
+    if m:
+        num = next(g for g in m.groups() if g)
+        n = re.escape(num)
+        cl = clause_lookup or {}
+
+        # Out-of-range is a FACT from clause_map, independent of what the model
+        # said — deliberately NOT gated on _RX_ABSENCE_CLAIM. Confirmed live
+        # (clause 12 of a document mapped 1-8): scope resolves this document
+        # alongside its Test_ synthetic stand-in, retrieval pulled a page from
+        # the stand-in, and the model answered from it confidently — "Clause 12
+        # — Term, Survival, and Governing Law (NDA-GreenSteel — NDA)" — with no
+        # absence language anywhere, so a gated check never runs at all. Since
+        # the map already proves the number doesn't belong to the real
+        # document, waiting for the model to agree was the bug, not a
+        # legitimate gate.
+        if cl.get("doc_numbers") and num not in cl["doc_numbers"]:
+            nums = cl["doc_numbers"]
+            hedged = _RX_ABSENCE_CLAIM.search(ans)
+            msg = (
+                f"**No clause {num} in this document.** Its source is numbered "
+                f"**{nums[0]}–{nums[-1]}**, and clause {num} is not among those "
+                f"sections."
+            )
+            if hedged:
+                notes.append(msg)
+            else:
+                # The model answered as if clause N were real, with no hedge at
+                # all — a stronger signal than a topic gap, since it means
+                # content was very likely drawn from a different document
+                # sharing this one's scope (the same real/Test_ collision the
+                # SCOPE WARNING already names, here pinned to a specific number).
+                alerts.append(
+                    msg + " The answer above did not flag this, so treat its "
+                    "content as unverified against this document."
+                )
+            return _done()
+
+        if not _RX_ABSENCE_CLAIM.search(ans):
+            return _done()   # answered without hedging and the number checks out (or is unmapped) — nothing to add
+
+        if cl.get("hits"):
+            # The map resolved the number but the answer still claimed absence —
+            # tell the reader exactly where the clause lives.
+            heads = ", ".join(sorted({h["heading"] for h in cl["hits"]}))
+            notes.append(
+                f"**Clause {num} does exist in this document** — it is the section "
+                f"titled **{heads}**. If the answer above missed it, re-ask naming "
+                f"that section."
+            )
+            return _done()
+        # Must look like a CLAUSE reference, not any stray digit. The first
+        # version tested `\b5[\.\s)]`, which "within 5 business days" satisfies —
+        # so the note never fired on a real corpus. Accept "Clause 5", "5.2",
+        # or a "5." / "5)" heading at the start of a line, nothing else.
+        looks_numbered = re.search(
+            rf"(?:clause|section|article|art\.|cl\.)\s*{n}\b"
+            rf"|^\s*{n}[.)]\s"
+            rf"|\b{n}\.\d",
+            ctx, re.IGNORECASE | re.MULTILINE,
+        )
+        if not looks_numbered:
+            # Phrased as how to search, not as what the system lacks. The
+            # information is the same either way, but "numbering is not retained"
+            # reads as a defect report to a client, and the note exists to stop a
+            # reader concluding the clause does not exist — not to apologise.
+            notes.append(
+                f"**Try asking by subject.** Documents here are indexed by topic "
+                f"rather than by clause number, so **clause {num}** has nothing to "
+                f"match against — this is not a finding that the clause is missing. "
+                f"Name the subject instead (e.g. \"the termination clause\" or "
+                f"\"the indemnity clause\") and it will be found if it is there."
+            )
+
+    return _done()
+
+
 def validate_response_node(state: QueryState) -> dict:
     logger.info("[AGENT] validate_response_node: intent=%s", state.get("intent"))
     wr = state.get("answer_result") or {}
@@ -991,6 +1458,34 @@ def validate_response_node(state: QueryState) -> dict:
                "message": f"Grounding: {grounding.get('grounding_score', '?')}%"})
 
     wr["validation"] = {"valid": valid, "warning": warning, "grounding": grounding}
+
+    # Deliberately outside the ENABLE_ANSWER_VALIDATION block: this costs no LLM
+    # call, and it is the only check that caught the confirmed fabrication.
+    if config.ENABLE_TERM_CHECK:
+        ctx_alert, ctx_note, term_facts = _check_term_presence(
+            state["question"], state.get("wiki_context", ""), answer,
+            clause_lookup=state.get("clause_lookup"))
+        if ctx_alert or ctx_note:
+            logger.info("[AGENT] term-presence alert=%r note=%r",
+                        ctx_alert[:110], ctx_note[:110])
+        wr["context_warning"] = ctx_alert   # red — may not come from any document
+        wr["context_note"] = ctx_note       # amber — worth a second look
+
+        # Counts the reader can act on, shown beside the confidence percentage
+        # rather than replacing it. Every one is derived by string match or by
+        # counting what retrieval returned, so none of them is a prediction that
+        # could be wrong the way confidence_score routinely is.
+        cite = wr.get("citation_check") or {}
+        wr["answer_facts"] = {
+            "pages": len(wr.get("selected_titles") or wr.get("pages_used") or []),
+            "documents": len(wr.get("files_used") or []),
+            "topics_asked": term_facts.get("topics_asked", 0),
+            "topics_found": term_facts.get("topics_found", 0),
+            "topics_missing": term_facts.get("topics_missing", []),
+            "quotes_total": cite.get("total", 0),
+            "quotes_unverified": cite.get("unverified", 0) + cite.get("misattributed", 0),
+        }
+
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
     return {"answer_result": wr, "validation": {"valid": valid, "warning": warning, "grounding": grounding}}
@@ -1060,7 +1555,12 @@ def get_query_graph():
 _RX_META_QUERY = re.compile(
     r'^\s*(?:'
     r'help[\s!.?]*$|\?+\s*$'
-    r'|what\s+(?:kind|kinds|type|types|sort|sorts)\s+of\s+(?:questions?|things?|queries)\b'
+    # Up to 3 modifier words allowed between "of" and "questions" — "what kind
+    # of NDA related questions can I ask" is still a meta question (asking
+    # about capability, scoped to a topic), not a document question; the
+    # _RX_META_DOC_HINT veto below still disqualifies it if a legal term shows
+    # up AFTER this whole opener instead of as a modifier inside it.
+    r'|what\s+(?:kind|kinds|type|types|sort|sorts)\s+of\s+(?:\w+[\s-]+){0,3}?(?:questions?|things?|queries)\b'
     r'|what\s+(?:questions?|things?)\s+(?:can|could|should)\s+i\s+ask\b'
     r'|what\s+can\s+(?:you|this|it|lexwiki)\s+(?:do|help|answer|handle)\b'
     r'|what\s+can\s+i\s+ask\b'
@@ -1096,12 +1596,105 @@ def _is_meta_query(question: str) -> bool:
     return not _RX_META_DOC_HINT.search(q[m.end():])
 
 
-def _corpus_summary(session_id: str) -> str:
+# LLM fallback for meta questions the regex misses ("what should I be asking
+# you about?" — no fixed opener the regex above anticipated). Gated hard
+# before it ever calls the model:
+#   1. Must clear _RX_META_DOC_HINT with ZERO legal vocabulary anywhere in the
+#      message (not just after an opener) — the same veto the regex path
+#      uses, just applied to the whole message instead of a tail. A real
+#      document question always contains at least one of these words, so it
+#      can never reach the LLM call; this is what makes the fallback provably
+#      unable to turn a real question into a canned reply.
+#   2. Must look like a question (starts with a wh-word/aux verb, or ends in
+#      "?") — filters out ordinary short statements that reach this point.
+#   3. Must be short — genuine meta questions are short; a long message this
+#      deep into the checks is never one.
+# Failing any gate skips the LLM call entirely and falls through to the
+# normal graph, identical to today's regex-only behaviour — so the worst
+# case this fallback can produce is unchanged from the status quo.
+_META_LLM_MAX_LEN = 120
+
+_RX_QUESTION_LIKE = re.compile(
+    r'^\s*(?:what|how|who|why|can|could|do|does|is|are)\b|\?\s*$', re.IGNORECASE,
+)
+
+# Regulatory/compliance framing is never a question about the assistant, but it
+# clears every gate above: no meta opener, none of _RX_META_DOC_HINT's legal
+# vocabulary ("GDPR" and "compliant" are in neither list), question-like, short.
+# So it reached the LLM tiebreak — which is a coin flip on it. Measured on "are
+# we GDPR compliant": 3/8 runs answered "meta" and returned the capabilities
+# blurb, a total non-sequitur to someone asking about compliance.
+#
+# Applied ONLY in _is_meta_query_extended, gating the LLM fallback. Deliberately
+# not added to _RX_META_DOC_HINT, which is also applied to the tail of a matched
+# meta opener — a word like "law" or "policy" there would start vetoing genuine
+# capability questions ("what can you do with legal documents").
+_RX_META_COMPLIANCE = re.compile(
+    r'\b(?:compl(?:y|ies|iant|iance)|non[\s-]?compliance'
+    r'|gdpr|hipaa|ccpa|dpdp|sox|pci|ferpa'
+    r'|regulat(?:ion|ions|ory|ed)|statutor(?:y|ily)'
+    r'|audit(?:s|ed|ing)?|penalt(?:y|ies)|liable|exposure'
+    r')\b',
+    re.IGNORECASE,
+)
+
+_META_LLM_PROMPT = (
+    "Decide whether this message is asking about the ASSISTANT itself — its "
+    "capabilities, how to use it, or what kinds of questions it can answer — "
+    "rather than asking about the content of any legal document.\n\n"
+    'Message: "{question}"\n\n'
+    'Respond with ONLY one word: "meta" or "document".'
+)
+
+
+def _is_meta_query_llm(question: str) -> bool:
+    """Cheap last-resort LLM check for a meta question the regex missed.
+
+    Only ever called after the message has already cleared the zero-legal-
+    vocabulary gate in _is_meta_query_extended, so a real document question
+    can't reach this call in the first place — it can only fail to catch a
+    genuine meta question (same as today's regex-only behaviour), never
+    mistake a real one for meta.
+    """
+    try:
+        raw, _ = llm.ask(
+            _META_LLM_PROMPT.format(question=question),
+            fast=True, max_tokens=config.MAX_TOKENS_META_CLASSIFY,
+        )
+        return raw.strip().lower().startswith("meta")
+    except Exception as e:
+        logger.warning("Meta LLM fallback failed: %s", e)
+        return False
+
+
+def _is_meta_query_extended(question: str) -> bool:
+    """_is_meta_query, plus a gated LLM fallback for phrasing the regex misses."""
+    if _is_meta_query(question):
+        return True
+    if not config.ENABLE_META_LLM_FALLBACK:
+        return False
+    q = (question or "").strip()
+    if not q or len(q) > _META_LLM_MAX_LEN:
+        return False
+    if _RX_META_DOC_HINT.search(q):
+        return False
+    if _RX_META_COMPLIANCE.search(q):
+        return False
+    if not _RX_QUESTION_LIKE.search(q):
+        return False
+    return _is_meta_query_llm(q)
+
+
+def _corpus_summary(session_id: str, max_families: int = 0) -> str:
     """One line describing what's actually loaded, or '' if it can't be read.
 
     Reads the real corpus rather than hardcoding a document list, so the answer
     stays true for any session — including a client's own upload of categories
     this codebase's type regexes have never seen.
+
+    max_families caps how many types are named (0 = all). A real corpus can have
+    a dozen, which is orientation in a help answer but a wall of text in a
+    one-line greeting.
     """
     try:
         from services import db as _db
@@ -1115,8 +1708,40 @@ def _corpus_summary(session_id: str) -> str:
         return ""
     parts = [f"**{n_docs} documents** are currently loaded"]
     if families:
-        parts.append("covering " + ", ".join(families))
+        shown, rest = families, 0
+        if max_families and len(families) > max_families:
+            shown, rest = families[:max_families], len(families) - max_families
+        listed = ", ".join(shown)
+        parts.append(f"covering {listed} and {rest} other types" if rest
+                     else f"covering {listed}")
     return " ".join(parts) + "."
+
+
+def _canned_payload(answer: str, label: str, method: str) -> dict:
+    """Shape a zero-token canned reply like a normal `answer_result`.
+
+    Same key set app.py and the frontend already read, so nothing downstream
+    needs to special-case a canned turn beyond the `meta_answer` render flag.
+    """
+    return {
+        "answer": answer,
+        "meta_answer": True,       # frontend: render without confidence/grounding/refs
+        "intent": "factual",
+        "intent_label": label,
+        "intent_confidence": 1.0,
+        "intent_method": method,
+        "confidence_score": 100,
+        "pages_used": [],
+        "files_used": [],
+        "selected_titles": [],
+        "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "validation": {"valid": True, "warning": None, "grounding": {}},
+        # Deliberately blank: a canned turn resolved no document scope, so it must
+        # not become the scope the NEXT turn inherits via wiki._carryover_scope.
+        "scope_method": "",
+        "scope_docs": [],
+        "_debug_context": "",
+    }
 
 
 def _meta_answer(session_id: str) -> dict:
@@ -1125,46 +1750,618 @@ def _meta_answer(session_id: str) -> dict:
     corpus_line = f"{corpus}\n\n" if corpus else ""
 
     answer = (
-        "I answer questions about the legal documents loaded into this "
+        "I'm here to help you work through the documents loaded into this "
         f"workspace. {corpus_line}"
-        "**What I can do**\n\n"
-        "- **Find facts** — pull a specific clause, definition, party, date or figure "
-        "out of a named document.\n"
-        "- **List obligations** — set out duties, deadlines and compliance requirements.\n"
-        "- **Compare documents** — put two or more agreements side by side and show "
-        "where they differ.\n"
-        "- **Assess risk** — flag unusual or one-sided terms and give a go/no-go view.\n"
-        "- **Draft** — produce clause language, letters or trackers in the Draft tab.\n\n"
-        "**Example questions**\n\n"
+        "Ask me to pull a specific clause, definition, party, date, or figure out of "
+        "a document; list out obligations and deadlines; put a few agreements "
+        "side by side and show where they differ; flag unusual or one-sided terms; "
+        "or draft clause language, letters, and trackers over in the Draft tab.\n\n"
+        "A few examples of what that looks like:\n\n"
         "- *What are the termination rights in Service Agreement 2?*\n"
         "- *List every notice obligation and its deadline under NDA 3.*\n"
         "- *Compare the confidentiality clauses in NDA 1 and NDA 4.*\n"
         "- *Are there any red flags in the SunBridge joint venture agreement?*\n\n"
-        "**Tips**\n\n"
-        "- Name the document where you can — it makes answers faster and more precise.\n"
-        "- Browse everything that's loaded under the **Files** tab.\n"
-        "- Every answer cites the document and clause it came from, so you can verify it."
+        "One thing that helps: if you already know which document you mean, just say "
+        "so — it gets you a faster, more precise answer. You can browse everything "
+        "that's loaded under the **Files** tab, and every answer comes with a "
+        "citation back to the clause it's based on, so you can double-check it "
+        "yourself.\n\n"
+        "One honest caveat: I can tell you what the documents say, but I'm not a "
+        "lawyer, and this isn't legal advice."
     )
 
-    return {
-        "answer": answer,
-        "meta_answer": True,       # frontend: render without confidence/grounding/refs
-        "intent": "factual",
-        "intent_label": "Help",
-        "intent_confidence": 1.0,
-        "intent_method": "meta-regex",
-        "confidence_score": 100,
-        "pages_used": [],
-        "files_used": [],
-        "selected_titles": [],
-        "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "validation": {"valid": True, "warning": None, "grounding": {}},
-        # Deliberately blank: a meta turn resolved no document scope, so it must
-        # not become the scope the NEXT turn inherits via wiki._carryover_scope.
-        "scope_method": "",
-        "scope_docs": [],
-        "_debug_context": "",
+    return _canned_payload(answer, "Help", "meta-regex")
+
+
+# ---------------------------------------------------------------------------
+# Greetings, thanks, sign-offs
+# ---------------------------------------------------------------------------
+# Same failure shape as the meta questions above and cheaper to trigger: "hi"
+# has no answer anywhere in a legal corpus, so it retrieved unrelated contracts
+# and reported 0% confidence at full token cost.
+#
+# Every pattern here is a FULL match on the whole message (each ends in `$`),
+# unlike the prefix-anchored meta patterns — so "hello, what does clause 5 say?"
+# does not match and goes to the graph as a normal question. `[\s\W]*` at both
+# ends absorbs punctuation and emoji ("hi!!", "thanks :)") but never letters.
+_RX_GREETING = re.compile(
+    r'^[\s\W]*(?:hi+|hey+|hell?o+|hiya|heya|greetings|namaste|'
+    r'good\s+(?:morning|afternoon|evening|day))'
+    r'(?:\s+(?:there|team|all|folks|everyone))?[\s\W]*$',
+    re.IGNORECASE,
+)
+
+# Checked before _RX_ACK so "ok thanks" reads as thanks, not a bare ack.
+_RX_THANKS = re.compile(
+    r'^[\s\W]*'
+    r'(?:(?:ok(?:ay)?|alright|cool|nice|great|perfect|awesome|excellent)\W+)?'
+    r'(?:thanks|thank\s+you|thankyou|thx|ty|cheers|much\s+appreciated|appreciate\s+it)'
+    r'(?:\s+(?:a\s+lot|so\s+much|very\s+much|again))?[\s\W]*$',
+    re.IGNORECASE,
+)
+
+_RX_FAREWELL = re.compile(
+    r'^[\s\W]*'
+    r'(?:bye|goodbye|good\s?bye|see\s+(?:you|ya)(?:\s+later)?|'
+    r'that(?:\'|’)?s\s+all(?:\s+for\s+now)?|that\s+is\s+all|'
+    r'no\s+more\s+questions|nothing\s+else)'
+    r'[\s\W]*$',
+    re.IGNORECASE,
+)
+
+# Deliberately excludes "yes"/"no"/"sure" — those are plausible replies to a
+# clarification prompt, where swallowing them would break the flow.
+_RX_ACK = re.compile(
+    r'^[\s\W]*'
+    r'(?:ok(?:ay)?|cool|nice|great|perfect|awesome|excellent|alright|'
+    r'got\s+it|understood|noted|makes\s+sense|sounds\s+good|fair\s+enough)'
+    r'[\s\W]*$',
+    re.IGNORECASE,
+)
+
+
+def _social_query_kind(question: str) -> str:
+    """'greeting' | 'thanks' | 'farewell' | 'ack' | '' — whole-message match only."""
+    q = (question or "").strip()
+    # A real question is never this short; the cap is a second guard on top of
+    # the `$` anchors so no long message can reach the patterns at all.
+    if not q or len(q) > 60:
+        return ""
+    if _RX_GREETING.match(q):
+        return "greeting"
+    if _RX_THANKS.match(q):
+        return "thanks"
+    if _RX_FAREWELL.match(q):
+        return "farewell"
+    if _RX_ACK.match(q):
+        return "ack"
+    return ""
+
+
+def _social_answer(kind: str, session_id: str) -> dict:
+    """Canned reply to a greeting / thanks / sign-off — no LLM call, no tokens."""
+    if kind == "greeting":
+        corpus = _corpus_summary(session_id, max_families=4)
+        answer = (
+            "Hello — I answer questions about the legal documents in this workspace."
+            + (f" {corpus}" if corpus else "")
+            + "\n\nAsk me about any of them, for example *\"What are the termination "
+              "rights in Service Agreement 2?\"* — or type **help** for the full list "
+              "of what I can do."
+        )
+    elif kind == "thanks":
+        answer = ("You're welcome. Ask me anything else about the documents in this "
+                  "workspace whenever you're ready.")
+    elif kind == "farewell":
+        answer = "Goodbye — come back whenever you need something from these documents."
+    else:
+        answer = ("Ready when you are. Ask another question about the documents, or "
+                  "type **help** to see what I can do.")
+
+    return _canned_payload(answer, "Help", f"social-{kind}")
+
+
+# ---------------------------------------------------------------------------
+# Legal-advice framing
+# ---------------------------------------------------------------------------
+# "Should I sign this?" is usually answerable from the documents — the
+# termination clause, the liability cap — so this must NOT short-circuit or
+# refuse. What it changes is the framing: the user asked for a decision and gets
+# back a document summary, and nothing on screen said which of the two it is.
+#
+# Detection is regex-only (0 tokens) and its only effect is an `advice_notice`
+# string on the payload that the frontend renders under the answer, so a false
+# positive costs one banner and cannot alter the answer itself.
+_RX_ADVICE_SEEKING = re.compile(
+    r'\b(?:'
+    r'(?:should|shall|must|ought\s+to|can|could|may|do|am|are|will|would)\s+'
+    r'(?:i|we|my\s+client|our\s+client)\b'
+    r'|what\s+(?:should|would|do)\s+(?:i|we|you)\s+(?:do|recommend|advise|suggest)'
+    r'|what\s+are\s+(?:my|our)\s+(?:options|rights|chances)'
+    r'|(?:my|our)\s+(?:legal\s+)?(?:rights|options|exposure|liability|risk)\b'
+    r'|do\s+(?:i|we)\s+have\s+(?:a|any)\s+(?:case|claim|grounds|defence|defense)'
+    r'|(?:advise|advice)\s+(?:me|us)\b'
+    r'|what\s+would\s+you\s+(?:do|recommend|advise)'
+    # Allows a noun between the pronoun and the adjective ("is this CLAUSE
+    # enforceable"). `valid until/from/for` is excluded — that is a question
+    # about the term length, not about legal validity.
+    r'|(?:is|are|was|would|will)\s+(?:this|it|that|these|those|the)\s+(?:[\w\'’-]+\s+){0,3}'
+    r'(?:legally\s+)?(?:enforceable|binding|lawful|valid\b(?!\s+(?:until|from|till|through|for)\b))'
+    r'|is\s+(?:this|it|that)\s+legal\b'
+    r'|(?:hold|stand)\s+up\s+in\s+court'
+    r'|(?:can|could|would)\s+(?:they|he|she|the\s+other\s+party|the\s+counterparty)\s+sue'
+    r'|is\s+(?:this|it)\s+a\s+good\s+(?:deal|idea)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+_ADVICE_NOTICE = (
+    "This answers what the documents say, not what you should do. It is not legal "
+    "advice, does not account for facts, jurisdiction or case law outside this "
+    "workspace, and should be reviewed by a qualified lawyer before you act on it."
+)
+
+
+def _is_advice_seeking(question: str) -> bool:
+    """True when the question asks for a decision rather than a document fact."""
+    return bool(_RX_ADVICE_SEEKING.search(question or ""))
+
+
+# ---------------------------------------------------------------------------
+# Personal legal predicaments
+# ---------------------------------------------------------------------------
+# The subject-match rule in the answer prompts is a judgement the model re-makes
+# on every request, and it fails on phrasings where the mismatch is subtle.
+# Measured: "…my ITR legal issue…my personal income tax return filing" refuses
+# 3/3, but the shorter "can u advice me ragarding my ITR legal issue i have been
+# facing this year" leaked 3/3 — each time opening "the context DOES address the
+# question's subject" and then serving corporate joint-venture tax-structuring
+# advice (retain a Big Four firm, review your 704(b) allocations) to someone
+# asking about their own tax return. Every sentence true of those opinions; the
+# advice still wrong, because a company's tax structuring is not a person's tax
+# filing and "tax" was the only thing connecting them.
+#
+# A third prompt revision would only move which phrasings fail. This is a
+# deterministic gate instead, and it sits with the other pre-checks rather than
+# inside the pipeline: a question about the user's OWN personal legal
+# predicament is not a question about the documents at all, so there is nothing
+# for retrieval to do and no answer that could be grounded.
+#
+# Deliberately NOT built on the term-presence check above — that mechanism is
+# documented as warning-only on purpose, because the corpus has a real "wrongly
+# said the document is silent" failure and a suppressing gate would worsen it.
+#
+# All three conditions must hold, which is what keeps it off real questions:
+#   1. the matter is a personal-life legal domain this corpus does not hold,
+#   2. it is framed as the USER'S OWN (not "my client's", not a document's),
+#   3. the question names no document.
+
+# Legal domains belonging to an individual's private life. A corpus of
+# commercial agreements, judgments and opinions holds none of them.
+_RX_PERSONAL_DOMAIN = re.compile(
+    r'\b(?:'
+    r'itr\b|income[\s-]?tax[\s-]?return|tax[\s-]?return|tax[\s-]?filing|form\s*16'
+    r'|divorce|alimony|custody|maintenance\s+petition|matrimonial'
+    r'|landlord|tenant|rent\s+agreement|eviction'
+    r'|visa|immigration|passport|citizenship|green\s+card'
+    r'|\bwill\b\s+(?:and|&)\s+testament|probate|inheritance|succession\s+certificate'
+    r'|personal\s+injury|accident\s+claim|insurance\s+claim'
+    r'|criminal\s+case|\bfir\b|bail|police\s+complaint'
+    r'|consumer\s+(?:court|complaint|forum)'
+    r'|provident\s+fund|gratuity|pension'
+    r'|my\s+(?:salary|employer|boss|landlord|marriage|property|flat|house)'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# The matter must be the USER'S OWN. "My client's divorce" is professional use
+# and stays in the normal pipeline; so does any third-party framing.
+_RX_PERSONAL_OWNERSHIP = re.compile(
+    r'\b(?:my|mine|i|me|myself|we|our|us)\b',
+    re.IGNORECASE,
+)
+
+# Professional framing that disqualifies condition 2 — a lawyer asking on behalf
+# of someone else is doing exactly what this tool is for.
+_RX_ON_BEHALF = re.compile(
+    r'\b(?:my|our)\s+client|\bthe\s+client\b|\bon\s+behalf\s+of\b',
+    re.IGNORECASE,
+)
+
+# Any document reference sends it back to the pipeline — "what does my tax
+# indemnity say in SA 2" is a document question wearing personal phrasing.
+_RX_PERSONAL_DOC_REF = re.compile(
+    r'\b(?:clause|section|article|schedule|annexures?|annexes?|exhibit|appendix'
+    # "files" plural only — bare "file" is usually the VERB here ("file an FIR",
+    # "file my return"), and vetoing on it sent personal matters back into the
+    # pipeline, which is the exact failure this gate exists to stop.
+    r'|agreements?|contracts?|nda|sha|jva|msa|sow|deed|documents?|files'
+    r'|workspace|corpus|judgment|opinion|pleading)\b'
+    r'|\b[a-z]{2,}\s*[-_]?\s*\d{1,3}\b',
+    re.IGNORECASE,
+)
+
+
+def _is_personal_matter(question: str) -> bool:
+    """True when the question is about the user's own private legal predicament."""
+    q = (question or "").strip()
+    if not q:
+        return False
+    if not _RX_PERSONAL_DOMAIN.search(q):
+        return False
+    if _RX_ON_BEHALF.search(q):
+        return False
+    if not _RX_PERSONAL_OWNERSHIP.search(q):
+        return False
+    if _RX_PERSONAL_DOC_REF.search(q):
+        return False
+    return True
+
+
+def _personal_matter_answer(session_id: str) -> dict:
+    """Canned scope reply — no LLM call, no retrieval, no tokens.
+
+    Says plainly that this is outside what the workspace can answer, rather than
+    reaching for the nearest corporate document and reasoning from it.
+    """
+    corpus = _corpus_summary(session_id, max_families=4)
+    answer = (
+        "That sounds like a matter about your own situation, and it isn't something "
+        "I can help with here.\n\n"
+        "I can only tell you what the documents loaded into this workspace say"
+        + (f" — {corpus[0].lower() + corpus[1:]}" if corpus else ".")
+        + "\n\nThose are commercial legal documents, so they contain nothing about a "
+        "personal matter like this, and answering from them would mean applying "
+        "terms written for an entirely different situation to yours. For something "
+        "affecting you personally, please speak to a qualified lawyer or adviser "
+        "who can look at your actual facts.\n\n"
+        "If you did mean a document in this workspace, name it and I'll pull it up."
+    )
+    return _canned_payload(answer, "Out of scope", "personal-matter")
+
+
+# ---------------------------------------------------------------------------
+# General legal knowledge
+# ---------------------------------------------------------------------------
+# "What is arbitration?" has no answer in a corpus of executed contracts — they
+# USE the concept, they do not define it — so it retrieved whatever mentioned
+# the word and reported "not covered" at full token cost. Same shape as the meta
+# and social fast-paths above: a question the pipeline structurally cannot
+# answer, recognised before the pipeline runs.
+#
+# Unlike those two, this path costs an LLM call, and its answer is the ONLY
+# output in this system with no document behind it — nothing for
+# _verify_answer_citations to check, no grounding score that would mean
+# anything. That asymmetry drives every design decision here:
+#
+#   * the gates are deterministic regex, in a fixed order, and the LLM tiebreak
+#     runs LAST and only on questions that have already cleared every one of
+#     them — so it can never pull a document question onto this path,
+#   * failing any gate means falling through to the normal pipeline, which is
+#     exactly today's behaviour, so a miss costs nothing new,
+#   * the answer itself is capped and labelled, structurally (a render flag the
+#     frontend reads) rather than trusting the model to say so in prose.
+#
+# It runs BEFORE resolve_scope and carryover deliberately. Placed later, a
+# genuinely general question asked mid-thread ("by the way, what is novation?")
+# would inherit the scope of the document under discussion and be answered as
+# though that document defined the term.
+
+# Definitional / explanatory openers. Anchored at ^ — nothing here matches
+# mid-sentence, so a real question that happens to contain "what is" further in
+# ("tell me the notice period and what is the cure window") never matches.
+_RX_GK_OPENER = re.compile(
+    r'^\s*'
+    r'(?:(?:so|and|but|also|ok(?:ay)?|btw|by\s+the\s+way|just|hey|hi)\b[\s,]*){0,2}'
+    r'(?:(?:can|could|would)\s+you\s+)?(?:please\s+)?'
+    r'(?:'
+    r"what(?:'s|’s|\s+is|\s+are|\s+does|\s+do)\b"
+    r'|what\s+exactly\s+(?:is|are|does|do)\b'
+    r'|what\s+do(?:es)?\s+(?:the\s+)?(?:term|word|phrase)\b'
+    r'|explain\b|define\b|describe\b'
+    r'|tell\s+me\s+(?:what|about|how)\b'
+    r'|how\s+(?:does|do|is|are)\b'
+    r'|(?:the\s+)?(?:meaning|definition|concept|purpose)\s+of\b'
+    r')',
+    re.IGNORECASE,
+)
+
+# Abstract framing consumed off the front of the subject so the definite-article
+# veto below doesn't reject "what is THE doctrine of frustration" — "the" there
+# points at a concept, not at a document.
+_RX_GK_SUBJECT_STRIP = re.compile(
+    r'^\s*(?:the\s+)?(?:doctrine|concept|principle|term|word|phrase|meaning|'
+    r'definition|purpose|idea|notion|rule)\s+of\s+',
+    re.IGNORECASE,
+)
+
+# The subject must be a bare concept. A definite article or a demonstrative
+# means the user is pointing at something specific — "what is THE governing
+# law", "what does THIS mean" — which is a document question in a workspace
+# full of documents, and belongs in the normal pipeline.
+_RX_GK_SUBJECT_VETO = re.compile(
+    r'^\s*(?:the|this|that|these|those|it|its|such|said|above|'
+    r'our|my|your|their|his|her)\b',
+    re.IGNORECASE,
+)
+
+# Anywhere in the question: a reference to the workspace's own material. Wider
+# than strictly necessary — "what is a force majeure clause" is vetoed by
+# `clause` even though it reads general — because the safe direction is the
+# document pipeline, which already answers that well.
+_RX_GK_DOC_REF = re.compile(
+    r'\b(?:'
+    r'clause|section|article|schedule|annexures?|annexes?|annex|exhibit|appendix|recital'
+    r'|documents?|files?|pages?|workspace|corpus|uploaded|attached'
+    r'|nda|sha|jva|msa|sow|deed'
+    r'|part(?:y|ies)|counterpart(?:y|ies)'
+    r'|here|above|earlier|previous(?:ly)?|mentioned|aforesaid'
+    r')\b'
+    r'|\b[a-z]{2,}\s*[-_]?\s*\d{1,3}\b'     # "agreement 2", "sa 01", "nda3"
+    r'|\b\d+(?:\.\d+)+\b'                    # clause numbers — 5.2.1
+    # A demonstrative/possessive next to "agreement"/"contract" points at a
+    # specific document ("in THIS contract", "OUR agreement") even though
+    # neither bare word is a reliable veto on its own — "what is a service
+    # agreement" is a genuine general question. Confirmed live: "what does
+    # force majeure mean in this contract" cleared every other gate and was
+    # answered as a textbook definition, never touching retrieval, silently
+    # discarding the one word in the question that pointed at an actual file.
+    r'|\b(?:this|that|these|those|our|my|the)\s+(?:agreements?|contracts?)\b',
+    re.IGNORECASE,
+)
+
+# Hard block, checked before anything else can let a question through. This is
+# the gate that keeps the carve-out from becoming a legal-advice channel, so it
+# is deliberately over-broad: it blocks "what is legal advice" along with the
+# cases it exists for, and blocking those costs only a fall-through to the
+# normal pipeline.
+#
+# First-person framing is the signal. A genuine general-knowledge question
+# needs no "I" or "my" — "explain to me what novation is" survives (the block
+# is on first-person SUBJECTS and possessives, not the object of "tell/explain
+# me"), while "what does novation mean for my contract" does not.
+#
+# A former line here also bare-matched compl(y|ies|iant|iance) — no
+# self-reference required — reasoning that a "fall-through" was a harmless
+# cost. Confirmed live it was not: "what is compliance?" fell through, named no
+# document, disambiguated three times, and finally answered from an unrelated
+# document instead of the one the conversation had just established. Removed;
+# every self-referential compliance phrasing this was meant to catch ("are we
+# compliant", "is our data GDPR compliant") is already covered by the pronoun
+# lines above, since it always pairs "compliant/comply" with my/our/we/are-we —
+# the bare word alone was doing no real work, only causing this failure.
+_RX_GK_ADVICE_BLOCK = re.compile(
+    r'\b(?:my|mine|our|ours|myself|ourselves)\b'
+    r"|\b(?:i|we)\s*(?:'m|'re|'ve|'ll|'d)\b"
+    r'|\b(?:i|we)\s+(?:am|are|was|were|have|had|has|need|want|think|face|faced|'
+    r"facing|got|get|do|don'?t|did|didn'?t|should|shall|can|could|may|might|must|"
+    r'will|would|filed?|signed?|received?|paid|owe|run|own|work|live)\b'
+    r'|\b(?:should|shall|can|could|may|must|do|does|did|will|would|am|are|is)\s+'
+    r'(?:i|we|one)\b'
+    r'|\bin\s+(?:my|our|this|that)\s+(?:case|situation|matter|position)\b'
+    r'|\bwhat\s+should\b'
+    r'|\badvi[cs]e\b|\brecommend\w*\b'
+    r'|\bsue\b|\bsuing\b|\blawsuit\b'
+    r'|\bapplies?\s+to\s+(?:me|us)\b',
+    re.IGNORECASE,
+)
+
+# Legal vocabulary the subject must contain for the regex path to fire. Not
+# exhaustive by design and never will be — the LLM tiebreak below exists
+# precisely to cover the terms this list misses ("what is laches"). Kept to
+# concepts, doctrines and procedures; deliberately excludes bare "law"/"legal",
+# which appear in far too many document questions to be a reliable signal.
+_RX_GK_LEGAL_TERM = re.compile(
+    r'\b(?:'
+    # Dispute resolution and procedure
+    r'arbitrat\w*|mediat\w*|conciliat\w*|litigat\w*|adjudicat\w*|tribunals?|'
+    r'injunct\w*|subpoenas?|depositions?|discovery|pleadings?|affidavits?|'
+    r'plaintiffs?|defendants?|appellants?|respondents?|claimants?|'
+    r'jurisdictions?|appeals?|writs?|decrees?|summons|'
+    r'class\s+action|due\s+process|burden\s+of\s+proof|statutes?\s+of\s+limitations?|'
+    r'limitation\s+period|res\s+judicata|locus\s+standi|prima\s+facie|'
+    # Contract law
+    r'contracts?|consideration|privity|novation|assignments?|'
+    r'rescission|rescind\w*|repudiat\w*|frustration|force\s+majeure|'
+    r'conditions?\s+precedent|indemnit\w*|indemnif\w*|warrant\w*|covenants?|'
+    r'guarantees?|suret\w*|liquidated\s+damages|specific\s+performance|'
+    r'severab\w*|waivers?|estoppel|breach\w*|boilerplate|'
+    r'non[\s-]?compete|non[\s-]?disclosure|confidentialit\w*|'
+    # Liability, tort, remedies
+    r'liabilit\w*|neglig\w*|torts?|damages|remed\w*|restitution|'
+    r'vicarious|strict\s+liability|duty\s+of\s+care|causation|mitigat\w*|'
+    r'unjust\s+enrichment|nuisance|defamation|misrepresentation|'
+    # Corporate and commercial
+    r'fiduciar\w*|due\s+diligence|escrow|liens?|mortgages?|pledges?|'
+    r'shareholders?|incorporat\w*|winding\s+up|insolvenc\w*|'
+    r'bankrupt\w*|liquidation|mergers?|acquisitions?|joint\s+ventures?|'
+    r'partnerships?|limited\s+liability|piercing\s+the\s+(?:corporate\s+)?veil|'
+    # Intellectual property
+    r'copyrights?|trade\s?marks?|patents?|trade\s+secrets?|'
+    r'intellectual\s+propert\w*|licens\w*|royalt\w*|infring\w*|moral\s+rights|'
+    # Property and employment
+    r'leases?|tenanc\w*|landlords?|easements?|freehold|leasehold|conveyanc\w*|'
+    r'redundanc\w*|wrongful\s+dismissal|'
+    # Jurisprudence
+    r'justice|equit\w*|jurisprudence|common\s+law|civil\s+law|'
+    r'legislation|precedents?|stare\s+decisis|rule\s+of\s+law|natural\s+justice|'
+    r'good\s+faith|bona\s+fide|ultra\s+vires|mens\s+rea|actus\s+reus'
+    r')\b',
+    re.IGNORECASE,
+)
+
+# Same cap as the meta fallback, for the same reason: a genuine definitional
+# question is short, and a long message this deep into the gates is not one.
+_GK_LLM_MAX_LEN = 120
+
+_GK_LLM_PROMPT = (
+    "A user asked a definition-style question. Decide whether its subject is a "
+    "LEGAL term, doctrine, or procedure — something you would find in a law "
+    "dictionary or a legal textbook — or something else entirely.\n\n"
+    'Question: "{question}"\n\n'
+    'Respond with ONLY one word: "legal" or "other".'
+)
+
+
+def _gk_subject(question: str) -> str | None:
+    """The concept a definitional question is about, or None if it isn't one.
+
+    Returns the text after the opener, with abstract framing ("the doctrine
+    of…") removed. None means the question never looked definitional in the
+    first place, or its subject points at something specific rather than at a
+    concept.
+    """
+    m = _RX_GK_OPENER.match(question or "")
+    if not m:
+        return None
+    subject = _RX_GK_SUBJECT_STRIP.sub("", question[m.end():]).strip()
+    # Drop the trailing verb/punctuation a definitional question ends on, so
+    # "arbitration work?" reduces to the concept itself.
+    subject = re.sub(r'\s*(?:mean(?:s|ing)?|work(?:s)?|entail|involve(?:s)?)?\s*[?.!]*\s*$',
+                     '', subject, flags=re.IGNORECASE).strip()
+    if not subject or _RX_GK_SUBJECT_VETO.match(subject):
+        return None
+    return subject
+
+
+def _is_general_knowledge_llm(question: str) -> bool:
+    """Cheap tiebreak for a legal term the vocabulary regex doesn't list.
+
+    Only ever reached after every deterministic gate has passed — definitional
+    phrasing, no document reference, no advice framing, short. So the worst it
+    can do is decline to answer a general question (identical to today), never
+    divert a document question onto the general path.
+    """
+    try:
+        raw, _ = llm.ask(
+            _GK_LLM_PROMPT.format(question=question),
+            fast=True, max_tokens=config.MAX_TOKENS_META_CLASSIFY,
+        )
+        return raw.strip().lower().startswith("legal")
+    except Exception as e:
+        logger.warning("General-knowledge LLM tiebreak failed: %s", e)
+        return False
+
+
+def _general_knowledge_kind(question: str) -> str:
+    """'gk-regex' | 'gk-llm' | '' — which gate, if any, claims this question.
+
+    Every gate must pass. Order matters only for cost: the advice block runs
+    before the vocabulary check so an advice-seeking question is rejected
+    without ever being scored as legal.
+    """
+    if not config.ENABLE_GENERAL_KNOWLEDGE:
+        return ""
+    q = (question or "").strip()
+    if not q:
+        return ""
+    if _RX_GK_DOC_REF.search(q):
+        return ""
+    if _RX_GK_ADVICE_BLOCK.search(q) or _is_advice_seeking(q):
+        return ""
+    subject = _gk_subject(q)
+    if subject is None:
+        return ""
+    if _RX_GK_LEGAL_TERM.search(subject):
+        return "gk-regex"
+    if not config.ENABLE_GK_LLM_FALLBACK or len(q) > _GK_LLM_MAX_LEN:
+        return ""
+    return "gk-llm" if _is_general_knowledge_llm(q) else ""
+
+
+# Appended by code, not asked of the model. A label the model has to remember
+# to write is a label it will eventually omit, and this one carries the whole
+# distinction between a checkable answer and an unchecked one.
+_GK_FOOTER = (
+    "\n\n---\n\n*This is general legal information, not drawn from the documents "
+    "in this workspace and not checked against them. It is not legal advice — for "
+    "anything touching your own situation, consult a qualified lawyer.*"
+)
+
+# Belt-and-braces on the prompt's "no References section, no confidence score"
+# rules: the model has seen those sections in every other prompt in this file
+# and occasionally emits them out of habit. They are meaningless here — there
+# is nothing to reference — so they are stripped rather than rendered.
+_RX_GK_STRIP_TAIL = re.compile(
+    r'\n+\s*(?:#{1,4}\s*)?(?:\*\*)?(?:References?|Sources?|CONFIDENCE_SCORE|'
+    r'CONFIDENCE_REASON)\b.*$',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _general_knowledge_aside(question: str) -> str:
+    """Short general definition to sit BESIDE a document-grounded answer.
+
+    Returns "" on any failure — the aside is an addition, so losing it must
+    never cost the user the grounded answer it accompanies.
+    """
+    from services.prompts import GENERAL_KNOWLEDGE_ASIDE_PROMPT
+
+    try:
+        raw, _ = llm.ask(
+            GENERAL_KNOWLEDGE_ASIDE_PROMPT.format(question=question),
+            max_tokens=config.MAX_TOKENS_GENERAL_KNOWLEDGE,
+        )
+    except Exception as e:
+        logger.error("General-knowledge aside failed: %s", e)
+        return ""
+    text = _RX_GK_STRIP_TAIL.sub("", (raw or "").strip()).strip()
+    if not text:
+        return ""
+    # A citation marker here would be a lie — nothing was retrieved for this
+    # text. Strip rather than render one next to genuinely cited prose.
+    text = re.sub(r'\[\d+\]', '', text).strip()
+    if len(text) > _GK_ASIDE_MAX_CHARS:
+        text = text[:_GK_ASIDE_MAX_CHARS].rsplit(" ", 1)[0] + "…"
+    return text
+
+
+# The aside is a margin note beside a real answer. A long one starts competing
+# with the cited content for attention, which is exactly the confusion the
+# separate field exists to prevent.
+_GK_ASIDE_MAX_CHARS = 900
+
+
+def _general_knowledge_answer(question: str, method: str) -> dict | None:
+    """Answer a general legal-knowledge question — no retrieval, no citations.
+
+    Returns None if the call fails or comes back empty, in which case the caller
+    falls through to the normal pipeline rather than showing an error.
+    """
+    from services.prompts import GENERAL_KNOWLEDGE_PROMPT
+
+    try:
+        raw, usage = llm.ask(
+            GENERAL_KNOWLEDGE_PROMPT.format(question=question),
+            max_tokens=config.MAX_TOKENS_GENERAL_KNOWLEDGE,
+        )
+    except Exception as e:
+        logger.error("General-knowledge generation failed: %s", e)
+        return None
+
+    text = _RX_GK_STRIP_TAIL.sub("", (raw or "").strip()).strip()
+    if not text:
+        logger.warning("General-knowledge generation returned nothing — falling through")
+        return None
+
+    payload = _canned_payload(text + _GK_FOOTER, "General", method)
+    # Reuses the meta render path (no confidence, no grounding, no References —
+    # none of which exist here), and adds the flag the frontend keys the
+    # general-knowledge banner and tag off.
+    payload["general_knowledge"] = True
+    payload["confidence_score"] = 0        # not 100 — there is nothing to be confident against
+    payload["intent_confidence"] = 1.0
+    # llm.ask returns prompt/completion counts only — no total — so it is summed
+    # here rather than read with a .get that would silently report every
+    # general-knowledge answer as costing zero tokens.
+    _prompt_tok = (usage or {}).get("prompt_tokens", 0) or 0
+    _completion_tok = (usage or {}).get("completion_tokens", 0) or 0
+    payload["token_total"] = {
+        "prompt_tokens": _prompt_tok,
+        "completion_tokens": _completion_tok,
+        "total_tokens": _prompt_tok + _completion_tok,
     }
+    return payload
 
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
@@ -1178,15 +2375,92 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
 
     exclude_cached_answers: QA/testing option — see wiki.get_context().
     """
+    # Greetings and sign-offs short-circuit before the graph. Unlike the meta
+    # path below this one DOES run on follow-ups — "thanks" after an answer is
+    # exactly when it happens — and it is safe there because every pattern is a
+    # whole-message match.
+    social = _social_query_kind(question)
+    if social:
+        logger.info("[AGENT] social fast-path (%s, 0 tokens): %r", social, (question or "")[:40])
+        yield {"stage": "complete", "status": "done", "type": "answer",
+               "payload": _social_answer(social, session_id), "message": "Done"}
+        return
+
     # Meta questions short-circuit before the graph — no classify, no retrieve,
     # no generate, no validate. Skipped for follow-ups, where a bare "help" is
     # far more likely to be an answer to a previous prompt than a fresh request
     # for capabilities.
-    if not is_followup and _is_meta_query(question):
-        logger.info("[AGENT] meta query fast-path (0 tokens): %r", (question or "")[:80])
+    if not is_followup and _is_meta_query_extended(question):
+        logger.info("[AGENT] meta query fast-path: %r", (question or "")[:80])
         yield {"stage": "complete", "status": "done", "type": "answer",
                "payload": _meta_answer(session_id), "message": "Done"}
         return
+
+    # General legal-knowledge questions ("what is arbitration") answer from a
+    # separate path with no retrieval — see _general_knowledge_kind. Placed here
+    # for a reason: everything below this line resolves document scope, and a
+    # general question that reaches resolve_scope inherits whatever document the
+    # thread was last about and gets answered as though that document defined
+    # the term.
+    #
+    # Unlike the meta path above, this DOES run on follow-ups — "by the way,
+    # what is novation?" mid-thread is exactly when these get asked. That is
+    # safe because the gates require a named legal concept as the subject and
+    # veto every demonstrative, so a follow-up that depends on the previous turn
+    # ("what does that mean?") can never match.
+    # A question about the user's own personal legal predicament has no answer
+    # in a corpus of commercial agreements, and letting it reach retrieval is
+    # how corporate tax-structuring advice ended up answering a personal tax
+    # question. Runs on follow-ups too — that is exactly how it was reported.
+    if _is_personal_matter(question):
+        logger.info("[AGENT] personal-matter fast-path (0 tokens): %r", (question or "")[:80])
+        yield {"stage": "complete", "status": "done", "type": "answer",
+               "payload": _personal_matter_answer(session_id), "message": "Done"}
+        return
+
+    gk_method = _general_knowledge_kind(question)
+
+    # "What does indemnify mean?" asked cold is a general question. Asked three
+    # turns into a thread about one agreement, the user wants BOTH: how their
+    # document uses the term, and what it means generally. Taking the standalone
+    # path there answers only half and silently drops the document they were
+    # discussing.
+    #
+    # So when the thread already has a document, the question goes to the normal
+    # pipeline — grounded and cited exactly as before, with the prompts
+    # untouched — and the general meaning is attached afterwards as a separate
+    # field. Keeping it out of the grounded prompt is deliberate: a labelled
+    # aside woven INTO cited prose is how a general sentence ends up wearing a
+    # citation number it has no right to.
+    gk_aside_wanted = False
+    if gk_method:
+        _gk_chat_sid = chat_session_id or session_id
+        try:
+            if wiki.has_established_document_scope(_gk_chat_sid):
+                gk_aside_wanted = True
+                gk_method = ""
+        except Exception as e:
+            logger.warning("Could not check document scope for GK aside: %s", e)
+
+    if gk_method:
+        logger.info("[AGENT] general-knowledge fast-path (%s): %r",
+                    gk_method, (question or "")[:80])
+        yield {"stage": "generating", "status": "active",
+               "message": "Answering from general legal knowledge…"}
+        gk_payload = _general_knowledge_answer(question, gk_method)
+        if gk_payload:
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": gk_payload, "message": "Done"}
+            return
+        # Generation failed or came back empty — fall through to the normal
+        # pipeline rather than surfacing an error.
+        logger.info("[AGENT] general-knowledge path yielded nothing — using normal pipeline")
+
+    # Decided once, up front: the notice is attached to the terminal answer event
+    # below rather than inside a node, so no graph node's behaviour changes.
+    advice_seeking = _is_advice_seeking(question)
+    if advice_seeking:
+        logger.info("[AGENT] advice-seeking phrasing — attaching disclaimer")
 
     graph = get_query_graph()
     state: QueryState = {
@@ -1199,4 +2473,16 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
+        if chunk.get("type") == "answer" and isinstance(chunk.get("payload"), dict):
+            if advice_seeking:
+                chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
+            # Attached to the finished payload, never merged into the answer
+            # text — the separation between cited and general content is
+            # structural, not a formatting convention the model has to honour.
+            if gk_aside_wanted:
+                _aside = _general_knowledge_aside(question)
+                if _aside:
+                    chunk["payload"]["general_knowledge_note"] = _aside
+                    logger.info("[AGENT] attached general-knowledge aside (%d chars)",
+                                len(_aside))
         yield chunk
