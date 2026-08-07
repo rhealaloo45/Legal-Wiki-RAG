@@ -4797,6 +4797,257 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     return set()
 
 
+# Document-type words a question uses to single out ONE instrument between two
+# parties, mapped to the parenthetical ingest appends to that document's page
+# titles ("… – Aether-Helios (Verified Complaint)"). Ordered most-specific
+# first: "amended complaint" and "verified complaint" must both be tested
+# before the bare "complaint" that each of them contains, or the general
+# pattern would claim the phrase and point at the wrong pleading.
+_TITLE_KIND_HINTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'amended\s+complaint', re.I),                  'Amended Complaint'),
+    (re.compile(r'verified\s+complaint', re.I),                 'Verified Complaint'),
+    (re.compile(r'opposition\s+brief', re.I),                   'Opposition Brief'),
+    (re.compile(r'reply\s+brief', re.I),                        'Reply Brief'),
+    (re.compile(r'(?:court\s+)?transcript', re.I),              'Transcript'),
+    (re.compile(r'\baffidavit\b', re.I),                        'Affidavit'),
+    (re.compile(r'settlement\s+agreement', re.I),               'Settlement'),
+    (re.compile(r'preliminary\s+injunction|injunction\s+motion', re.I), 'Injunction'),
+    (re.compile(r'judg[e]?ment', re.I),                         'Judgment'),
+    (re.compile(r'joint\s+venture', re.I),                      'Joint Venture'),
+    (re.compile(r'shareholders?\s+agreement', re.I),            'Shareholder'),
+    (re.compile(r'non[-\s]?disclosure|\bnda\b', re.I),          'NDA'),
+    (re.compile(r'services?\s+agreement', re.I),                'Services Agreement'),
+    (re.compile(r'\bcounterclaims?\b|\banswer\b', re.I),        '(Answer)'),
+    (re.compile(r'\bcomplaint\b', re.I),                        'Complaint'),
+]
+
+# Corporate-form and generic descriptor words that are NOT the distinctive part
+# of a party name. Ingest coins its matter short-name from the first
+# distinctive word ("Aether Technologies Inc." → "Aether"), so stripping these
+# leaves the token that actually appears in the page titles.
+_PARTY_GENERIC_WORDS = frozenset({
+    'private', 'limited', 'ltd', 'pvt', 'pte', 'llp', 'llc', 'inc', 'corp',
+    'corporation', 'plc', 'gmbh', 'company', 'co', 'group', 'holdings',
+    'technologies', 'technology', 'systems', 'solutions', 'services',
+    'energy', 'industries', 'international', 'global', 'partners', 'ventures',
+})
+
+
+def _distinctive_party_token(name: str) -> str:
+    """The one word of a party name that identifies the party.
+
+    "Aether Technologies Inc." → "Aether"; "Helios Energy Corporation" →
+    "Helios". Ingest builds each document's matter short-name from this same
+    leading distinctive word, which is what makes the token matchable against
+    page titles. Returns "" when nothing distinctive survives (a name made
+    entirely of generic words), so the caller can skip it rather than search
+    for a word that would match half the corpus.
+    """
+    for word in re.split(r'[^A-Za-z0-9]+', name or ''):
+        if len(word) >= 3 and word.lower() not in _PARTY_GENERIC_WORDS:
+            return word
+    return ""
+
+
+# Capitalised words that are NOT party names, used to filter the bare-name
+# fallback below. Question openers, forum/procedure vocabulary, and instrument
+# abbreviations all get capitalised in ordinary legal phrasing ("in the Court
+# of Chancery", "breach of the JVA") and would otherwise be mistaken for the
+# second party of a pair.
+_QUESTION_COMMON_WORDS = frozenset({
+    'what', 'who', 'whom', 'whose', 'which', 'when', 'where', 'why', 'how',
+    'the', 'this', 'that', 'these', 'those', 'and', 'but', 'for', 'from',
+    'did', 'does', 'was', 'were', 'has', 'have', 'are', 'its', 'their',
+    'court', 'chancery', 'state', 'delaware', 'district', 'supreme', 'high',
+    'civil', 'criminal', 'action', 'suit', 'lawsuit', 'litigation', 'case',
+    'matter', 'section', 'clause', 'schedule', 'exhibit', 'annexure',
+    'agreement', 'contract', 'deed', 'amendment', 'addendum',
+    'jva', 'nda', 'sha', 'sow', 'msa', 'spa', 'ira', 'llp', 'llc',
+    'plaintiff', 'defendant', 'petitioner', 'respondent', 'appellant',
+    'complaint', 'answer', 'counterclaim', 'counterclaims', 'defense',
+    'defence', 'defenses', 'defences', 'motion', 'brief', 'affidavit',
+    'judgment', 'judgement', 'order', 'decree', 'verdict', 'counsel',
+    'esq', 'inc', 'ltd', 'corp', 'plc', 'gmbh', 'pvt', 'pte',
+})
+
+# An adversarial caption names both sides with no corporate suffix on either
+# ("the Aether v. Helios litigation"). _PARTY_NAME_RE's suffix anchor cannot
+# see them, so the pair resolver would find at most one party and give up.
+_CASE_CAPTION_RE = re.compile(
+    r'\b([A-Z][A-Za-z0-9&.\-]{2,})\s+(?:v\.?|vs\.?|versus)\s+([A-Z][A-Za-z0-9&.\-]{2,})\b'
+)
+
+# The other two ways a question puts two parties in an explicit relationship
+# without captioning them: a claim asserted "against" the other side, and an
+# instrument struck "between" them. Both keep the second party in the pattern;
+# the first is recovered by scanning backwards (see _bare_party_tokens).
+_AGAINST_RE = re.compile(r'\bagainst\s+([A-Z][A-Za-z0-9&.\-]{2,})')
+_BETWEEN_AND_RE = re.compile(
+    r'\bbetween\s+([A-Z][A-Za-z0-9&.\-]{2,})(?:[^.?!]{0,60}?)\s+and\s+([A-Z][A-Za-z0-9&.\-]{2,})'
+)
+
+_CAPITALISED_WORD_RE = re.compile(r'\b[A-Z][A-Za-z0-9&.\-]*\b')
+
+
+def _is_party_like(word: str) -> bool:
+    """Could this capitalised word be a party's short-name?"""
+    w = (word or '').rstrip('.').lower()
+    return (len(w) >= 3
+            and w not in _QUESTION_COMMON_WORDS
+            and w not in _PARTY_GENERIC_WORDS)
+
+
+def _bare_party_tokens(question: str) -> list[str]:
+    """Party short-names a question states WITHOUT a corporate suffix.
+
+    Complements ``_distinctive_party_token``, which only ever sees names
+    carrying a corporate suffix. Lawyers drop the suffix once a matter is
+    under discussion ("what damages did Helios claim against Aether"), and an
+    adversarial caption never carries one at all.
+
+    Only words standing in an EXPLICIT two-party relationship count — "X v.
+    Y", a claim "against Y", an instrument "between X and Y". An earlier
+    version simply harvested every capitalised word that was not a common
+    legal term, on the theory that the caller's title-match would filter the
+    rest; it does not. Capitalised topic words co-occur in page titles just
+    fine, so "Summarize the Joint Venture Agreement" resolved <Joint, Venture>
+    and pinned two arbitrary JVAs instead of scoping to the family, and "What
+    are Reserved Matters and Board Approval thresholds?" pinned an unrelated
+    judgment. Requiring a relational construction is what separates naming two
+    PARTIES from naming one TOPIC in title case.
+    """
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    def add(word: str) -> None:
+        w = (word or '').rstrip('.')
+        if w and w.lower() not in seen and _is_party_like(w):
+            seen.add(w.lower())
+            tokens.append(w)
+
+    for m in _CASE_CAPTION_RE.finditer(question or ''):
+        add(m.group(1))
+        add(m.group(2))
+    for m in _BETWEEN_AND_RE.finditer(question or ''):
+        add(m.group(1))
+        add(m.group(2))
+    for m in _AGAINST_RE.finditer(question or ''):
+        add(m.group(1))
+        # The claimant is whatever party-like name last appeared before
+        # "against" — "damages did HELIOS claim in its counterclaim … against
+        # Aether". Taking the nearest one avoids latching onto the sentence's
+        # capitalised opening word ("What", "Who"), which is grammar.
+        prior = [w for w in _CAPITALISED_WORD_RE.findall(question[:m.start()])
+                 if _is_party_like(w)]
+        if prior:
+            add(prior[-1])
+    return tokens
+
+
+def _resolve_docs_by_party_pair(question: str, session_id: str,
+                                max_docs: int = 6) -> set[str]:
+    """Resolve the documents of a matter named by BOTH of its parties.
+
+    ``_resolve_docs_by_party`` above scores each party name INDEPENDENTLY and
+    keeps the single most distinctive one — it never intersects them. That is
+    the right call for "the JV with Cold Chain Energy Services", where one
+    party is the whole signal, but it cannot resolve an adversarial pair:
+    asked about "the lawsuit filed by Aether Technologies Inc. against Helios
+    Energy Corporation", each name alone spans ~115 documents, both exceed the
+    max_docs cap, and the function returns nothing. Scope then falls through
+    to an unscoped corpus search.
+
+    Confirmed live, and the reason this exists: that exact question answered
+    "not covered" for a civil action number sitting in the retrieved corpus,
+    and the companion question about plaintiff's counsel cited an unrelated
+    NDA between entirely different parties. Both documents were indexed and
+    both contained the answer verbatim — retrieval simply never scoped to them.
+
+    Intersecting on page CONTENT does not fix this, because litigation
+    documents recite the opposing side's officers in their discovery
+    paragraphs: on this corpus a content-intersection of the two names still
+    matched 76 of ~115 documents. Intersecting on page TITLES does, because
+    ingest writes the matter's own short-name into every title it creates —
+    that drops the same corpus to the 20 instruments actually between those
+    parties, and adding the document-type word the question already supplies
+    ("the verified complaint") pins it to exactly one.
+
+    Returns an empty set unless at least two distinct parties are named AND
+    the resolved cluster is non-empty and within ``max_docs`` — so it only
+    ever ADDS precision where scope currently resolves to nothing at all.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    tokens: list[str] = []
+    for n in names:
+        tok = _distinctive_party_token(n)
+        if tok and tok.lower() not in {t.lower() for t in tokens}:
+            tokens.append(tok)
+    if len(tokens) < 2:
+        # Only one side carried a corporate suffix (or neither did). Fall back
+        # to bare capitalised short-names, which is how a matter gets referred
+        # to once it is under discussion ("the Aether v. Helios litigation",
+        # "what damages did Helios claim against Aether"). Suffix-derived
+        # tokens stay first so the strongest signal still leads.
+        for tok in _bare_party_tokens(question):
+            if tok.lower() not in {t.lower() for t in tokens}:
+                tokens.append(tok)
+    if len(tokens) < 2:
+        return set()
+    # More than a handful of capitalised words means this is prose, not a
+    # two-party reference — requiring ALL of them in one title would either
+    # match nothing or match by accident.
+    tokens = tokens[:3]
+
+    try:
+        cluster = {d for d in _db.find_source_docs_by_title_tokens(
+            session_id, tokens, cap=max_docs * 5) if d}
+    except Exception as e:
+        logger.error("resolve_scope: party-pair title lookup failed: %s", e)
+        return set()
+    if not cluster:
+        return set()
+    if len(cluster) <= max_docs:
+        logger.info("Party-pair title match %s → %d document(s): %s",
+                    tokens, len(cluster), {_norm_doc_name(d) for d in cluster})
+        return cluster
+
+    # Cluster is the whole matter (every instrument between these parties).
+    # Narrow it the way the question already distinguishes them — first by the
+    # instrument it names outright ("the verified complaint"), then, for a
+    # question that names the matter but no instrument ("the LAWSUIT filed by
+    # X against Y"), by the document family the phrasing implies.
+    for rx, hint in _TITLE_KIND_HINTS:
+        if not rx.search(question):
+            continue
+        try:
+            narrowed = {d for d in _db.find_source_docs_by_title_tokens(
+                session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+        except Exception:
+            narrowed = set()
+        if narrowed and len(narrowed) <= max_docs:
+            logger.info("Party-pair title match %s + kind %r → %d document(s): %s",
+                        tokens, hint, len(narrowed),
+                        {_norm_doc_name(d) for d in narrowed})
+            return narrowed
+        break
+
+    try:
+        available = set(_db.list_doc_families(session_id))
+        fam = _detect_question_family(question, available)
+        fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+    except Exception as e:
+        logger.error("resolve_scope: party-pair family narrowing failed: %s", e)
+        fam_docs = set()
+    narrowed = cluster & fam_docs
+    if narrowed and len(narrowed) <= max_docs:
+        logger.info("Party-pair title match %s + family → %d document(s): %s",
+                    tokens, len(narrowed), {_norm_doc_name(d) for d in narrowed})
+        return narrowed
+    return set()
+
+
 # Distinct legal-instrument categories a question may name. Counting how many
 # DIFFERENT categories appear tells scope resolution whether a question about a
 # named party wants ONE of its instruments (summarise "the NordForge NDA") or a
@@ -4891,8 +5142,8 @@ _BACKREF_PRONOUN_RE = re.compile(
 # guards remain the exits, and every carried turn discloses itself. "carryover-set"
 # is included for the same reason: a comparison thread that established its set
 # should keep it for subsequent follow-ups, not only the turn that resolved it.
-_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "entity",
-                                     "carryover", "carryover-set"})
+_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "party-pair",
+                                     "entity", "carryover", "carryover-set"})
 
 # How many answers back to look for the turn whose scope should be inherited.
 # NOT a widening of what may be inherited — see _last_document_turn. Bounded so a
@@ -5151,6 +5402,25 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             return {"scope": "single_doc", "target_docs": sorted(narrowed),
                     "target_family": None, "is_broad": False,
                     "confidence": 0.8, "method": "party"}
+
+    # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
+    # Energy Corporation"). The single-party resolver above cannot reach this:
+    # each name on its own spans far more documents than its cap allows, so it
+    # returns nothing and scope would fall through to an unscoped corpus search
+    # that has repeatedly failed to surface the right document. Runs only after
+    # every stronger single-document signal has passed, and returns a set at
+    # all only when both parties resolve to a small shared cluster.
+    try:
+        pair_docs = _resolve_docs_by_party_pair(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party-pair resolution failed: %s", e)
+        pair_docs = set()
+    if pair_docs:
+        return {"scope": "single_doc", "target_docs": sorted(pair_docs),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
+                "method": "party-pair"}
+
     if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
         # Resolve the concrete document(s) the entity points at so retrieval can
         # scope STRICTLY to them. A single-instrument question (e.g. "summarise
