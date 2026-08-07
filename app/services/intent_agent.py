@@ -508,6 +508,21 @@ def check_disambiguation_node(state: QueryState) -> dict:
         except Exception as e:
             logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
 
+    # A question that names BOTH sides of a matter ("damages Helios claimed in
+    # its counterclaim against Aether") is not ambiguous — it identifies one
+    # matter precisely — but classify_query below sees no document NUMBER and
+    # no single dominant party, and asks anyway. wiki._resolve_docs_by_party_pair
+    # resolves exactly this case deterministically, so consult it first and skip
+    # the question when it pins a concrete document set. Same shape as the
+    # carryover skips above: a deterministic resolver pre-empting an LLM
+    # ambiguity judgment that has no way to see what it saw.
+    try:
+        if wiki._resolve_docs_by_party_pair(state["question"], state["session_id"]):
+            logger.info("[AGENT] disambiguation skipped (party-pair scope resolved)")
+            return {"needs_disambiguation": False}
+    except Exception as e:
+        logger.error("Party-pair disambiguation check failed: %s", e)
+
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
         result = wiki.classify_query(state["question"], state["session_id"])
