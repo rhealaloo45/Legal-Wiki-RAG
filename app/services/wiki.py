@@ -2700,6 +2700,89 @@ def _strip_placeholder_quotes(answer: str) -> str:
     return _PLACEHOLDER_QUOTE_RE.sub('', answer)
 
 
+# An identifier-style LABEL, checked WITHOUT requiring immediate proximity to
+# a code — real phrasing routinely restates the whole question between label
+# and value ("The matter reference number for the NDA between Tata Steel
+# Limited and NordForge Metallurgy GmbH is TSL/GREENSTEEL/2025/219"), which a
+# proximity-anchored regex cannot bridge. Presence of this label ANYWHERE in
+# the answer is the trigger; _CODE_SHAPED_TOKEN_RE below then independently
+# finds candidate values.
+_IDENTIFIER_LABEL_RE = re.compile(
+    r'\b(?:matter\s*ref(?:erence)?(?:\s*(?:no\.?|number))?|docket\s*(?:no\.?|number)|'
+    r'case\s*(?:no\.?|number)|filing\s*(?:id|reference|number)|'
+    r'reference\s*(?:no\.?|number))\b',
+    re.IGNORECASE,
+)
+
+# A code-shaped token: 3+ segments joined by "/" or "-", each alphanumeric.
+# Requires at least one letter somewhere (so it can't match a bare number like
+# a page range "10-20") and at least one segment of 2+ chars (so it can't
+# match a bare clause locator like "8-1" or "5-3"). Real observed shapes:
+# "TSPL/LEGALOPS/2025/058", "CS/331/2025", "2025-CV-0041".
+_CODE_SHAPED_TOKEN_RE = re.compile(
+    r'\b[A-Za-z0-9]{2,15}(?:[/\-][A-Za-z0-9]{2,15}){2,5}\b'
+)
+
+
+def _verify_identifier_claims(answer: str, context: str) -> list[str]:
+    """Deterministically catch a fabricated matter-reference/docket/case-number
+    value — a different failure shape from a fabricated QUOTE, and confirmed to
+    slip past _verify_answer_citations: the model states a plausible-looking
+    code as fact (often with no surrounding quotation marks at all, e.g. "The
+    matter reference is TCPL/PORTFOLIO/2025/211"), so the quote-span check
+    never sees it as a quote to verify in the first place. A prompt-level rule
+    telling the model not to do this was added first and did NOT stop it on
+    live retest (same two codes reproduced deterministically on fresh, non-
+    cached generations) — this is the same "prompt guidance alone has a
+    residual failure rate, back it with a deterministic check" pattern already
+    used throughout this file for quotes/attribution/party-name fabrication.
+
+    Only scans the answer at all when an identifier LABEL is present somewhere
+    in it — a bare code-shaped token with no such label nearby is far more
+    likely to be a real clause/case citation the answer is legitimately
+    quoting (e.g. "CS(COMM) 331/2025" in a court-case answer) than a matter
+    reference, so this stays narrow to the one confirmed fabrication shape
+    rather than becoming a general code-shaped-token checker.
+
+    Case-sensitive exact-substring match against the raw context (these are
+    formatted codes, not prose — case matters and normalisation would risk
+    false-clearing a wrong code that only differs by case). Returns the list
+    of CODE values that do not appear anywhere in the retrieved context; a
+    genuine code that IS in context (confirmed live: SA4/Redwood's real
+    "TSPL/LEGALOPS/2025/058") is correctly left alone.
+    """
+    if not answer or not context or not _IDENTIFIER_LABEL_RE.search(answer):
+        return []
+    # Collapse incidental whitespace around "/" and "-" separators for the
+    # comparison only (never for anything that would change verification
+    # elsewhere) — a genuine code in context formatted with stray spacing
+    # ("TSPL/ LEGALOPS /2025/ 058") must not be treated as fabricated just
+    # because the model reproduced it without the spacing.
+    context_tight = re.sub(r'\s*([/\-])\s*', r'\1', context)
+    unverified = []
+    for m in _CODE_SHAPED_TOKEN_RE.finditer(answer):
+        code = m.group(0)
+        if code in unverified:
+            continue
+        if code not in context and code not in context_tight:
+            unverified.append(code)
+    return unverified
+
+
+def _strip_fabricated_identifiers(answer: str, codes: list[str]) -> str:
+    """Replace each fabricated identifier CODE wherever it appears in the
+    answer with an honest placeholder, so the invented value cannot survive
+    into the visible answer even if a corrective retry doesn't fix it. Unlike
+    the quote-warning path (which only appends a banner and leaves the
+    original text visible), an invented ID-shaped code reads as authoritative
+    on sight — leaving it in place defeats the point even with a warning
+    attached below it.
+    """
+    for code in codes:
+        answer = answer.replace(code, "[not stated in this document]")
+    return answer
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -3696,13 +3779,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # attributed to the wrong document.
     _unverified_quotes = _verify_answer_citations(answer, wiki_content, question)
     _misattributed = _verify_citation_attribution(answer, wiki_content)
+    _unverified_ids = _verify_identifier_claims(answer, wiki_content)
 
     # Corrective retry: give the model one chance to fix flagged quotes — either
     # match them verbatim to context or drop the quotation marks — instead of
     # just warning the user after the fact. Only retried once; if the retry
     # doesn't measurably improve things, the original answer is kept and a
     # warning is appended as before.
-    if _unverified_quotes or _misattributed:
+    if _unverified_quotes or _misattributed or _unverified_ids:
         _flagged = list(_unverified_quotes) + list(_misattributed)
         _flag_lines = []
         for f in _flagged[:6]:
@@ -3713,10 +3797,17 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             else:
                 _flag_lines.append(f'- Flagged (no verbatim match in CONTEXT — remove the '
                                    f'quotation marks and state it plainly): "{f[:180]}"')
+        for code in _unverified_ids[:4]:
+            _flag_lines.append(
+                f'- Flagged identifier (not found anywhere in CONTEXT — this is a fabricated '
+                f'value, do NOT restate it in any form): "{code}". State plainly that this '
+                f'document does not state this field, instead of giving any value for it.'
+            )
         _retry_prompt = prompt + _CITATION_RETRY_ADDENDUM.format(flagged="\n".join(_flag_lines))
         retry_answer, retry_usage, retry_score, retry_reason = _run_generation_pass(_retry_prompt)
         retry_unverified = _verify_answer_citations(retry_answer, wiki_content, question)
         retry_misattributed = _verify_citation_attribution(retry_answer, wiki_content)
+        retry_unverified_ids = _verify_identifier_claims(retry_answer, wiki_content)
 
         token_breakdown.append({
             "call": "citation_retry",
@@ -3726,7 +3817,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
 
-        _fewer_issues = len(retry_unverified) + len(retry_misattributed) < len(_unverified_quotes) + len(_misattributed)
+        _fewer_issues = (len(retry_unverified) + len(retry_misattributed) + len(retry_unverified_ids)
+                          < len(_unverified_quotes) + len(_misattributed) + len(_unverified_ids))
         # A citation fix must not gut the answer. The retry sometimes comes back
         # far shorter — e.g. only the reasoning plan, or a truncated table — which
         # trivially has "fewer" unverified quotes simply because it has fewer
@@ -3736,12 +3828,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         _retained_length = len(retry_answer) >= 0.6 * len(answer)
         if _fewer_issues and _retained_length:
             logger.info(
-                "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed",
+                "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed, "
+                "%d->%d unverified identifiers",
                 len(_unverified_quotes), len(retry_unverified),
                 len(_misattributed), len(retry_misattributed),
+                len(_unverified_ids), len(retry_unverified_ids),
             )
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
-            _unverified_quotes, _misattributed = retry_unverified, retry_misattributed
+            _unverified_quotes, _misattributed, _unverified_ids = retry_unverified, retry_misattributed, retry_unverified_ids
         elif _fewer_issues and not _retained_length:
             logger.info(
                 "Citation retry had fewer issues but was drastically shorter "
@@ -3750,6 +3844,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             )
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
+
+        # Unlike unverified quotes/misattribution (banner-only, original text
+        # kept visible), a fabricated identifier that survives the retry is
+        # hard-stripped from the answer text itself — see
+        # _strip_fabricated_identifiers's docstring for why a banner alone
+        # isn't enough for this specific failure shape. This runs regardless
+        # of which branch above fired, since the retry may not have touched
+        # every flagged code even when it measurably helped elsewhere.
+        if _unverified_ids:
+            answer = _strip_fabricated_identifiers(answer, _unverified_ids)
 
     if _misattributed:
         # The corrective retry above already had its shot at fixing this via a
@@ -3819,6 +3923,20 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         answer += (
             f"\n\n[ATTRIBUTION WARNING: {len(_misattributed)} quote(s) above appear to be attributed "
             f"to the wrong document — {'; '.join(_misattributed[:2])}]"
+        )
+
+    if _unverified_ids:
+        # The fabricated code itself was already hard-stripped from the answer
+        # body above (see _strip_fabricated_identifiers) — this banner explains
+        # WHY a field now reads "[not stated in this document]" instead of
+        # silently leaving that placeholder unexplained.
+        logger.warning("Identifier-fabrication check: %d identifier value(s) not found in context, stripped: %s",
+                        len(_unverified_ids), _unverified_ids)
+        answer += (
+            f"\n\n[IDENTIFIER WARNING: {len(_unverified_ids)} field value(s) the answer initially "
+            f"stated (e.g. a matter reference or case/docket number) could not be found anywhere "
+            f"in this document's retrieved content and have been removed — this document does not "
+            f"appear to state that field.]"
         )
 
     # --- Named-document substitution check ---
@@ -4071,7 +4189,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # would re-quote its own cached past self, and that quote would "verify"
     # against the cache even though the underlying content was never trustworthy.
     # Confirmed live: this exact loop happened with a paraphrased NDA_08 quote.
-    if confidence["score"] >= 80 and not _unverified_quotes and not _misattributed:
+    if confidence["score"] >= 80 and not _unverified_quotes and not _misattributed and not _unverified_ids:
         q_title_prefix = f"Q: {question[:50]}"
         existing_titles = [t for t in pages if t.startswith("Q: ")]
         
@@ -4752,6 +4870,54 @@ _PARTY_NAME_RE = re.compile(
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
 
 
+# An explicit calendar date typed in the question ("the SA dated 15 January
+# 2026", "signed on August 28, 2025"). Two orderings: day-month-year (the
+# convention this corpus's own documents use) and month-day-year.
+_QUESTION_DATE_RE = re.compile(
+    r'\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|'
+    r'September|October|November|December)\s+\d{4}\b'
+    r'|\b(?:January|February|March|April|May|June|July|August|September|'
+    r'October|November|December)\s+\d{1,2},?\s+\d{4}\b',
+    re.IGNORECASE,
+)
+
+
+def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> set[str]:
+    """Resolve the document a question names by an explicit date it recites.
+
+    Mirrors _resolve_docs_by_party below, same content-FTS mechanism, for a
+    different way lawyers pin a document with no filename and no party name in
+    hand: by a date they already know ("the Service Agreement dated 15 January
+    2026"). The date string is a phrase search against page content the same
+    way a party name is — execution/effective dates are recited near-verbatim
+    in a document's own recitals. Deliberately max_docs=1 by default (unlike
+    the party resolver's small-cluster tolerance): two different documents
+    sharing the exact same execution date is a real possibility in this corpus
+    (batch-signed agreements), so this only fires on a genuinely unique hit,
+    never picks among several dated the same day. Returns an empty set on any
+    ambiguity, so it only ever ADDS a match other detectors miss.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    dates = _QUESTION_DATE_RE.findall(question)
+    # findall on an alternation with no groups returns the full match already;
+    # re-run finditer defensively in case a future edit adds a capture group.
+    if not dates:
+        return set()
+    matches = [m.group(0) for m in _QUESTION_DATE_RE.finditer(question)]
+    for date_str in matches:
+        try:
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, date_str, cap=max_docs + 1) if d]
+        except Exception as e:
+            logger.error("resolve_scope: date-content lookup failed for %r: %s", date_str, e)
+            continue
+        if len(docs) == 1:
+            logger.info("Date content match → 1 document: %s (%r)",
+                        _norm_doc_name(docs[0]), date_str)
+            return set(docs)
+    return set()
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -5134,6 +5300,28 @@ _BACKREF_PRONOUN_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Ordinary-English uses of "notice"/"agreement"/"contract" that are NOT naming a
+# new document type, unlike _COMPARATIVE_TYPE_REF_RE's "which agreement..."
+# exception, which points BACK at an established set. These instead use the
+# word as a plain noun referring to the document already under discussion —
+# "what notice do we need to provide" (asking about the notice OBLIGATION, not
+# switching to a document called "a Notice"), "breach the agreement" / "under
+# the agreement" / "terms of the agreement" (all definite-article references to
+# the current document, not a pivot to a different one). Confirmed live: both
+# phrasings tripped _CARRYOVER_TYPE_RE and bounced back to disambiguation mid-
+# thread even after the carryover-aware fix above, on a conversation that had
+# just established a single document's scope. Deliberately narrow — only the
+# specific phrasings observed to false-positive, not a general "the X" carve-out
+# (which would also swallow genuine pivots like "what about the NDA instead").
+_ORDINARY_TYPE_USAGE_RE = re.compile(
+    r'\b(?:give|provide|serve|receive|send)\s+(?:\w+\s+){0,2}notice\b'
+    r'|\bnotice\s+(?:period|do\s+we\s+need|is\s+required|clause)\b'
+    r'|\bbreach(?:es|ed|ing)?\s+the\s+(?:agreement|contract)\b'
+    r'|\b(?:under|pursuant\s+to)\s+the\s+(?:agreement|contract)\b'
+    r'|\bterms?\s+of\s+the\s+(?:agreement|contract)\b',
+    re.IGNORECASE,
+)
+
 
 # Scope-resolution methods that pinned specific documents and are therefore safe
 # to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
@@ -5143,7 +5331,7 @@ _BACKREF_PRONOUN_RE = re.compile(
 # is included for the same reason: a comparison thread that established its set
 # should keep it for subsequent follow-ups, not only the turn that resolved it.
 _CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "party-pair",
-                                     "entity", "carryover", "carryover-set"})
+                                     "entity", "date", "carryover", "carryover-set"})
 
 # How many answers back to look for the turn whose scope should be inherited.
 # NOT a widening of what may be inherited — see _last_document_turn. Bounded so a
@@ -5237,7 +5425,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     # the underscore-joined shorthand).
     if (_CARRYOVER_TYPE_RE.search(question.replace('_', ' '))
             and not _COMPARATIVE_TYPE_REF_RE.search(question)
-            and not _BACKREF_PRONOUN_RE.search(question)):
+            and not _BACKREF_PRONOUN_RE.search(question)
+            and not _ORDINARY_TYPE_USAGE_RE.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
@@ -5420,6 +5609,23 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                 "target_family": None, "is_broad": False,
                 "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
                 "method": "party-pair"}
+
+    # An explicit date the question recites ("the SA dated 15 January 2026")
+    # resolving to exactly one document. Runs after every party-name signal
+    # (a party name is a stronger identifier than a shared execution date), but
+    # still before the vaguer family/broad/carryover branches below — a
+    # question that names nothing else but a specific date it already knows
+    # should resolve directly rather than asking "which document?" (confirmed
+    # live: this exact phrasing needlessly disambiguated).
+    try:
+        date_docs = _resolve_docs_by_date(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: date resolution failed: %s", e)
+        date_docs = set()
+    if date_docs:
+        return {"scope": "single_doc", "target_docs": sorted(date_docs),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.8, "method": "date"}
 
     if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
         # Resolve the concrete document(s) the entity points at so retrieval can
@@ -5613,6 +5819,23 @@ def classify_query(question: str, session_id: str) -> dict:
     if len(party_docs) == 1:
         logger.info("Named party resolves to a single document → skip disambiguation: %s",
                     _norm_doc_name(next(iter(party_docs))))
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # Same idea, for a question that names no party but does recite an explicit
+    # date it already knows ("the SA dated 15 January 2026", "the Legal Opinion
+    # from 3 March 2025"). Confirmed live: several date-only and keyword-only
+    # document references (a distinctive date, "EV charging infrastructure")
+    # needlessly disambiguated despite uniquely identifying one document —
+    # resolve_scope runs the SAME date resolver later via _resolve_docs_by_date,
+    # so this only skips the redundant round-trip when it's already unambiguous.
+    try:
+        date_docs = _resolve_docs_by_date(question, session_id)
+    except Exception as e:
+        logger.error("classify_query: date resolution failed: %s", e)
+        date_docs = set()
+    if len(date_docs) == 1:
+        logger.info("Dated reference resolves to a single document → skip disambiguation: %s",
+                    _norm_doc_name(next(iter(date_docs))))
         return {"needs_disambiguation": False, "documents": docs}
 
     # Vague singular reference ("this NDA", "the agreement") with multiple matching

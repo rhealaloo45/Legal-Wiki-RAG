@@ -223,11 +223,19 @@ def _is_governance_approval_only(q: str) -> bool:
 _INTENT_LLM_PROMPT = (
     "You classify a lawyer's question into exactly ONE intent.\n\n"
     "Intents:\n"
-    "- factual: extract or explain what a document says (clauses, definitions, parties, summaries).\n"
+    "- factual: extract or explain what a document says (clauses, definitions, parties, "
+    "summaries, term length, subject matter, dates) — including a single specific "
+    "document's own attributes.\n"
     "- risk_assessment: judge risk, recommend go/no-go, flag red flags, advise whether to sign.\n"
     "- comparison: compare two or more documents/clauses side by side, find differences.\n"
     "- obligation: list duties, obligations, deadlines, or compliance requirements.\n"
     "- drafting: write, redline, or propose new/alternative clause language.\n\n"
+    "IMPORTANT: classify as comparison ONLY if the question ITSELF asks to compare, "
+    "contrast, or find differences between two or more documents/clauses. A question "
+    "asking about ONE specific document's own attribute — e.g. \"What is the term of "
+    "NDA 5?\", \"What is NDA 5 about?\", \"When was Service Agreement 2 signed?\" — is "
+    "factual, never comparison, even if the same conversation earlier discussed several "
+    "other documents.\n\n"
     "Question: {question}\n\n"
     "Respond with JSON only:\n"
     '{{"intent": "one of the five slugs", "confidence": 0.0-1.0}}'
@@ -482,7 +490,20 @@ def check_disambiguation_node(state: QueryState) -> dict:
     #       here directly is what actually reopens that guard; skipping it
     #       would silently reintroduce the original bug instead of just
     #       fixing the new one.
-    if not wiki._VAGUE_DOC_PATTERN.search(state["question"]):
+    # _VAGUE_DOC_PATTERN also matches ordinary uses of "the agreement"/"the
+    # contract" that are not actually naming/pivoting to a document ("breach
+    # THE AGREEMENT", "under THE AGREEMENT") — the same false-positive shape
+    # wiki._ORDINARY_TYPE_USAGE_RE already carves out one layer down inside
+    # _carryover_scope. But this gate runs BEFORE that function is ever
+    # called, so a phrase matching _VAGUE_DOC_PATTERN never reached
+    # _carryover_scope for its own exception to apply. Re-check the same
+    # exception here directly: an ordinary-usage phrase should still be
+    # allowed through to the carryover check below, same as if
+    # _VAGUE_DOC_PATTERN hadn't matched at all. Confirmed live: "What if they
+    # breach the agreement?", asked mid-thread on an already-pinned document,
+    # fell through to classify_query() and re-asked which document.
+    if (not wiki._VAGUE_DOC_PATTERN.search(state["question"])
+            or wiki._ORDINARY_TYPE_USAGE_RE.search(state["question"])):
         # Carryover must read THIS thread's messages, which live under the CHAT
         # session — not the wiki/doc session, which is shared by every thread
         # served off the same fixed main wiki and therefore holds every answer
@@ -732,6 +753,24 @@ def generate_answer_node(state: QueryState) -> dict:
             f"{len(_set_docs)} document(s) already under discussion in this "
             f"conversation — {_set_names}{_more}. To compare a different set, name "
             f"the documents explicitly, or use \"across all …\" to search every document."
+        )
+    elif (_scope.get("method") == "default" and not _scope.get("target_docs")
+            and not _scope.get("unresolved_party")):
+        # No document was ever named in this conversation (not carried over from
+        # a prior turn, not a named-but-ambiguous party — genuinely never named),
+        # so retrieval searched the whole corpus with no document pinned. If the
+        # answer below reads as if it's about one specific document, that's an
+        # artifact of which pages happened to rank highest, not a confirmed
+        # match — disclose it, same duty as the carryover note above. Confirmed
+        # live: a 4-turn thread with no document ever named silently answered as
+        # if about "Service Agreement 1" (never mentioned anywhere in the
+        # conversation) with zero indication a guess had been made.
+        _scope_note = (
+            "This question named no document, so the entire corpus was searched "
+            "with nothing pinned to one specific agreement. If the answer below "
+            "reads as if it concerns a single document, verify that against the "
+            "References section below — no document was confirmed as the one you "
+            "meant. Name a document explicitly to get a scoped answer."
         )
 
     # The clause map resolved the asked-for number to a real section of this
