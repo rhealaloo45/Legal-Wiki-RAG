@@ -502,8 +502,18 @@ def check_disambiguation_node(state: QueryState) -> dict:
     # _VAGUE_DOC_PATTERN hadn't matched at all. Confirmed live: "What if they
     # breach the agreement?", asked mid-thread on an already-pinned document,
     # fell through to classify_query() and re-asked which document.
+    # Same reasoning again for a demonstrative backreference to a specific
+    # filing type already established ("that petition", "that affidavit") —
+    # wiki._DEMONSTRATIVE_BACKREF_RE carves this out one layer down inside
+    # _carryover_scope, but "affidavit" (among others in its word list) is
+    # ALSO one of _VAGUE_DOC_PATTERN's own type words, so this outer gate
+    # blocks the same phrase from ever reaching that exception. Confirmed
+    # live: "What records are sought to be preserved under THAT PETITION?",
+    # asked right after a Section 9 petition was the established scope, still
+    # forced a disambiguation prompt.
     if (not wiki._VAGUE_DOC_PATTERN.search(state["question"])
-            or wiki._ORDINARY_TYPE_USAGE_RE.search(state["question"])):
+            or wiki._ORDINARY_TYPE_USAGE_RE.search(state["question"])
+            or wiki._DEMONSTRATIVE_BACKREF_RE.search(state["question"])):
         # Carryover must read THIS thread's messages, which live under the CHAT
         # session — not the wiki/doc session, which is shared by every thread
         # served off the same fixed main wiki and therefore holds every answer
