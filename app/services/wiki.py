@@ -5322,6 +5322,27 @@ _ORDINARY_TYPE_USAGE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A demonstrative pronoun ("that"/"this") + a SPECIFIC litigation-filing or
+# instrument type word ("that petition", "this notice", "that matter") is a
+# backreference to the document already established this thread, not a pivot
+# to a new one — confirmed live: "What records are sought to be preserved
+# under THAT PETITION?", asked right after a Section 9 petition was the
+# established scope, still tripped _CARRYOVER_TYPE_RE's bare "petition" match
+# and forced a needless disambiguation prompt mid-thread. Deliberately
+# excludes the generic words "agreement"/"contract"/"document"/"nda" — those
+# stay covered by _VAGUE_DOC_PATTERN's own, deliberately stricter safety net
+# (see the original "top 10 risks in THIS document" bug this project's Phase 2
+# is built around): a bare demonstrative + generic instrument word is exactly
+# the ambiguous case that net exists to keep asking about, since it could
+# equally mean a different document the user has in mind. A demonstrative +
+# SPECIFIC filing-type word carries far less of that ambiguity.
+_DEMONSTRATIVE_BACKREF_RE = re.compile(
+    r'\b(?:that|this)\s+(?:petition|affidavit|notice|judgment|judgement|'
+    r'opinion|complaint|motion|application|award|plaint|summons|suit|claim|'
+    r'matter|proceedings?|dispute|arbitration)\b',
+    re.IGNORECASE,
+)
+
 
 # Scope-resolution methods that pinned specific documents and are therefore safe
 # to inherit. A "family"/"broad"/"default" answer has no specific scope to pass
@@ -5426,7 +5447,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     if (_CARRYOVER_TYPE_RE.search(question.replace('_', ' '))
             and not _COMPARATIVE_TYPE_REF_RE.search(question)
             and not _BACKREF_PRONOUN_RE.search(question)
-            and not _ORDINARY_TYPE_USAGE_RE.search(question)):
+            and not _ORDINARY_TYPE_USAGE_RE.search(question)
+            and not _DEMONSTRATIVE_BACKREF_RE.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
