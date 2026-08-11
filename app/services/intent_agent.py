@@ -784,6 +784,44 @@ def generate_answer_node(state: QueryState) -> dict:
             "meant. Name a document explicitly to get a scoped answer."
         )
 
+    # The question identified its document by a description (a party's
+    # registered-office block) that several documents state identically, so it
+    # has as many valid answers as it has matches. resolve_scope pinned them all
+    # rather than letting the entity branch collapse them to a top-ranked winner
+    # (wiki._detect_description_ambiguity). Three separate channels, each doing a
+    # job the others can't: the DIRECTIVE reshapes the answer itself (one value
+    # per document, each attributed), the WARNING is a deterministic banner the
+    # model cannot omit, and the NOTE explains how to resolve it next turn.
+    _ambiguity_directive = ""
+    _amb = _scope.get("ambiguous_match") or {}
+    if len(_amb.get("docs") or []) > 1:
+        _amb_docs = _amb["docs"]
+        _amb_desc = _amb.get("description", "")
+        _amb_names = ", ".join(f'"{wiki._norm_doc_name(d)}"' for d in _amb_docs)
+        _ambiguity_directive = (
+            f"The question identifies its document by {_amb_desc} \u2014 which fits "
+            f"{len(_amb_docs)} documents in this corpus equally well: "
+            f"{_amb_names}. Nothing else in the question distinguishes them, so the "
+            f"question has {len(_amb_docs)} equally valid answers, not one. Do NOT pick "
+            f"the best-matching document and answer as if it were the only match, and do "
+            f"NOT merge their values into one figure. Instead: state in the FIRST "
+            f"SENTENCE that the description matches {len(_amb_docs)} documents and name "
+            f"them, then answer the question SEPARATELY FOR EACH ONE, with every value "
+            f"carrying the name of the document it came from. Close by saying what would "
+            f"distinguish them (a document number, the counterparty, or the subject "
+            f"matter) so the user can narrow it. If the retrieved excerpts only support "
+            f"an answer for some of these documents, say which ones you could answer for "
+            f"and which you could not \u2014 never let a missing excerpt turn this back into "
+            f"a single-document answer."
+        )
+        _scope_note = (
+            f"This question identified its document by {_amb_desc}, which fits "
+            f"{len(_amb_docs)} documents equally \u2014 {_amb_names} \u2014 so all of them "
+            f"were searched and each is answered separately above. To pin one, "
+            f"name it by number (e.g. \"Service Agreement 2\") or by its subject "
+            f"matter."
+        )
+
     # The clause map resolved the asked-for number to a real section of this
     # document. Two channels, deliberately separate: scope_note is DISPLAY-ONLY
     # (wiki appends it under the finished answer), so it gets the short
@@ -833,11 +871,23 @@ def generate_answer_node(state: QueryState) -> dict:
     # fell through to a broad corpus search. The answer may be sourced from a
     # same-type sibling rather than the exact document the user meant — warn.
     _scope_warning = ""
+    # An ambiguous identifying description outranks the warning below: that one
+    # says "this MIGHT be the wrong document", whereas here it is established
+    # that no single document is the right one. Set first, and the weaker
+    # warning defers to it.
+    if _ambiguity_directive:
+        _scope_warning = (
+            f"Your question identifies its document by {_amb_desc}, which fits "
+            f"{len(_amb_docs)} documents equally ({_amb_names}), so it does not "
+            f"single one out. The answer below is given separately for each; "
+            f"there is no single value that answers this question. Name the document by "
+            f"number, counterparty, or subject matter to get one answer."
+        )
     # Set by the corpus-wide default AND by its family-narrowed variant: limiting
     # the search to the instrument the question named does not establish WHICH
     # document of that type was meant, so the disclosure duty is unchanged.
     _unresolved = _scope.get("unresolved_party") or ""
-    if _unresolved:
+    if _unresolved and not _scope_warning:
         _scope_warning = (
             f"The question named \"{_unresolved}\" but that party appears in several "
             f"documents, so no single document could be confirmed as the one you meant. "
@@ -874,6 +924,7 @@ def generate_answer_node(state: QueryState) -> dict:
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
             scope_note=_scope_note, scope_warning=_scope_warning,
             clause_directive=_clause_directive,
+            ambiguity_directive=_ambiguity_directive,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
