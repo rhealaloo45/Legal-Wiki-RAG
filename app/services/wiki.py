@@ -3972,6 +3972,46 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # effectively empty and unusable, regardless of why.
     _MIN_VIABLE_ANSWER_CHARS = 50
 
+    # A much lower bar than _MIN_VIABLE_ANSWER_CHARS, and deliberately so — this
+    # one tests for the presence of a stated answer, not its adequacy, and a
+    # correct answer is often genuinely short ("18 November 2025.", "Tata Steel
+    # Limited."). Measured across all 105 answers in the Q1-105 audit: every
+    # legitimate short answer had a body of 17+ characters; the three broken
+    # ones measured here (see _answer_lacks_body) had exactly 0. Set well below
+    # the former and well above the latter — this is a "did it say ANYTHING"
+    # check, not a quality bar.
+    _MIN_BODY_CHARS = 8
+
+    # Matches a "References" section header, so its own content is excluded
+    # from the body-presence check below — a citation list is not an answer.
+    _RX_REFERENCES_HEADER = re.compile(r'^\s*References?\s*:?\s*$', re.IGNORECASE | re.MULTILINE)
+
+    def _answer_lacks_body(text: str) -> bool:
+        """True when nothing but citations and disclosures precede References.
+
+        A response of "References\\n[1] Document, Section" is not "short but
+        real" — it never states the fact at all, it just cites where the fact
+        would be. This passes every existing check: it clears
+        _MIN_VIABLE_ANSWER_CHARS on citation text alone, and (for the
+        corrective-retry path below) can clear the _retained_length ratio the
+        same way, since a citation list can be long. Confirmed live on three
+        single-fact lookups (a company name, a case number): each answer's
+        entire content was its own References block, despite the correct
+        document and clause being cited and the fact sitting in the retrieved
+        context. None of the three ever tripped a warning, a retry, or a low
+        confidence score gated on anything else, and one of them shipped
+        through a citation retry the pipeline itself logged as "improved" —
+        fewer unverified quotes was true only because the retry deleted the
+        sentence carrying them, and length alone doesn't distinguish "a
+        shorter true answer" from "the answer is gone, only citations remain."
+        Bracket disclosures ([SCOPE NOTE...], [CITATION WARNING...]) are
+        stripped first since they are appended regardless of outcome, same
+        reasoning as intent_agent.py's _RX_BRACKET_NOTE.
+        """
+        body = re.sub(r'\[[A-Z][A-Z \-]{2,30}:.*?\]', '', text, flags=re.DOTALL)
+        body = _RX_REFERENCES_HEADER.split(body, maxsplit=1)[0]
+        return len(body.strip()) < _MIN_BODY_CHARS
+
     # Truncation/empty-answer retry. Two distinct failure shapes land here:
     #   (a) finish_reason == "length": a "factual"-intent question that's
     #       actually broad/cross-document (e.g. "across all JVAs in the
@@ -3993,7 +4033,10 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     #       than a complete one, so this always keeps the retry — no
     #       comparison needed.
     _was_truncated = usage.get("finish_reason") == "length"
-    _was_empty = len(answer.strip()) < _MIN_VIABLE_ANSWER_CHARS
+    # A references-only answer is the same failure as a char-count-empty one —
+    # nothing was actually said — so it takes the identical retry path (stop-empty:
+    # escalate reasoning_effort one step, see _EFFORT_ESCALATION below).
+    _was_empty = len(answer.strip()) < _MIN_VIABLE_ANSWER_CHARS or _answer_lacks_body(answer)
     _at_broad_budget = _answer_token_budget >= config.MAX_TOKENS_ANSWER_BROAD
 
     # A same-budget retry is only worth attempting for the EMPTY case, not
@@ -4041,7 +4084,9 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "completion_tokens": retry_usage.get("completion_tokens", 0),
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
         })
-        _retry_ok = retry_usage.get("finish_reason") != "length" and len(retry_answer.strip()) >= _MIN_VIABLE_ANSWER_CHARS
+        _retry_ok = (retry_usage.get("finish_reason") != "length"
+                     and len(retry_answer.strip()) >= _MIN_VIABLE_ANSWER_CHARS
+                     and not _answer_lacks_body(retry_answer))
         if _retry_ok:
             answer, usage, confidence_score, confidence_reason = retry_answer, retry_usage, retry_score, retry_reason
         elif len(retry_answer.strip()) > len(answer.strip()):
@@ -4147,7 +4192,17 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         # replaced by an 818-char plan-only answer that "passed" this check.
         # Require the retry to retain most of the original's length to count.
         _retained_length = len(retry_answer) >= 0.6 * len(answer)
-        if _fewer_issues and _retained_length:
+        # Length alone isn't enough: a References block is itself long, so a
+        # retry that deletes the answer sentence and keeps only citations can
+        # clear 60% of the original's length while removing the fact the
+        # question asked for — the one thing that legitimately has "fewer
+        # unverified quotes" (there are no quotes left to flag). Confirmed
+        # live: this exact shape logged as "Citation retry improved answer:
+        # 1->0 unverified quotes" while shipping a bare citation list with no
+        # answer. A retry this hollow is worse than the flagged original, which
+        # at least stated the fact even if one quote in it couldn't be verified.
+        _retry_has_body = not _answer_lacks_body(retry_answer)
+        if _fewer_issues and _retained_length and _retry_has_body:
             logger.info(
                 "Citation retry improved answer: %d->%d unverified quotes, %d->%d misattributed, "
                 "%d->%d unverified identifiers",
@@ -4162,6 +4217,11 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 "Citation retry had fewer issues but was drastically shorter "
                 "(%d vs %d chars) — keeping fuller original answer",
                 len(retry_answer), len(answer),
+            )
+        elif _fewer_issues and not _retry_has_body:
+            logger.info(
+                "Citation retry had fewer issues but deleted the stated answer, "
+                "leaving only citations — keeping flagged original instead"
             )
         else:
             logger.info("Citation retry did not improve verification — keeping original answer")
