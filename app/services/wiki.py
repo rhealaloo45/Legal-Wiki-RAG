@@ -3533,7 +3533,7 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
-def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "", clause_directive: str = "") -> dict:
+def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "", clause_directive: str = "", ambiguity_directive: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
     scope_note: a plain-English disclosure of HOW the scope was decided, when it
@@ -3547,6 +3547,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         answer was drawn from a broad corpus search that may have surfaced the
         wrong same-family document. Stronger than scope_note (emitted as
         [SCOPE WARNING], which the frontend hoists into the visible body).
+
+    ambiguity_directive: a PROMPT instruction (not display text) used when the
+        question identifies its document by a description that fits several
+        documents equally. Tells the model to answer for each candidate with
+        every value attributed to its own document, instead of reporting the
+        top-ranked one as though it were the only match. Prepended like
+        clause_directive — see that note for why mid-prompt placement fails.
     """
     index = _load_index(session_id)
     pages = index.get("pages", {})
@@ -3642,6 +3649,17 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         f"CLAUSE NUMBER MAPPING: {clause_directive}\n\n"
     ) if clause_directive else ""
 
+    # The question's identifying description matched several documents equally
+    # (resolve_scope → an "ambiguous_match" on the scope decision). Same placement
+    # and the same reason: this must beat the rigid REQUIRED OUTPUT FORMAT
+    # directive each template ends with, which otherwise pulls the model back
+    # into producing one tidy single-document answer. Placed FIRST of the three
+    # so it frames the whole answer — how many answers there are is a more
+    # fundamental constraint than what any one of them says.
+    _ambiguity_directive_note = (
+        f"AMBIGUOUS DOCUMENT DESCRIPTION: {ambiguity_directive}\n\n"
+    ) if ambiguity_directive else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -3651,7 +3669,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
-    prompt = _unconfirmed_doc_note + _clause_directive_note + prompt_template.format(
+    prompt = (_ambiguity_directive_note + _unconfirmed_doc_note
+              + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
         question=question,
         conversation_block=conv_block,
@@ -5309,6 +5328,12 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
 # an intersection against a truncated list is arbitrary rather than wrong-looking.
 _PARTY_FAMILY_SCAN_CAP = 80
 
+# How many documents the party-and-instrument intersection may resolve to before
+# it stops being an answerable set. One is a clean resolution; a handful is a
+# genuine ambiguity the answer reports per document; more than this and nobody
+# can read the result, so scope widens to the family as it did before.
+_PARTY_IN_FAMILY_MAX_DOCS = 4
+
 
 def _resolve_party_within_family(question: str, session_id: str,
                                  fam_docs: set[str]) -> set[str]:
@@ -6019,6 +6044,119 @@ def _enforce_question_family(scoped: dict, family: str | None,
             "method": f"{method}-family-corrected"}
 
 
+# ---------------------------------------------------------------------------
+# Content-descriptive ambiguity — one description, several documents
+# ---------------------------------------------------------------------------
+# Every resolver above pins a document by its NAME (a filename, a number, a title
+# identifier), by a party name, by a party PAIR, or by a date it recites. None of
+# them notices the opposite failure: a question that identifies its document by a
+# descriptive phrase drawn from the document's own TEXT, where that exact phrase
+# is boilerplate repeated verbatim across several agreements with the same party.
+#
+# Confirmed live (Q85, scoring 6/10 through v3 and v4): "the services agreement
+# entered into by Tata Sons Private Limited having its registered office at Bombay
+# House, 24 Homi Mody Street, Mumbai" — that registered-office block is stated
+# IDENTICALLY in Service Agreement 2 and Service Agreement 4, so the question has
+# two equally valid answers (execution dates 18 July 2025 and 28 August 2025).
+# The system answered "28 August 2025", cited SA 4, and stopped: correct FOR SA 4,
+# but the reader gets one confident date for a question the description cannot
+# resolve. Every existing signal passes it by — _resolve_docs_by_party gives up
+# ("Tata Sons" is an umbrella name over the cap), _resolve_docs_by_party_pair sees
+# only one party, _resolve_docs_by_date finds no recited date (the date is what is
+# being ASKED for), and the entity branch below collapses its matches to ONE
+# winner via max(ent_counts). So the second candidate never surfaced anywhere.
+#
+# The corporate-boilerplate framing is deliberate and narrow. A registered-office
+# block is the one descriptor a drafter copies verbatim between every instrument
+# with the same counterparty, which is exactly what makes it non-identifying —
+# and equally what makes the user believe it identifies one document. Free-form
+# subject-matter paraphrases ("the wastewater-dosing NDA") are NOT handled here:
+# they are genuinely distinguishing more often than not, and the existing
+# paraphrase path in check_disambiguation_node already covers them.
+
+# The office noun that marks a party-address descriptor. Matching on this
+# specific vocabulary — rather than any "located at X" phrase — keeps the
+# detector off questions ASKING about a location inside a document ("what does
+# the lease say about the premises at 5 Main Street") and on questions USING an
+# address to name which document they mean.
+_OFFICE_NOUN_RE_STR = (
+    r'(?:registered\s+(?:office|address)|principal\s+place\s+of\s+business|'
+    r'(?:principal|head|corporate|registered|branch)\s+office|office)'
+)
+
+_DESCRIPTIVE_IDENTIFIER_RES = (
+    # "… having its registered office at X", "… with registered office at X"
+    re.compile(
+        r'\b(?:having|with|has)\s+(?:its|their|a|the)?\s*' + _OFFICE_NOUN_RE_STR +
+        r'\s+(?:situated\s+|located\s+)?(?:at|in)\s+(?P<desc>[^?;]+)',
+        re.IGNORECASE,
+    ),
+    # "… whose registered office is at X", "… registered office at X" — anchored
+    # on the unmistakable corporate-boilerplate noun, so it is safe standing alone
+    # without a "having"/"with" frame in front of it.
+    re.compile(
+        r'\b(?:whose\s+)?(?:registered\s+(?:office|address)|principal\s+place\s+of\s+business)\s+'
+        r'(?:is\s+)?(?:situated\s+|located\s+)?(?:at|in)\s+(?P<desc>[^?;]+)',
+        re.IGNORECASE,
+    ),
+)
+
+_DESC_MIN_TOKENS = 4
+
+
+# The captures above run to the end of the sentence, so a question that appends
+# another clause ("… registered office at X, and when does it expire?") drags
+# that clause in too. Cut at the join — an address never continues into an
+# interrogative or an auxiliary verb.
+_DESC_TAIL_RE = re.compile(
+    r'\b(?:and|but|or)\s+(?:what|when|who|whom|which|where|how|why|is|are|was|were|'
+    r'does|do|did|has|have|had|can|could|should|would|will)\b',
+    re.IGNORECASE,
+)
+
+# An address never begins with one of these; a relative clause the capture ran
+# into always does ("… registered office AT WHICH notices must be served").
+_DESC_RELATIVE_PRONOUNS = frozenset({
+    "which", "whom", "what", "whose", "that", "who", "where", "whether",
+})
+
+
+def _extract_descriptive_identifier(question: str) -> str:
+    """The party-address descriptor a question uses to identify its document.
+
+    Returns the raw descriptor text ("Bombay House, 24 Homi Mody Street,
+    Mumbai") or "" when the question carries no such phrase.
+
+    The result must LOOK like an address: two or more capitalised tokens, and not
+    opening on a relative pronoun. Without that gate the office-noun frames also
+    fire on a question ASKING about a registered office rather than identifying a
+    document by one ("what is the registered office AT WHICH notices must be
+    served under NDA 3"), and the ordinary prose that follows would then be
+    looked up as if it were a distinguishing phrase — a run of common legal words
+    matches a handful of documents by accident, manufacturing an ambiguity that
+    isn't there. Both conditions are needed: that example clears a
+    capitalised-token count on its own ("NDA") and is caught only by the pronoun
+    check, while a lowercase clause is caught only by the count.
+    """
+    for rx in _DESCRIPTIVE_IDENTIFIER_RES:
+        m = rx.search(question)
+        if not m:
+            continue
+        desc = (m.group("desc") or "").strip()
+        cut = _DESC_TAIL_RE.search(desc)
+        if cut:
+            desc = desc[:cut.start()]
+        desc = desc.strip().strip('.,:;"\'')
+        tokens = desc.split()
+        if len(tokens) < _DESC_MIN_TOKENS:
+            continue
+        if tokens[0].lower().strip('.,') in _DESC_RELATIVE_PRONOUNS:
+            continue
+        if sum(1 for t in tokens if t[:1].isupper()) >= 2:
+            return desc
+    return ""
+
+
 def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                   chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
@@ -6299,7 +6437,30 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                        "confidence": 0.78 if len(_narrowed) == 1 else 0.65,
                        "method": "party-in-family"}
             if len(_narrowed) > 1:
+                # Several documents fit the question equally: the party is in all
+                # of them and so is the instrument type, and the question offers
+                # nothing else to choose by. Reporting the top-ranked one as THE
+                # answer is what scored Q85 6/10 twice — "28 August 2025" from
+                # Service Agreement 4, with no sign that Service Agreement 2
+                # answers the same question with 18 July 2025. Hand the answer
+                # side the matched set so every value it reports is attributed to
+                # the document it came from (see the ambiguity_directive in
+                # intent_agent.generate_answer_node).
+                #
+                # unresolved_party rides along as it always did, so if the
+                # directive is ever dropped the weaker warning still fires.
                 _scoped["unresolved_party"] = unresolved_party
+                _what = f'"{unresolved_party}" in the {_fam_name} family'
+                _desc = _extract_descriptive_identifier(question)
+                if _desc:
+                    # The question also recited boilerplate — a registered-office
+                    # block — which the reader almost certainly believed was
+                    # doing the identifying. Name it, so the disclosure answers
+                    # the question they will actually ask: why wasn't that enough?
+                    _what += f' (the address you gave, "{_desc}", does not '
+                    _what += 'separate them)'
+                _scoped["ambiguous_match"] = {"description": _what,
+                                              "docs": sorted(_narrowed)}
             return _scoped
         return {"scope": "family", "target_docs": sorted(_fam_docs),
                 "target_family": _fam_name, "is_broad": True,
@@ -6400,6 +6561,36 @@ def classify_query(question: str, session_id: str) -> dict:
     if len(date_docs) == 1:
         logger.info("Dated reference resolves to a single document → skip disambiguation: %s",
                     _norm_doc_name(next(iter(date_docs))))
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # Same idea a third time, for the pairing that actually identifies Q85's
+    # document: an UMBRELLA party name plus the instrument the question names.
+    # Neither is usable alone — "Tata Sons Private Limited" appears in 10
+    # documents, the Service Agreement family holds 62 — but their intersection
+    # is exactly the two service agreements the question could mean. The vague
+    # branch below claimed the question first on the type word alone and asked
+    # "which of 68 service agreements?", so that intersection was never spent.
+    #
+    # Skips whether the intersection is one document or several, and the
+    # difference is the whole point: one means resolve_scope will pin it, and
+    # several means the question has that many valid answers, which resolve_scope
+    # surfaces with each value attributed to its own document. Asking "which
+    # agreement?" is wrong in both cases — in the first the user already said,
+    # and in the second the honest reply is that their description names more
+    # than one. Suppression only; this can never RAISE a prompt, so it cannot
+    # reopen the documented disambiguation stuck-loop.
+    try:
+        _fam_docs_gate = _question_family_scope(question, session_id)[1]
+        party_in_fam = (_resolve_party_within_family(question, session_id, _fam_docs_gate)
+                        if _fam_docs_gate else set())
+    except Exception as e:
+        logger.error("classify_query: party-in-family resolution failed: %s", e)
+        party_in_fam = set()
+    if party_in_fam and len(party_in_fam) <= _PARTY_IN_FAMILY_MAX_DOCS:
+        logger.info("Party within the named instrument family resolves to %d "
+                    "document(s) → skip disambiguation, resolve_scope will scope it: %s",
+                    len(party_in_fam),
+                    ", ".join(sorted(_norm_doc_name(d) for d in party_in_fam)))
         return {"needs_disambiguation": False, "documents": docs}
 
     # Vague singular reference ("this NDA", "the agreement") with multiple matching
