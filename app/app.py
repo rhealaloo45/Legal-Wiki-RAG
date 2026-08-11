@@ -31,7 +31,7 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft
+from services import wiki, hybrid, advanced_modes, draft, redaction
 import threading
 
 # ---------------------------------------------------------------------------
@@ -873,6 +873,7 @@ def query_route():
                     # raw retrieved context over SSE to the frontend, only use it locally
                     # for the RAG query log.
                     debug_context = wiki_result.pop("_debug_context", "")
+                    wiki_result["answer"] = redaction.redact_pii(wiki_result.get("answer", ""))
                     wiki_result["elapsed_ms"] = round((time.time() - t0) * 1000)
                     _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
                                     "answer", {
