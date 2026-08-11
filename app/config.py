@@ -185,6 +185,12 @@ PROGRESS_STORE = {}
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
+# Masks email/SSN/IBAN/bank-account/credit-card/phone patterns in the final
+# answer text before it's stored or sent to the client. Runs after generation
+# is complete — never touches retrieval or the LLM call. Flag exists so it can
+# be turned off from App Service settings without a redeploy if it ever
+# misfires on legitimate document numbering.
+PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
 # Deterministic string-count check of the question's legal topics against the
 # retrieved pages. Independent of ENABLE_ANSWER_VALIDATION on purpose — the LLM
 # grounding check scored a confirmed fabrication at 90% and endorsed the invented
