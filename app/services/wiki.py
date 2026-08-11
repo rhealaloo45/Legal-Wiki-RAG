@@ -339,6 +339,8 @@ _DOC_FAMILY_RULES = (
     ("pleading", "Pleading"),
     ("petition", "Pleading"),
     ("plaint", "Pleading"),
+    ("suit", "Court Judgment"),
+    ("lawsuit", "Court Judgment"),
 )
 
 
@@ -5440,6 +5442,61 @@ def _resolve_party_within_family(question: str, session_id: str,
     return best or set()
 
 
+# A quoted proper noun the question uses to name the SUBJECT of a dispute
+# rather than its second party ("operators of 'Tata Restart' and related
+# websites"). Matches straight and curly quote pairs.
+_QUOTED_PHRASE_RE = re.compile(
+    r"['‘’\"“”]([A-Za-z][A-Za-z0-9 &.\-]{2,40})['‘’\"“”]"
+)
+
+
+def _narrow_by_quoted_subject(question: str, session_id: str,
+                              candidate_docs: set[str]) -> set[str]:
+    """Narrow a document set using a quoted subject the question names.
+
+    Court-document questions routinely distinguish between many judgments
+    that share the same plaintiff ("Tata Sons Private Limited" is the
+    plaintiff in every Tata Brand Judgment) by naming the infringing subject
+    in quotes instead of a second party — "the suit ... against operators of
+    'Tata Restart' and related websites" has no second capitalised party for
+    _resolve_docs_by_party_pair to catch, so party resolution alone leaves
+    every judgment in the family equally plausible.
+
+    Ingest folds that subject into the matter's title short-name with spaces
+    stripped ("TataRestart"), so the title ILIKE search below collapses the
+    quoted phrase the same way — searching for "Tata Restart" WITH the space
+    would match nothing.
+
+    Confirmed on Q100: "Tata Sons Private Limited" alone spans every document
+    in the Judgments family, so party-in-family resolution returns the whole
+    family and the answer LLM guesses (measured: it picked Judgment 2 when
+    the case number sat in Judgment 7). The quoted "'Tata Restart'" pins the
+    one document whose title carries that short-name.
+
+    Returns the first quoted phrase's hits (intersected with candidate_docs)
+    that resolve to at least one document, or an empty set if no quoted
+    phrase in the question matches anything.
+    """
+    if not config.USE_DATABASE or not candidate_docs:
+        return set()
+    for m in _QUOTED_PHRASE_RE.finditer(question or ''):
+        phrase = m.group(1).strip()
+        collapsed = re.sub(r'[^A-Za-z0-9]', '', phrase)
+        if len(collapsed) < 4:
+            continue
+        try:
+            docs = set(_db.find_source_docs_by_title_tokens(
+                session_id, [collapsed], cap=25))
+        except Exception as e:
+            logger.error("resolve_scope: quoted-subject lookup failed for %r: %s",
+                         phrase, e)
+            continue
+        hit = docs & candidate_docs
+        if hit:
+            return hit
+    return set()
+
+
 # Document-type words a question uses to single out ONE instrument between two
 # parties, mapped to the parenthetical ingest appends to that document's page
 # titles ("… – Aether-Helios (Verified Complaint)"). Ordered most-specific
@@ -6485,6 +6542,24 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         #     roughly one page each — is what lets the answer see the whole
         #     instrument instead of an arbitrary page of it.
         _narrowed = _resolve_party_within_family(question, session_id, _fam_docs)
+        #     The party alone often isn't enough within Judgments/Court-case
+        #     families, where the same plaintiff files against many unrelated
+        #     defendants — the party-in-family intersection there is the whole
+        #     family, not one document. A quoted subject the question names
+        #     ("operators of 'Tata Restart'") is the second signal those
+        #     questions actually carry; spend it before giving up to the
+        #     unresolved whole-family fallback below. See
+        #     _narrow_by_quoted_subject.
+        if len(_narrowed) != 1:
+            _quoted_narrowed = _narrow_by_quoted_subject(
+                question, session_id, _narrowed or _fam_docs)
+            if _quoted_narrowed and len(_quoted_narrowed) <= _PARTY_IN_FAMILY_MAX_DOCS:
+                logger.info("Quoted subject in %r narrowed party-in-family %d(%s"
+                            ") document(s) to %d: %s",
+                            question, len(_narrowed or _fam_docs), _fam_name,
+                            len(_quoted_narrowed),
+                            ", ".join(sorted(_norm_doc_name(d) for d in _quoted_narrowed)))
+                _narrowed = _quoted_narrowed
         if _narrowed and len(_narrowed) <= 4:
             logger.info("Party %r within the %s family → %d document(s): %s",
                         unresolved_party, _fam_name, len(_narrowed),
