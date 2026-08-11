@@ -45,14 +45,14 @@ cannot occur in production at all.
 | Q74 | 1 | 9 | **9** | Exact |
 | Q76 | 1 | 9 | **9** | All six ground-truth categories |
 | Q79 | 1 | 9 | **9** | Exact quote, correct document |
-| Q85 | 3 | 6 | **6** | Right date, still does not flag the SA2/SA4 ambiguity ground truth asks for |
+| Q85 | 3 | 6 | **9** | **Fixed** — returns both 18 July 2025 (SA 2) and 28 August 2025 (SA 4), each attributed to its own document |
 | Q92 | 2 | 9 | **9** | Confident and correct |
 | Q94 | 6 | — | **9** | Correct |
 | Q101 | 1 | 1 | **2** | Still failing — answers "affidavits of admission and denial" instead of the screenshots / chat transcripts / payment instructions / complaints |
 | Q102 | 5 | — | **3** | Describes Tata Sons procedurally (petitioner seeking relief) rather than the Court's characterisation (principal investment holding company, trust-led group) |
 | Q105 | 2 | 2 | **2** | Still circular — echoes "integrated design consultancy services" instead of naming the Western Freeway / Thane project |
 
-**Mean across these 27: 2.04 → 7.59.**
+**Mean across these 27: 2.04 → 7.70.**
 
 ## Fixes landed this round
 
@@ -91,7 +91,26 @@ is by construction the nearest neighbour of the question that produced it. Those
 filtered *after* the SQL `LIMIT`, so the vector channel contributed nothing and every
 unpinned question silently ran BM25-only. Now excluded in SQL.
 
-**5. Answer caching is off** (`ENABLE_ANSWER_CACHE=false`). Nothing is written to the
+**5. A description matching several documents equally now yields several answers.**
+Every resolver pins a document by a name, a party, a party pair or a recited date.
+None noticed the opposite failure: a question identifying its document by a phrase
+from the document's own text, where that phrase is boilerplate repeated verbatim.
+Q85's registered-office block is stated identically in Service Agreement 2 and 4, so
+the question has two valid execution dates; the system returned one and stopped.
+The `party-in-family` intersection above already resolved the one-document case —
+"Tata Sons Private Limited" (10 docs) ∩ Service Agreement (62) is exactly SA 2 + SA 4 —
+so this carries the >1 case through as an `ambiguous_match`, and the answer reports
+each date against its own document. `classify_query` gained a matching skip so the
+vague-reference branch stops claiming these questions first; it is suppression only
+and cannot raise a prompt, so it cannot reopen the documented stuck-loop.
+
+Worth recording because three harness rounds were spent on it: **ground truth blames
+the registered-office block, and that signal does not work.** The address is reachable
+by phrase search in SA 2 only — it lives in that document's `Parties` page and is
+absent from SA 4's compiled pages at every prefix length. Ground truth describes the
+source PDFs; the index is a different artefact.
+
+**6. Answer caching is off** (`ENABLE_ANSWER_CACHE=false`). Nothing is written to the
 wiki, and the `Q:` pages earlier runs already filed are hidden from retrieval too —
 otherwise the feature would keep running on everything it wrote before. Set the flag
 to `true` to restore both behaviours.
@@ -101,8 +120,6 @@ to `true` to restore both behaviours.
 - **Q101 (2), Q102 (3), Q105 (2)** — three genuine misses, all in the judgments /
   court-document family, all cases where the right document is retrieved and the
   specific passage is not surfaced or not used. Q105 remains the confirmed ingest gap.
-- **Q85 (6)** — no mechanism detects that a question's identifying description matches
-  two documents equally well. This is the ambiguity-detection work already spawned.
 - **Q30 (6)** — states the document does not exist, then drafts clauses anyway. The
   fabrication is much reduced without fixtures present, but the contradiction remains.
 - **Q17 (7)** and **Q56 (8)** are near their ceiling: Q17's missing clause is an ingest
