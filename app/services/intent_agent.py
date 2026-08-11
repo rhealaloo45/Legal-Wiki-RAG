@@ -121,7 +121,16 @@ _RX_BETWEEN_PARTIES = re.compile(
     r'venture|arrangement|memorandum|settlement|'
     r'notice|petition|affidavit|application|award|plaint|summons|'
     r'suit|claim|proceedings?|dispute|arbitration)\b[^.?!;]{0,30}?\bbetween\b'
-    r'[^.?!;]+\band\b',
+    # A corporate suffix between the two party names ("... Ltd. and ...",
+    # "... Pte. Ltd. and ...") carries its own period, which [^.?!;]+ can never
+    # cross — the exclusion silently stopped matching short of "and" and the
+    # whole rule went inert for exactly the two-party names it exists to catch
+    # (confirmed live: "the NDA between Tata Passenger Electric Mobility Ltd.
+    # and Cirrus Battery Intelligence" fell through to a comparison template
+    # over a single document). Allow periods, since the pattern is already
+    # bounded at the next "and" and a short abbreviation dot is far more
+    # likely here than an actual sentence break.
+    r'[^?!;]{1,80}?\band\b',
     re.IGNORECASE,
 )
 # A third false trigger: "board composition structured between Tata Power and
@@ -211,6 +220,34 @@ def _is_advisory_entity_name_only(q: str) -> bool:
     return hits <= {"advise", "advisory"} and bool(_RX_ADVISORY_ENTITY.search(q))
 
 
+# A case caption ("the Tata Sons vs Deepak Kumar case", "X vs. Y") names ONE
+# matter by its two litigants the same way a contract names its two
+# signatories — it is not a request to compare two documents, but bare "vs"/
+# "versus" is one of _RX_COMPARISON's own trigger words, so a single-document
+# question about a captioned case forced the comparison template every time
+# (confirmed live: "What did the defendants agree to transfer ... in the Tata
+# Sons vs Deepak Kumar case?" rendered a two-column table with "Not
+# Applicable" for the missing second document).
+_RX_CASE_CAPTION_VS = re.compile(
+    r'\b[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\s+vs\.?\s+'
+    r'[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\b',
+)
+
+
+def _is_case_caption_vs_only(q: str) -> bool:
+    """True when the ONLY _RX_COMPARISON signal is a "vs" naming a case
+    caption — so comparison intent should be suppressed. Same subset-guard
+    shape as _is_governance_approval_only: a question that ALSO carries a
+    real comparison cue (compare, differ, contrast, side-by-side) elsewhere
+    still classifies as comparison, because stripping the caption match
+    leaves that cue in place for _RX_COMPARISON to find again."""
+    m = _RX_CASE_CAPTION_VS.search(q)
+    if not m:
+        return False
+    remainder = q[:m.start()] + q[m.end():]
+    return not _RX_COMPARISON.search(remainder)
+
+
 def _is_governance_approval_only(q: str) -> bool:
     """True when the ONLY _RX_RISK signal in the question is an approval/consent
     word used in a governance sense — so risk intent should be suppressed and the
@@ -252,7 +289,7 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
 
     if _RX_DRAFTING.search(q):
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
-    if _RX_COMPARISON.search(q):
+    if _RX_COMPARISON.search(q) and not _is_case_caption_vs_only(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
             and not _RX_BETWEEN_PARTIES.search(q) \
