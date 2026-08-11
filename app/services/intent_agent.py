@@ -701,6 +701,7 @@ def retrieve_context_node(state: QueryState) -> dict:
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
         doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
+        family_docs=(scope.get("target_docs") if scope.get("scope") == "family" else None),
     )
     titles = res.get("selected_titles", [])
     _emit({"stage": "pages_retrieved", "status": "done",
@@ -832,7 +833,10 @@ def generate_answer_node(state: QueryState) -> dict:
     # fell through to a broad corpus search. The answer may be sourced from a
     # same-type sibling rather than the exact document the user meant — warn.
     _scope_warning = ""
-    _unresolved = _scope.get("unresolved_party") if _scope.get("method") == "default" else ""
+    # Set by the corpus-wide default AND by its family-narrowed variant: limiting
+    # the search to the instrument the question named does not establish WHICH
+    # document of that type was meant, so the disclosure duty is unchanged.
+    _unresolved = _scope.get("unresolved_party") or ""
     if _unresolved:
         _scope_warning = (
             f"The question named \"{_unresolved}\" but that party appears in several "
@@ -2134,9 +2138,35 @@ _RX_GK_OPENER = re.compile(
 # veto below doesn't reject "what is THE doctrine of frustration" — "the" there
 # points at a concept, not at a document.
 _RX_GK_SUBJECT_STRIP = re.compile(
-    r'^\s*(?:the\s+)?(?:doctrine|concept|principle|term|word|phrase|meaning|'
-    r'definition|purpose|idea|notion|rule)\s+of\s+',
+    r'^\s*(?:the\s+)?'
+    # An adjective may sit between the article and the framing noun — "the LEGAL
+    # doctrine of unclean hands" is the same shape as "the doctrine of
+    # frustration", but without this the article survives and the veto below
+    # rejects a plainly general question (confirmed live on "unclean hands").
+    r'(?:(?:legal|equitable|common[\s-]law|general|basic|underlying)\s+)?'
+    r'(?:doctrine|concept|principle|term|word|phrase|meaning|'
+    r'definition|purpose|idea|notion|rule|test|standard)\s+of\s+',
     re.IGNORECASE,
+)
+
+# Named legal authorities and tests keep their definite article as part of the
+# name — "THE Delaware Uniform Trade Secrets Act", "THE Alice test". The veto
+# below reads that article as pointing at a workspace document, so without this
+# exception a textbook question about a named statute is answered from whatever
+# agreement happened to be under discussion. Requires a capitalised name (or a
+# quoted one) in front of the category noun, which no bare document reference in
+# this corpus has — those carry a number and are caught by _RX_GK_DOC_REF.
+_GK_AUTHORITY_NOUN = (r'(?i:acts?|doctrines?|rules?|tests?|standards?|conventions?|'
+                      r'codes?|treaties|treaty|principles?)')
+_RX_GK_NAMED_AUTHORITY = re.compile(
+    r'^\s*the\s+(?:'
+    # Quoted name carrying the category noun inside the quotes — the "Alice test".
+    rf'["“][^"”]*\b{_GK_AUTHORITY_NOUN}["”]'
+    # Capitalised name followed by the category noun — the Delaware Uniform
+    # Trade Secrets Act. Case-sensitive on the name so a lowercase phrase such
+    # as "the termination clause test" cannot qualify.
+    rf'|(?:[A-Z][\w.\-]*\s+){{0,5}}{_GK_AUTHORITY_NOUN}\b'
+    r')',
 )
 
 # The subject must be a bare concept. A definite article or a demonstrative
@@ -2254,6 +2284,17 @@ _RX_GK_LEGAL_TERM = re.compile(
     re.IGNORECASE,
 )
 
+# A statute citation names public law, never a workspace document, but its
+# shape trips _RX_GK_DOC_REF's generic "word followed by a number" alternation —
+# "under 35" in "35 U.S.C. § 101" reads exactly like "agreement 2". Removed from
+# the question before that check rather than loosening the alternation itself,
+# which would let real document references through.
+_RX_GK_STATUTE_CITE = re.compile(
+    r'\b\d+\s*U\.?\s?S\.?\s?C\.?(?:\s*§+)?(?:\s*[\d]+[\w.()\-]*)?'
+    r'|§+\s*[\w.()\-]+',
+    re.IGNORECASE,
+)
+
 # Same cap as the meta fallback, for the same reason: a genuine definitional
 # question is short, and a long message this deep into the gates is not one.
 _GK_LLM_MAX_LEN = 120
@@ -2283,7 +2324,9 @@ def _gk_subject(question: str) -> str | None:
     # "arbitration work?" reduces to the concept itself.
     subject = re.sub(r'\s*(?:mean(?:s|ing)?|work(?:s)?|entail|involve(?:s)?)?\s*[?.!]*\s*$',
                      '', subject, flags=re.IGNORECASE).strip()
-    if not subject or _RX_GK_SUBJECT_VETO.match(subject):
+    if not subject:
+        return None
+    if _RX_GK_SUBJECT_VETO.match(subject) and not _RX_GK_NAMED_AUTHORITY.match(subject):
         return None
     return subject
 
@@ -2308,24 +2351,36 @@ def _is_general_knowledge_llm(question: str) -> bool:
 
 
 def _general_knowledge_kind(question: str) -> str:
-    """'gk-regex' | 'gk-llm' | '' — which gate, if any, claims this question.
+    """'gk-regex' | 'gk-llm' | 'gk-named' | '' — which gate, if any, claims this.
 
     Every gate must pass. Order matters only for cost: the advice block runs
     before the vocabulary check so an advice-seeking question is rejected
     without ever being scored as legal.
+
+    'gk-named' is deliberately weaker than the other two. A bare concept
+    ("what is novation") is textbook material a commercial corpus is unlikely to
+    define, so answering it without retrieval is right. A NAMED authority — the
+    Delaware Uniform Trade Secrets Act, the Alice test — is exactly what legal
+    opinions and pleadings discuss at length, and a corpus that holds that
+    discussion should answer from it. So the caller runs retrieval first for
+    these and keeps the general answer as a fallback (see run_query_stream);
+    skipping retrieval here would replace a document's own analysis with a
+    dictionary definition.
     """
     if not config.ENABLE_GENERAL_KNOWLEDGE:
         return ""
     q = (question or "").strip()
     if not q:
         return ""
-    if _RX_GK_DOC_REF.search(q):
+    if _RX_GK_DOC_REF.search(_RX_GK_STATUTE_CITE.sub(" ", q)):
         return ""
     if _RX_GK_ADVICE_BLOCK.search(q) or _is_advice_seeking(q):
         return ""
     subject = _gk_subject(q)
     if subject is None:
         return ""
+    if _RX_GK_NAMED_AUTHORITY.match(subject):
+        return "gk-named"
     if _RX_GK_LEGAL_TERM.search(subject):
         return "gk-regex"
     if not config.ENABLE_GK_LLM_FALLBACK or len(q) > _GK_LLM_MAX_LEN:
@@ -2497,11 +2552,18 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # aside woven INTO cited prose is how a general sentence ends up wearing a
     # citation number it has no right to.
     gk_aside_wanted = False
+    gk_deferred_method = ""
+    # A named authority never takes the standalone path — the corpus may well
+    # discuss it, and a document's own analysis beats a definition. Held back as
+    # a fallback for the case where retrieval genuinely finds nothing.
+    if gk_method == "gk-named":
+        gk_deferred_method, gk_method = gk_method, ""
     if gk_method:
         _gk_chat_sid = chat_session_id or session_id
         try:
             if wiki.has_established_document_scope(_gk_chat_sid):
                 gk_aside_wanted = True
+                gk_deferred_method = gk_method
                 gk_method = ""
         except Exception as e:
             logger.warning("Could not check document scope for GK aside: %s", e)
@@ -2538,6 +2600,20 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
         if chunk.get("type") == "answer" and isinstance(chunk.get("payload"), dict):
+            # The aside path above assumes the document has something to say
+            # about the term. When it does not, the user is left with a refusal
+            # ("not addressed in the provided context") beside a margin note
+            # holding the actual answer — for a question the general path was
+            # willing to answer outright. Promoting it here costs nothing a
+            # grounded answer would have provided, because it only ever fires
+            # once that grounded answer has already come back empty.
+            if gk_deferred_method and chunk["payload"].get("not_covered"):
+                promoted = _general_knowledge_answer(question, gk_deferred_method)
+                if promoted:
+                    logger.info("[AGENT] document scope had nothing — promoting "
+                                "general-knowledge answer (%s)", gk_deferred_method)
+                    chunk["payload"] = promoted
+                    gk_aside_wanted = False
             if advice_seeking:
                 chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
             # Attached to the finished payload, never merged into the answer

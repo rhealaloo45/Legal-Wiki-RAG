@@ -1944,7 +1944,8 @@ QUESTION: {question}"""
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
                  exclude_cached_answers: bool = False,
                  doc_family: "str | list[str] | None" = None, force_broad: bool = False,
-                 force_docs: "list[str] | None" = None) -> tuple[str, list]:
+                 force_docs: "list[str] | None" = None,
+                 family_docs: "list[str] | None" = None) -> tuple[str, list]:
     """Select relevant pages for a query and return them as a formatted string + list of titles.
 
     If the question mentions a specific source file (e.g. "Legal Opinion 2.pdf"),
@@ -2011,6 +2012,29 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # Kanther") and force-include those pages so the answer is correctly scoped.
         if not file_pages:
             matched_titles = _pages_matching_question_entity(question, pages)
+            # Scope resolution already established which document FAMILY the
+            # question is about; the entity fallback must stay inside it. It
+            # matches on a party name alone, so an umbrella party pulls in pages
+            # from every instrument it appears in — and because these pages are
+            # FORCE-included below, they bypass the family pre-filter applied to
+            # the vector search. Measured on Q21 ("the Service Agreement of Tata
+            # Steel Limited"): the scope resolved to the Service Agreement family,
+            # the entity fallback force-included NDA 7 pages anyway, and the answer
+            # reported a "thirty (30) days" notice period that appears nowhere in
+            # Service Agreement 7 — whose own page says the term is fifteen months
+            # and convenience termination is "upon notice" with no day count.
+            if matched_titles and family_docs:
+                _fam_set = {d for d in family_docs if d}
+                _kept = [
+                    t for t in matched_titles
+                    if isinstance(pages.get(t), dict)
+                    and pages[t].get("source_doc", "") in _fam_set
+                ]
+                if len(_kept) != len(matched_titles):
+                    logger.info("Entity match: dropped %d of %d page(s) outside the "
+                                "resolved document family",
+                                len(matched_titles) - len(_kept), len(matched_titles))
+                matched_titles = _kept
             # A distinctive entity ("ReVolt", "Yuvraj Kanther") should only match a
             # handful of pages. If it matches a huge slice of the wiki, the "entity"
             # is actually a common party name reused across many unrelated documents
@@ -2099,11 +2123,33 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     else:
         # No file mentioned — original behaviour, now with optional family
         # pre-filter + broad-widen forwarded from the resolved scope (Phase 2).
-        if len(pages) <= 20:
-            selected_titles = list(pages.keys())
+        _candidates = pages_for_llm
+        if family_docs:
+            _fam_set = {d for d in family_docs if d}
+            _in_family = {
+                t: p for t, p in pages_for_llm.items()
+                if isinstance(p, dict) and p.get("source_doc", "") in _fam_set
+            }
+            # doc_family pre-filters the VECTOR search only. BM25 ranks over whatever
+            # pool it is handed, and the RRF fusion + per-document diversification
+            # that follow actively spread results ACROSS documents — so a page from
+            # outside the family can enter through the keyword channel and then be
+            # promoted for variety. Measured on Q21: a Service-Agreement family scope
+            # still returned NDA 7 pages this way, and the answer reported a "thirty
+            # (30) days" convenience-notice period that appears nowhere in Service
+            # Agreement 7 (whose own page says fifteen-month term, notice unspecified).
+            # Narrowing the candidate pool makes the resolved family bind every
+            # channel. Falls back to the full pool when the family matches no page
+            # here, so a scope decision can never starve retrieval outright.
+            if _in_family:
+                logger.info("Family scope: candidate pool narrowed from %d to %d page(s)",
+                            len(pages_for_llm), len(_in_family))
+                _candidates = _in_family
+        if len(_candidates) <= 20:
+            selected_titles = list(_candidates.keys())
         else:
             selected_titles, page_selection_usage = _select_relevant_pages(
-                pages_for_llm, question, session_id,
+                _candidates, question, session_id,
                 doc_family=doc_family, force_broad=force_broad,
             )
 
@@ -2124,6 +2170,58 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             for d in mentioned_files]
         doc_names = [re.sub(r'\s+', ' ', d) for d in doc_names]
         wiki_parts.append(f"[The following pages are from: {', '.join(doc_names)}]\n")
+
+    # Document-level metadata (execution/effective date, parties, governing law)
+    # is stored in page_metadata, which retrieval never searches — ranking runs
+    # over page CONTENT. A field extracted correctly at ingest but kept only as
+    # metadata is therefore invisible to the answer, and the pipeline reports
+    # "not covered" about a fact already in its own database. Measured: Court
+    # Case Document 2 carries effective_date "06 July 2025" and Joint Venture
+    # Agreement 3 "18 November 2025" — the exact ground truth of two questions
+    # that scored 2/10 and were classified ingest-capped. Surfacing a compact
+    # header for the documents actually selected costs a few indexed lookups and
+    # a few hundred characters, and never displaces page content (it is added
+    # before the budget loop and counted against the same cap).
+    if config.USE_DATABASE and selected_titles:
+        _meta_docs = []
+        for _t in selected_titles:
+            _p = pages.get(_t)
+            _sd = _p.get("source_doc", "") if isinstance(_p, dict) else ""
+            if _sd and _sd not in _meta_docs:
+                _meta_docs.append(_sd)
+            if len(_meta_docs) >= 6:
+                break
+        _meta_lines = []
+        for _sd in _meta_docs:
+            try:
+                _md = _db.get_metadata(session_id, _sd)
+            except Exception as _md_err:
+                logger.warning("metadata lookup failed for %s: %s", _sd, _md_err)
+                continue
+            _labels = {"effective_date": "date of this document (execution / effective / filing date)",
+                       "parties": "parties", "governing_law": "governing law",
+                       "jurisdiction": "jurisdiction"}
+            _bits = [f"{_labels[_k]}: {_md[_k]}"
+                     for _k in ("effective_date", "parties", "governing_law", "jurisdiction")
+                     if _md.get(_k)]
+            if _bits:
+                _meta_lines.append(f"- {_norm_doc_name(_sd)} — " + "; ".join(_bits))
+        if _meta_lines:
+            # Framing matters as much as inclusion. A first version headed these
+            # "metadata … use only if the question asks for one of these fields"
+            # and the answer LLM ignored it: asked for the date of a filing whose
+            # date sat in the block, it still replied "not covered in the provided
+            # documents". Two causes, both addressed here — the field name
+            # "effective date" did not obviously answer "date of the application",
+            # and an uncitable block loses to the prompt's rule that every fact
+            # carry a citation. So the field is named for what it is, and the
+            # block is declared citable against the document it describes.
+            wiki_parts.append(
+                "[Document facts recorded at ingest. These are drawn from the documents "
+                "themselves and may be cited as such, naming the document. Where the "
+                "question asks for one of these fields, answer from it rather than "
+                "reporting the fact as unavailable:]\n" + "\n".join(_meta_lines) + "\n"
+            )
 
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
     total_chars = sum(len(p) for p in wiki_parts)
@@ -2370,6 +2468,13 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # quoted text and producing a span that matches neither. Excluding quote
 # chars forces each `"..."` span to stop at its own closing quote instead.
 _QUOTE_SPAN_RE = re.compile(r'["“]([^"“”|\n]{15,500})["”]')
+
+# Matches the start of a reference-list line: an optional bullet/dash marker
+# followed by a "[N]"-style citation number, e.g. "- [1] FileName, ..." or
+# "[2] FileName ...". Used to scope the bare-quote stripping in
+# _drop_unverifiable_reference_quotes to actual reference lines, so a quote
+# appearing in ordinary answer prose is never mistaken for a citation excerpt.
+_RX_REFERENCE_LINE_START = re.compile(r'^\s*(?:[-*]\s*)?\[\d+\]')
 
 # Splits a quote on ellipsis markers ("..." or "…"). Legal citations legitimately
 # splice together non-adjacent sentences this way (e.g. "BETWEEN: ... Each of
@@ -2863,6 +2968,86 @@ def _norm_for_severity(s: str) -> str:
     return _norm_for_match(s)
 
 
+def _drop_unverifiable_reference_quotes(answer: str, absent: list[str]) -> tuple[str, int]:
+    """Delete fabricated "| Quote: …" excerpts from References lines.
+
+    A quote the check found NOWHERE in the retrieved context is not evidence, so
+    printing it and appending a warning underneath leaves the invented sentence
+    on screen — the reader still sees an authoritative-looking excerpt, and the
+    warning is the only thing standing between them and treating it as real.
+    Measured on Q60/Q64, whose ANSWERS were both exactly right (the correct Tata
+    entities, matching ground truth): each supported its correct answer with a
+    quotation that paraphrased the page instead of copying it, and the resulting
+    banner made a correct answer read as untrustworthy.
+
+    Removing the excerpt keeps everything that was true — the document, the
+    clause, the answer itself — and drops only the part that could not be
+    substantiated. Reference lines only: a quote embedded in the answer's prose
+    cannot be excised without rewriting the sentence around it, so those still
+    take the banner. Returns (answer, number_removed).
+
+    Two reference-line shapes, handled separately: the documented "FileName,
+    Clause | Quote: ..." form, and a bare-quote form the model also produces —
+    "[1] FileName, "quoted text."" with no "| Quote:" delimiter at all. Only
+    the first shape was originally handled; confirmed missed live on Q105,
+    whose citation read `- [1] ... Judgment 5 (1), "Under the Letter of
+    Intent..."` — the quote was correctly flagged unverified, but the absent
+    delimiter meant this function's line-scan never found it to remove.
+    """
+    if not absent:
+        return answer, 0
+    targets = [_norm_for_match(q) for q in absent if q and q.strip()]
+    if not targets:
+        return answer, 0
+
+    def _matches_target(quoted_norm: str) -> bool:
+        # Substring either way: the flagged span may be the whole excerpt or,
+        # when the model spliced fragments, only the piece that failed
+        # verification.
+        return bool(quoted_norm) and any(
+            t and (t in quoted_norm or quoted_norm in t) for t in targets
+        )
+
+    removed = 0
+    out = []
+    for line in answer.split("\n"):
+        idx = line.find("| Quote:")
+        if idx != -1:
+            quoted = _norm_for_match(line[idx + len("| Quote:"):])
+            if _matches_target(quoted):
+                out.append(line[:idx].rstrip())
+                removed += 1
+                continue
+            out.append(line)
+            continue
+
+        # Bare-quote form: a reference line (starts, after an optional bullet,
+        # with a "[N]"-style citation marker) whose quote sits directly in the
+        # line with no delimiter. Strip only the quoted span itself plus one
+        # adjoining separator, leaving the citation/document/clause intact.
+        if _RX_REFERENCE_LINE_START.match(line):
+            new_line = line
+            stripped_any = False
+            for m in list(_QUOTE_SPAN_RE.finditer(line))[::-1]:
+                if not _matches_target(_norm_for_match(m.group(1))):
+                    continue
+                start, end = m.start(), m.end()
+                # Absorb one leading separator (", " / " - " / " | ") so removal
+                # doesn't leave a dangling comma or dash before the cut.
+                sep = re.match(r'\s*[,\-|]\s*$', new_line[max(0, start - 3):start])
+                if sep:
+                    start -= len(sep.group(0))
+                new_line = new_line[:start].rstrip() + new_line[end:]
+                stripped_any = True
+            if stripped_any:
+                out.append(new_line)
+                removed += 1
+                continue
+
+        out.append(line)
+    return "\n".join(out), removed
+
+
 def _split_unverified_by_severity(unverified: list[str], context: str,
                                   question: str = "") -> tuple[list[str], list[str]]:
     """Split flagged quotes into (absent, prose_sourced) by how serious they are.
@@ -3233,6 +3418,83 @@ shown, replace your quotation with THAT text copied character-for-character (do 
 reword "shall not exceed" into "caps at", do not add a clause/section number that isn't \
 in the quote). If no exact text is shown, describe the provision in your own words \
 WITHOUT quotation marks. Do not repeat the same error."""
+
+
+# Words carrying no retrieval signal — excluded before measuring how much of a
+# question actually appears in the retrieved context (see _refusal_looks_wrong).
+_REFUSAL_CHECK_STOPWORDS = frozenset("""
+what which when where does do did is are was were the this that these those and
+or but for with from into onto about under over between per any some each all
+how why who whom whose can could shall should will would may might must have has
+had been being its it their there here you your our we they them then than such
+said also more most other another only just very much many both same
+please tell explain describe state provide give list name mention say
+question answer document documents agreement agreements clause clauses section
+sections provided context text page pages according per terms term
+""".split())
+
+# Fraction of a question's distinctive words that must appear in the retrieved
+# context before a refusal is treated as suspect. Set high on purpose: the point
+# is to catch answers refusing over material demonstrably sitting in front of
+# them, not to argue with refusals about genuinely absent topics.
+_REFUSAL_RECHECK_MIN_OVERLAP = 0.7
+
+# Below this many distinctive words the overlap ratio is noise — a three-word
+# question clears any threshold by accident.
+_REFUSAL_RECHECK_MIN_TERMS = 4
+
+# Prefix length for the stem match below. Five characters keeps "emission"/
+# "emissions" and "achieve"/"achieving" together without collapsing genuinely
+# different words ("terminate"/"termination" share a stem and a meaning;
+# "confidential"/"confirmation" diverge well before the fifth character).
+_REFUSAL_STEM_LEN = 5
+
+
+def _refusal_looks_wrong(question: str, context: str) -> bool:
+    """True when an answer refused but the context still holds most of what the
+    question asked about.
+
+    Exists because the same document, in the same session, is sometimes cited
+    correctly for one question and then declared absent for the next — the
+    retrieval was fine and the refusal was the model's own miss. Deliberately
+    keyword-level and deliberately strict: it only decides whether a second
+    generation pass is worth one call, and the retry that follows is still free
+    to refuse again.
+    """
+    if not question or not context:
+        return False
+    ctx = _norm_for_match(context)
+    # Prefix-keyed so a question's "achieve" still matches the context's
+    # "achieving" — an inflected form is the same retrieval signal, and exact
+    # matching alone put ordinary morphology on the wrong side of the threshold.
+    ctx_stems = {w[:_REFUSAL_STEM_LEN] for w in re.findall(r'[a-z][a-z\-]+', ctx)}
+    terms = {
+        w for w in re.findall(r'[a-z][a-z\-]{3,}', _norm_for_match(question))
+        if w not in _REFUSAL_CHECK_STOPWORDS
+    }
+    if len(terms) < _REFUSAL_RECHECK_MIN_TERMS:
+        return False
+    present = sum(1 for w in terms if w in ctx or w[:_REFUSAL_STEM_LEN] in ctx_stems)
+    return present / len(terms) >= _REFUSAL_RECHECK_MIN_OVERLAP
+
+
+# Appended for a one-shot retry when an answer refused over context that still
+# contains the question's subject matter. Re-states the refusal as a legitimate
+# outcome on purpose — the failure being corrected is a missed reading, and an
+# addendum that only rewarded finding something would trade it for invention.
+_REFUSAL_RETRY_ADDENDUM = """
+
+---
+IMPORTANT: Your previous answer stated that the CONTEXT above does not cover this \
+question. Before settling on that, read the CONTEXT again in full — the terms this \
+question asks about do appear in it, and the relevant provision may be worded \
+differently from the question, sit under an unexpected heading, or be split across \
+more than one passage.
+
+Answer the question again from the CONTEXT. If, having re-read it, the CONTEXT \
+genuinely does not answer the question, say so plainly again — that is a correct \
+answer and is preferred over guessing. Never invent, infer, or fill in a fact that \
+is not in the CONTEXT."""
 
 
 # A line is "complete" if it ends with a terminal mark a truncated model
@@ -3766,6 +4028,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         logger.warning("Answer generation truncated at the broad token budget with no further retry — trimming to last complete unit")
         answer = _truncate_to_last_complete_unit(answer)
 
+    # Refusal recheck: an answer that declines over context still holding the
+    # question's subject matter gets one more pass. Placed before the citation
+    # checks below so anything it produces is verified on exactly the same terms
+    # as a first-pass answer, and gated on the replacement not being a refusal
+    # itself — a second refusal is evidence the first one was right, and the
+    # original is kept.
+    if _is_not_covered_answer(answer) and _refusal_looks_wrong(question, wiki_content):
+        logger.info("Answer refused but context covers %s — one recheck pass",
+                    question[:60])
+        recheck_answer, recheck_usage, recheck_score, recheck_reason = _run_generation_pass(
+            prompt + _REFUSAL_RETRY_ADDENDUM
+        )
+        token_breakdown.append({
+            "call": "refusal_recheck",
+            "model": config.AZURE_OPENAI_DEPLOYMENT,
+            "prompt_tokens": recheck_usage.get("prompt_tokens", 0),
+            "completion_tokens": recheck_usage.get("completion_tokens", 0),
+            "total_tokens": recheck_usage.get("prompt_tokens", 0) + recheck_usage.get("completion_tokens", 0),
+        })
+        if (recheck_answer.strip()
+                and not _is_not_covered_answer(recheck_answer)
+                and recheck_usage.get("finish_reason") != "length"):
+            logger.info("Refusal recheck produced a substantive answer — using it")
+            answer, usage, confidence_score, confidence_reason = (
+                recheck_answer, recheck_usage, recheck_score, recheck_reason)
+        else:
+            logger.info("Refusal recheck refused again — keeping the original answer")
+
     # Strip quote-wrapped placeholder stand-ins ("Not provided in excerpt", "(not
     # provided here)", etc.) from reference lines BEFORE the integrity checks — they
     # are a known nano non-compliance the prompts already forbid, and stripping them
@@ -3905,11 +4195,26 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             )
 
         if _absent_quotes:
-            answer += (
-                f"\n\n[CITATION WARNING: {len(_absent_quotes)} quoted passage(s) above do not "
-                f"appear anywhere in the retrieved source text — do not rely on them as quotes "
-                f"without checking the document: {_preview_of(_absent_quotes)}]"
-            )
+            # Excise the unsubstantiated excerpts that sit in References lines, then
+            # warn only about any still present in the answer's prose — those cannot
+            # be removed without rewriting the sentence that carries them.
+            answer, _dropped = _drop_unverifiable_reference_quotes(answer, _absent_quotes)
+            _answer_norm = _norm_for_match(answer)
+            _still_present = [q for q in _absent_quotes
+                              if _norm_for_match(q) and _norm_for_match(q) in _answer_norm]
+            if _dropped:
+                logger.warning("Removed %d unverifiable quote(s) from References line(s)", _dropped)
+                answer += (
+                    f"\n\n[CITATION NOTE: {_dropped} reference(s) above cited an excerpt that could "
+                    f"not be matched to the retrieved source text. The excerpt was removed; the "
+                    f"document and clause citation are unchanged.]"
+                )
+            if _still_present:
+                answer += (
+                    f"\n\n[CITATION WARNING: {len(_still_present)} quoted passage(s) above do not "
+                    f"appear anywhere in the retrieved source text — do not rely on them as quotes "
+                    f"without checking the document: {_preview_of(_still_present)}]"
+                )
         if _prose_quotes:
             answer += (
                 f"\n\n[CITATION NOTE: {len(_prose_quotes)} passage(s) above match the retrieved "
@@ -4815,6 +5120,23 @@ _PLURAL_FAMILY_HINT_RE = re.compile(
 )
 
 
+# Family keywords that do NOT, on their own, refer to a DOCUMENT. Against a
+# doc_type string at ingest ("License Agreement") the bare noun is unambiguous,
+# which is what _DOC_FAMILY_RULES was written for. Against a free-form QUESTION
+# the same word is usually ordinary prose — "the Quantum-Mesh IP license", "a
+# Letter of Intent for integrated design consultancy services" — and treating it
+# as a document reference scopes the search to the wrong family, which now also
+# EXCLUDES the document holding the answer. Measured on the live corpus: Q46
+# (answer in a tax opinion) and Q105 (answer in a court judgment) were both
+# pulled into the wrong family this way. These require an explicit document noun
+# immediately after them; the multi-word and acronym rules stay as they were.
+_GENERIC_FAMILY_WORDS = frozenset({
+    "license", "licence", "service", "employment", "consulting", "supply",
+    "opinion", "court",
+})
+_DOC_NOUN = r'(?:agreement|contract|deed|document)'
+
+
 def _detect_question_family(question: str, available_families: set[str]) -> str | None:
     """Return the single document family a question refers to, or None.
 
@@ -4835,7 +5157,11 @@ def _detect_question_family(question: str, available_families: set[str]) -> str 
         # the plural ("compare the NDAs", "the service agreements"), so allow an
         # optional trailing 's' on the keyword's final word — without it "nda"
         # would fail to match "NDAs" and silently drop the family.
-        if re.search(rf'\b{re.escape(keyword)}s?\b', q):
+        if keyword in _GENERIC_FAMILY_WORDS:
+            pattern = rf'\b{re.escape(keyword)}s?\s+{_DOC_NOUN}s?\b'
+        else:
+            pattern = rf'\b{re.escape(keyword)}s?\b'
+        if re.search(pattern, q):
             matched.add(family)
     return next(iter(matched)) if len(matched) == 1 else None
 
@@ -5525,6 +5851,73 @@ def _carryover_comparative_set(question: str, session_id: str) -> list[str]:
     return list(files)
 
 
+def _question_family_scope(question: str, session_id: str) -> tuple[str | None, set[str]]:
+    """The document family a question explicitly names, plus that family's members.
+
+    Returns (None, set()) whenever the question names no single family — which
+    leaves the guard below inert and preserves the pre-Phase-2 behaviour.
+    """
+    if not config.USE_DATABASE:
+        return None, set()
+    try:
+        available = set(_db.list_doc_families(session_id))
+    except Exception as e:
+        logger.error("resolve_scope: list_doc_families failed: %s", e)
+        return None, set()
+    family = _detect_question_family(question, available)
+    if not family:
+        return None, set()
+    try:
+        return family, set(_db.get_documents_by_family(session_id, family))
+    except Exception as e:
+        logger.error("resolve_scope: get_documents_by_family failed: %s", e)
+        return None, set()
+
+
+def _enforce_question_family(scoped: dict, family: str | None,
+                             fam_docs: set[str]) -> dict:
+    """Reconcile a party/entity resolution with the INSTRUMENT the question names.
+
+    The party, party-pair and entity resolvers match on party NAMES alone. A
+    party appearing across several document types therefore resolves to whichever
+    of its documents the content match ranked highest — which can be a different
+    instrument than the one asked about. Confirmed on the production-representative
+    corpus: "the NDA between Tata Steel and NordForge" resolved to the
+    Tata-NordForge *arbitration notice*, "the VitalSpring … *joint venture*" to an
+    NDA, and "the *Services Agreement* between Tata Sons and its service provider"
+    to three brand *judgments* — each answering "not covered" from a document
+    whose type the question had already ruled out.
+
+    The question stated the instrument; this makes that statement authoritative:
+
+      * partial overlap — narrow to the named family's members (strictly tighter)
+      * no overlap      — the resolution contradicts the question, so drop it and
+                          scope to the named family rather than answer from the
+                          wrong instrument
+
+    Never widens: with no family named, no known members, or a scope that resolved
+    no documents at all, the scope is returned untouched.
+    """
+    if not family or not fam_docs:
+        return scoped
+    targets = scoped.get("target_docs") or []
+    if not targets:
+        return scoped
+    kept = [d for d in targets if d in fam_docs]
+    if len(kept) == len(targets):
+        return scoped
+    method = scoped.get("method", "")
+    if kept:
+        logger.info("Scope %s narrowed to the %s family the question names: %d of %d doc(s)",
+                    method, family, len(kept), len(targets))
+        return {**scoped, "target_docs": kept, "method": f"{method}-family"}
+    logger.info("Scope %s resolved entirely outside the %s family the question names "
+                "— scoping to that family instead", method, family)
+    return {**scoped, "scope": "family", "target_docs": sorted(fam_docs),
+            "target_family": family, "is_broad": True, "confidence": 0.6,
+            "method": f"{method}-family-corrected"}
+
+
 def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                   chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
@@ -5576,6 +5969,13 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                 "target_family": None, "is_broad": False,
                 "confidence": 0.9, "method": "file",
                 "doc_collisions": collisions}
+    # The instrument the question names, resolved once and applied to every
+    # name-based branch below (party / party-pair / entity). Deliberately AFTER
+    # the explicit-filename branch above: a user who names a file outright has
+    # said something stronger than a document type, and must never be overridden
+    # by it.
+    _fam_name, _fam_docs = _question_family_scope(question, session_id)
+
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
     # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
@@ -5595,10 +5995,12 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             # the Section 9 petition") — pin the whole resolved cluster so every
             # named instrument is retrieved, not just the ones a single semantic
             # pass happened to surface.
-            return {"scope": "single_doc", "target_docs": sorted(party_docs),
-                    "target_family": None, "is_broad": False,
-                    "confidence": 0.85 if len(party_docs) == 1 else 0.8,
-                    "method": "party" if len(party_docs) == 1 else "party-multi"}
+            return _enforce_question_family(
+                {"scope": "single_doc", "target_docs": sorted(party_docs),
+                 "target_family": None, "is_broad": False,
+                 "confidence": 0.85 if len(party_docs) == 1 else 0.8,
+                 "method": "party" if len(party_docs) == 1 else "party-multi"},
+                _fam_name, _fam_docs)
         # Party spans several documents but the question names only one instrument
         # type — narrow to that family when it resolves cleanly, else fall through
         # rather than guess.
@@ -5627,10 +6029,12 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         logger.error("resolve_scope: party-pair resolution failed: %s", e)
         pair_docs = set()
     if pair_docs:
-        return {"scope": "single_doc", "target_docs": sorted(pair_docs),
-                "target_family": None, "is_broad": False,
-                "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
-                "method": "party-pair"}
+        return _enforce_question_family(
+            {"scope": "single_doc", "target_docs": sorted(pair_docs),
+             "target_family": None, "is_broad": False,
+             "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
+             "method": "party-pair"},
+            _fam_name, _fam_docs)
 
     # An explicit date the question recites ("the SA dated 15 January 2026")
     # resolving to exactly one document. Runs after every party-name signal
@@ -5662,9 +6066,11 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                 ent_targets = sorted(ent_counts)
             else:
                 ent_targets = [max(ent_counts, key=ent_counts.get)]
-            return {"scope": "single_doc", "target_docs": ent_targets,
-                    "target_family": None, "is_broad": False,
-                    "confidence": 0.72, "method": "entity"}
+            return _enforce_question_family(
+                {"scope": "single_doc", "target_docs": ent_targets,
+                 "target_family": None, "is_broad": False,
+                 "confidence": 0.72, "method": "entity"},
+                _fam_name, _fam_docs)
         return {"scope": "single_doc", "target_docs": [],
                 "target_family": None, "is_broad": False,
                 "confidence": 0.7, "method": "entity"}
@@ -5674,22 +6080,10 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     #    (broad phrasing or a plural family noun) and a single resolved family,
     #    so a narrow single-clause question is never wrongly filtered.
     collective = bool(_BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question))
-    if collective:
-        try:
-            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
-        except Exception as e:
-            logger.error("resolve_scope: list_doc_families failed: %s", e)
-            available = set()
-        family = _detect_question_family(question, available)
-        if family:
-            try:
-                docs = _db.get_documents_by_family(session_id, family)
-            except Exception as e:
-                logger.error("resolve_scope: get_documents_by_family failed: %s", e)
-                docs = []
-            return {"scope": "family", "target_docs": docs,
-                    "target_family": family, "is_broad": True,
-                    "confidence": 0.75, "method": "family"}
+    if collective and _fam_name:
+        return {"scope": "family", "target_docs": sorted(_fam_docs),
+                "target_family": _fam_name, "is_broad": True,
+                "confidence": 0.75, "method": "family"}
 
     # 3. Broad cross-document question with no single resolvable family.
     if _BROAD_SCOPE_RE.search(question):
@@ -5763,6 +6157,31 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             return {"scope": "single_doc", "target_docs": carried_set,
                     "target_family": None, "is_broad": False,
                     "confidence": 0.5, "method": "carryover-set"}
+
+    # 4c. Nothing pinned a single document, but the question DID name an
+    #     instrument ("the Service Agreement of Tata Steel Limited"). Falling
+    #     through to a whole-corpus search discards a signal the user actually
+    #     gave: confirmed on the production-representative corpus, that question
+    #     was answered from Service Agreement 2 when it meant Service Agreement 7.
+    #     Narrow to the named family, and carry unresolved_party through so the
+    #     ambiguity is still disclosed — the party genuinely was not pinned, and
+    #     narrowing the search does not make it certain which document was meant.
+    #
+    #     Gated on unresolved_party deliberately. _detect_question_family matches
+    #     its keywords anywhere in the sentence, including inside ordinary prose:
+    #     "a Letter of Intent ... for integrated design consultancy SERVICES"
+    #     matches the Service Agreement family although the answer lives in a
+    #     court judgment, and hard-narrowing there would exclude the very document
+    #     that holds it. Requiring a named-but-unpinned party keeps this to the
+    #     case it was built for — the user identified a company AND an instrument
+    #     type, so only WHICH document of that type is in doubt. Questions naming
+    #     no party at all keep the whole-corpus search they already answer well
+    #     from (measured: Q14/Q67/Q70 score 8-9 on the unscoped path).
+    if _fam_name and unresolved_party:
+        return {"scope": "family", "target_docs": sorted(_fam_docs),
+                "target_family": _fam_name, "is_broad": True,
+                "confidence": 0.55, "method": "default-family",
+                "unresolved_party": unresolved_party}
 
     # 5. Default — search the whole corpus, narrow (unchanged pre-Phase-2 path).
     return {"scope": "corpus", "target_docs": [], "target_family": None,
