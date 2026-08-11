@@ -522,6 +522,7 @@ def upsert_embedding(session_id: str, title: str, embedding: list[float],
 def search_similar_pages(
     session_id: str, query_embedding: list[float], limit: int = 25,
     doc_family: "str | list[str] | None" = None,
+    exclude_cached: bool = False,
 ) -> list[str]:
     """Return page titles ordered by cosine similarity to query_embedding.
 
@@ -533,6 +534,16 @@ def search_similar_pages(
     This narrows the candidate set for family-scoped questions ("across all
     NDAs") at 20k-doc scale, cutting near-neighbour noise. None = search the
     whole session (backward-compatible default).
+
+    exclude_cached: drop cached "Q:" answer pages from the ranking, the same way
+    find_source_docs_mentioning_phrase already does. Must be set whenever the
+    caller has filtered those pages out of its own in-memory dict, because the
+    caller's post-filter runs AFTER the LIMIT: a cached answer is by nature the
+    nearest neighbour of the question that produced it, so the whole top-N is
+    cached answers, every one is then discarded, and the vector channel
+    contributes nothing at all. Measured on Q101 against the 7,245-embedding
+    audit session — all 15 vector hits were "Q:" pages, retrieval silently
+    degraded to BM25-only, and the page holding the answer never surfaced.
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -545,6 +556,7 @@ def search_similar_pages(
         if families:
             family_clause = "AND doc_family = ANY(:families)"
             params["families"] = families
+    cached_clause = "AND title NOT LIKE 'Q:%'" if exclude_cached else ""
     with engine.connect() as conn:
         rows = conn.execute(
             text(f"""
@@ -552,6 +564,7 @@ def search_similar_pages(
                 FROM {tbl}
                 WHERE session_id = :sid
                 {family_clause}
+                {cached_clause}
                 ORDER BY embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
             """),

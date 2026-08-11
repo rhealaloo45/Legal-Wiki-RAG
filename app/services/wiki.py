@@ -1963,10 +1963,18 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     question isn't answered by echoing a previous answer to the same/similar
     question. Intended for QA/testing repeat-asks — a real user benefits from
     the cache, but retesting the same question after a fix needs a guaranteed
-    fresh generation to actually observe whether behavior changed.
+    fresh generation to actually observe whether behavior changed. Forced on
+    whenever config.ENABLE_ANSWER_CACHE is off, so disabling the feature also
+    hides the pages earlier runs already filed.
     """
     index = _load_index(session_id)
     pages = index.get("pages", {})
+    # Turning the cache OFF has to hide the pages already filed, not just stop
+    # writing new ones: a session that has answered questions before still holds
+    # "Q:" pages, and leaving them retrievable means the feature is still running
+    # on everything it wrote earlier. One effective flag so both channels — the
+    # in-memory pool here and the pgvector ranking below — agree.
+    exclude_cached_answers = exclude_cached_answers or not config.ENABLE_ANSWER_CACHE
     if exclude_cached_answers:
         pages = {t: p for t, p in pages.items() if not t.startswith("Q:")}
 
@@ -2115,7 +2123,10 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             selected_titles = file_pages + other
         else:
             # Large wiki: file pages + vector/LLM-selected supplementary pages
-            llm_selected, page_selection_usage = _select_relevant_pages(pages_for_llm, question, session_id)
+            llm_selected, page_selection_usage = _select_relevant_pages(
+                pages_for_llm, question, session_id,
+                exclude_cached_answers=exclude_cached_answers,
+            )
             supplementary = _drop_colliding(llm_selected)
             selected_titles = file_pages + supplementary
         logger.info("File-focused query: %d pages from mentioned file(s), %d total selected",
@@ -2151,6 +2162,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             selected_titles, page_selection_usage = _select_relevant_pages(
                 _candidates, question, session_id,
                 doc_family=doc_family, force_broad=force_broad,
+                exclude_cached_answers=exclude_cached_answers,
             )
 
     # --- Step 2: Build context string from selected pages ---
@@ -4494,7 +4506,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # would re-quote its own cached past self, and that quote would "verify"
     # against the cache even though the underlying content was never trustworthy.
     # Confirmed live: this exact loop happened with a paraphrased NDA_08 quote.
-    if confidence["score"] >= 80 and not _unverified_quotes and not _misattributed and not _unverified_ids:
+    if (config.ENABLE_ANSWER_CACHE and confidence["score"] >= 80
+            and not _unverified_quotes and not _misattributed and not _unverified_ids):
         q_title_prefix = f"Q: {question[:50]}"
         existing_titles = [t for t in pages if t.startswith("Q: ")]
         
@@ -5289,6 +5302,59 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     return set()
 
 
+# Ceiling on how many documents an umbrella party may hit before its doc set is
+# treated as unusable even for intersection. Generous on purpose — the set is
+# only ever intersected with a family below, never used on its own — but bounded,
+# because a name matching hundreds of documents is truncated by the query cap and
+# an intersection against a truncated list is arbitrary rather than wrong-looking.
+_PARTY_FAMILY_SCAN_CAP = 80
+
+
+def _resolve_party_within_family(question: str, session_id: str,
+                                 fam_docs: set[str]) -> set[str]:
+    """Resolve an UMBRELLA party name against the family the question names.
+
+    _resolve_docs_by_party deliberately gives up on a name that hits more than a
+    handful of documents ("Tata Steel Limited", "Tata Sons Private Limited"),
+    because on its own such a name cannot identify one document. But the question
+    usually supplies a second constraint the resolver never spends: the
+    INSTRUMENT. Neither signal is decisive alone; their intersection routinely is.
+
+    Measured on Q21 ("the termination clause of Service Agreement of Tata Steel
+    Limited"): "Tata Steel Limited" appears in 7 documents — over the standalone
+    resolver's cap of 4, so it returned nothing — while the Service Agreement
+    family holds 62. The intersection is exactly ONE document, Service Agreement 7,
+    the correct one. Without this, scope fell through to the whole 62-document
+    family flagged broad, retrieval diversified one page per document, and the
+    single page of SA 7 that survived was about confidentiality; the answer then
+    reported that no termination grounds existed when the document lists seven.
+
+    Returns the smallest non-empty intersection across the question's party-name
+    candidates, or an empty set when nothing intersects or the name is so common
+    that its document list came back truncated (see _PARTY_FAMILY_SCAN_CAP).
+    """
+    if not config.USE_DATABASE or not fam_docs:
+        return set()
+    candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    candidates = [c for c in candidates if len(c) >= 4]
+    if not candidates:
+        return set()
+    best: set[str] | None = None
+    for name in candidates:
+        try:
+            docs = _db.find_source_docs_mentioning_phrase(
+                session_id, name, cap=_PARTY_FAMILY_SCAN_CAP + 1)
+        except Exception as e:
+            logger.error("resolve_scope: party-in-family lookup failed for %r: %s", name, e)
+            continue
+        if not docs or len(docs) > _PARTY_FAMILY_SCAN_CAP:
+            continue
+        hit = {d for d in docs if d in fam_docs}
+        if hit and (best is None or len(hit) < len(best)):
+            best = hit
+    return best or set()
+
+
 # Document-type words a question uses to single out ONE instrument between two
 # parties, mapped to the parenthetical ingest appends to that document's page
 # titles ("… – Aether-Helios (Verified Complaint)"). Ordered most-specific
@@ -5298,6 +5364,16 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
 _TITLE_KIND_HINTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'amended\s+complaint', re.I),                  'Amended Complaint'),
     (re.compile(r'verified\s+complaint', re.I),                 'Verified Complaint'),
+    # Both instruments of one dispute carry the same two party names, so the
+    # party-pair lookup returns them together and only the instrument the
+    # question names tells them apart. Confirmed on Q24, which asks about the
+    # "Notice Invoking Arbitration" and was answered from the Section 9 petition
+    # sitting beside it — preservation relief instead of the pleaded breaches.
+    (re.compile(r'section\s+9\s+petition|petition\s+under\s+section\s+9', re.I),
+                                                                'Section 9 Petition'),
+    (re.compile(r'notice\s+invoking\s+arbitration|arbitration\s+notice', re.I),
+                                                                'Arbitration Notice'),
+    (re.compile(r'written\s+statement', re.I),                   'Written Statement'),
     (re.compile(r'opposition\s+brief', re.I),                   'Opposition Brief'),
     (re.compile(r'reply\s+brief', re.I),                        'Reply Brief'),
     (re.compile(r'(?:court\s+)?transcript', re.I),              'Transcript'),
@@ -5500,6 +5576,31 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         return set()
     if not cluster:
         return set()
+    # A cluster small enough to pin outright can still hold SEVERAL instruments
+    # of one dispute — the same two parties sign the arbitration notice and the
+    # Section 9 petition alike. When the question names exactly one of them, say
+    # so before returning: pinning both leaves the answer LLM to choose, and on
+    # Q24 it chose the petition and reported preservation relief for a question
+    # about the notice's pleaded breaches. Only ever narrows, and only when the
+    # question names ONE instrument — a question spanning several ("across the
+    # NDA, the notice, and the petition") must keep the whole cluster.
+    if len(cluster) > 1 and _count_instrument_mentions(question) <= 1:
+        for rx, hint in _TITLE_KIND_HINTS:
+            if not rx.search(question):
+                continue
+            try:
+                pinned = {d for d in _db.find_source_docs_by_title_tokens(
+                    session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+            except Exception:
+                pinned = set()
+            pinned &= cluster
+            if pinned and len(pinned) < len(cluster):
+                logger.info("Party-pair title match %s narrowed by the instrument "
+                            "named (%r) → %d document(s): %s",
+                            tokens, hint, len(pinned),
+                            {_norm_doc_name(d) for d in pinned})
+                return pinned
+            break
     if len(cluster) <= max_docs:
         logger.info("Party-pair title match %s → %d document(s): %s",
                     tokens, len(cluster), {_norm_doc_name(d) for d in cluster})
@@ -6178,6 +6279,28 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     #     no party at all keep the whole-corpus search they already answer well
     #     from (measured: Q14/Q67/Q70 score 8-9 on the unscoped path).
     if _fam_name and unresolved_party:
+        #     Before widening to the whole family, spend the party name against it.
+        #     An umbrella party is unusable alone and a family is unusable alone,
+        #     but their intersection is often a single document (see
+        #     _resolve_party_within_family). Pinning that document — rather than
+        #     handing 60+ siblings to a broad, diversified retrieval that returns
+        #     roughly one page each — is what lets the answer see the whole
+        #     instrument instead of an arbitrary page of it.
+        _narrowed = _resolve_party_within_family(question, session_id, _fam_docs)
+        if _narrowed and len(_narrowed) <= 4:
+            logger.info("Party %r within the %s family → %d document(s): %s",
+                        unresolved_party, _fam_name, len(_narrowed),
+                        ", ".join(sorted(_norm_doc_name(d) for d in _narrowed)))
+            #     One document is a genuine resolution, so it carries no warning.
+            #     Several means the instrument type still hides which one was
+            #     meant, so unresolved_party rides along and the answer discloses.
+            _scoped = {"scope": "single_doc", "target_docs": sorted(_narrowed),
+                       "target_family": None, "is_broad": False,
+                       "confidence": 0.78 if len(_narrowed) == 1 else 0.65,
+                       "method": "party-in-family"}
+            if len(_narrowed) > 1:
+                _scoped["unresolved_party"] = unresolved_party
+            return _scoped
         return {"scope": "family", "target_docs": sorted(_fam_docs),
                 "target_family": _fam_name, "is_broad": True,
                 "confidence": 0.55, "method": "default-family",
@@ -6622,6 +6745,7 @@ def _rerank_pages(question: str, candidate_titles: list[str], pages: dict,
 def _select_relevant_pages(
     pages: dict, question: str, session_id: str | None = None,
     doc_family: "str | list[str] | None" = None, force_broad: bool = False,
+    exclude_cached_answers: bool = False,
 ) -> tuple[list[str], dict]:
     """Select the most relevant pages for a question.
 
@@ -6633,6 +6757,11 @@ def _select_relevant_pages(
     doc_family (Phase 1): when scope resolution (Phase 2) narrows a question to a
     document family, it's passed here to pre-filter the pgvector search to that
     family's embeddings. None = unfiltered whole-session search (default).
+
+    exclude_cached_answers: forwarded to the pgvector search so cached "Q:" pages
+    are excluded by the SQL rather than discarded after the LIMIT. The caller has
+    already dropped them from `pages`, and filtering only afterwards costs the
+    entire vector budget — see search_similar_pages for the measured case.
 
     force_broad (Phase 2): when scope resolution classifies a question as family
     or broad, force the wide+diversified candidate path even if the local
@@ -6673,7 +6802,8 @@ def _select_relevant_pages(
                 is_broad = force_broad or bool(_BROAD_SCOPE_RE.search(question))
                 vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family
+                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family,
+                    exclude_cached=exclude_cached_answers,
                 )
                 # Validate titles against the in-memory pages dict (guards against
                 # stale embeddings pointing at deleted pages)

@@ -222,5 +222,18 @@ MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning model
 # precision matters most. Off by default — enable to A/B its quality/latency cost.
 ENABLE_RERANK = os.getenv("ENABLE_RERANK", "false").lower() == "true"
 
+# Answer caching — file each high-confidence answer back into the wiki as a
+# "Q: <question>" page, reusable as context for later questions. OFF: nothing new
+# is written to the wiki, so the corpus stays exactly as ingested.
+#
+# Turned off deliberately, not merely untrusted. A cached answer is by
+# construction the nearest embedding neighbour of the question that produced it,
+# so on a session with many cached answers the entire pgvector top-N came back
+# cached and real source pages never surfaced (measured on the 7,245-embedding
+# audit session: 15 of 15 vector hits were "Q:" pages). Those pages also count as
+# fully trusted context for citation verification, which lets a paraphrase
+# entrench itself as a quotable source. Set ENABLE_ANSWER_CACHE=true to restore.
+ENABLE_ANSWER_CACHE = os.getenv("ENABLE_ANSWER_CACHE", "false").lower() == "true"
+
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

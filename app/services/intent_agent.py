@@ -1969,6 +1969,12 @@ _ADVICE_NOTICE = (
     "workspace, and should be reviewed by a qualified lawyer before you act on it."
 )
 
+# The pipeline's own bracketed disclosures — "[SCOPE NOTE: …]", "[SCOPE WARNING: …]",
+# "[CITATION NOTE: …]". Stripped before asking whether an answer actually said
+# anything: they are appended regardless of outcome, so a payload holding nothing
+# but disclosures is an empty answer wearing a full-looking body.
+_RX_BRACKET_NOTE = re.compile(r'\[[A-Z][A-Z \-]{2,30}:.*?\]', re.DOTALL)
+
 
 def _is_advice_seeking(question: str) -> bool:
     """True when the question asks for a decision rather than a document fact."""
@@ -2607,11 +2613,25 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
             # willing to answer outright. Promoting it here costs nothing a
             # grounded answer would have provided, because it only ever fires
             # once that grounded answer has already come back empty.
-            if gk_deferred_method and chunk["payload"].get("not_covered"):
+            #
+            # "Nothing to say" also arrives as an EMPTY answer, not only as an
+            # explicit refusal. A corpus that never discusses the named authority
+            # gives the answer LLM no material to write from and no absent-topic
+            # to declare, so it returns a blank body that not_covered does not
+            # flag. Measured on the 46-document production-representative corpus:
+            # "What is the Delaware Uniform Trade Secrets Act (DUTSA)…" produced
+            # a payload whose entire content was the scope disclosure — no answer
+            # at all — while the general path was ready to answer it outright.
+            # Bracketed disclosures are discounted before the emptiness test
+            # precisely because they are what a blank answer is left holding.
+            _body = _RX_BRACKET_NOTE.sub("", chunk["payload"].get("answer") or "").strip()
+            if gk_deferred_method and (chunk["payload"].get("not_covered") or not _body):
                 promoted = _general_knowledge_answer(question, gk_deferred_method)
                 if promoted:
-                    logger.info("[AGENT] document scope had nothing — promoting "
-                                "general-knowledge answer (%s)", gk_deferred_method)
+                    logger.info("[AGENT] document scope had nothing (%s) — promoting "
+                                "general-knowledge answer (%s)",
+                                "refused" if chunk["payload"].get("not_covered") else "empty",
+                                gk_deferred_method)
                     chunk["payload"] = promoted
                     gk_aside_wanted = False
             if advice_seeking:
