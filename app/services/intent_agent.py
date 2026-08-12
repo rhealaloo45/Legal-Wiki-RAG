@@ -75,7 +75,8 @@ _RX_DRAFTING_NEW_DOC = re.compile(
     r'memorandum|policy|clause)\b'
     r'|from\s+scratch\b'
     r'|how\s+(?:to|do\s+i|should\s+i|would\s+i)\s+(?:go\s+about\s+)?draft'
-    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points)\b'
+    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points|'
+    r'keep\s+in\s+mind)\b'
     r'[^.?!]{0,60}\bdraft'
     r'|\bdraft(?:ing)?\b[^.?!]{0,60}\b(?:steps|tips|advice|guidance|pointers|'
     r'best\s+practices|keep\s+in\s+mind)\b'
@@ -88,7 +89,17 @@ _RX_DRAFTING_NEW_DOC = re.compile(
     # including once the user clarified "a Statement of Work with a software
     # integration partner" — still just a generic role, never a real
     # corpus document, so no reply could ever satisfy the prompt.
-    r'|\bdraft(?:ing)?\b[^.?!]{0,80}\bfor\s+(?:a|an|any|our)\s+(?:\w+\s+){0,2}'
+    #
+    # The first cut of this rule required the role word within 2 words of
+    # "for a/an/any/our" — too tight for real phrasing. Confirmed live again:
+    # "before drafting an indemnity clause for a services agreement with a
+    # software vendor" has FIVE words between "for a" and "vendor" (the
+    # agreement type itself), so the tight version never matched and the same
+    # disambiguation loop recurred in the Ask tab. Dropped the immediate-
+    # article requirement and just look for "for ... <role>" within a wider
+    # span — a role word this far past "draft ... for" is never a corpus
+    # document reference either way.
+    r'|\bdraft(?:ing)?\b[^.?!]{0,100}\bfor\b[^.?!]{0,60}\b'
     r'(?:vendor|supplier|partner|counterparty|client|customer|contractor|'
     r'licensor|licensee|distributor|reseller|integrator)\b'
     r')',
