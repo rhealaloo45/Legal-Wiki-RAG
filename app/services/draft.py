@@ -127,7 +127,12 @@ _PRESERVE_UNLESS_ASKED = """\
 
 _REVIEW_NOTES_TABLE = """\
 - KEEP OPERATIVE TEXT CLEAN (CRITICAL): The clause/document text itself must read as final, ready-to-paste legal language — no citations, caveats, or commentary inside it. Every caveat, source basis, or open question goes in the separate "Legal Review Notes" section below, never inline in the drafted text.
-- LEGAL REVIEW NOTES (CRITICAL): After the drafted formulation(s), add a "**Legal Review Notes**" section as a Markdown table with columns: Source basis | Changed from source (if redrafting) | Fallback / negotiation point | Confirmation needed. Be SPECIFIC — "changed from source" must name the actual delta (e.g. "source Clause 8.3 gives Tata this right alone; this draft keeps it Tata-only" or, if something WAS changed, exactly what and why), not a generic "review alignment" note. If nothing changed from source, say so explicitly rather than leaving the cell blank."""
+- LEGAL REVIEW NOTES (CRITICAL): After the drafted formulation(s), add a "**Legal Review Notes**" section as a Markdown table with columns: Source basis | Changed from source (if redrafting) | Fallback / negotiation point | Confirmation needed. Be SPECIFIC — "changed from source" must name the actual delta (e.g. "source Clause 8.3 gives Tata this right alone; this draft keeps it Tata-only" or, if something WAS changed, exactly what and why), not a generic "review alignment" note. If nothing changed from source, say so explicitly rather than leaving the cell blank.
+- TABLE SYNTAX (CRITICAL): The table has EXACTLY two structural rows before any data — the header row and ONE delimiter row of dashes — then every row after that is real content. Never emit a second all-dashes row; a row of "---" cells is a delimiter, not a placeholder for missing data, and repeating it renders as a blank row above your real answer. Exact shape, four columns, no more and no fewer:
+  | Source basis | Changed from source (if redrafting) | Fallback / negotiation point | Confirmation needed |
+  | --- | --- | --- | --- |
+  | Clause 8.3, Term and Termination – SA-Tata | Preserved Tata's unilateral right; added the 30-day notice period only | Consider a mutual notice cure window if requested in negotiation | Confirm no separate wind-down payment is owed beyond Services already performed |
+  That second line above (the dashes) appears ONCE, immediately after the header, and nowhere else in the table."""
 
 CLAUSE_TEMPLATE = """
 You are an expert legal drafter, drafting like senior in-house counsel: clear, concise, enforceable, negotiation-ready, and not over-engineered. Draft a specific clause based on the prompt, applying the requested stance.
