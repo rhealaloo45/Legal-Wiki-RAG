@@ -6614,6 +6614,15 @@
         } else if (inTable) { flushTable(); inTable = false; }
 
         if (t === '---') { html.push('<hr style="border:0; border-top:1px solid var(--border); margin: 15px 0;">'); }
+        else if (/^\*?AI-generated draft.{0,40}legal review\.?\*?$/i.test(t)) {
+          // Every draft template is instructed to open with this exact
+          // disclaimer, wrapped in single asterisks for italic — but this
+          // hand-rolled parser only ever implemented **bold**, never single-
+          // asterisk italic, so it rendered as literal "*text*" with no
+          // styling at all. Give it an actual banner instead of trying to
+          // make single-asterisk italics work generically.
+          html.push(`<div style="display:flex; align-items:center; gap:8px; border-left: 3px solid var(--accent); padding: 8px 12px; margin: 0 0 14px; background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 0 6px 6px 0; font-size: 12px; font-weight: 600; color: var(--accent);"><i class="ti ti-robot" style="font-size:14px;"></i>${t.replace(/^\*|\*$/g, '')}</div>`);
+        }
         else if (t.startsWith('# ')) { html.push(`<h1 style="font-family:var(--font-heading); font-size:18px; margin: 18px 0 10px;">${parseInline(t.substring(2))}</h1>`); }
         else if (t.startsWith('## ')) { html.push(`<h2 style="font-family:var(--font-heading); font-size:16px; margin: 16px 0 10px;">${parseInline(t.substring(3))}</h2>`); }
         else if (t.startsWith('### ')) { html.push(`<h3 style="font-family:var(--font-heading); font-size:14px; margin: 14px 0 10px;">${parseInline(t.substring(4))}</h3>`); }
