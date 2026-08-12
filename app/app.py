@@ -1243,13 +1243,26 @@ def rename_session(session_id):
 
 @app.route("/session", methods=["DELETE"])
 def clear_session():
-    """Delete all data associated with a session (wiki index, uploads)."""
-    _lock = _locked_in_production()
-    if _lock:
-        return _lock
+    """Delete all data associated with a session (wiki index, uploads).
+
+    NOT gated on _locked_in_production() — that guard exists for routes that
+    mutate the shared WIKI CONTENT (ingest-capable), but in production mode
+    every "chat" in the sidebar is its own throwaway session_id used only for
+    chat_messages/history, entirely separate from the fixed main wiki session
+    (see _get_main_session_id) — deleting one never touches ingested content.
+    Applying the ingest lock here meant users could never delete a chat on
+    Azure at all: every attempt silently 403'd (the frontend didn't check the
+    response status either — see deleteSession() in index.html), leaving the
+    chat in the sidebar forever and, if it was the active chat, reloading
+    into the upload/ingest panel instead of starting a fresh chat.
+    Only refuse when session_id is the actual shared main session — deleting
+    THAT would delete the production wiki content itself.
+    """
     session_id = request.args.get("session_id", "")
     if not session_id:
         return jsonify({"error": "session_id is required"}), 400
+    if session_id == _get_main_session_id():
+        return jsonify({"error": "Cannot delete the shared wiki session."}), 403
 
     errors = []
 
