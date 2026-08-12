@@ -1,0 +1,32 @@
+[
+ {
+  "id": "Q85",
+  "setup": [],
+  "target": "What is the execution date of the services agreement entered into by Tata Sons Private Limited having its registered office at Bombay House, 24 Homi Mody Street, Mumbai?",
+  "doc_hint": "Service Agreement 4"
+ },
+ {
+  "id": "Q14",
+  "setup": [],
+  "target": "In the NDA for EV battery-tool evaluation activities involving a potential $2 billion transaction, what is the standard of care required for protecting technical schematics, and what is the duration of the confidentiality survival period?",
+  "doc_hint": "NDA 5"
+ },
+ {
+  "id": "Q67",
+  "setup": [],
+  "target": "Who is the client for the legal opinion on strategy for dynamic injunctions and coordinated takedowns against deceptive Tata-formative domains?",
+  "doc_hint": "Legal Opinion 2"
+ },
+ {
+  "id": "Q70",
+  "setup": [],
+  "target": "According to the legal opinion for Tata Motors and JLR, how should foreground IP be allocated?",
+  "doc_hint": "Legal Opinion 7"
+ },
+ {
+  "id": "Q92",
+  "setup": [],
+  "target": "What is the name of the company governed by the shareholders' agreement where Tata Consumer Products Limited is the lead strategic shareholder?",
+  "doc_hint": "Shareholder Agreement 4"
+ }
+]

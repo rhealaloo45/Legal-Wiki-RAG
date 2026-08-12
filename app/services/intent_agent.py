@@ -75,10 +75,33 @@ _RX_DRAFTING_NEW_DOC = re.compile(
     r'memorandum|policy|clause)\b'
     r'|from\s+scratch\b'
     r'|how\s+(?:to|do\s+i|should\s+i|would\s+i)\s+(?:go\s+about\s+)?draft'
-    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points)\b'
+    r'|(?:steps|tips|advice|guidance|pointers|best\s+practices|things|points|'
+    r'keep\s+in\s+mind)\b'
     r'[^.?!]{0,60}\bdraft'
     r'|\bdraft(?:ing)?\b[^.?!]{0,60}\b(?:steps|tips|advice|guidance|pointers|'
     r'best\s+practices|keep\s+in\s+mind)\b'
+    # "draft a clause for a software vendor" names the counterparty by its
+    # GENERIC ROLE (vendor, supplier, partner, ...), not a proper name or an
+    # existing document — there is nothing in the corpus such a reference
+    # could resolve to, the same way "a new agreement" has nothing to resolve
+    # to. Confirmed live (deployed): "Help me draft an AI governance clause
+    # for a software vendor" re-asked "which agreement?" on every turn,
+    # including once the user clarified "a Statement of Work with a software
+    # integration partner" — still just a generic role, never a real
+    # corpus document, so no reply could ever satisfy the prompt.
+    #
+    # The first cut of this rule required the role word within 2 words of
+    # "for a/an/any/our" — too tight for real phrasing. Confirmed live again:
+    # "before drafting an indemnity clause for a services agreement with a
+    # software vendor" has FIVE words between "for a" and "vendor" (the
+    # agreement type itself), so the tight version never matched and the same
+    # disambiguation loop recurred in the Ask tab. Dropped the immediate-
+    # article requirement and just look for "for ... <role>" within a wider
+    # span — a role word this far past "draft ... for" is never a corpus
+    # document reference either way.
+    r'|\bdraft(?:ing)?\b[^.?!]{0,100}\bfor\b[^.?!]{0,60}\b'
+    r'(?:vendor|supplier|partner|counterparty|client|customer|contractor|'
+    r'licensor|licensee|distributor|reseller|integrator)\b'
     r')',
     re.IGNORECASE,
 )
@@ -121,7 +144,16 @@ _RX_BETWEEN_PARTIES = re.compile(
     r'venture|arrangement|memorandum|settlement|'
     r'notice|petition|affidavit|application|award|plaint|summons|'
     r'suit|claim|proceedings?|dispute|arbitration)\b[^.?!;]{0,30}?\bbetween\b'
-    r'[^.?!;]+\band\b',
+    # A corporate suffix between the two party names ("... Ltd. and ...",
+    # "... Pte. Ltd. and ...") carries its own period, which [^.?!;]+ can never
+    # cross — the exclusion silently stopped matching short of "and" and the
+    # whole rule went inert for exactly the two-party names it exists to catch
+    # (confirmed live: "the NDA between Tata Passenger Electric Mobility Ltd.
+    # and Cirrus Battery Intelligence" fell through to a comparison template
+    # over a single document). Allow periods, since the pattern is already
+    # bounded at the next "and" and a short abbreviation dot is far more
+    # likely here than an actual sentence break.
+    r'[^?!;]{1,80}?\band\b',
     re.IGNORECASE,
 )
 # A third false trigger: "board composition structured between Tata Power and
@@ -211,6 +243,34 @@ def _is_advisory_entity_name_only(q: str) -> bool:
     return hits <= {"advise", "advisory"} and bool(_RX_ADVISORY_ENTITY.search(q))
 
 
+# A case caption ("the Tata Sons vs Deepak Kumar case", "X vs. Y") names ONE
+# matter by its two litigants the same way a contract names its two
+# signatories — it is not a request to compare two documents, but bare "vs"/
+# "versus" is one of _RX_COMPARISON's own trigger words, so a single-document
+# question about a captioned case forced the comparison template every time
+# (confirmed live: "What did the defendants agree to transfer ... in the Tata
+# Sons vs Deepak Kumar case?" rendered a two-column table with "Not
+# Applicable" for the missing second document).
+_RX_CASE_CAPTION_VS = re.compile(
+    r'\b[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\s+vs\.?\s+'
+    r'[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*){0,4}\b',
+)
+
+
+def _is_case_caption_vs_only(q: str) -> bool:
+    """True when the ONLY _RX_COMPARISON signal is a "vs" naming a case
+    caption — so comparison intent should be suppressed. Same subset-guard
+    shape as _is_governance_approval_only: a question that ALSO carries a
+    real comparison cue (compare, differ, contrast, side-by-side) elsewhere
+    still classifies as comparison, because stripping the caption match
+    leaves that cue in place for _RX_COMPARISON to find again."""
+    m = _RX_CASE_CAPTION_VS.search(q)
+    if not m:
+        return False
+    remainder = q[:m.start()] + q[m.end():]
+    return not _RX_COMPARISON.search(remainder)
+
+
 def _is_governance_approval_only(q: str) -> bool:
     """True when the ONLY _RX_RISK signal in the question is an approval/consent
     word used in a governance sense — so risk intent should be suppressed and the
@@ -223,11 +283,19 @@ def _is_governance_approval_only(q: str) -> bool:
 _INTENT_LLM_PROMPT = (
     "You classify a lawyer's question into exactly ONE intent.\n\n"
     "Intents:\n"
-    "- factual: extract or explain what a document says (clauses, definitions, parties, summaries).\n"
+    "- factual: extract or explain what a document says (clauses, definitions, parties, "
+    "summaries, term length, subject matter, dates) — including a single specific "
+    "document's own attributes.\n"
     "- risk_assessment: judge risk, recommend go/no-go, flag red flags, advise whether to sign.\n"
     "- comparison: compare two or more documents/clauses side by side, find differences.\n"
     "- obligation: list duties, obligations, deadlines, or compliance requirements.\n"
     "- drafting: write, redline, or propose new/alternative clause language.\n\n"
+    "IMPORTANT: classify as comparison ONLY if the question ITSELF asks to compare, "
+    "contrast, or find differences between two or more documents/clauses. A question "
+    "asking about ONE specific document's own attribute — e.g. \"What is the term of "
+    "NDA 5?\", \"What is NDA 5 about?\", \"When was Service Agreement 2 signed?\" — is "
+    "factual, never comparison, even if the same conversation earlier discussed several "
+    "other documents.\n\n"
     "Question: {question}\n\n"
     "Respond with JSON only:\n"
     '{{"intent": "one of the five slugs", "confidence": 0.0-1.0}}'
@@ -244,7 +312,7 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
 
     if _RX_DRAFTING.search(q):
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
-    if _RX_COMPARISON.search(q):
+    if _RX_COMPARISON.search(q) and not _is_case_caption_vs_only(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
     if _RX_BETWEEN.search(q) and not _RX_BETWEEN_EXCLUDE.search(q) \
             and not _RX_BETWEEN_PARTIES.search(q) \
@@ -482,7 +550,30 @@ def check_disambiguation_node(state: QueryState) -> dict:
     #       here directly is what actually reopens that guard; skipping it
     #       would silently reintroduce the original bug instead of just
     #       fixing the new one.
-    if not wiki._VAGUE_DOC_PATTERN.search(state["question"]):
+    # _VAGUE_DOC_PATTERN also matches ordinary uses of "the agreement"/"the
+    # contract" that are not actually naming/pivoting to a document ("breach
+    # THE AGREEMENT", "under THE AGREEMENT") — the same false-positive shape
+    # wiki._ORDINARY_TYPE_USAGE_RE already carves out one layer down inside
+    # _carryover_scope. But this gate runs BEFORE that function is ever
+    # called, so a phrase matching _VAGUE_DOC_PATTERN never reached
+    # _carryover_scope for its own exception to apply. Re-check the same
+    # exception here directly: an ordinary-usage phrase should still be
+    # allowed through to the carryover check below, same as if
+    # _VAGUE_DOC_PATTERN hadn't matched at all. Confirmed live: "What if they
+    # breach the agreement?", asked mid-thread on an already-pinned document,
+    # fell through to classify_query() and re-asked which document.
+    # Same reasoning again for a demonstrative backreference to a specific
+    # filing type already established ("that petition", "that affidavit") —
+    # wiki._DEMONSTRATIVE_BACKREF_RE carves this out one layer down inside
+    # _carryover_scope, but "affidavit" (among others in its word list) is
+    # ALSO one of _VAGUE_DOC_PATTERN's own type words, so this outer gate
+    # blocks the same phrase from ever reaching that exception. Confirmed
+    # live: "What records are sought to be preserved under THAT PETITION?",
+    # asked right after a Section 9 petition was the established scope, still
+    # forced a disambiguation prompt.
+    if (not wiki._VAGUE_DOC_PATTERN.search(state["question"])
+            or wiki._ORDINARY_TYPE_USAGE_RE.search(state["question"])
+            or wiki._DEMONSTRATIVE_BACKREF_RE.search(state["question"])):
         # Carryover must read THIS thread's messages, which live under the CHAT
         # session — not the wiki/doc session, which is shared by every thread
         # served off the same fixed main wiki and therefore holds every answer
@@ -507,6 +598,21 @@ def check_disambiguation_node(state: QueryState) -> dict:
                 return {"needs_disambiguation": False}
         except Exception as e:
             logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
+
+    # A question that names BOTH sides of a matter ("damages Helios claimed in
+    # its counterclaim against Aether") is not ambiguous — it identifies one
+    # matter precisely — but classify_query below sees no document NUMBER and
+    # no single dominant party, and asks anyway. wiki._resolve_docs_by_party_pair
+    # resolves exactly this case deterministically, so consult it first and skip
+    # the question when it pins a concrete document set. Same shape as the
+    # carryover skips above: a deterministic resolver pre-empting an LLM
+    # ambiguity judgment that has no way to see what it saw.
+    try:
+        if wiki._resolve_docs_by_party_pair(state["question"], state["session_id"]):
+            logger.info("[AGENT] disambiguation skipped (party-pair scope resolved)")
+            return {"needs_disambiguation": False}
+    except Exception as e:
+        logger.error("Party-pair disambiguation check failed: %s", e)
 
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
@@ -655,6 +761,7 @@ def retrieve_context_node(state: QueryState) -> dict:
         target_doc=state.get("target_doc", ""), retrieval_hints=hints,
         exclude_cached_answers=state.get("exclude_cached_answers", False),
         doc_family=_fam, force_broad=_force_broad, force_docs=_force_docs,
+        family_docs=(scope.get("target_docs") if scope.get("scope") == "family" else None),
     )
     titles = res.get("selected_titles", [])
     _emit({"stage": "pages_retrieved", "status": "done",
@@ -718,6 +825,62 @@ def generate_answer_node(state: QueryState) -> dict:
             f"conversation — {_set_names}{_more}. To compare a different set, name "
             f"the documents explicitly, or use \"across all …\" to search every document."
         )
+    elif (_scope.get("method") == "default" and not _scope.get("target_docs")
+            and not _scope.get("unresolved_party")):
+        # No document was ever named in this conversation (not carried over from
+        # a prior turn, not a named-but-ambiguous party — genuinely never named),
+        # so retrieval searched the whole corpus with no document pinned. If the
+        # answer below reads as if it's about one specific document, that's an
+        # artifact of which pages happened to rank highest, not a confirmed
+        # match — disclose it, same duty as the carryover note above. Confirmed
+        # live: a 4-turn thread with no document ever named silently answered as
+        # if about "Service Agreement 1" (never mentioned anywhere in the
+        # conversation) with zero indication a guess had been made.
+        _scope_note = (
+            "This question named no document, so the entire corpus was searched "
+            "with nothing pinned to one specific agreement. If the answer below "
+            "reads as if it concerns a single document, verify that against the "
+            "References section below — no document was confirmed as the one you "
+            "meant. Name a document explicitly to get a scoped answer."
+        )
+
+    # The question identified its document by a description (a party's
+    # registered-office block) that several documents state identically, so it
+    # has as many valid answers as it has matches. resolve_scope pinned them all
+    # rather than letting the entity branch collapse them to a top-ranked winner
+    # (wiki._detect_description_ambiguity). Three separate channels, each doing a
+    # job the others can't: the DIRECTIVE reshapes the answer itself (one value
+    # per document, each attributed), the WARNING is a deterministic banner the
+    # model cannot omit, and the NOTE explains how to resolve it next turn.
+    _ambiguity_directive = ""
+    _amb = _scope.get("ambiguous_match") or {}
+    if len(_amb.get("docs") or []) > 1:
+        _amb_docs = _amb["docs"]
+        _amb_desc = _amb.get("description", "")
+        _amb_names = ", ".join(f'"{wiki._norm_doc_name(d)}"' for d in _amb_docs)
+        _ambiguity_directive = (
+            f"The question identifies its document by {_amb_desc} \u2014 which fits "
+            f"{len(_amb_docs)} documents in this corpus equally well: "
+            f"{_amb_names}. Nothing else in the question distinguishes them, so the "
+            f"question has {len(_amb_docs)} equally valid answers, not one. Do NOT pick "
+            f"the best-matching document and answer as if it were the only match, and do "
+            f"NOT merge their values into one figure. Instead: state in the FIRST "
+            f"SENTENCE that the description matches {len(_amb_docs)} documents and name "
+            f"them, then answer the question SEPARATELY FOR EACH ONE, with every value "
+            f"carrying the name of the document it came from. Close by saying what would "
+            f"distinguish them (a document number, the counterparty, or the subject "
+            f"matter) so the user can narrow it. If the retrieved excerpts only support "
+            f"an answer for some of these documents, say which ones you could answer for "
+            f"and which you could not \u2014 never let a missing excerpt turn this back into "
+            f"a single-document answer."
+        )
+        _scope_note = (
+            f"This question identified its document by {_amb_desc}, which fits "
+            f"{len(_amb_docs)} documents equally \u2014 {_amb_names} \u2014 so all of them "
+            f"were searched and each is answered separately above. To pin one, "
+            f"name it by number (e.g. \"Service Agreement 2\") or by its subject "
+            f"matter."
+        )
 
     # The clause map resolved the asked-for number to a real section of this
     # document. Two channels, deliberately separate: scope_note is DISPLAY-ONLY
@@ -768,8 +931,23 @@ def generate_answer_node(state: QueryState) -> dict:
     # fell through to a broad corpus search. The answer may be sourced from a
     # same-type sibling rather than the exact document the user meant — warn.
     _scope_warning = ""
-    _unresolved = _scope.get("unresolved_party") if _scope.get("method") == "default" else ""
-    if _unresolved:
+    # An ambiguous identifying description outranks the warning below: that one
+    # says "this MIGHT be the wrong document", whereas here it is established
+    # that no single document is the right one. Set first, and the weaker
+    # warning defers to it.
+    if _ambiguity_directive:
+        _scope_warning = (
+            f"Your question identifies its document by {_amb_desc}, which fits "
+            f"{len(_amb_docs)} documents equally ({_amb_names}), so it does not "
+            f"single one out. The answer below is given separately for each; "
+            f"there is no single value that answers this question. Name the document by "
+            f"number, counterparty, or subject matter to get one answer."
+        )
+    # Set by the corpus-wide default AND by its family-narrowed variant: limiting
+    # the search to the instrument the question named does not establish WHICH
+    # document of that type was meant, so the disclosure duty is unchanged.
+    _unresolved = _scope.get("unresolved_party") or ""
+    if _unresolved and not _scope_warning:
         _scope_warning = (
             f"The question named \"{_unresolved}\" but that party appears in several "
             f"documents, so no single document could be confirmed as the one you meant. "
@@ -806,6 +984,7 @@ def generate_answer_node(state: QueryState) -> dict:
             unconfirmed_doc_reference=state.get("unconfirmed_doc_reference", False),
             scope_note=_scope_note, scope_warning=_scope_warning,
             clause_directive=_clause_directive,
+            ambiguity_directive=_ambiguity_directive,
         )
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
@@ -1901,6 +2080,12 @@ _ADVICE_NOTICE = (
     "workspace, and should be reviewed by a qualified lawyer before you act on it."
 )
 
+# The pipeline's own bracketed disclosures — "[SCOPE NOTE: …]", "[SCOPE WARNING: …]",
+# "[CITATION NOTE: …]". Stripped before asking whether an answer actually said
+# anything: they are appended regardless of outcome, so a payload holding nothing
+# but disclosures is an empty answer wearing a full-looking body.
+_RX_BRACKET_NOTE = re.compile(r'\[[A-Z][A-Z \-]{2,30}:.*?\]', re.DOTALL)
+
 
 def _is_advice_seeking(question: str) -> bool:
     """True when the question asks for a decision rather than a document fact."""
@@ -2070,9 +2255,35 @@ _RX_GK_OPENER = re.compile(
 # veto below doesn't reject "what is THE doctrine of frustration" — "the" there
 # points at a concept, not at a document.
 _RX_GK_SUBJECT_STRIP = re.compile(
-    r'^\s*(?:the\s+)?(?:doctrine|concept|principle|term|word|phrase|meaning|'
-    r'definition|purpose|idea|notion|rule)\s+of\s+',
+    r'^\s*(?:the\s+)?'
+    # An adjective may sit between the article and the framing noun — "the LEGAL
+    # doctrine of unclean hands" is the same shape as "the doctrine of
+    # frustration", but without this the article survives and the veto below
+    # rejects a plainly general question (confirmed live on "unclean hands").
+    r'(?:(?:legal|equitable|common[\s-]law|general|basic|underlying)\s+)?'
+    r'(?:doctrine|concept|principle|term|word|phrase|meaning|'
+    r'definition|purpose|idea|notion|rule|test|standard)\s+of\s+',
     re.IGNORECASE,
+)
+
+# Named legal authorities and tests keep their definite article as part of the
+# name — "THE Delaware Uniform Trade Secrets Act", "THE Alice test". The veto
+# below reads that article as pointing at a workspace document, so without this
+# exception a textbook question about a named statute is answered from whatever
+# agreement happened to be under discussion. Requires a capitalised name (or a
+# quoted one) in front of the category noun, which no bare document reference in
+# this corpus has — those carry a number and are caught by _RX_GK_DOC_REF.
+_GK_AUTHORITY_NOUN = (r'(?i:acts?|doctrines?|rules?|tests?|standards?|conventions?|'
+                      r'codes?|treaties|treaty|principles?)')
+_RX_GK_NAMED_AUTHORITY = re.compile(
+    r'^\s*the\s+(?:'
+    # Quoted name carrying the category noun inside the quotes — the "Alice test".
+    rf'["“][^"”]*\b{_GK_AUTHORITY_NOUN}["”]'
+    # Capitalised name followed by the category noun — the Delaware Uniform
+    # Trade Secrets Act. Case-sensitive on the name so a lowercase phrase such
+    # as "the termination clause test" cannot qualify.
+    rf'|(?:[A-Z][\w.\-]*\s+){{0,5}}{_GK_AUTHORITY_NOUN}\b'
+    r')',
 )
 
 # The subject must be a bare concept. A definite article or a demonstrative
@@ -2190,6 +2401,17 @@ _RX_GK_LEGAL_TERM = re.compile(
     re.IGNORECASE,
 )
 
+# A statute citation names public law, never a workspace document, but its
+# shape trips _RX_GK_DOC_REF's generic "word followed by a number" alternation —
+# "under 35" in "35 U.S.C. § 101" reads exactly like "agreement 2". Removed from
+# the question before that check rather than loosening the alternation itself,
+# which would let real document references through.
+_RX_GK_STATUTE_CITE = re.compile(
+    r'\b\d+\s*U\.?\s?S\.?\s?C\.?(?:\s*§+)?(?:\s*[\d]+[\w.()\-]*)?'
+    r'|§+\s*[\w.()\-]+',
+    re.IGNORECASE,
+)
+
 # Same cap as the meta fallback, for the same reason: a genuine definitional
 # question is short, and a long message this deep into the gates is not one.
 _GK_LLM_MAX_LEN = 120
@@ -2219,7 +2441,9 @@ def _gk_subject(question: str) -> str | None:
     # "arbitration work?" reduces to the concept itself.
     subject = re.sub(r'\s*(?:mean(?:s|ing)?|work(?:s)?|entail|involve(?:s)?)?\s*[?.!]*\s*$',
                      '', subject, flags=re.IGNORECASE).strip()
-    if not subject or _RX_GK_SUBJECT_VETO.match(subject):
+    if not subject:
+        return None
+    if _RX_GK_SUBJECT_VETO.match(subject) and not _RX_GK_NAMED_AUTHORITY.match(subject):
         return None
     return subject
 
@@ -2244,24 +2468,36 @@ def _is_general_knowledge_llm(question: str) -> bool:
 
 
 def _general_knowledge_kind(question: str) -> str:
-    """'gk-regex' | 'gk-llm' | '' — which gate, if any, claims this question.
+    """'gk-regex' | 'gk-llm' | 'gk-named' | '' — which gate, if any, claims this.
 
     Every gate must pass. Order matters only for cost: the advice block runs
     before the vocabulary check so an advice-seeking question is rejected
     without ever being scored as legal.
+
+    'gk-named' is deliberately weaker than the other two. A bare concept
+    ("what is novation") is textbook material a commercial corpus is unlikely to
+    define, so answering it without retrieval is right. A NAMED authority — the
+    Delaware Uniform Trade Secrets Act, the Alice test — is exactly what legal
+    opinions and pleadings discuss at length, and a corpus that holds that
+    discussion should answer from it. So the caller runs retrieval first for
+    these and keeps the general answer as a fallback (see run_query_stream);
+    skipping retrieval here would replace a document's own analysis with a
+    dictionary definition.
     """
     if not config.ENABLE_GENERAL_KNOWLEDGE:
         return ""
     q = (question or "").strip()
     if not q:
         return ""
-    if _RX_GK_DOC_REF.search(q):
+    if _RX_GK_DOC_REF.search(_RX_GK_STATUTE_CITE.sub(" ", q)):
         return ""
     if _RX_GK_ADVICE_BLOCK.search(q) or _is_advice_seeking(q):
         return ""
     subject = _gk_subject(q)
     if subject is None:
         return ""
+    if _RX_GK_NAMED_AUTHORITY.match(subject):
+        return "gk-named"
     if _RX_GK_LEGAL_TERM.search(subject):
         return "gk-regex"
     if not config.ENABLE_GK_LLM_FALLBACK or len(q) > _GK_LLM_MAX_LEN:
@@ -2433,11 +2669,18 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # aside woven INTO cited prose is how a general sentence ends up wearing a
     # citation number it has no right to.
     gk_aside_wanted = False
+    gk_deferred_method = ""
+    # A named authority never takes the standalone path — the corpus may well
+    # discuss it, and a document's own analysis beats a definition. Held back as
+    # a fallback for the case where retrieval genuinely finds nothing.
+    if gk_method == "gk-named":
+        gk_deferred_method, gk_method = gk_method, ""
     if gk_method:
         _gk_chat_sid = chat_session_id or session_id
         try:
             if wiki.has_established_document_scope(_gk_chat_sid):
                 gk_aside_wanted = True
+                gk_deferred_method = gk_method
                 gk_method = ""
         except Exception as e:
             logger.warning("Could not check document scope for GK aside: %s", e)
@@ -2474,6 +2717,34 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):
         if chunk.get("type") == "answer" and isinstance(chunk.get("payload"), dict):
+            # The aside path above assumes the document has something to say
+            # about the term. When it does not, the user is left with a refusal
+            # ("not addressed in the provided context") beside a margin note
+            # holding the actual answer — for a question the general path was
+            # willing to answer outright. Promoting it here costs nothing a
+            # grounded answer would have provided, because it only ever fires
+            # once that grounded answer has already come back empty.
+            #
+            # "Nothing to say" also arrives as an EMPTY answer, not only as an
+            # explicit refusal. A corpus that never discusses the named authority
+            # gives the answer LLM no material to write from and no absent-topic
+            # to declare, so it returns a blank body that not_covered does not
+            # flag. Measured on the 46-document production-representative corpus:
+            # "What is the Delaware Uniform Trade Secrets Act (DUTSA)…" produced
+            # a payload whose entire content was the scope disclosure — no answer
+            # at all — while the general path was ready to answer it outright.
+            # Bracketed disclosures are discounted before the emptiness test
+            # precisely because they are what a blank answer is left holding.
+            _body = _RX_BRACKET_NOTE.sub("", chunk["payload"].get("answer") or "").strip()
+            if gk_deferred_method and (chunk["payload"].get("not_covered") or not _body):
+                promoted = _general_knowledge_answer(question, gk_deferred_method)
+                if promoted:
+                    logger.info("[AGENT] document scope had nothing (%s) — promoting "
+                                "general-knowledge answer (%s)",
+                                "refused" if chunk["payload"].get("not_covered") else "empty",
+                                gk_deferred_method)
+                    chunk["payload"] = promoted
+                    gk_aside_wanted = False
             if advice_seeking:
                 chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
             # Attached to the finished payload, never merged into the answer
