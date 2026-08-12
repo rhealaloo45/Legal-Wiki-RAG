@@ -4870,9 +4870,23 @@
       e.stopPropagation();
       if (!confirm('Delete this session?')) return;
       try {
-        await fetch(`/session?session_id=${id}`, { method: 'DELETE' });
-        if (id === SID) newSession();
-        else loadSessions();
+        const res = await fetch(`/session?session_id=${id}`, { method: 'DELETE' });
+        if (!res.ok) {
+          // Previously ignored: a 403 (or any other failure) was treated as
+          // success, so the chat silently stayed in the sidebar forever and,
+          // if it was the active one, newSession() below still ran anyway —
+          // reloading into the upload/ingest panel for a delete that never
+          // happened.
+          const body = await res.json().catch(() => ({}));
+          alert(body.error || 'Could not delete this chat.');
+          return;
+        }
+        // newSession() is the "New ingest" flow — it reloads onto the
+        // upload/ingest panel, which production users should never see.
+        // Deleting the active CHAT should start a fresh chat thread against
+        // the existing wiki instead, same as the "New Chat" button.
+        if (id === SID) newChat();
+        loadSessions();
       } catch (err) { }
     }
 
