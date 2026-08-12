@@ -99,10 +99,49 @@ Avoid:
 }
 
 # Prompt Templates
+#
+# Shared blocks below were added after auditing two live drafts against their
+# source documents: redrafting Service Agreement 2's termination clause to
+# add a 30-day notice period silently turned Tata's UNILATERAL right into a
+# MUTUAL one for both parties — a real, unrequested change to who holds the
+# right, flagged only by a fixed, non-specific "[DRAFTING NOTE: conflicts...]"
+# sentence with nothing to say WHAT conflicted. A second indemnity-clause
+# redraft kept directionality correct but silently broadened which events
+# triggered indemnification beyond what the source clause covered. Same
+# pattern both times: an instruction to change ONE thing drifted into
+# changing adjacent things nobody asked about, and the only integrity check
+# was the model grading its own homework in one vague sentence baked into the
+# operative text.
+#
+# PRESERVE_UNLESS_ASKED and REVIEW_NOTES_TABLE below exist specifically for
+# that failure shape — informed by a colleague's DRAFT_SYSTEM_PROMPT, which
+# handles it two ways worth adopting: (1) soften a broad/one-sided right with
+# a qualifier (materiality, reasonable opinion, applicable law) instead of
+# silently making it symmetric, and (2) never let a caveat live inside the
+# operative clause language — it goes in a separate, structured notes section
+# instead of one ambiguous inline flag.
+
+_PRESERVE_UNLESS_ASKED = """\
+- PRESERVE EXISTING ASYMMETRY UNLESS ASKED TO CHANGE IT (CRITICAL): When redrafting or modifying a clause that already exists in the wiki context, change ONLY what the prompt actually asked for — every other term, including which party holds a right, stays exactly as the source has it. A right that is unilateral in the source (e.g. only one party may terminate for convenience, only one party indemnifies the other) MUST remain unilateral in the redraft unless the prompt explicitly asks to make it mutual. Confirmed real failure: asked to add a 30-day notice period to Tata's existing one-sided termination-for-convenience right, the redraft silently extended that right to both parties — a substantive change to who holds it, never requested and not disclosed as a change. If a one-sided right risks looking excessive, soften it with a qualifier (materiality, reasonable opinion, applicable law, legal/compliance requirement) rather than making it mutual — a qualifier narrows how the right is exercised without handing it to the other side.
+- DO NOT SILENTLY WIDEN SCOPE (CRITICAL): The same discipline applies to what a clause covers, not just who it favors. Confirmed real failure: asked only to add a notice-of-claim requirement to an existing one-directional indemnity clause, the redraft also broadened WHICH events trigger indemnification beyond what the source clause listed. Only add categories, triggers, or carve-outs the prompt actually requested."""
+
+_REVIEW_NOTES_TABLE = """\
+- KEEP OPERATIVE TEXT CLEAN (CRITICAL): The clause/document text itself must read as final, ready-to-paste legal language — no citations, caveats, or commentary inside it. Every caveat, source basis, or open question goes in the separate "Legal Review Notes" section below, never inline in the drafted text.
+- LEGAL REVIEW NOTES (CRITICAL): After the drafted formulation(s), add a "**Legal Review Notes**" heading followed by FOUR bullet points, one per line, each starting with a bold label exactly as shown — a bulleted list, not a table (tables from this model have repeatedly rendered malformed — a stray delimiter row, or columns silently dropped — a list degrades safely, a broken table does not):
+  - **Source basis:** Clause 8.3, Term and Termination – SA-Tata
+  - **Changed from source:** Preserved Tata's unilateral right; added the 30-day notice period only
+  - **Fallback / negotiation point:** Consider a mutual notice cure window if requested in negotiation
+  - **Confirmation needed:** Confirm no separate wind-down payment is owed beyond Services already performed
+  Be SPECIFIC on every line — "Changed from source" must name the actual delta (or state plainly that nothing changed beyond what was requested), never a generic "review alignment" note. If there is no existing source clause at all, say so on the "Source basis" line rather than omitting it."""
+
 CLAUSE_TEMPLATE = """
-You are an expert legal drafter. Draft a specific clause based on the prompt, applying the requested stance.
-Output ONLY the clause itself. Avoid commentary. Preserve numbering if applicable. Capitalize defined terms. Use precise legal drafting language and avoid vague qualifiers unless explicitly defined.
-If the wiki context reveals conflicting provisions, insert: "[DRAFTING NOTE: conflicts with existing agreement language — review alignment]" at the top.
+You are an expert legal drafter, drafting like senior in-house counsel: clear, concise, enforceable, negotiation-ready, and not over-engineered. Draft a specific clause based on the prompt, applying the requested stance.
+FORMAT AS MARKDOWN (CRITICAL): This renders through a Markdown parser, not plain text. Use a "## " heading for the clause's title (e.g. "## 1. Liability Cap"), and wrap each defined term in **bold** the first time it is introduced (e.g. "the **Service Provider**"). Sub-clauses get their own line, numbered, with a blank line between them — never one dense paragraph.
+Preserve numbering if applicable. Capitalize defined terms. Use precise legal drafting language and avoid vague qualifiers unless explicitly defined.
+Avoid duplicative provisions — consolidate repeated concepts (e.g. insolvency, survival, accrued rights, return/destruction, audit, remedies) rather than restating them across sub-clauses. Prefer compact categories with illustrative examples over exhaustive lists.
+If the prompt requests a clause type the wiki context contains NO existing provision for, say so as the first line of the Legal Review Notes ("No existing [type] clause in the retrieved context — this is market-standard language, not adapted from the agreement's own wording") — you may still draft it using standard market mechanisms, this is disclosure, not a reason to refuse.
+{preserve_unless_asked}
+{review_notes_table}
 {wiki_instructions}
 
 STANCE INSTRUCTIONS:
@@ -110,12 +149,17 @@ STANCE INSTRUCTIONS:
 
 PROMPT:
 {prompt}
+
+Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
 FULL_DOCUMENT_TEMPLATE = """
-You are an expert legal drafter. Draft a full agreement based on the prompt, applying the requested stance.
+You are an expert legal drafter, drafting like senior in-house counsel: clear, concise, enforceable, negotiation-ready, and not over-engineered. Draft a full agreement based on the prompt, applying the requested stance.
 Include: agreement title, parties, recitals, definitions, commercial terms, confidentiality, IP, liability, termination, general provisions, schedules where relevant, and execution block.
 Formatting should resemble enterprise commercial agreements. Use Markdown.
+Avoid duplicative provisions — consolidate repeated concepts (e.g. insolvency, survival, accrued rights, return/destruction, audit, remedies) into one clause rather than restating them in several.
+{preserve_unless_asked}
+{review_notes_table}
 {wiki_instructions}
 
 STANCE INSTRUCTIONS:
@@ -123,11 +167,14 @@ STANCE INSTRUCTIONS:
 
 PROMPT:
 {prompt}
+
+Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
 COMMUNICATION_TEMPLATE = """
 You are an expert legal counsel. Draft a business/legal communication based on the prompt, applying the requested stance.
 Outputs should remain concise, professional, and include structured risk summaries where appropriate.
+FACTS ARE A HARD LIMIT (CRITICAL): Unlike clause drafting, this communication describes an EXISTING matter or document — every factual claim about that matter (dates, figures, party names, contract terms, status) must come from the user's prompt or the wiki context. Do not invent or infer a fact that isn't stated in either. If a fact the communication needs isn't available, list it as a "confirmation needed" item rather than stating it as if verified.
 {wiki_instructions}
 
 STANCE INSTRUCTIONS:
@@ -135,11 +182,14 @@ STANCE INSTRUCTIONS:
 
 PROMPT:
 {prompt}
+
+Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
 LETTER_TEMPLATE = """
 You are an expert legal counsel. Draft a formal legal letter based on the prompt, applying the requested stance.
 Maintain a formal legal tone. Include factual background, identify the legal basis, specify demands clearly, and include enforceable timelines.
+FACTS ARE A HARD LIMIT (CRITICAL): This letter describes an EXISTING matter — every factual claim (dates, figures, party names, contract terms, prior correspondence) must come from the user's prompt or the wiki context, never invented or inferred. If a needed fact isn't available, list it as a "confirmation needed" item rather than stating it as if verified.
 {wiki_instructions}
 
 STANCE INSTRUCTIONS:
@@ -147,12 +197,15 @@ STANCE INSTRUCTIONS:
 
 PROMPT:
 {prompt}
+
+Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
 TRACKER_TEMPLATE = """
 You are an expert legal compliance officer. Generate an obligations/compliance tracker based on the prompt.
 Produce a Markdown table. Identify obligations, deadlines, responsible parties, gaps, and high-risk items.
 The tracker output should be operationally usable by legal/compliance teams.
+FACTS ARE A HARD LIMIT (CRITICAL): Every obligation, deadline, or party listed must trace to the user's prompt or the wiki context — never invent an obligation or deadline that isn't actually stated in either. A gap in the source is itself a trackable row ("not specified in source — confirm"), not something to fill with an assumed value.
 {wiki_instructions}
 
 STANCE INSTRUCTIONS:
@@ -160,6 +213,8 @@ STANCE INSTRUCTIONS:
 
 PROMPT:
 {prompt}
+
+Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
 def detect_stance(prompt: str) -> str:
@@ -315,7 +370,17 @@ def _run_draft_job(job_id: str, session_id: str, prompt: str, use_wiki: bool = T
         if has_wiki:
             wiki_instructions = f"\nRelevant Wiki Knowledge:\n{context_dict['context']}\n\nAdditional instructions:\n- Use wiki knowledge as drafting precedent\n- Reuse terminology already found in the wiki\n- Reuse defined terms when appropriate\n- Maintain consistency with existing agreements\n- Surface conflicts through drafting notes\n"
         
-        final_prompt = template.format(stance_instruction=stance_inst, wiki_instructions=wiki_instructions, prompt=prompt)
+        # preserve_unless_asked / review_notes_table are only referenced by
+        # CLAUSE_TEMPLATE and FULL_DOCUMENT_TEMPLATE's {placeholders} — passing
+        # them to str.format() for a template that doesn't use them is a no-op,
+        # so it's simplest to always pass both rather than branch per draft_type.
+        final_prompt = template.format(
+            stance_instruction=stance_inst,
+            wiki_instructions=wiki_instructions,
+            prompt=prompt,
+            preserve_unless_asked=_PRESERVE_UNLESS_ASKED,
+            review_notes_table=_REVIEW_NOTES_TABLE,
+        )
 
         # Uncapped before — a reasoning-model call with no max_tokens has no
         # ceiling on hidden reasoning + visible output, and a full_document/

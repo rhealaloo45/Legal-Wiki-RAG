@@ -522,6 +522,7 @@ def upsert_embedding(session_id: str, title: str, embedding: list[float],
 def search_similar_pages(
     session_id: str, query_embedding: list[float], limit: int = 25,
     doc_family: "str | list[str] | None" = None,
+    exclude_cached: bool = False,
 ) -> list[str]:
     """Return page titles ordered by cosine similarity to query_embedding.
 
@@ -533,6 +534,16 @@ def search_similar_pages(
     This narrows the candidate set for family-scoped questions ("across all
     NDAs") at 20k-doc scale, cutting near-neighbour noise. None = search the
     whole session (backward-compatible default).
+
+    exclude_cached: drop cached "Q:" answer pages from the ranking, the same way
+    find_source_docs_mentioning_phrase already does. Must be set whenever the
+    caller has filtered those pages out of its own in-memory dict, because the
+    caller's post-filter runs AFTER the LIMIT: a cached answer is by nature the
+    nearest neighbour of the question that produced it, so the whole top-N is
+    cached answers, every one is then discarded, and the vector channel
+    contributes nothing at all. Measured on Q101 against the 7,245-embedding
+    audit session — all 15 vector hits were "Q:" pages, retrieval silently
+    degraded to BM25-only, and the page holding the answer never surfaced.
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -545,6 +556,7 @@ def search_similar_pages(
         if families:
             family_clause = "AND doc_family = ANY(:families)"
             params["families"] = families
+    cached_clause = "AND title NOT LIKE 'Q:%'" if exclude_cached else ""
     with engine.connect() as conn:
         rows = conn.execute(
             text(f"""
@@ -552,6 +564,7 @@ def search_similar_pages(
                 FROM {tbl}
                 WHERE session_id = :sid
                 {family_clause}
+                {cached_clause}
                 ORDER BY embedding <=> CAST(:embedding AS vector)
                 LIMIT :limit
             """),
@@ -900,6 +913,63 @@ def find_source_docs_mentioning_phrase(
                 LIMIT :cap
             """),
             {"sid": session_id, "phrase": phrase, "cap": cap},
+        )
+        return [row.source_doc for row in rows]
+
+
+def find_source_docs_by_title_tokens(
+    session_id: str, tokens: list[str], kind_hint: str | None = None,
+    cap: int = 25,
+) -> list[str]:
+    """Return distinct source_docs whose page TITLES contain EVERY token.
+
+    Companion to ``find_source_docs_mentioning_phrase`` above, which searches
+    page CONTENT. Content search cannot separate the parties to a matter from
+    the parties merely NAMED in one — litigation documents recite the opposing
+    side's officers in their procedural/discovery paragraphs, so a content
+    search for two adversaries matches every document that quotes that
+    boilerplate (measured on this corpus: "Aether" AND "Helios" hit 76 of ~115
+    documents, nearly all of them unrelated matters reusing the same recital).
+
+    Page TITLES are the discriminator, because ingest synthesises the matter's
+    own short-name into every title it writes for a document ("Parties –
+    Aether-Helios (Verified Complaint)", "Signature – Aether v Helios
+    (Answer)"). Requiring both parties in the TITLE drops the same corpus from
+    76 documents to 20 — the instruments actually BETWEEN those two parties.
+
+    ``kind_hint`` adds one more ILIKE against the title, used to match the
+    document-type word the question supplies ("the verified complaint", "the
+    answer") against the parenthetical ingest appends to each title; on the
+    measured corpus that narrows the 20 to exactly 1. Cached "Q:" answer pages
+    are excluded so a prior answer cannot masquerade as a source document.
+
+    Returns [] for fewer than one token or no match, so callers can treat an
+    empty result as "no opinion" and fall through unchanged.
+    """
+    from sqlalchemy import text
+    toks = [t.strip() for t in (tokens or []) if t and t.strip()]
+    if not toks:
+        return []
+    # Bounded so a pathological question cannot build an unbounded predicate.
+    toks = toks[:4]
+    conds = " AND ".join(f"title ILIKE :t{i}" for i in range(len(toks)))
+    params: dict = {f"t{i}": f"%{tok}%" for i, tok in enumerate(toks)}
+    params.update({"sid": session_id, "cap": cap})
+    if kind_hint and kind_hint.strip():
+        conds += " AND title ILIKE :kind"
+        params["kind"] = f"%{kind_hint.strip()}%"
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f"""
+                SELECT DISTINCT source_doc FROM pages
+                WHERE session_id = :sid
+                  AND title NOT LIKE 'Q:%'
+                  AND source_doc IS NOT NULL
+                  AND {conds}
+                LIMIT :cap
+            """),
+            params,
         )
         return [row.source_doc for row in rows]
 

@@ -185,6 +185,12 @@ PROGRESS_STORE = {}
 ENABLE_CLARIFICATION = os.getenv("ENABLE_CLARIFICATION", "true").lower() == "true"
 ENABLE_INTENT_CLASSIFIER = os.getenv("ENABLE_INTENT_CLASSIFIER", "true").lower() == "true"
 ENABLE_ANSWER_VALIDATION = os.getenv("ENABLE_ANSWER_VALIDATION", "true").lower() == "true"
+# Masks email/SSN/IBAN/bank-account/credit-card/phone patterns in the final
+# answer text before it's stored or sent to the client. Runs after generation
+# is complete — never touches retrieval or the LLM call. Flag exists so it can
+# be turned off from App Service settings without a redeploy if it ever
+# misfires on legitimate document numbering.
+PII_REDACTION_ENABLED = os.getenv("PII_REDACTION_ENABLED", "true").lower() == "true"
 # Deterministic string-count check of the question's legal topics against the
 # retrieved pages. Independent of ENABLE_ANSWER_VALIDATION on purpose — the LLM
 # grounding check scored a confirmed fabrication at 90% and endorsed the invented
@@ -221,6 +227,19 @@ MAX_TOKENS_GROUNDING_CHECK = 1500  # bumped 900→1500: on Azure reasoning model
 # a fast-model relevance rerank ON TOP, applied only to broad/family queries where
 # precision matters most. Off by default — enable to A/B its quality/latency cost.
 ENABLE_RERANK = os.getenv("ENABLE_RERANK", "false").lower() == "true"
+
+# Answer caching — file each high-confidence answer back into the wiki as a
+# "Q: <question>" page, reusable as context for later questions. OFF: nothing new
+# is written to the wiki, so the corpus stays exactly as ingested.
+#
+# Turned off deliberately, not merely untrusted. A cached answer is by
+# construction the nearest embedding neighbour of the question that produced it,
+# so on a session with many cached answers the entire pgvector top-N came back
+# cached and real source pages never surfaced (measured on the 7,245-embedding
+# audit session: 15 of 15 vector hits were "Q:" pages). Those pages also count as
+# fully trusted context for citation verification, which lets a paraphrase
+# entrench itself as a quotable source. Set ENABLE_ANSWER_CACHE=true to restore.
+ENABLE_ANSWER_CACHE = os.getenv("ENABLE_ANSWER_CACHE", "false").lower() == "true"
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")

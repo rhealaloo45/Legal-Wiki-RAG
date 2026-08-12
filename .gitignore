@@ -330,3 +330,25 @@ deployment_test.md
 out.txt
 tmp_*.*
 scratch_*.*
+
+# Second copies of the app tree kept for provider/spike testing. These carry a
+# full app/ underneath them — including their own .env, uploads, wiki pages and
+# logs — and every data rule above is anchored to the repo-root "app/", so none
+# of them apply one level down. Ignore the tree wholesale: it is a scratch copy
+# to experiment against, not a second component of this project.
+test_nvidia/
+
+# The same anchoring problem, generalised. Real ingest material and local state
+# must stay out no matter how deep the app tree sits, so these repeat the
+# app/data/ rules unanchored. Wiki pages and uploads are client documents;
+# chroma/ and logs/ are rebuildable local state.
+**/data/wiki/
+**/data/uploads/
+**/data/logs/
+**/data/chroma/
+**/data/eval_results/
+
+# Harness and eval run output. The "/q*.json" and "/t*.json" rules above match
+# the repo root only, so an output file written next to the script it came from
+# (app/q85_out.json) went straight past them.
+*_out.json
