@@ -79,6 +79,18 @@ _RX_DRAFTING_NEW_DOC = re.compile(
     r'[^.?!]{0,60}\bdraft'
     r'|\bdraft(?:ing)?\b[^.?!]{0,60}\b(?:steps|tips|advice|guidance|pointers|'
     r'best\s+practices|keep\s+in\s+mind)\b'
+    # "draft a clause for a software vendor" names the counterparty by its
+    # GENERIC ROLE (vendor, supplier, partner, ...), not a proper name or an
+    # existing document — there is nothing in the corpus such a reference
+    # could resolve to, the same way "a new agreement" has nothing to resolve
+    # to. Confirmed live (deployed): "Help me draft an AI governance clause
+    # for a software vendor" re-asked "which agreement?" on every turn,
+    # including once the user clarified "a Statement of Work with a software
+    # integration partner" — still just a generic role, never a real
+    # corpus document, so no reply could ever satisfy the prompt.
+    r'|\bdraft(?:ing)?\b[^.?!]{0,80}\bfor\s+(?:a|an|any|our)\s+(?:\w+\s+){0,2}'
+    r'(?:vendor|supplier|partner|counterparty|client|customer|contractor|'
+    r'licensor|licensee|distributor|reseller|integrator)\b'
     r')',
     re.IGNORECASE,
 )
