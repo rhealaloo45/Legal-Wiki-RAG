@@ -590,6 +590,22 @@ PRINCIPLES:
 - Each page should read like a well-written wiki article.
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
+- STAMP/CHALLAN CAPTURE (CRITICAL): If the document includes a stamp certificate, e-stamp, \
+  or stamp duty challan anywhere in it — including as a cover-page watermark or header, not \
+  just a separate attached page — you MUST create a dedicated wiki page for it capturing the \
+  certificate/GRN number, date, purchaser/payer name, and amount verbatim. Also populate the \
+  metadata field 'matter_reference' with this certificate/GRN number. Never omit this because \
+  it looks like decorative letterhead rather than agreement text — it is frequently the only \
+  reliable date and party-identification anchor in the document.
+- SERVICE-LEVEL / CADENCE PRECISION (CRITICAL): For any recurring obligation — reporting \
+  frequency, review or hygiene cadence, response times, SLA turnaround — quote the literal \
+  cadence and its clause context verbatim (e.g. "Weekly reports every Monday", "changed and \
+  managed once a month"). Do NOT compress these into vague paraphrase like "periodic reporting" \
+  or "regular reviews" — the exact frequency is often the entire legal content of the clause.
+- METADATA COMPLETENESS: Populate governing_law, jurisdiction, and parties whenever the \
+  document states them anywhere in the text, even if some party names are redacted elsewhere — \
+  describe what is identifiable (e.g. "Tata Sons Private Limited; counterparty name redacted") \
+  rather than leaving the field null just because one side is unnamed.
 
 PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
 DOCUMENT-SPECIFIC PAGES (CRITICAL): Most pages describe provisions unique to THIS specific \
@@ -728,6 +744,12 @@ RULES:
 - MULTI-STAGE LITIGATION (CRITICAL): If the case has multiple stages (Trial Court → High Court → \
   Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
   what each court decided and why. Never blend outcomes from different stages.
+- STAMP/CHALLAN CAPTURE (CRITICAL): If this segment includes a stamp certificate, e-stamp, or \
+  stamp duty challan — including as a cover-page watermark or header — create a dedicated wiki \
+  page for it with the certificate/GRN number, date, purchaser/payer name, and amount verbatim.
+- SERVICE-LEVEL / CADENCE PRECISION (CRITICAL): For recurring obligations (reporting frequency, \
+  review/hygiene cadence, response times, SLA turnaround), quote the literal cadence verbatim \
+  (e.g. "Weekly reports every Monday"). Do not compress into vague paraphrase like "periodic".
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
   DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics with \
   a document identifier attached (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
@@ -5829,7 +5851,8 @@ def _docs_of_entity_pages(question: str, pages: dict) -> dict:
 # thread is a pivot, not a continuation).
 _CARRYOVER_TYPE_RE = re.compile(
     r'\b(nda|non-?disclosure|confidentiality\s+agreement|service\s+agreement|'
-    r'shareholders?\s+agreement|joint\s+venture|jva|sha|msa|deed|lease|licen[cs]e|'
+    r'shareholders?\s+agreement|joint\s+venture|jva|sha|msa|dpa|sow|'
+    r'statement\s+of\s+work|data\s+processing\s+agreement|deed|lease|licen[cs]e|'
     r'judgment|judgement|court\s+case|legal\s+opinion|arbitration|petition|'
     r'complaint|affidavit|notice|contract|agreement)\b',
     re.IGNORECASE,
@@ -6780,13 +6803,20 @@ def classify_query(question: str, session_id: str) -> dict:
         "- It names or numbers a specific document (e.g. 'service agreement 1', 'NDA 3', 'the SHA')\n"
         "- It mentions specific party names, entity names, or company names (e.g. 'the ReVolt JV Agreement', 'Meridian service agreement', 'agreement between Tata Motors and ReVolt')\n"
         "- It's a cross-document comparison or general legal question\n"
-        "- It mentions a document type with a number, identifier, or distinctive party/entity name\n\n"
+        "- It mentions a document type with a number, identifier, or distinctive party/entity name\n"
+        "- It mentions a distinctive project/deal codename (e.g. a named initiative or "
+        "project) that only one document's content would use\n"
+        "- The clause it asks about would be covered by a linked family of instruments "
+        "that explicitly incorporate and cross-reference one another (e.g. an MSA plus "
+        "its DPA and SOW) — that's a valid answer spanning the linked set, not an "
+        "ambiguous reference needing a document pick\n\n"
         "A question NEEDS disambiguation when:\n"
         "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
         "without ANY identifier, number, or party name\n"
         "- It refers to a specific clause, provision, or section (e.g. 'the indemnity clause', "
         "'limitation of liability', 'termination provisions') without specifying WHICH document "
-        "contains that clause — and multiple documents in the list could have such a clause\n\n"
+        "contains that clause, where the candidates are UNRELATED documents (not a linked "
+        "instrument family) and multiple of them could have such a clause\n\n"
         "A question does NOT need disambiguation when it is a cross-document comparison or "
         "general legal question that intentionally spans all documents.\n\n"
         "Respond with JSON only:\n"
@@ -6905,7 +6935,11 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
         "- It names a specific document AND states what to do with it\n"
         "- Standard legal analysis is implied\n"
         "- The intent is obvious from context or conversation history\n"
-        "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n\n"
+        "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n"
+        "- It asks about a clause/topic that a linked family of instruments would "
+        "cover together (e.g. an MSA plus its DPA and SOW, which explicitly "
+        "incorporate and cross-reference one another) — answer using all of "
+        "them rather than asking which one\n\n"
         "When in doubt, answer directly — do NOT ask for clarification.\n\n"
         f"Available documents: {', '.join(clean_docs)}\n"
         f"{conv_snippet}\n"

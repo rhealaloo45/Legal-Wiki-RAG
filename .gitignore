@@ -225,13 +225,12 @@ app/.env
 app/sessions.json
 app/build_ui.py
 
-# Generated eval datasets (rebuilt from app/data/logs/rag_query_log.json on
-# demand) — real client clause text ends up in these. Glob, not exact names:
-# a suffixed variant ("eval_dataset 998.jsonl") slipped past the old exact-name
-# rule and got committed with real Tata Service Agreement content in it
-# (scrubbed from history via git filter-repo on 2026-07-27).
-app/eval/*dataset*.jsonl
-app/eval/*dataset*.csv
+# Entire eval folder — scripts, datasets, and outputs alike. Real client
+# clause text has repeatedly ended up in files here (a suffixed dataset
+# variant slipped past a prior exact-name rule and had to be scrubbed from
+# history via git filter-repo on 2026-07-27). Block the whole folder rather
+# than chasing filename patterns.
+app/eval/
 
 # Node Modules (puppeteer test)
 node_modules/
@@ -273,6 +272,13 @@ checklist.md
 implementation_list.md
 phases.md
 questions.txt
+
+# RAG accuracy/retest/review reports — quote real client clause text pulled
+# from the corpus during audits, same reason app/eval/ is blocked wholesale.
+rag_accuracy_report*.md
+rag_retest_*.md
+rag_review*.*
+rag_top90_review.xlsx
 
 # Debug output
 app/debug_raw_answer.txt
