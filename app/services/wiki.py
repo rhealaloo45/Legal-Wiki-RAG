@@ -1909,6 +1909,75 @@ def _pages_from_files(pages: dict, source_docs: set[str]) -> list[str]:
     return result
 
 
+# Ingest writes every page prose-first, verbatim-evidence-last, under this
+# heading. That layout and a plain content[:cap] tail-slice are in direct
+# conflict: the slice always eats the quotes and always keeps the paraphrase —
+# the exact inversion of what an answer needs. Measured on the Hyden-Lexus MSA
+# at the 2,000-char cap: "Limitation of Liability and Carve-outs" (2,474 chars)
+# lost the tail of its own Clause 10.4 quote mid-sentence, so the INR
+# 15,00,00,000 figure never reached the model and the answer reported the cap
+# as "not fully reproduced in the provided context" while the database held it
+# verbatim. "Intellectual Property Allocation" (2,232) lost Clauses 5.4 and 5.5
+# the same way, and "AI Governance" (2,137) lost Clause 6.7.
+#
+# Two downstream effects, not one. The obvious one is the missing fact. The
+# quieter one is that the model, left with prose only, paraphrases it and
+# _verify_answer_citations then cannot match that paraphrase to any retrieved
+# quote — which is where the recurring "[CITATION NOTE: excerpt could not be
+# matched to the retrieved source text]" banners come from. Both are fixed by
+# spending the budget on evidence instead of summary.
+_SUPPORTING_QUOTES_RE = re.compile(r'\n\*\*Supporting Quotes:\*\*[ \t]*\n', re.IGNORECASE)
+
+# Always keep at least this much summary. The quotes alone are clause text with
+# no framing; the opening prose is what tells the model which document and
+# which topic they belong to.
+_MIN_PROSE_CHARS = 400
+
+
+def _truncate_page_content(content: str, cap: int) -> str:
+    """Trim an over-long page to ``cap`` chars without destroying its quotes.
+
+    Trims the prose summary and keeps the Supporting Quotes block whole. When
+    the quotes alone cannot fit, drops WHOLE quote lines from the end rather
+    than cutting one mid-sentence — a half-quote is worse than an absent one,
+    because it reads as complete and is what the model then cites.
+
+    Falls back to the old tail-slice for pages with no quotes block (cached
+    "Q:" answers, older pages ingested before the format settled).
+    """
+    if len(content) <= cap:
+        return content
+
+    m = _SUPPORTING_QUOTES_RE.search(content)
+    if not m:
+        return content[:cap] + "\n[...truncated]"
+
+    prose = content[:m.start()]
+    header = content[m.start():m.end()]
+    body = content[m.end():]
+
+    note = "\n[...summary trimmed — supporting quotes kept in full]"
+    prose_budget = cap - (len(header) + len(body)) - len(note)
+    if prose_budget >= _MIN_PROSE_CHARS:
+        return prose[:prose_budget].rstrip() + note + header + body
+
+    # Quotes alone overflow the cap: keep the minimum prose, then as many whole
+    # quote lines as fit. Quotes appear in document order, so truncating from
+    # the end keeps the earliest clauses — the ones the page is titled for.
+    note = "\n[...truncated — later supporting quotes omitted]"
+    avail = cap - _MIN_PROSE_CHARS - len(header) - len(note)
+    kept: list[str] = []
+    used = 0
+    for line in body.split("\n"):
+        if used + len(line) + 1 > avail:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if not kept:
+        return content[:cap] + "\n[...truncated]"
+    return prose[:_MIN_PROSE_CHARS].rstrip() + header + "\n".join(kept) + note
+
+
 # ---------------------------------------------------------------------------
 # Query — index-based retrieval for accuracy at scale
 # ---------------------------------------------------------------------------
@@ -2278,7 +2347,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             if title.startswith("Q:") and len(content) > _QPAGE_CAP:
                 content = content[:_QPAGE_CAP] + "\n[...truncated — cached answer summary only]"
             elif len(content) > _PAGE_CAP:
-                content = content[:_PAGE_CAP] + "\n[...truncated]"
+                content = _truncate_page_content(content, _PAGE_CAP)
 
             # Clean the title for LLM context: strip UUID prefix and path noise
             # "Topic (uuid_Legal AI Tool - Group_Type_Name_redacted.pdf)"
@@ -5155,6 +5224,60 @@ def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
     q = question.lower()
     return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
+
+
+# Words that appear in this corpus's FILENAMES but identify nothing — folder
+# names, document types, redaction/sample markers, extensions. A filename token
+# is only a useful signal if it is the part that names a specific matter.
+_DOC_TOKEN_STOPWORDS = frozenset({
+    "legal", "service", "services", "agreement", "agreements", "contract",
+    "judgment", "judgments", "judgement", "judgements", "court", "case",
+    "cases", "document", "documents", "opinion", "opinions", "shareholder",
+    "shareholders", "joint", "venture", "ventures", "confidentiality",
+    "disclosure", "master", "statement", "work", "data", "processing",
+    "redacted", "redact", "sample", "samples", "test", "final", "draft",
+    "copy", "docx", "doc", "pdf", "txt", "file", "files", "version",
+    "brand", "tool", "group", "type", "name", "misc", "other", "new", "old",
+})
+
+
+def _corpus_doc_name_tokens(pages: dict) -> set[str]:
+    """Distinctive word tokens drawn from this corpus's source_doc filenames.
+
+    Complements _extract_doc_entities, which mines PAGE TITLES. Ingest often
+    abbreviates a counterparty in the title it synthesises ("HYD-LEX") while the
+    filename keeps the name the user actually types ("Hyden-Lexus"), so a
+    question naming that party matches nothing in the title-derived entity set.
+    Confirmed live: "Hyden" appears in no page title in this corpus — the entity
+    set holds "hyd-lex" — so every entity-based resolver returns empty for a
+    question about Hyden Tech, even though retrieval finds the documents easily.
+    """
+    tokens: set[str] = set()
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        sd = page.get("source_doc", "")
+        if not sd:
+            continue
+        name = re.sub(r'^[a-f0-9-]{36}_', '', sd)
+        name = re.sub(r'\.[A-Za-z0-9]{2,5}$', '', name)
+        for tok in re.split(r'[^A-Za-z]+', name):
+            t = tok.lower()
+            if len(t) >= 4 and t not in _DOC_TOKEN_STOPWORDS:
+                tokens.add(t)
+    return tokens
+
+
+def _question_names_corpus_doc_token(question: str, pages: dict) -> bool:
+    """True if the question names a matter/party token from a document filename.
+
+    Proper-noun-aware for the same reason _question_names_distinctive_entity is:
+    a lowercase common word that happens to sit in a filename must not count.
+    """
+    for tok in _corpus_doc_name_tokens(pages):
+        if _appears_as_proper_noun(tok, question):
+            return True
+    return False
 
 
 def _appears_as_proper_noun(token: str, question: str) -> bool:
