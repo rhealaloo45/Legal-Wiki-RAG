@@ -1195,6 +1195,39 @@ def get_recent_context(session_id: str, n: int = 5) -> list[dict]:
         return [{"role": r.role, "content": r.content, "msg_type": r.msg_type} for r in rows]
 
 
+def count_trailing_disambiguations(session_id: str, look_back: int = 6) -> int:
+    """How many of this thread's most recent assistant turns were, in an unbroken
+    run ending at the newest, a "which document?" prompt.
+
+    A disambiguation prompt is answered by the user's next message, which is
+    appended to the original question and re-run through the same matcher. When
+    that reply carries no resolvable document token — "same document", "the one
+    I just asked about" — the re-run fails identically and asks again, forever.
+    Confirmed live: three consecutive prompts on one question, each answered in
+    good faith, none resolving. Counting the unbroken run is what lets the caller
+    stop asking a question the user has already tried to answer.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT msg_type
+                FROM chat_messages
+                WHERE session_id = :sid AND role = 'assistant'
+                ORDER BY created_at DESC
+                LIMIT :n
+            """),
+            {"sid": session_id, "n": look_back},
+        )
+        streak = 0
+        for r in rows:
+            if r.msg_type != "disambiguation":
+                break
+            streak += 1
+        return streak
+
+
 def get_recent_answer_scope(session_id: str, n: int = 1) -> list[dict]:
     """Return ``{method, docs}`` for the last n assistant answers, newest first.
 
