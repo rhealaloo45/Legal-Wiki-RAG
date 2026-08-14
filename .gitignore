@@ -225,11 +225,13 @@ app/.env
 app/sessions.json
 app/build_ui.py
 
-# Entire eval folder — scripts, datasets, and outputs alike. Real client
-# clause text has repeatedly ended up in files here (a suffixed dataset
-# variant slipped past a prior exact-name rule and had to be scrubbed from
-# history via git filter-repo on 2026-07-27). Block the whole folder rather
-# than chasing filename patterns.
+# Entire eval folder — scripts, datasets, and outputs alike. These are
+# generated evaluation artifacts rebuilt from the query log on demand, not
+# source, and they churn constantly. Datasets here also embed large amounts of
+# corpus text (the sample/fictitious contract set), which makes for noisy diffs
+# and pointless repo weight. Blocking the folder rather than chasing filename
+# patterns, after a suffixed variant ("eval_dataset 998.jsonl") slipped past an
+# earlier exact-name rule.
 app/eval/
 
 # Node Modules (puppeteer test)
@@ -273,12 +275,13 @@ implementation_list.md
 phases.md
 questions.txt
 
-# RAG accuracy/retest/review reports — quote real client clause text pulled
-# from the corpus during audits, same reason app/eval/ is blocked wholesale.
-# Patterns are prefix-anchored on purpose but kept broad enough that a file
-# named for the matter rather than the tool ("hyden_lexus_retest_questions.md",
-# which carries verbatim MSA/DPA/SOW clause text as ground truth) cannot slip
-# past them the way "eval_dataset 998.jsonl" once did.
+# RAG accuracy/retest/review reports — generated audit output, not source.
+# Regenerated per evaluation run, quote long stretches of corpus text, and go
+# stale the moment retrieval changes, so they are worth reading once and not
+# worth versioning. Same reasoning as app/eval/ above.
+# Patterns stay prefix-anchored on the tool name but are widened here so a
+# report named after the matter instead ("hyden_lexus_retest_questions.md")
+# cannot slip past them the way "eval_dataset 998.jsonl" once did.
 rag_accuracy_report*.md
 rag_retest_*.md
 rag_review*.*
@@ -287,8 +290,10 @@ rag_top90_review.xlsx
 *ground_truth*
 *_audit_report*.md
 
-# Session/corpus CSV exports and their apply scripts — these are straight
-# database dumps of the client corpus (pages, embeddings, metadata).
+# Session/corpus CSV exports and their apply scripts — straight database dumps
+# (pages, embeddings, metadata) used to move a wiki session between machines.
+# Bulk generated data, regenerable from the source DB, and large enough to
+# bloat the repo; embeddings in particular are megabytes of float text.
 *_delta/
 sync_export/
 */pages.csv
