@@ -1,5 +1,6 @@
 import os
 import io
+import re
 import json
 import uuid
 import logging
@@ -11,6 +12,65 @@ import config
 from services import reader, llm, wiki
 
 logger = logging.getLogger(__name__)
+
+# Max documents processed in a single Review/Compare background job pass.
+# Larger selections are chunked into multiple ≤_MAX_DOCS_PER_RUN passes within
+# the same job (same job_id, same progress store) rather than firing one
+# unbounded batch of concurrent LLM calls.
+_MAX_DOCS_PER_RUN = 20
+
+
+def _chunk_docs(docs: list[str]) -> list[list[str]]:
+    return [docs[i:i + _MAX_DOCS_PER_RUN] for i in range(0, len(docs), _MAX_DOCS_PER_RUN)]
+
+
+# Shared by Review and Compare: mapping from normalised column/aspect names to
+# page_metadata field names. When a requested column matches a standard field
+# that was pre-extracted at ingest time, serve it directly from the DB —
+# no LLM call needed.
+_METADATA_FIELD_MAP = {
+    "governing law": "governing_law",
+    "jurisdiction": "jurisdiction",
+    "effective date": "effective_date",
+    "termination notice": "termination_notice",
+    "termination notice period": "termination_notice",
+    "liability cap": "liability_cap",
+    "ip ownership": "ip_ownership",
+    "intellectual property ownership": "ip_ownership",
+    "parties": "parties",
+    "auto renewal": "auto_renewal",
+    "auto-renewal": "auto_renewal",
+    "notice period": "notice_period",
+    "payment terms": "payment_terms",
+}
+
+# Column/aspect names that read as open-ended asks (summaries, overviews) —
+# these need a wider slice of the document up front rather than waiting for a
+# low-confidence retry, since a narrow retrieval slice is unlikely to cover
+# "summarize this agreement".
+_OPEN_ENDED_COLUMN_RE = re.compile(
+    r"\b(summar|overview|key\s*terms|description|explain|analysis|synopsis)", re.IGNORECASE
+)
+
+
+def _is_open_ended_column(col_name: str) -> bool:
+    return bool(_OPEN_ENDED_COLUMN_RE.search(col_name))
+
+
+def _lookup_cached_metadata(session_id: str, doc_name: str, col_name: str) -> Optional[dict]:
+    """Try the page_metadata cache before firing an LLM call. Returns a
+    ready-to-store result dict, or None if there's no cache hit."""
+    field_key = _METADATA_FIELD_MAP.get(col_name.lower().strip())
+    if not (field_key and config.USE_DATABASE):
+        return None
+    try:
+        from services import db as _db
+        cached = _db.get_metadata(session_id, doc_name)
+        if cached.get(field_key) is not None:
+            return {"value": cached[field_key], "confidence": 0.95, "quote": None}
+    except Exception as _e:
+        logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
+    return None
 
 # ---------------------------------------------------------------------------
 # Shared Utilities
@@ -39,37 +99,70 @@ def get_raw_doc_text(session_id: str, doc_name: str) -> str:
         logger.error(f"Error reading file {file_path}: {e}")
         return ""
 
-def _get_wiki_text_for_doc(session_id: str, doc_name: str) -> str:
-    """Retrieve synthesized wiki content for a document.
-    
-    Looks up wiki pages tagged with this source_doc and concatenates their
-    content. This is much smaller and more focused than raw document text,
-    leading to faster and more accurate extraction.
-    Falls back to raw text if no wiki pages are found.
-    
+# Context-char budgets for a single extraction cell. Narrow is the default —
+# cheap, and sufficient for a targeted factual column/aspect. Broad is a
+# capped escalation (same "cheap default, capped widen" shape as
+# config.BROAD_QUESTION_TOTAL_CAP in wiki.py), used only for open-ended/summary
+# columns or when a narrow-budget first pass comes back low-confidence/empty.
+_CELL_CONTEXT_NARROW_LIMIT = 3000
+_CELL_CONTEXT_BROAD_LIMIT = 8000
+
+
+def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broad: bool = False) -> str:
+    """Retrieve synthesized wiki content for a document, scoped to `query`.
+
+    Looks up wiki pages tagged with this source_doc, then — instead of
+    concatenating every one of them and truncating at a flat char limit —
+    ranks them with the same vector+BM25 hybrid retrieval the main chat
+    pipeline uses (wiki._select_relevant_pages), restricted to just this
+    document's own pages, and fills a char budget with only the pages that
+    actually rank for `query`. Falls back to raw text if no wiki pages are
+    found, and to the old dump-everything-then-truncate behaviour if page
+    selection fails or no query is given.
+
+    broad=True widens the char budget for an open-ended column/aspect or an
+    escalation retry after a narrow-budget pass came back low-confidence.
+
     The output preserves source attribution and supporting quotes embedded
     during wiki ingest, so downstream LLM calls can cite them.
     """
+    limit = _CELL_CONTEXT_BROAD_LIMIT if broad else _CELL_CONTEXT_NARROW_LIMIT
     scoped = _get_scoped_wiki_pages(session_id, doc_name)
     if scoped:
+        ordered_titles = list(scoped.keys())
+        if query and config.USE_DATABASE:
+            try:
+                selected_titles, _usage = wiki._select_relevant_pages(
+                    scoped, query, session_id=session_id, force_broad=broad,
+                )
+                ranked = [t for t in selected_titles if t in scoped]
+                if ranked:
+                    ordered_titles = ranked
+            except Exception as e:
+                logger.warning(
+                    f"Scoped page selection failed for {doc_name}/{query[:40]!r}: {e} — using all scoped pages"
+                )
+
         parts = [f"[Source Document: {doc_name}]"]
-        for title, page_data in scoped.items():
+        total_len = 0
+        for title in ordered_titles:
+            page_data = scoped[title]
             content = page_data.get("content", "") if isinstance(page_data, dict) else str(page_data)
             summary = page_data.get("summary", "") if isinstance(page_data, dict) else ""
-            parts.append(f"## {title}\n{summary}\n{content}")
+            chunk = f"## {title}\n{summary}\n{content}"
+            if total_len and total_len + len(chunk) > limit:
+                break
+            parts.append(chunk)
+            total_len += len(chunk)
         wiki_text = "\n\n".join(parts)
         if len(wiki_text) > 200:  # Only use wiki if substantial content exists
             return wiki_text
-    
+
     # Fallback to raw text — prefix with source doc name for traceability
     raw = get_raw_doc_text(session_id, doc_name)
     if raw:
-        return f"[Source Document: {doc_name}]\n\n{raw}"
+        return f"[Source Document: {doc_name}]\n\n{raw[:limit]}"
     return ""
-
-# Max chars of context to send per cell extraction call.
-# Set to 6000 to ensure wiki quotes and multi-page content aren't truncated.
-_CELL_CONTEXT_LIMIT = 6000
 
 def extract_cell(doc_text: str, column_name: str) -> dict:
     """Extract a specific piece of information from text using fast LLM path."""
@@ -91,13 +184,12 @@ STRICT RULES:
   1.0 = exact verbatim match, 0.8 = clearly stated, 0.5 = implied, 0.0 = not found.
 
 Text:
-{doc_text[:_CELL_CONTEXT_LIMIT]}
+{doc_text[:_CELL_CONTEXT_BROAD_LIMIT]}
 
 Extract: {column_name}"""
 
     try:
         raw, _ = llm.fast_ask(prompt, max_tokens=300)
-        import re
         # remove potential reasoning block or markdown
         raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
         raw = re.sub(r'```json', '', raw)
@@ -111,6 +203,23 @@ Extract: {column_name}"""
     except Exception as e:
         logger.error(f"Cell extraction failed for '{column_name}': {e}")
         return {"value": None, "confidence": 0.0, "quote": None}
+
+
+def _extract_with_retrieval(session_id: str, doc_name: str, query_text: str, broad_hint: bool = False) -> dict:
+    """Fetch document-scoped context and extract a value, escalating once to
+    the broader context budget if a narrow-budget first pass comes back
+    low-confidence or empty. Shared by Review and Compare cell workers.
+    """
+    doc_text = _get_wiki_text_for_doc(session_id, doc_name, query=query_text, broad=broad_hint)
+    res = extract_cell(doc_text, query_text)
+    if not broad_hint and (res.get("confidence", 0.0) < 0.5 or res.get("value") is None):
+        broad_text = _get_wiki_text_for_doc(session_id, doc_name, query=query_text, broad=True)
+        if broad_text and broad_text != doc_text:
+            res_broad = extract_cell(broad_text, query_text)
+            if res_broad.get("value") is not None and res_broad.get("confidence", 0.0) >= res.get("confidence", 0.0):
+                res = res_broad
+    return res
+
 
 def _apply_cell_styling(ws, cell, confidence):
     """Apply color styling based on confidence."""
@@ -247,6 +356,25 @@ def _get_session_file_paths(session_id: str) -> list[str]:
                     file_paths.append(fname[len(prefix):])
     return file_paths
 
+
+def _resolve_selected_docs(candidates: list[str], available_docs: list[str]) -> list[str]:
+    """Match candidate doc names against available_docs, tolerant of the "/"
+    vs "_" delimiter mismatch between the Files-tab tree paths (sent by the
+    frontend as checkbox values, e.g. "Legal AI/NDA (1)/Test_NDA_01.txt")
+    and the flat on-disk names /review /compare actually key rows by
+    (e.g. "Legal AI_NDA (1)_Test_NDA_01.txt").
+    """
+    flat_lookup = {d.replace("/", "_").replace("\\", "_"): d for d in available_docs}
+    resolved = []
+    for c in dict.fromkeys(candidates):
+        if c in available_docs:
+            resolved.append(c)
+        else:
+            flat = c.replace("/", "_").replace("\\", "_")
+            if flat in flat_lookup:
+                resolved.append(flat_lookup[flat])
+    return list(dict.fromkeys(resolved))
+
 def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
     """Background job for review mode with NLP prompt.
     
@@ -255,43 +383,17 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str
     """
     lock = locks_ref[job_id]
 
-    # C7: mapping from normalised column names to page_metadata field names.
-    # When a Review column matches a standard field that was pre-extracted at
-    # ingest time, we serve it directly from the DB — no LLM call needed.
-    _METADATA_FIELD_MAP = {
-        "governing law": "governing_law",
-        "jurisdiction": "jurisdiction",
-        "effective date": "effective_date",
-        "termination notice": "termination_notice",
-        "termination notice period": "termination_notice",
-        "liability cap": "liability_cap",
-        "ip ownership": "ip_ownership",
-        "intellectual property ownership": "ip_ownership",
-        "parties": "parties",
-        "auto renewal": "auto_renewal",
-        "auto-renewal": "auto_renewal",
-        "notice period": "notice_period",
-        "payment terms": "payment_terms",
-    }
-
-    def _extract_worker(doc_name, col_name, doc_text):
+    def _extract_worker(doc_name, col_name):
         # C7: try metadata cache before firing an LLM call
-        field_key = _METADATA_FIELD_MAP.get(col_name.lower().strip())
-        if field_key and config.USE_DATABASE:
-            try:
-                from services import db as _db
-                cached = _db.get_metadata(session_id, doc_name)
-                if cached.get(field_key) is not None:
-                    res = {"value": cached[field_key], "confidence": 0.95, "quote": None}
-                    with lock:
-                        store_ref[job_id]["rows"][doc_name][col_name] = res
-                        store_ref[job_id]["completed"] += 1
-                    return
-            except Exception as _e:
-                logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
+        cached_res = _lookup_cached_metadata(session_id, doc_name, col_name)
+        if cached_res is not None:
+            with lock:
+                store_ref[job_id]["rows"][doc_name][col_name] = cached_res
+                store_ref[job_id]["completed"] += 1
+            return
 
         try:
-            res = extract_cell(doc_text, col_name)
+            res = _extract_with_retrieval(session_id, doc_name, col_name, broad_hint=_is_open_ended_column(col_name))
         except Exception as e:
             logger.error(f"Worker failed for {doc_name}/{col_name}: {e}")
             res = {"value": None, "confidence": 0.0, "quote": None}
@@ -304,31 +406,44 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str
     try:
         # Step 0: Get available documents in the session
         available_docs = _get_session_file_paths(session_id)
-        
-        # Step 1: Generate columns and infer target documents from the prompt
-        prompt = f"""\
+
+        # Step 1: Generate columns, and infer target documents only if the
+        # user didn't already pick any — skipping doc inference when docs are
+        # already selected keeps this prompt small (the full available_docs
+        # list can run into the hundreds) and avoids burning the fast model's
+        # completion budget enumerating documents nobody asked it to infer.
+        needs_doc_inference = not doc_names
+        if needs_doc_inference:
+            doc_inference_block = f"""
 Available Documents in this session:
 {json.dumps(available_docs, indent=1)}
-
-User Query: {question}
-
-Based on the User Query and the list of Available Documents, perform two tasks:
-1. List the specific factual columns/aspects that need to be extracted from the document(s).
-   If the query asks for specific items (e.g., "deliverables, fees, payment terms"), list those exact items as columns.
-   If the query is open-ended (e.g., "Summarize this agreement"), list 4-6 key legal or commercial columns to extract.
-   Keep column names short (1-5 words).
+"""
+            task_2 = """
 2. Infer which of the Available Documents the user wants to review.
    - If the user explicitly mentions document names (or abbreviations/substrings) in their query, map them to the matching document(s) from the Available Documents list.
    - If the user implies certain types of documents or uses keywords (e.g. "all NDA agreements", "the service contract"), select all matching documents from the Available Documents list.
    - If the user does not specify any documents or implies reviewing everything (e.g. "Review these documents"), select ALL Available Documents.
    - Return the inferred documents as a list of exact filenames from the Available Documents list.
+"""
+            result_shape = '{"columns": ["col1", "col2", ...], "inferred_documents": ["doc_file1", "doc_file2", ...]}'
+        else:
+            doc_inference_block = ""
+            task_2 = ""
+            result_shape = '{"columns": ["col1", "col2", ...]}'
 
+        prompt = f"""\
+{doc_inference_block}
+User Query: {question}
+
+Based on the User Query, perform the following:
+1. List the specific factual columns/aspects that need to be extracted from the document(s).
+   If the query asks for specific items (e.g., "deliverables, fees, payment terms"), list those exact items as columns.
+   If the query is open-ended (e.g., "Summarize this agreement"), list 4-6 key legal or commercial columns to extract.
+   Keep column names short (1-5 words).
+{task_2}
 Return JSON only, no preamble or explanation:
-{{
-  "columns": ["col1", "col2", ...],
-  "inferred_documents": ["doc_file1", "doc_file2", ...]
-}}"""
-        
+{result_shape}"""
+
         columns = []
         inferred = []
         try:
@@ -346,41 +461,46 @@ Return JSON only, no preamble or explanation:
         if not columns:
             columns = ["Extracted Information"]
             
-        # Merge manual selections and inferred documents
-        all_selected_docs = list(dict.fromkeys(doc_names + inferred))
-        # Keep only docs that actually exist
-        all_selected_docs = [d for d in all_selected_docs if d in available_docs]
-        
+        # Merge manual selections and inferred documents, resolving them
+        # against the available docs (tolerant of "/" vs "_" delimiters)
+        all_selected_docs = _resolve_selected_docs(doc_names + inferred, available_docs)
+
         if not all_selected_docs:
             raise ValueError("No documents were selected or could be inferred from your query.")
-            
+
         with lock:
             # Re-initialize the rows and columns in the store
             store_ref[job_id]["rows"] = {d: {} for d in all_selected_docs}
             store_ref[job_id]["columns"] = columns
             store_ref[job_id]["total"] = len(all_selected_docs) * len(columns)
 
-        # Step 2: Pre-fetch all document texts (wiki-first, raw fallback)
-        doc_texts = {}
-        for doc_name in all_selected_docs:
-            doc_texts[doc_name] = _get_wiki_text_for_doc(session_id, doc_name)
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = []
-            for doc_name in all_selected_docs:
-                doc_text = doc_texts[doc_name]
-                for col_name in columns:
-                    futures.append(executor.submit(_extract_worker, doc_name, col_name, doc_text))
-            
-            # Wait with timeout to prevent indefinite hanging
-            done, not_done = concurrent.futures.wait(futures, timeout=_FUTURE_TIMEOUT * len(futures) / 5 + 30)
-            
-            # Cancel any stragglers
-            for f in not_done:
-                f.cancel()
-                with lock:
-                    store_ref[job_id]["completed"] += 1
-            
+        # Step 2: Extract cells, chunked into ≤_MAX_DOCS_PER_RUN-document passes
+        # instead of one unbounded batch of concurrent LLM calls. Context is
+        # retrieved per (doc, column) inside _extract_worker, scoped by query.
+        doc_chunks = _chunk_docs(all_selected_docs)
+        if len(doc_chunks) > 1:
+            logger.info(
+                f"Review job {job_id}: {len(all_selected_docs)} docs exceeds "
+                f"{_MAX_DOCS_PER_RUN}-doc cap — running in {len(doc_chunks)} chunks"
+            )
+
+        for chunk in doc_chunks:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(_extract_worker, doc_name, col_name)
+                    for doc_name in chunk
+                    for col_name in columns
+                ]
+
+                # Wait with timeout to prevent indefinite hanging
+                done, not_done = concurrent.futures.wait(futures, timeout=_FUTURE_TIMEOUT * len(futures) / 5 + 30)
+
+                # Cancel any stragglers
+                for f in not_done:
+                    f.cancel()
+                    with lock:
+                        store_ref[job_id]["completed"] += 1
+
         with lock:
             store_ref[job_id]["status"] = "complete"
             
@@ -466,31 +586,43 @@ def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: st
     try:
         # STEP 0 - ASPECT IDENTIFICATION AND DOCUMENT INFERENCE
         available_docs = _get_session_file_paths(session_id)
-        
-        aspect_prompt = f"""\
+
+        # Skip document inference (and the potentially hundreds-long available_docs
+        # list) when the user already picked documents — see the matching comment
+        # in _run_review_job for why this matters for the fast model's budget.
+        needs_doc_inference = not doc_names
+        if needs_doc_inference:
+            doc_inference_block = f"""
 Available Documents in this session:
 {json.dumps(available_docs, indent=1)}
+"""
+            task_2 = """
+2. Infer which of the Available Documents the user wants to compare.
+   - If the user explicitly mentions document names (or abbreviations/substrings) in their query, map them to the matching document(s) from the Available Documents list.
+   - If the user implies certain types of documents or uses keywords (e.g. "all NDA agreements", "the service contract"), select all matching documents from the Available Documents list.
+   - If the user does not specify any documents or implies comparing everything (e.g. "Compare these documents"), select ALL Available Documents.
+   - Return the inferred documents as a list of exact filenames from the Available Documents list.
+"""
+            result_shape = '{"aspects": ["Aspect 1", "Aspect 2", ...], "inferred_documents": ["doc_file1", "doc_file2", ...]}'
+        else:
+            doc_inference_block = ""
+            task_2 = ""
+            result_shape = '{"aspects": ["Aspect 1", "Aspect 2", ...]}'
 
+        aspect_prompt = f"""\
+{doc_inference_block}
 User Query: {question}
 
-Based on the User Query and the list of Available Documents, perform two tasks:
+Based on the User Query, perform the following:
 1. List the specific factual aspects that need to be extracted for comparison.
    If the query explicitly asks for certain points (e.g., "limits of liability, liability caps"), use those exact points as the aspects.
    If the query is a complex multi-sentence narrative (e.g., "Identify which is most favourable to Tata. Check IP ownership, indemnities, and termination"), extract the core legal/commercial items needed to answer the overall question.
    If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
    Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts or full sentences.
    Keep aspect names short (1-5 words).
-2. Infer which of the Available Documents the user wants to compare.
-   - If the user explicitly mentions document names (or abbreviations/substrings) in their query, map them to the matching document(s) from the Available Documents list.
-   - If the user implies certain types of documents or uses keywords (e.g. "all NDA agreements", "the service contract"), select all matching documents from the Available Documents list.
-   - If the user does not specify any documents or implies comparing everything (e.g. "Compare these documents"), select ALL Available Documents.
-   - Return the inferred documents as a list of exact filenames from the Available Documents list.
-
+{task_2}
 Return JSON only, no preamble or explanation:
-{{
-  "aspects": ["Aspect 1", "Aspect 2", ...],
-  "inferred_documents": ["doc_file1", "doc_file2", ...]
-}}"""
+{result_shape}"""
 
         aspects = []
         inferred = []
@@ -508,72 +640,93 @@ Return JSON only, no preamble or explanation:
         if not aspects:
             aspects = ["Comparison Details"]
             
-        # Merge manually selected and inferred documents
-        all_selected_docs = list(dict.fromkeys(doc_names + inferred))
-        # Keep only docs that actually exist
-        all_selected_docs = [d for d in all_selected_docs if d in available_docs]
-        
+        # Merge manually selected and inferred documents, resolving them
+        # against the available docs (tolerant of "/" vs "_" delimiters)
+        all_selected_docs = _resolve_selected_docs(doc_names + inferred, available_docs)
+
         if not all_selected_docs and not uploaded_name:
             raise ValueError("No documents were selected or could be inferred from your query.")
 
         # STEP 1 - NORMALIZE SOURCES
+        # Sources carry only identity here — per-(source, aspect) text is now
+        # fetched at extraction time via document-scoped hybrid retrieval
+        # (_extract_with_retrieval), not pre-concatenated once for every aspect.
         with lock:
             store_ref[job_id]["stage"] = "retrieving"
-            
-        sources = []
-        for doc_name in all_selected_docs:
-            scoped_pages = _get_scoped_wiki_pages(session_id, doc_name)
-            if not scoped_pages:
-                structured_text = get_raw_doc_text(session_id, doc_name)
-            else:
-                # Use all scoped wiki pages
-                parts = []
-                for k, v in scoped_pages.items():
-                    content = v.get("content", "") if isinstance(v, dict) else str(v)
-                    parts.append(content)
-                structured_text = "\n\n".join(parts)
-            
-            sources.append({"name": doc_name, "type": "wiki", "text": structured_text})
-            
+
+        doc_sources = [{"name": doc_name, "type": "wiki"} for doc_name in all_selected_docs]
+
+        upload_source = None
         if uploaded_text and uploaded_name:
-            sources.append({"name": uploaded_name, "type": "upload", "text": uploaded_text[:12000], "label": f"{uploaded_name} ⚡"})
-            
+            upload_source = {"name": uploaded_name, "type": "upload", "text": uploaded_text[:12000], "label": f"{uploaded_name} ⚡"}
+
+        all_sources = doc_sources + ([upload_source] if upload_source else [])
         with lock:
-            store_ref[job_id]["sources"] = [{"name": s["name"], "type": s["type"], "label": s.get("label", s["name"])} for s in sources]
-            
+            store_ref[job_id]["sources"] = [{"name": s["name"], "type": s["type"], "label": s.get("label", s["name"])} for s in all_sources]
+
         # STEP 2 - INITIALIZE ASPECTS AND TABLE IN STORE
         with lock:
             store_ref[job_id]["stage"] = "extracting"
             store_ref[job_id]["aspects"] = aspects
             for aspect in aspects:
                 store_ref[job_id]["table"][aspect] = {}
-        
-        # STEP 3 - EXTRACT PER SOURCE PER ASPECT (parallel with fast_ask)
+
+        # STEP 3 - EXTRACT PER SOURCE PER ASPECT (parallel with fast_ask),
+        # chunked into ≤_MAX_DOCS_PER_RUN-document passes instead of one
+        # unbounded batch of concurrent LLM calls.
         def _extract_compare_worker(source_dict, aspect):
-            try:
-                res = extract_cell(source_dict["text"], aspect)
-            except Exception as e:
-                logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
-                res = {"value": None, "confidence": 0.0, "quote": None}
             doc_key = source_dict.get("label", source_dict["name"])
+            if source_dict["type"] == "upload":
+                try:
+                    res = extract_cell(source_dict["text"], aspect)
+                except Exception as e:
+                    logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
+                    res = {"value": None, "confidence": 0.0, "quote": None}
+            else:
+                # C7: try metadata cache before firing an LLM call
+                res = _lookup_cached_metadata(session_id, source_dict["name"], aspect)
+                if res is None:
+                    try:
+                        res = _extract_with_retrieval(
+                            session_id, source_dict["name"], aspect,
+                            broad_hint=_is_open_ended_column(aspect),
+                        )
+                    except Exception as e:
+                        logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
+                        res = {"value": None, "confidence": 0.0, "quote": None}
             with lock:
                 store_ref[job_id]["table"][aspect][doc_key] = res
-                
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            futures = []
-            for s in sources:
-                for a in aspects:
-                    futures.append(executor.submit(_extract_compare_worker, s, a))
-            
-            # Wait with timeout
-            total_cells = len(sources) * len(aspects)
-            timeout = max(60, total_cells * 15)  # ~15s per cell, minimum 60s
-            done, not_done = concurrent.futures.wait(futures, timeout=timeout)
-            
-            # Fill in failures for timed-out cells
-            for f in not_done:
-                f.cancel()
-            
+
+        doc_chunks = _chunk_docs(all_selected_docs) or [[]]  # keep one (possibly empty) chunk so an upload-only compare still runs
+        if len(doc_chunks) > 1:
+            logger.info(
+                f"Compare job {job_id}: {len(all_selected_docs)} docs exceeds "
+                f"{_MAX_DOCS_PER_RUN}-doc cap — running in {len(doc_chunks)} chunks"
+            )
+        doc_source_by_name = {s["name"]: s for s in doc_sources}
+
+        for i, chunk in enumerate(doc_chunks):
+            chunk_sources = [doc_source_by_name[d] for d in chunk]
+            if upload_source and i == 0:
+                chunk_sources = chunk_sources + [upload_source]
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = [
+                    executor.submit(_extract_compare_worker, s, a)
+                    for s in chunk_sources
+                    for a in aspects
+                ]
+
+                # Wait with timeout
+                total_cells = len(futures)
+                timeout = max(60, total_cells * 15)  # ~15s per cell, minimum 60s
+                done, not_done = concurrent.futures.wait(futures, timeout=timeout)
+
+                # Fill in failures for timed-out cells
+                for f in not_done:
+                    f.cancel()
+
+
         # STEP 4 - OUTLIER DETECTION (batched into a single LLM call)
         with lock:
             store_ref[job_id]["stage"] = "analyzing"
@@ -582,7 +735,7 @@ Return JSON only, no preamble or explanation:
         all_values = {}
         for aspect in aspects:
             aspect_vals = {}
-            for s in sources:
+            for s in all_sources:
                 doc_key = s.get("label", s["name"])
                 cell_data = store_ref[job_id]["table"].get(aspect, {}).get(doc_key, {})
                 val = cell_data.get("value")
@@ -618,7 +771,10 @@ Extracted values:
         with lock:
             store_ref[job_id]["outliers"] = outliers
             
-        # STEP 5 - NARRATIVE GENERATION (single call, using ask for quality)
+        # STEP 5 - NARRATIVE GENERATION (single call). This is summarizing an
+        # already-extracted table, not doing fresh legal reasoning over raw
+        # text, so the fast/cheap model is sufficient — same tier used for
+        # every other Review/Compare call.
         narrative_prompt = f"""\
 Question: {question}
 Comparison table: {json.dumps(store_ref[job_id]["table"])}
@@ -637,7 +793,7 @@ STRICT RULES:
 - DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
 - PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1 | Quote: The Supplier shall deliver..."). If the exact clause/page or quote is not in the table, just map it as: "[1] Service Agreement 1_redacted.pdf | Quote: <verbatim quote>" or "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
 
-        narrative, _ = llm.ask(narrative_prompt, max_tokens=1500)
+        narrative, _ = llm.fast_ask(narrative_prompt, max_tokens=1500)
         
         # STEP 6 - STORE + COMPLETE
         with lock:
