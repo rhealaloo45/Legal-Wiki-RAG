@@ -2801,12 +2801,10 @@
         <div class="tabs d-none" id="modeTabs">
           <div class="tab active" data-target="ask" onclick="switchTab('ask',this)"><i class="ti ti-message-circle"
               style="font-size:13px"></i>Ask</div>
-          <!-- Review and Compare tabs commented out for now
           <div class="tab" data-target="review" onclick="switchTab('review',this)"><i class="ti ti-table"
               style="font-size:13px"></i>Review</div>
           <div class="tab" data-target="compare" onclick="switchTab('compare',this)"><i class="ti ti-columns"
               style="font-size:13px"></i>Compare</div>
-          -->
           <div class="tab" data-target="draft" onclick="switchTab('draft',this)"><i class="ti ti-writing"
               style="font-size:13px"></i>Draft</div>
           <div class="tab" id="tour-files-btn" data-target="files" onclick="switchTab('files',this)"><i class="ti ti-folder-open"
@@ -2930,8 +2928,6 @@
                   Documents
                 </span>
                 <div class="select-all-bar" id="review-select-bar">
-                  <a href="#" id="review-select-all">All</a>
-                  <span style="color:var(--text-muted)">|</span>
                   <a href="#" id="review-deselect-all">None</a>
                 </div>
               </div>
@@ -3050,8 +3046,6 @@
                   Existing docs
                 </span>
                 <div class="select-all-bar" id="compare-select-bar">
-                  <a href="#" id="compare-select-all">All</a>
-                  <span style="color:var(--text-muted)">|</span>
                   <a href="#" id="compare-deselect-all">None</a>
                 </div>
               </div>
@@ -3511,6 +3505,7 @@
       });
     }
     let SID = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : generateUUID();
+    const MAX_DOC_SELECTION = 20; // Review/Compare doc pickers cap selection at this — matches the backend's per-run chunk size
     let uploadDone = false;
     let wikiRelations = [];
     let wikiPages = {};
@@ -6120,7 +6115,11 @@
       }
     }
 
-    function renderCheckboxTree(node, prefix, depth, sectionId) {
+    function renderCheckboxTree(node, prefix, depth, sectionId, fileCounter) {
+      // fileCounter is a shared {n: 0} threaded through the whole tree so only
+      // the first MAX_DOC_SELECTION files across ALL folders default-checked —
+      // matches the Review/Compare backend's per-run document cap.
+      fileCounter = fileCounter || { n: 0 };
       let html = '';
       const indent = depth * 14;
       const keys = Object.keys(node).sort((a, b) => {
@@ -6133,29 +6132,65 @@
       for (const k of keys) {
         const fullPath = prefix ? prefix + '/' + k : k;
         if (node[k] === 'file') {
+          const checkedAttr = fileCounter.n < MAX_DOC_SELECTION ? 'checked' : '';
+          fileCounter.n++;
           html += `
           <div class="tree-file-row" style="padding-left:${indent}px;">
-            <input type="checkbox" value="${fullPath}" class="doc-checkbox" checked style="accent-color:var(--accent);">
+            <input type="checkbox" value="${fullPath}" class="doc-checkbox" ${checkedAttr} style="accent-color:var(--accent);">
             <i class="ti ti-file" style="font-size:11px; color:var(--text-secondary); margin-top:1px;"></i>
             <span class="doc-ck-lbl" title="${k}" style="font-size:11px; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="var cb=this.previousElementSibling.previousElementSibling; cb.checked=!cb.checked; cb.dispatchEvent(new Event('change', {bubbles:true}));">${k}</span>
           </div>
         `;
         } else {
           const folderId = `${sectionId}_fold_${Math.random().toString(36).slice(2, 8)}`;
+          const childHtml = renderCheckboxTree(node[k], fullPath, depth + 1, sectionId, fileCounter);
           html += `
           <div class="tree-folder-row" style="padding-left:${indent}px;">
             <i class="ti ti-chevron-down fold-chevron" style="font-size:11px; color:var(--text-secondary); padding:2px;" onclick="toggleCheckboxFolder('${folderId}', this)"></i>
-            <input type="checkbox" class="folder-checkbox" checked style="accent-color:var(--accent);" onclick="toggleFolderCheckboxChildren(this)">
+            <input type="checkbox" class="folder-checkbox" style="accent-color:var(--accent);" onclick="toggleFolderCheckboxChildren(this)">
             <i class="ti ti-folder" style="font-size:11px; color:var(--accent); margin-top:1px;"></i>
             <span class="folder-name" title="${k}" style="font-size:11px; font-weight:500; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="toggleCheckboxFolder('${folderId}', this.previousElementSibling.previousElementSibling.previousElementSibling)">${k}</span>
           </div>
           <div id="${folderId}" class="folder-children-container" style="display:block;">
-            ${renderCheckboxTree(node[k], fullPath, depth + 1, sectionId)}
+            ${childHtml}
           </div>
         `;
         }
       }
       return html;
+    }
+
+    // Recomputes every folder checkbox's checked state bottom-up from its
+    // actual children — used after any bulk selection change (initial render,
+    // "All", or the doc-selection cap trimming excess checks).
+    function syncFolderCheckboxes(containerId) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const folderCbs = Array.from(container.querySelectorAll('.folder-checkbox')).reverse();
+      folderCbs.forEach(fcb => {
+        const row = fcb.closest('.tree-folder-row');
+        const childContainer = row ? row.nextElementSibling : null;
+        if (childContainer && childContainer.classList.contains('folder-children-container')) {
+          const allChildren = childContainer.querySelectorAll('input[type="checkbox"]:not(.folder-checkbox)');
+          const checkedChildren = childContainer.querySelectorAll('input[type="checkbox"]:not(.folder-checkbox):checked');
+          fcb.checked = allChildren.length > 0 && allChildren.length === checkedChildren.length;
+        }
+      });
+    }
+
+    // Caps the number of selected documents at MAX_DOC_SELECTION, trimming
+    // the excess (keeping the first ones checked, in DOM order) and warning
+    // the user. Called after any change to a Review/Compare doc checklist.
+    function enforceDocSelectionCap(containerId) {
+      const container = document.getElementById(containerId);
+      if (!container) return;
+      const fileCbs = Array.from(container.querySelectorAll('.doc-checkbox'));
+      const checked = fileCbs.filter(cb => cb.checked);
+      if (checked.length > MAX_DOC_SELECTION) {
+        checked.slice(MAX_DOC_SELECTION).forEach(cb => cb.checked = false);
+        syncFolderCheckboxes(containerId);
+        showToast(`Up to ${MAX_DOC_SELECTION} documents can be selected at a time`, 'error');
+      }
     }
 
     async function loadFileTree() {
@@ -6219,6 +6254,8 @@
         } else {
           rDiv.innerHTML = renderCheckboxTree(finalTree, '', 0, 'review');
           cDiv.innerHTML = renderCheckboxTree(finalTree, '', 0, 'compare');
+          syncFolderCheckboxes('review-doc-list');
+          syncFolderCheckboxes('compare-doc-list');
         }
 
         // Render file tree panel
@@ -6304,30 +6341,22 @@
     document.getElementById('review-doc-list').addEventListener('change', e => {
       if (e.target.classList.contains('doc-checkbox') || e.target.classList.contains('folder-checkbox')) {
         updateParentFolderCheckboxes(e.target);
+        enforceDocSelectionCap('review-doc-list');
       }
     });
     document.getElementById('compare-doc-list').addEventListener('change', e => {
       if (e.target.classList.contains('doc-checkbox') || e.target.classList.contains('folder-checkbox')) {
         updateParentFolderCheckboxes(e.target);
+        enforceDocSelectionCap('compare-doc-list');
       }
     });
 
-    document.getElementById('review-select-all').addEventListener('click', e => {
-      e.preventDefault();
-      const cbs = document.getElementById('review-doc-list').querySelectorAll('input[type="checkbox"]');
-      cbs.forEach(cb => cb.checked = true);
-    });
     document.getElementById('review-deselect-all').addEventListener('click', e => {
       e.preventDefault();
       const cbs = document.getElementById('review-doc-list').querySelectorAll('input[type="checkbox"]');
       cbs.forEach(cb => cb.checked = false);
     });
 
-    document.getElementById('compare-select-all').addEventListener('click', e => {
-      e.preventDefault();
-      const cbs = document.getElementById('compare-doc-list').querySelectorAll('input[type="checkbox"]');
-      cbs.forEach(cb => cb.checked = true);
-    });
     document.getElementById('compare-deselect-all').addEventListener('click', e => {
       e.preventDefault();
       const cbs = document.getElementById('compare-doc-list').querySelectorAll('input[type="checkbox"]');
