@@ -1315,10 +1315,11 @@ def review_start():
     session_id = data.get("session_id", "")
     doc_names = data.get("doc_names", [])
     question = data.get("question", "")
-    
+
     if not session_id or not question:
         return jsonify({"error": "session_id and question are required"}), 400
-        
+
+    session_id = _get_main_session_id() or session_id
     job_id = str(uuid.uuid4())
     REVIEW_STORE[job_id] = {
         "status": "running",
@@ -1394,7 +1395,8 @@ def compare_start():
         
     if not session_id or not question:
         return jsonify({"error": "session_id and question are required"}), 400
-        
+
+    session_id = _get_main_session_id() or session_id
     job_id = str(uuid.uuid4())
     COMPARE_STORE[job_id] = {
         "status": "running",
