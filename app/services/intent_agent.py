@@ -681,6 +681,37 @@ def check_disambiguation_node(state: QueryState) -> dict:
     return {"needs_disambiguation": False}
 
 
+def _question_precisely_names_a_document(question: str, session_id: str) -> bool:
+    """True if the question already pins down a document precisely enough that
+    asking "which document?" would be pointless — even though it names it by
+    counterparty rather than by the "type + number" pattern
+    wiki._question_names_a_document alone recognises.
+
+    check_clarification_node's own skip check used to be that narrower pattern
+    only, so a question naming both parties of a document in full ("the NDA
+    between Tata Passenger Electric Mobility Ltd. and Cirrus Battery
+    Intelligence Pte. Ltd., what is the subject matter?") still reached the
+    ambiguity LLM triage, which asked "summary of the entire NDA or specific
+    clauses?" despite the question already stating precisely what it wanted —
+    exactly the "names a specific document AND states what to do with it"
+    case check_ambiguity's OWN prompt says should not need clarification. The
+    LLM doesn't reliably apply that rule for a party-named (non-numbered)
+    reference, so resolve it deterministically first, the same way
+    classify_query's disambiguation gate already does.
+    """
+    try:
+        if wiki._resolve_docs_by_party(question, session_id):
+            return True
+        if wiki._resolve_docs_by_party_pair(question, session_id):
+            return True
+        index = wiki._load_index(session_id)
+        pages = index.get("pages", {})
+        return bool(pages) and wiki._question_names_distinctive_entity(question, pages)
+    except Exception as e:
+        logger.warning("Precise-document check for clarification gate failed: %s", e)
+        return False
+
+
 def check_clarification_node(state: QueryState) -> dict:
     # Must read the per-thread chat session, not the shared wiki/doc session —
     # build_conversation_context(state["session_id"]) pulled "recent conversation"
@@ -692,8 +723,9 @@ def check_clarification_node(state: QueryState) -> dict:
     # always sets it first). resolve_scope already gets this right via its own
     # chat_session_id param; mirror that here.
     chat_sid = state.get("chat_session_id") or state["session_id"]
-    if state.get("is_followup") or wiki._question_names_a_document(state["question"], []) \
-            or not config.ENABLE_CLARIFICATION:
+    if (state.get("is_followup") or wiki._question_names_a_document(state["question"], [])
+            or not config.ENABLE_CLARIFICATION
+            or _question_precisely_names_a_document(state["question"], state["session_id"])):
         conv = wiki.build_conversation_context(chat_sid)
         return {"needs_clarification": False, "conversation_context": conv}
 
@@ -2504,17 +2536,15 @@ def _question_names_corpus_entity(question: str, session_id: str) -> bool:
     Uses the proper-noun-aware check, not the looser token match: a lowercase
     clause word that leaked into the entity set ("termination", "liability")
     must not divert a genuine general question into retrieval.
+
+    Delegates to wiki._question_names_distinctive_entity, which itself checks
+    both page titles and source_doc filenames — see that function for why both
+    are needed ("Hyden" lives only in filenames, not titles).
     """
     try:
         index = wiki._load_index(session_id)
         pages = index.get("pages", {})
-        if not pages:
-            return False
-        # Two sources, because neither alone covers this corpus: page titles
-        # (what ingest synthesised, often abbreviated) and source_doc filenames
-        # (what the user actually types). "Hyden" lives only in the latter.
-        return (wiki._question_names_distinctive_entity(question, pages)
-                or wiki._question_names_corpus_doc_token(question, pages))
+        return bool(pages) and wiki._question_names_distinctive_entity(question, pages)
     except Exception as e:
         logger.warning("Corpus-entity check for general-knowledge gate failed: %s", e)
         return False
