@@ -235,6 +235,12 @@ def ask_vision(image_b64: str, prompt: str, max_tokens: int = 4096, fast: bool =
         raise RuntimeError(f"LLM unavailable (vision): {e}") from e
 
 
+# Same escalation ladder used by the main answer-synthesis retry in wiki.py:
+# a reasoning model that spends its whole budget internally and emits zero
+# visible content needs more room to *commit* to an answer, not more reasoning.
+_EFFORT_ESCALATION = {"minimal": "low", "low": "medium", "medium": "high", "high": "high"}
+
+
 def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
     """Lightweight LLM call for bulk extraction tasks (cell extraction, column inference,
     aspect identification, outlier detection).
@@ -242,6 +248,12 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
     Routes to the cheap model (AZURE_FAST_DEPLOYMENT / OPENROUTER_FAST_MODEL) with a
     short timeout and single retry to avoid blocking the ThreadPoolExecutor.
     Never use for synthesis tasks that require legal reasoning depth.
+
+    On Azure reasoning-model deployments (gpt-5-nano etc.), a low reasoning_effort
+    can spend the whole token budget internally and return empty content with a
+    clean finish_reason — confirmed live on Review/Compare cell extraction, where
+    most cells came back blank. One retry with reasoning_effort escalated a step
+    fixes this without the cost of always running at higher effort.
     """
     if config.LLM_PROVIDER == "openrouter":
         client = _get_fast_openrouter_client()
@@ -253,14 +265,22 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
         client = _get_fast_client()
         model_name = config.AZURE_FAST_DEPLOYMENT
 
-    try:
-        kwargs = _completion_kwargs(model_name, prompt, max_tokens)
+    def _call(reasoning_effort=None):
+        kwargs = _completion_kwargs(model_name, prompt, max_tokens, reasoning_effort)
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
         }
+        return content, usage
+
+    try:
+        content, usage = _call()
+        if not content.strip() and _is_azure() and _is_reasoning_model(model_name):
+            retry_effort = _EFFORT_ESCALATION.get(config.AZURE_REASONING_EFFORT, "medium")
+            logger.warning(f"Fast LLM call came back empty — retrying with reasoning_effort='{retry_effort}'")
+            content, usage = _call(reasoning_effort=retry_effort)
         return content, usage
     except RateLimitError:
         raise
