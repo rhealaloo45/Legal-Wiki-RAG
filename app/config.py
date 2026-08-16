@@ -243,3 +243,9 @@ ENABLE_ANSWER_CACHE = os.getenv("ENABLE_ANSWER_CACHE", "false").lower() == "true
 
 # OCR — path to Tesseract executable (set in .env if not on PATH)
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
+
+# OCR engine: "tesseract" (default, local/free) or "azure_vision" (sends the
+# rendered page image to the Azure OpenAI chat deployment for transcription —
+# use when Tesseract can't read a scanned page, e.g. skewed/low-quality scans).
+# Only takes effect when LLM_PROVIDER=azure, since it reuses the Azure client.
+OCR_ENGINE = os.getenv("OCR_ENGINE", "tesseract").lower()

@@ -17,6 +17,8 @@ import os
 import re
 import logging
 
+import config
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -341,14 +343,50 @@ def _ocr_with_retry(img, psm: str) -> str:
     return ""
 
 
-def _ocr_page(page) -> str:
-    """Render a single pymupdf page to an image and OCR it with Tesseract.
+_VISION_OCR_PROMPT = (
+    "Transcribe every word of visible text from this scanned legal document page, "
+    "exactly as it appears, in reading order. Include headings, numbered clauses, "
+    "table contents (row by row), and signature-block labels. Do not summarise, "
+    "translate, correct spelling/grammar, or add commentary — output the raw "
+    "transcription only, no preamble."
+)
 
-    Uses 300 DPI for high accuracy on legal documents.  Tries multiple PSM
-    modes and picks the result with the most extracted text. Every Tesseract
-    call is time-boxed and retried (see _ocr_with_retry) so a page that Tesseract
-    hangs on is skipped instead of freezing the whole ingest.
+
+def _ocr_page_azure_vision(page) -> str:
+    """Render a page and OCR it via the Azure OpenAI vision-capable deployment.
+
+    Used instead of Tesseract when OCR_ENGINE=azure_vision — helpful for scans
+    Tesseract garbles (skew, low DPI originals, redaction artefacts) since the
+    model reads the rendered image directly rather than running local OCR.
     """
+    import base64
+    from services import llm
+
+    mat = fitz.Matrix(300 / 72, 300 / 72)
+    pix = page.get_pixmap(matrix=mat)
+    image_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+
+    try:
+        text, _usage = llm.ask_vision(image_b64, _VISION_OCR_PROMPT, max_tokens=4096, fast=True)
+        return text.strip()
+    except Exception as e:
+        logger.warning("Azure vision OCR failed for a page: %s", e)
+        return ""
+
+
+def _ocr_page(page) -> str:
+    """Render a single pymupdf page to an image and OCR it.
+
+    Uses 300 DPI for high accuracy on legal documents. Routes to the Azure
+    vision deployment when OCR_ENGINE=azure_vision; otherwise runs local
+    Tesseract, trying multiple PSM modes and keeping the result with the most
+    extracted text. Every Tesseract call is time-boxed and retried (see
+    _ocr_with_retry) so a page that Tesseract hangs on is skipped instead of
+    freezing the whole ingest.
+    """
+    if config.OCR_ENGINE == "azure_vision":
+        return _ocr_page_azure_vision(page)
+
     # Render at 300 DPI (default PDF is 72 DPI)
     mat = fitz.Matrix(300 / 72, 300 / 72)
     pix = page.get_pixmap(matrix=mat)
