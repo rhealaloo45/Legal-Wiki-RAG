@@ -5221,9 +5221,21 @@ def _contains_token(token: str, text: str) -> bool:
 
 def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     """True if the question mentions a distinctive entity/party name from a
-    document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
+    document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther") OR from a
+    source_doc filename ("Hyden", "Brackenpyre").
+
+    The two sources cover different corpora. Page titles are what ingest
+    SYNTHESISES and often abbreviate the party into an initialism ("HYD-LEX",
+    "BRP-SOL") that no user ever types. Filenames keep the name the user
+    actually asked about. Checking titles alone means a question naming the
+    party by its real name matches nothing here even though the document is
+    right there — confirmed live for "Hyden" (matches zero title-derived
+    entities) and "Brackenpyre" (same), each forced into the LLM disambiguation
+    triage on every turn instead of resolving deterministically on the first.
+    """
     q = question.lower()
-    return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
+    return (any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
+            or _question_names_corpus_doc_token(question, pages))
 
 
 # Words that appear in this corpus's FILENAMES but identify nothing — folder
@@ -5311,12 +5323,25 @@ def _question_names_distinctive_entity(question: str, pages: dict) -> bool:
     entity token counts only when it ALSO appears as a capitalised proper noun in
     the question. Stops a generic dictionary word that leaked into the entity set
     from suppressing disambiguation on a genuinely vague query (e.g. "Summarize
-    this document…" listing "term, termination, liability" — none proper nouns)."""
+    this document…" listing "term, termination, liability" — none proper nouns).
+
+    This is the actual skip check classify_query uses before ever asking the LLM
+    whether to disambiguate — so its blind spot is not cosmetic. It only reads
+    _extract_doc_entities, which mines PAGE TITLES; the filename-token check
+    below (_question_names_corpus_doc_token, already proper-noun-gated the same
+    way) covers the party name as the user actually types it. Confirmed live:
+    "Can the vendor or its model provider use client data to train or improve
+    their AI models?" — asked, then "same document", then "the document I just
+    spoke about in the previous question" — got the identical disambiguation
+    prompt three times in one thread, because "Hyden" satisfies neither check
+    without this addition, so nothing before the LLM triage could ever resolve
+    it, and the triage has no memory of the reply already given.
+    """
     q = question.lower()
-    return any(
+    return (any(
         _contains_token(ent, q) and _appears_as_proper_noun(ent, question)
         for ent in _extract_doc_entities(pages)
-    )
+    ) or _question_names_corpus_doc_token(question, pages))
 
 
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
@@ -5434,6 +5459,52 @@ _PARTY_NAME_RE = re.compile(
 # Majeure") is essentially never typed in all caps, so this stays narrow.
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
 
+# A third naming style neither of the above catches: a single Title-Case word
+# with NO corporate suffix and NO second ALL-CAPS word — someone's shorthand
+# for a party ("Brackenpyre", "Hyden"), the way people actually refer to a
+# counterparty in conversation rather than by its full registered name.
+# Confirmed live: "the required timeframe for Brackenpyre to notify the
+# Client" extracts zero candidates from _PARTY_NAME_RE (no suffix) or
+# _BARE_ALLCAPS_ENTITY_RE (no second all-caps word) — even though the corpus
+# holds exactly three documents mentioning "Brackenpyre" by name — so
+# _resolve_docs_by_party never even tries a content search for it, and the
+# question falls through to the LLM disambiguation triage every time.
+#
+# Deliberately the weakest signal of the three, so it is tried only as a last
+# resort (see _resolve_docs_by_party) and leans on the SAME distinctiveness
+# cap every candidate here is already subject to: a stopword that slips
+# through just costs one wasted content-search query, filtered out for
+# matching too many documents to resolve anything.
+_BARE_PROPER_NOUN_STOPWORDS = frozenset({
+    "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
+    "does", "did", "do", "is", "are", "was", "were", "can", "could", "would",
+    "should", "will", "shall", "must", "may", "might", "have", "has", "had",
+    "the", "this", "that", "these", "those", "their", "its", "our", "your",
+    "under", "over", "before", "after", "between", "within", "during",
+    "against", "please", "kindly", "also", "then", "there", "here",
+    "client", "vendor", "party", "parties", "agreement", "agreements",
+    "contract", "contracts", "document", "documents", "clause", "clauses",
+    "section", "sections", "schedule", "schedules", "annexure", "annexures",
+    "service", "services", "statement", "work", "data", "processing",
+    "master", "regarding", "concerning", "according", "prepare", "provide",
+    "explain", "describe", "summarize", "summarise", "compare", "list",
+})
+_BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
+
+
+def _bare_proper_noun_candidates(question: str) -> list[str]:
+    """Single Title-Case words in ``question`` that aren't common English/legal
+    vocabulary — candidate bare party-name shorthand for _resolve_docs_by_party.
+    """
+    seen: list[str] = []
+    for m in _BARE_PROPER_NOUN_RE.finditer(question):
+        tok = m.group(0)
+        if tok.lower() in _BARE_PROPER_NOUN_STOPWORDS:
+            continue
+        if tok not in seen:
+            seen.append(tok)
+    return seen
+
 
 # An explicit calendar date typed in the question ("the SA dated 15 January
 # 2026", "signed on August 28, 2025"). Two orderings: day-month-year (the
@@ -5509,6 +5580,8 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         return set()
     candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
     candidates = [c for c in candidates if len(c) >= 4]
+    if not candidates:
+        candidates = _bare_proper_noun_candidates(question)
     if not candidates:
         return set()
     best_docs: set[str] | None = None
@@ -6503,9 +6576,10 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                  "confidence": 0.85 if len(party_docs) == 1 else 0.8,
                  "method": "party" if len(party_docs) == 1 else "party-multi"},
                 _fam_name, _fam_docs)
-        # Party spans several documents but the question names only one instrument
-        # type — narrow to that family when it resolves cleanly, else fall through
-        # rather than guess.
+        # Party spans several documents. If the question ALSO names exactly one
+        # instrument type ("the SOW with Cindercast"), narrow to that specific
+        # document within the resolved family — sharper than answering across
+        # all of them when the user asked for one.
         try:
             available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
             fam = _detect_question_family(question, available)
@@ -6517,6 +6591,26 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             return {"scope": "single_doc", "target_docs": sorted(narrowed),
                     "target_family": None, "is_broad": False,
                     "confidence": 0.8, "method": "party"}
+        # No instrument named, or naming one didn't narrow further — used to
+        # fall through here to carryover/corpus-default instead of using the
+        # match, on the reasoning that an unnarrowed multi-document party hit
+        # was too uncertain to commit to. But _resolve_docs_by_party's own
+        # contract already rules that out: it gives up and returns empty
+        # whenever the smallest candidate set exceeds max_docs (default 4), so
+        # a non-empty party_docs here is ALREADY a small, coherent instrument
+        # family (a deal's own MSA+SOW+DPA), not an arbitrary pile. Confirmed
+        # live: "Can Cindercast use Torvald's data to train AI models?" names
+        # no instrument type, so this used to fall through — past the party
+        # match that correctly found CND-TOR-MSA/SOW/DPA — all the way to
+        # carryover, which then answered from "Tata Brand Judgment 3", left
+        # over from an unrelated earlier question in the same thread. Silent
+        # and wrong, which is worse than the disambiguation prompt this branch
+        # exists to avoid. Answer across the whole resolved family instead.
+        return _enforce_question_family(
+            {"scope": "single_doc", "target_docs": sorted(party_docs),
+             "target_family": None, "is_broad": False,
+             "confidence": 0.75, "method": "party-multi"},
+            _fam_name, _fam_docs)
 
     # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
     # Energy Corporation"). The single-party resolver above cannot reach this:
@@ -6801,30 +6895,43 @@ def classify_query(question: str, session_id: str) -> dict:
         logger.info("Broad/plural-family phrasing → skip disambiguation")
         return {"needs_disambiguation": False, "documents": docs}
 
-    # A named party that resolves to exactly ONE document via full-text content
-    # search is an unambiguous document reference — skip disambiguation and let
-    # resolve_scope (which runs the SAME resolver later) pin it. This catches the
-    # common case the distinctive-entity check below misses: a counterparty named
-    # by its full corporate name ("Helios Grid Advisory Private Limited") whose
-    # name lives only in the document BODY / redaction-masked metadata, not in the
-    # page-title identifier tokens _extract_doc_entities mines — so
-    # _question_names_distinctive_entity returns False and the vague "the Services
-    # Agreement between X and Y" phrasing would otherwise trigger a needless
-    # "which document?" prompt even though the party pins it uniquely (confirmed
-    # live: SA5/Helios and SA6/Meridian questions both disambiguated despite each
-    # party name resolving to a single Service Agreement). Only a UNIQUE hit skips
-    # here; a party shared across several documents stays genuinely ambiguous and
-    # falls through to normal disambiguation. _resolve_docs_by_party is DB-gated
-    # and returns an empty set with no party phrase present, so questions that
-    # name no corporate party incur no extra cost.
+    # A named party that resolves via full-text content search is an unambiguous
+    # document reference — skip disambiguation and let resolve_scope (which runs
+    # the SAME resolver later) pin it. This catches the common case the
+    # distinctive-entity check above misses: a counterparty named by its full
+    # corporate name ("Helios Grid Advisory Private Limited"), or by bare
+    # shorthand with no suffix at all ("Brackenpyre"), whose name lives only in
+    # the document BODY, not the filename or the page-title identifier tokens
+    # _extract_doc_entities mines — so neither entity check above fires and the
+    # question would otherwise trigger a needless "which document?" prompt even
+    # though the party pins it precisely (confirmed live: SA5/Helios and
+    # SA6/Meridian questions both disambiguated despite each party name resolving
+    # to a single Service Agreement).
+    #
+    # ANY non-empty result skips here, not just a single document. That used to
+    # require len == 1, on the reasoning that "a party shared across several
+    # documents stays genuinely ambiguous" — true for an UNBOUNDED umbrella name,
+    # but _resolve_docs_by_party's own contract already rules that case out
+    # before ever returning: it gives up and returns empty whenever the smallest
+    # candidate set exceeds max_docs (default 4). So a non-empty result here is
+    # already guaranteed small and coherent — a deal's own linked instrument
+    # family (MSA+SOW+DPA), not an unrelated pile of documents that happen to
+    # share a common name. Confirmed live: "Brackenpyre" resolves to exactly its
+    # own 3 documents and was still disambiguated under the == 1 version, because
+    # a bare-name party question almost never resolves to just one instrument —
+    # requiring that never fires for the shape this whole check exists to catch.
+    #
+    # _resolve_docs_by_party is DB-gated and returns an empty set with no party
+    # phrase present, so questions that name no corporate party incur no extra
+    # cost.
     try:
         party_docs = _resolve_docs_by_party(question, session_id)
     except Exception as e:
         logger.error("classify_query: party resolution failed: %s", e)
         party_docs = set()
-    if len(party_docs) == 1:
-        logger.info("Named party resolves to a single document → skip disambiguation: %s",
-                    _norm_doc_name(next(iter(party_docs))))
+    if party_docs:
+        logger.info("Named party resolves to %d document(s) → skip disambiguation: %s",
+                    len(party_docs), {_norm_doc_name(d) for d in party_docs})
         return {"needs_disambiguation": False, "documents": docs}
 
     # Same idea, for a question that names no party but does recite an explicit
