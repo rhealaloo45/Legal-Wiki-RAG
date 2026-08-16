@@ -68,7 +68,7 @@ if config.TESSERACT_CMD:
     from services.reader import configure_tesseract
     configure_tesseract(config.TESSERACT_CMD)
 
-executor = ThreadPoolExecutor(max_workers=10)
+executor = ThreadPoolExecutor(max_workers=config.WIKI_MAX_WORKERS)
 
 # Per-session locks so concurrent ingest threads can atomically increment the
 # wiki_done counter without racing each other and under-counting completions.

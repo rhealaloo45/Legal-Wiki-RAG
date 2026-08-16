@@ -184,6 +184,57 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         logger.error(f"LLM call failed: {e}")
         raise RuntimeError(f"LLM unavailable: {e}") from e
 
+def ask_vision(image_b64: str, prompt: str, max_tokens: int = 4096, fast: bool = True) -> tuple[str, dict]:
+    """Send a single page image to the Azure OpenAI deployment for OCR/transcription.
+
+    Used as an alternative to Tesseract when local OCR fails to read a scanned
+    page (skew, low resolution, redaction artefacts) — the vision-capable chat
+    deployment reads the rendered page image directly. Azure-only: routes
+    through the same client/deployment as text calls, just with an image
+    content block attached.
+
+    Args:
+        image_b64: Base64-encoded PNG bytes of the rendered page.
+        prompt:    Instruction describing what to transcribe.
+        max_tokens: Completion budget — a dense legal page can run long.
+        fast:      Use AZURE_FAST_DEPLOYMENT (cheaper) vs the full deployment.
+    """
+    if not _is_azure():
+        raise RuntimeError("ask_vision requires LLM_PROVIDER=azure (OCR_ENGINE=azure_vision)")
+
+    client = _get_fast_client() if fast else get_client()
+    model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+        ],
+    }]
+    kwargs = {"model": model_name, "messages": messages}
+    if _is_reasoning_model(model_name):
+        kwargs["max_completion_tokens"] = max_tokens
+        kwargs["reasoning_effort"] = config.AZURE_REASONING_EFFORT
+    else:
+        kwargs["max_completion_tokens"] = max_tokens
+        kwargs["temperature"] = 0.0
+
+    try:
+        response = client.chat.completions.create(**kwargs)
+        content = response.choices[0].message.content or ""
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+        }
+        return content, usage
+    except RateLimitError:
+        raise
+    except Exception as e:
+        logger.error(f"Vision LLM call failed: {e}")
+        raise RuntimeError(f"LLM unavailable (vision): {e}") from e
+
+
 def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
     """Lightweight LLM call for bulk extraction tasks (cell extraction, column inference,
     aspect identification, outlier detection).

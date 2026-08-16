@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 
 VALID_INTENTS = ["factual", "risk_assessment", "comparison", "obligation", "drafting"]
 
+# How many unresolved "which document?" prompts a thread may issue in a row
+# before the question is answered from the whole corpus instead. Two, not one:
+# the first prompt is the one that legitimately resolves most questions, and a
+# single retry covers a user who names the document imprecisely on their first
+# try. A third has never resolved one in testing — see check_disambiguation_node.
+_MAX_DISAMBIGUATION_ROUNDS = 2
+
 INTENT_LABELS = {
     "factual": "Factual",
     "risk_assessment": "Risk Assessment",
@@ -614,6 +621,37 @@ def check_disambiguation_node(state: QueryState) -> dict:
     except Exception as e:
         logger.error("Party-pair disambiguation check failed: %s", e)
 
+    # Loop breaker. Everything above resolves a document from the question; if
+    # none of it fired, the prompt below asks the user. But that prompt is only
+    # useful the FIRST time — the reply is appended to the question and re-run
+    # through this same node, so a reply the matcher can't resolve produces the
+    # identical prompt again, and again. Confirmed live: three consecutive
+    # prompts on one question ("same document", then "the document I just spoke
+    # about in the previous question"), none resolving, the user never answered.
+    # Also confirmed on a question whose own subject collides with a corpus
+    # entity ("Project Aurora" vs Aurora Cloud Computing Inc.), where even a
+    # correct reply naming the agreement could not break the tie.
+    #
+    # After two unresolved rounds the question is one this matcher cannot pin,
+    # and a third identical prompt has no path to an answer. Fall through to
+    # ordinary corpus retrieval instead. Not silent: scope stays method="default"
+    # with no target_docs, which generate_answer_node already discloses as "this
+    # question named no document, so the entire corpus was searched" — the
+    # honest description of what then happens.
+    _dis_chat_sid = state.get("chat_session_id") or state["session_id"]
+    if config.USE_DATABASE:
+        try:
+            _streak = db.count_trailing_disambiguations(_dis_chat_sid)
+            if _streak >= _MAX_DISAMBIGUATION_ROUNDS:
+                logger.warning(
+                    "Disambiguation asked %d time(s) in a row on this thread without "
+                    "resolving — falling through to corpus retrieval rather than "
+                    "asking again: %r", _streak, state["question"][:80],
+                )
+                return {"needs_disambiguation": False}
+        except Exception as e:
+            logger.error("Disambiguation loop-breaker check failed: %s", e)
+
     _emit({"stage": "disambiguation", "status": "active", "message": "Checking document scope…"})
     try:
         result = wiki.classify_query(state["question"], state["session_id"])
@@ -643,6 +681,37 @@ def check_disambiguation_node(state: QueryState) -> dict:
     return {"needs_disambiguation": False}
 
 
+def _question_precisely_names_a_document(question: str, session_id: str) -> bool:
+    """True if the question already pins down a document precisely enough that
+    asking "which document?" would be pointless — even though it names it by
+    counterparty rather than by the "type + number" pattern
+    wiki._question_names_a_document alone recognises.
+
+    check_clarification_node's own skip check used to be that narrower pattern
+    only, so a question naming both parties of a document in full ("the NDA
+    between Tata Passenger Electric Mobility Ltd. and Cirrus Battery
+    Intelligence Pte. Ltd., what is the subject matter?") still reached the
+    ambiguity LLM triage, which asked "summary of the entire NDA or specific
+    clauses?" despite the question already stating precisely what it wanted —
+    exactly the "names a specific document AND states what to do with it"
+    case check_ambiguity's OWN prompt says should not need clarification. The
+    LLM doesn't reliably apply that rule for a party-named (non-numbered)
+    reference, so resolve it deterministically first, the same way
+    classify_query's disambiguation gate already does.
+    """
+    try:
+        if wiki._resolve_docs_by_party(question, session_id):
+            return True
+        if wiki._resolve_docs_by_party_pair(question, session_id):
+            return True
+        index = wiki._load_index(session_id)
+        pages = index.get("pages", {})
+        return bool(pages) and wiki._question_names_distinctive_entity(question, pages)
+    except Exception as e:
+        logger.warning("Precise-document check for clarification gate failed: %s", e)
+        return False
+
+
 def check_clarification_node(state: QueryState) -> dict:
     # Must read the per-thread chat session, not the shared wiki/doc session —
     # build_conversation_context(state["session_id"]) pulled "recent conversation"
@@ -654,8 +723,9 @@ def check_clarification_node(state: QueryState) -> dict:
     # always sets it first). resolve_scope already gets this right via its own
     # chat_session_id param; mirror that here.
     chat_sid = state.get("chat_session_id") or state["session_id"]
-    if state.get("is_followup") or wiki._question_names_a_document(state["question"], []) \
-            or not config.ENABLE_CLARIFICATION:
+    if (state.get("is_followup") or wiki._question_names_a_document(state["question"], [])
+            or not config.ENABLE_CLARIFICATION
+            or _question_precisely_names_a_document(state["question"], state["session_id"])):
         conv = wiki.build_conversation_context(chat_sid)
         return {"needs_clarification": False, "conversation_context": conv}
 
@@ -2448,6 +2518,38 @@ def _gk_subject(question: str) -> str | None:
     return subject
 
 
+def _question_names_corpus_entity(question: str, session_id: str) -> bool:
+    """True if the question names a party/entity this corpus holds documents about.
+
+    The general-knowledge gates recognise a document reference only by KEYWORD —
+    clause, section, NDA, MSA, SOW, party, "this agreement" (_RX_GK_DOC_REF). A
+    question that names a real COUNTERPARTY instead carries none of those words,
+    so it clears every gate and is answered from textbook knowledge while the
+    corpus holds the clause verbatim. Confirmed live, repeatedly: "What are Hyden
+    Tech's obligations regarding AI bias and discrimination?" took the standalone
+    path on three separate runs — "Hyden Tech" is not a gate keyword, and
+    "discrimination" then matched the legal-vocabulary regex — while DPA Clause
+    4.6 and SOW Clause 4.7 answer it directly. Same shape for "how is ownership
+    handled for AI-generated deliverables", answered generically against MSA
+    Clause 5.4, which addresses exactly that.
+
+    Uses the proper-noun-aware check, not the looser token match: a lowercase
+    clause word that leaked into the entity set ("termination", "liability")
+    must not divert a genuine general question into retrieval.
+
+    Delegates to wiki._question_names_distinctive_entity, which itself checks
+    both page titles and source_doc filenames — see that function for why both
+    are needed ("Hyden" lives only in filenames, not titles).
+    """
+    try:
+        index = wiki._load_index(session_id)
+        pages = index.get("pages", {})
+        return bool(pages) and wiki._question_names_distinctive_entity(question, pages)
+    except Exception as e:
+        logger.warning("Corpus-entity check for general-knowledge gate failed: %s", e)
+        return False
+
+
 def _is_general_knowledge_llm(question: str) -> bool:
     """Cheap tiebreak for a legal term the vocabulary regex doesn't list.
 
@@ -2674,6 +2776,15 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # discuss it, and a document's own analysis beats a definition. Held back as
     # a fallback for the case where retrieval genuinely finds nothing.
     if gk_method == "gk-named":
+        gk_deferred_method, gk_method = gk_method, ""
+    # Same treatment, same reason, for a question naming a real counterparty:
+    # the corpus probably answers it, and a document's own clause beats a
+    # textbook definition. Deferred rather than vetoed outright — if retrieval
+    # genuinely finds nothing, the general answer is still the right reply, so
+    # this only reorders the two, never removes the fallback.
+    if gk_method and _question_names_corpus_entity(question, session_id):
+        logger.info("[AGENT] general-knowledge deferred — question names a corpus "
+                    "entity, trying retrieval first: %r", (question or "")[:80])
         gk_deferred_method, gk_method = gk_method, ""
     if gk_method:
         _gk_chat_sid = chat_session_id or session_id

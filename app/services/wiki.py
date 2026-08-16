@@ -590,6 +590,22 @@ PRINCIPLES:
 - Each page should read like a well-written wiki article.
 - Include exact numbers, amounts, dates, rates, and timeframes verbatim.
 - Flag contradictions or ambiguities you notice.
+- STAMP/CHALLAN CAPTURE (CRITICAL): If the document includes a stamp certificate, e-stamp, \
+  or stamp duty challan anywhere in it — including as a cover-page watermark or header, not \
+  just a separate attached page — you MUST create a dedicated wiki page for it capturing the \
+  certificate/GRN number, date, purchaser/payer name, and amount verbatim. Also populate the \
+  metadata field 'matter_reference' with this certificate/GRN number. Never omit this because \
+  it looks like decorative letterhead rather than agreement text — it is frequently the only \
+  reliable date and party-identification anchor in the document.
+- SERVICE-LEVEL / CADENCE PRECISION (CRITICAL): For any recurring obligation — reporting \
+  frequency, review or hygiene cadence, response times, SLA turnaround — quote the literal \
+  cadence and its clause context verbatim (e.g. "Weekly reports every Monday", "changed and \
+  managed once a month"). Do NOT compress these into vague paraphrase like "periodic reporting" \
+  or "regular reviews" — the exact frequency is often the entire legal content of the clause.
+- METADATA COMPLETENESS: Populate governing_law, jurisdiction, and parties whenever the \
+  document states them anywhere in the text, even if some party names are redacted elsewhere — \
+  describe what is identifiable (e.g. "Tata Sons Private Limited; counterparty name redacted") \
+  rather than leaving the field null just because one side is unnamed.
 
 PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
 DOCUMENT-SPECIFIC PAGES (CRITICAL): Most pages describe provisions unique to THIS specific \
@@ -728,6 +744,12 @@ RULES:
 - MULTI-STAGE LITIGATION (CRITICAL): If the case has multiple stages (Trial Court → High Court → \
   Supreme Court, or First SLP → Remand → Second Appeal), label and separate each stage. Record \
   what each court decided and why. Never blend outcomes from different stages.
+- STAMP/CHALLAN CAPTURE (CRITICAL): If this segment includes a stamp certificate, e-stamp, or \
+  stamp duty challan — including as a cover-page watermark or header — create a dedicated wiki \
+  page for it with the certificate/GRN number, date, purchaser/payer name, and amount verbatim.
+- SERVICE-LEVEL / CADENCE PRECISION (CRITICAL): For recurring obligations (reporting frequency, \
+  review/hygiene cadence, response times, SLA turnaround), quote the literal cadence verbatim \
+  (e.g. "Weekly reports every Monday"). Do not compress into vague paraphrase like "periodic".
 - PAGE TITLES: You MUST append the inferred Document Type in parentheses to EVERY page title. \
   DOCUMENT-SPECIFIC TITLES (CRITICAL): The KNOWN TOPICS list will contain some topics with \
   a document identifier attached (e.g. "Facts – Yuvraj Kanther", "Term – SA1-Crayons") and some \
@@ -1887,6 +1909,75 @@ def _pages_from_files(pages: dict, source_docs: set[str]) -> list[str]:
     return result
 
 
+# Ingest writes every page prose-first, verbatim-evidence-last, under this
+# heading. That layout and a plain content[:cap] tail-slice are in direct
+# conflict: the slice always eats the quotes and always keeps the paraphrase —
+# the exact inversion of what an answer needs. Measured on the Hyden-Lexus MSA
+# at the 2,000-char cap: "Limitation of Liability and Carve-outs" (2,474 chars)
+# lost the tail of its own Clause 10.4 quote mid-sentence, so the INR
+# 15,00,00,000 figure never reached the model and the answer reported the cap
+# as "not fully reproduced in the provided context" while the database held it
+# verbatim. "Intellectual Property Allocation" (2,232) lost Clauses 5.4 and 5.5
+# the same way, and "AI Governance" (2,137) lost Clause 6.7.
+#
+# Two downstream effects, not one. The obvious one is the missing fact. The
+# quieter one is that the model, left with prose only, paraphrases it and
+# _verify_answer_citations then cannot match that paraphrase to any retrieved
+# quote — which is where the recurring "[CITATION NOTE: excerpt could not be
+# matched to the retrieved source text]" banners come from. Both are fixed by
+# spending the budget on evidence instead of summary.
+_SUPPORTING_QUOTES_RE = re.compile(r'\n\*\*Supporting Quotes:\*\*[ \t]*\n', re.IGNORECASE)
+
+# Always keep at least this much summary. The quotes alone are clause text with
+# no framing; the opening prose is what tells the model which document and
+# which topic they belong to.
+_MIN_PROSE_CHARS = 400
+
+
+def _truncate_page_content(content: str, cap: int) -> str:
+    """Trim an over-long page to ``cap`` chars without destroying its quotes.
+
+    Trims the prose summary and keeps the Supporting Quotes block whole. When
+    the quotes alone cannot fit, drops WHOLE quote lines from the end rather
+    than cutting one mid-sentence — a half-quote is worse than an absent one,
+    because it reads as complete and is what the model then cites.
+
+    Falls back to the old tail-slice for pages with no quotes block (cached
+    "Q:" answers, older pages ingested before the format settled).
+    """
+    if len(content) <= cap:
+        return content
+
+    m = _SUPPORTING_QUOTES_RE.search(content)
+    if not m:
+        return content[:cap] + "\n[...truncated]"
+
+    prose = content[:m.start()]
+    header = content[m.start():m.end()]
+    body = content[m.end():]
+
+    note = "\n[...summary trimmed — supporting quotes kept in full]"
+    prose_budget = cap - (len(header) + len(body)) - len(note)
+    if prose_budget >= _MIN_PROSE_CHARS:
+        return prose[:prose_budget].rstrip() + note + header + body
+
+    # Quotes alone overflow the cap: keep the minimum prose, then as many whole
+    # quote lines as fit. Quotes appear in document order, so truncating from
+    # the end keeps the earliest clauses — the ones the page is titled for.
+    note = "\n[...truncated — later supporting quotes omitted]"
+    avail = cap - _MIN_PROSE_CHARS - len(header) - len(note)
+    kept: list[str] = []
+    used = 0
+    for line in body.split("\n"):
+        if used + len(line) + 1 > avail:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    if not kept:
+        return content[:cap] + "\n[...truncated]"
+    return prose[:_MIN_PROSE_CHARS].rstrip() + header + "\n".join(kept) + note
+
+
 # ---------------------------------------------------------------------------
 # Query — index-based retrieval for accuracy at scale
 # ---------------------------------------------------------------------------
@@ -2256,7 +2347,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             if title.startswith("Q:") and len(content) > _QPAGE_CAP:
                 content = content[:_QPAGE_CAP] + "\n[...truncated — cached answer summary only]"
             elif len(content) > _PAGE_CAP:
-                content = content[:_PAGE_CAP] + "\n[...truncated]"
+                content = _truncate_page_content(content, _PAGE_CAP)
 
             # Clean the title for LLM context: strip UUID prefix and path noise
             # "Topic (uuid_Legal AI Tool - Group_Type_Name_redacted.pdf)"
@@ -5130,9 +5221,75 @@ def _contains_token(token: str, text: str) -> bool:
 
 def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     """True if the question mentions a distinctive entity/party name from a
-    document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther")."""
+    document identifier (e.g. "ReVolt", "Meridian", "Yuvraj Kanther") OR from a
+    source_doc filename ("Hyden", "Brackenpyre").
+
+    The two sources cover different corpora. Page titles are what ingest
+    SYNTHESISES and often abbreviate the party into an initialism ("HYD-LEX",
+    "BRP-SOL") that no user ever types. Filenames keep the name the user
+    actually asked about. Checking titles alone means a question naming the
+    party by its real name matches nothing here even though the document is
+    right there — confirmed live for "Hyden" (matches zero title-derived
+    entities) and "Brackenpyre" (same), each forced into the LLM disambiguation
+    triage on every turn instead of resolving deterministically on the first.
+    """
     q = question.lower()
-    return any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
+    return (any(_contains_token(ent, q) for ent in _extract_doc_entities(pages))
+            or _question_names_corpus_doc_token(question, pages))
+
+
+# Words that appear in this corpus's FILENAMES but identify nothing — folder
+# names, document types, redaction/sample markers, extensions. A filename token
+# is only a useful signal if it is the part that names a specific matter.
+_DOC_TOKEN_STOPWORDS = frozenset({
+    "legal", "service", "services", "agreement", "agreements", "contract",
+    "judgment", "judgments", "judgement", "judgements", "court", "case",
+    "cases", "document", "documents", "opinion", "opinions", "shareholder",
+    "shareholders", "joint", "venture", "ventures", "confidentiality",
+    "disclosure", "master", "statement", "work", "data", "processing",
+    "redacted", "redact", "sample", "samples", "test", "final", "draft",
+    "copy", "docx", "doc", "pdf", "txt", "file", "files", "version",
+    "brand", "tool", "group", "type", "name", "misc", "other", "new", "old",
+})
+
+
+def _corpus_doc_name_tokens(pages: dict) -> set[str]:
+    """Distinctive word tokens drawn from this corpus's source_doc filenames.
+
+    Complements _extract_doc_entities, which mines PAGE TITLES. Ingest often
+    abbreviates a counterparty in the title it synthesises ("HYD-LEX") while the
+    filename keeps the name the user actually types ("Hyden-Lexus"), so a
+    question naming that party matches nothing in the title-derived entity set.
+    Confirmed live: "Hyden" appears in no page title in this corpus — the entity
+    set holds "hyd-lex" — so every entity-based resolver returns empty for a
+    question about Hyden Tech, even though retrieval finds the documents easily.
+    """
+    tokens: set[str] = set()
+    for page in pages.values():
+        if not isinstance(page, dict):
+            continue
+        sd = page.get("source_doc", "")
+        if not sd:
+            continue
+        name = re.sub(r'^[a-f0-9-]{36}_', '', sd)
+        name = re.sub(r'\.[A-Za-z0-9]{2,5}$', '', name)
+        for tok in re.split(r'[^A-Za-z]+', name):
+            t = tok.lower()
+            if len(t) >= 4 and t not in _DOC_TOKEN_STOPWORDS:
+                tokens.add(t)
+    return tokens
+
+
+def _question_names_corpus_doc_token(question: str, pages: dict) -> bool:
+    """True if the question names a matter/party token from a document filename.
+
+    Proper-noun-aware for the same reason _question_names_distinctive_entity is:
+    a lowercase common word that happens to sit in a filename must not count.
+    """
+    for tok in _corpus_doc_name_tokens(pages):
+        if _appears_as_proper_noun(tok, question):
+            return True
+    return False
 
 
 def _appears_as_proper_noun(token: str, question: str) -> bool:
@@ -5166,12 +5323,25 @@ def _question_names_distinctive_entity(question: str, pages: dict) -> bool:
     entity token counts only when it ALSO appears as a capitalised proper noun in
     the question. Stops a generic dictionary word that leaked into the entity set
     from suppressing disambiguation on a genuinely vague query (e.g. "Summarize
-    this document…" listing "term, termination, liability" — none proper nouns)."""
+    this document…" listing "term, termination, liability" — none proper nouns).
+
+    This is the actual skip check classify_query uses before ever asking the LLM
+    whether to disambiguate — so its blind spot is not cosmetic. It only reads
+    _extract_doc_entities, which mines PAGE TITLES; the filename-token check
+    below (_question_names_corpus_doc_token, already proper-noun-gated the same
+    way) covers the party name as the user actually types it. Confirmed live:
+    "Can the vendor or its model provider use client data to train or improve
+    their AI models?" — asked, then "same document", then "the document I just
+    spoke about in the previous question" — got the identical disambiguation
+    prompt three times in one thread, because "Hyden" satisfies neither check
+    without this addition, so nothing before the LLM triage could ever resolve
+    it, and the triage has no memory of the reply already given.
+    """
     q = question.lower()
-    return any(
+    return (any(
         _contains_token(ent, q) and _appears_as_proper_noun(ent, question)
         for ent in _extract_doc_entities(pages)
-    )
+    ) or _question_names_corpus_doc_token(question, pages))
 
 
 def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
@@ -5289,6 +5459,52 @@ _PARTY_NAME_RE = re.compile(
 # Majeure") is essentially never typed in all caps, so this stays narrow.
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
 
+# A third naming style neither of the above catches: a single Title-Case word
+# with NO corporate suffix and NO second ALL-CAPS word — someone's shorthand
+# for a party ("Brackenpyre", "Hyden"), the way people actually refer to a
+# counterparty in conversation rather than by its full registered name.
+# Confirmed live: "the required timeframe for Brackenpyre to notify the
+# Client" extracts zero candidates from _PARTY_NAME_RE (no suffix) or
+# _BARE_ALLCAPS_ENTITY_RE (no second all-caps word) — even though the corpus
+# holds exactly three documents mentioning "Brackenpyre" by name — so
+# _resolve_docs_by_party never even tries a content search for it, and the
+# question falls through to the LLM disambiguation triage every time.
+#
+# Deliberately the weakest signal of the three, so it is tried only as a last
+# resort (see _resolve_docs_by_party) and leans on the SAME distinctiveness
+# cap every candidate here is already subject to: a stopword that slips
+# through just costs one wasted content-search query, filtered out for
+# matching too many documents to resolve anything.
+_BARE_PROPER_NOUN_STOPWORDS = frozenset({
+    "what", "when", "where", "which", "who", "whom", "whose", "why", "how",
+    "does", "did", "do", "is", "are", "was", "were", "can", "could", "would",
+    "should", "will", "shall", "must", "may", "might", "have", "has", "had",
+    "the", "this", "that", "these", "those", "their", "its", "our", "your",
+    "under", "over", "before", "after", "between", "within", "during",
+    "against", "please", "kindly", "also", "then", "there", "here",
+    "client", "vendor", "party", "parties", "agreement", "agreements",
+    "contract", "contracts", "document", "documents", "clause", "clauses",
+    "section", "sections", "schedule", "schedules", "annexure", "annexures",
+    "service", "services", "statement", "work", "data", "processing",
+    "master", "regarding", "concerning", "according", "prepare", "provide",
+    "explain", "describe", "summarize", "summarise", "compare", "list",
+})
+_BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
+
+
+def _bare_proper_noun_candidates(question: str) -> list[str]:
+    """Single Title-Case words in ``question`` that aren't common English/legal
+    vocabulary — candidate bare party-name shorthand for _resolve_docs_by_party.
+    """
+    seen: list[str] = []
+    for m in _BARE_PROPER_NOUN_RE.finditer(question):
+        tok = m.group(0)
+        if tok.lower() in _BARE_PROPER_NOUN_STOPWORDS:
+            continue
+        if tok not in seen:
+            seen.append(tok)
+    return seen
+
 
 # An explicit calendar date typed in the question ("the SA dated 15 January
 # 2026", "signed on August 28, 2025"). Two orderings: day-month-year (the
@@ -5364,6 +5580,8 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         return set()
     candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
     candidates = [c for c in candidates if len(c) >= 4]
+    if not candidates:
+        candidates = _bare_proper_noun_candidates(question)
     if not candidates:
         return set()
     best_docs: set[str] | None = None
@@ -5829,7 +6047,8 @@ def _docs_of_entity_pages(question: str, pages: dict) -> dict:
 # thread is a pivot, not a continuation).
 _CARRYOVER_TYPE_RE = re.compile(
     r'\b(nda|non-?disclosure|confidentiality\s+agreement|service\s+agreement|'
-    r'shareholders?\s+agreement|joint\s+venture|jva|sha|msa|deed|lease|licen[cs]e|'
+    r'shareholders?\s+agreement|joint\s+venture|jva|sha|msa|dpa|sow|'
+    r'statement\s+of\s+work|data\s+processing\s+agreement|deed|lease|licen[cs]e|'
     r'judgment|judgement|court\s+case|legal\s+opinion|arbitration|petition|'
     r'complaint|affidavit|notice|contract|agreement)\b',
     re.IGNORECASE,
@@ -6357,9 +6576,10 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                  "confidence": 0.85 if len(party_docs) == 1 else 0.8,
                  "method": "party" if len(party_docs) == 1 else "party-multi"},
                 _fam_name, _fam_docs)
-        # Party spans several documents but the question names only one instrument
-        # type — narrow to that family when it resolves cleanly, else fall through
-        # rather than guess.
+        # Party spans several documents. If the question ALSO names exactly one
+        # instrument type ("the SOW with Cindercast"), narrow to that specific
+        # document within the resolved family — sharper than answering across
+        # all of them when the user asked for one.
         try:
             available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
             fam = _detect_question_family(question, available)
@@ -6371,6 +6591,26 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
             return {"scope": "single_doc", "target_docs": sorted(narrowed),
                     "target_family": None, "is_broad": False,
                     "confidence": 0.8, "method": "party"}
+        # No instrument named, or naming one didn't narrow further — used to
+        # fall through here to carryover/corpus-default instead of using the
+        # match, on the reasoning that an unnarrowed multi-document party hit
+        # was too uncertain to commit to. But _resolve_docs_by_party's own
+        # contract already rules that out: it gives up and returns empty
+        # whenever the smallest candidate set exceeds max_docs (default 4), so
+        # a non-empty party_docs here is ALREADY a small, coherent instrument
+        # family (a deal's own MSA+SOW+DPA), not an arbitrary pile. Confirmed
+        # live: "Can Cindercast use Torvald's data to train AI models?" names
+        # no instrument type, so this used to fall through — past the party
+        # match that correctly found CND-TOR-MSA/SOW/DPA — all the way to
+        # carryover, which then answered from "Tata Brand Judgment 3", left
+        # over from an unrelated earlier question in the same thread. Silent
+        # and wrong, which is worse than the disambiguation prompt this branch
+        # exists to avoid. Answer across the whole resolved family instead.
+        return _enforce_question_family(
+            {"scope": "single_doc", "target_docs": sorted(party_docs),
+             "target_family": None, "is_broad": False,
+             "confidence": 0.75, "method": "party-multi"},
+            _fam_name, _fam_docs)
 
     # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
     # Energy Corporation"). The single-party resolver above cannot reach this:
@@ -6655,30 +6895,43 @@ def classify_query(question: str, session_id: str) -> dict:
         logger.info("Broad/plural-family phrasing → skip disambiguation")
         return {"needs_disambiguation": False, "documents": docs}
 
-    # A named party that resolves to exactly ONE document via full-text content
-    # search is an unambiguous document reference — skip disambiguation and let
-    # resolve_scope (which runs the SAME resolver later) pin it. This catches the
-    # common case the distinctive-entity check below misses: a counterparty named
-    # by its full corporate name ("Helios Grid Advisory Private Limited") whose
-    # name lives only in the document BODY / redaction-masked metadata, not in the
-    # page-title identifier tokens _extract_doc_entities mines — so
-    # _question_names_distinctive_entity returns False and the vague "the Services
-    # Agreement between X and Y" phrasing would otherwise trigger a needless
-    # "which document?" prompt even though the party pins it uniquely (confirmed
-    # live: SA5/Helios and SA6/Meridian questions both disambiguated despite each
-    # party name resolving to a single Service Agreement). Only a UNIQUE hit skips
-    # here; a party shared across several documents stays genuinely ambiguous and
-    # falls through to normal disambiguation. _resolve_docs_by_party is DB-gated
-    # and returns an empty set with no party phrase present, so questions that
-    # name no corporate party incur no extra cost.
+    # A named party that resolves via full-text content search is an unambiguous
+    # document reference — skip disambiguation and let resolve_scope (which runs
+    # the SAME resolver later) pin it. This catches the common case the
+    # distinctive-entity check above misses: a counterparty named by its full
+    # corporate name ("Helios Grid Advisory Private Limited"), or by bare
+    # shorthand with no suffix at all ("Brackenpyre"), whose name lives only in
+    # the document BODY, not the filename or the page-title identifier tokens
+    # _extract_doc_entities mines — so neither entity check above fires and the
+    # question would otherwise trigger a needless "which document?" prompt even
+    # though the party pins it precisely (confirmed live: SA5/Helios and
+    # SA6/Meridian questions both disambiguated despite each party name resolving
+    # to a single Service Agreement).
+    #
+    # ANY non-empty result skips here, not just a single document. That used to
+    # require len == 1, on the reasoning that "a party shared across several
+    # documents stays genuinely ambiguous" — true for an UNBOUNDED umbrella name,
+    # but _resolve_docs_by_party's own contract already rules that case out
+    # before ever returning: it gives up and returns empty whenever the smallest
+    # candidate set exceeds max_docs (default 4). So a non-empty result here is
+    # already guaranteed small and coherent — a deal's own linked instrument
+    # family (MSA+SOW+DPA), not an unrelated pile of documents that happen to
+    # share a common name. Confirmed live: "Brackenpyre" resolves to exactly its
+    # own 3 documents and was still disambiguated under the == 1 version, because
+    # a bare-name party question almost never resolves to just one instrument —
+    # requiring that never fires for the shape this whole check exists to catch.
+    #
+    # _resolve_docs_by_party is DB-gated and returns an empty set with no party
+    # phrase present, so questions that name no corporate party incur no extra
+    # cost.
     try:
         party_docs = _resolve_docs_by_party(question, session_id)
     except Exception as e:
         logger.error("classify_query: party resolution failed: %s", e)
         party_docs = set()
-    if len(party_docs) == 1:
-        logger.info("Named party resolves to a single document → skip disambiguation: %s",
-                    _norm_doc_name(next(iter(party_docs))))
+    if party_docs:
+        logger.info("Named party resolves to %d document(s) → skip disambiguation: %s",
+                    len(party_docs), {_norm_doc_name(d) for d in party_docs})
         return {"needs_disambiguation": False, "documents": docs}
 
     # Same idea, for a question that names no party but does recite an explicit
@@ -6780,13 +7033,20 @@ def classify_query(question: str, session_id: str) -> dict:
         "- It names or numbers a specific document (e.g. 'service agreement 1', 'NDA 3', 'the SHA')\n"
         "- It mentions specific party names, entity names, or company names (e.g. 'the ReVolt JV Agreement', 'Meridian service agreement', 'agreement between Tata Motors and ReVolt')\n"
         "- It's a cross-document comparison or general legal question\n"
-        "- It mentions a document type with a number, identifier, or distinctive party/entity name\n\n"
+        "- It mentions a document type with a number, identifier, or distinctive party/entity name\n"
+        "- It mentions a distinctive project/deal codename (e.g. a named initiative or "
+        "project) that only one document's content would use\n"
+        "- The clause it asks about would be covered by a linked family of instruments "
+        "that explicitly incorporate and cross-reference one another (e.g. an MSA plus "
+        "its DPA and SOW) — that's a valid answer spanning the linked set, not an "
+        "ambiguous reference needing a document pick\n\n"
         "A question NEEDS disambiguation when:\n"
         "- It uses vague references like 'this document', 'summarize it', 'the agreement' "
         "without ANY identifier, number, or party name\n"
         "- It refers to a specific clause, provision, or section (e.g. 'the indemnity clause', "
         "'limitation of liability', 'termination provisions') without specifying WHICH document "
-        "contains that clause — and multiple documents in the list could have such a clause\n\n"
+        "contains that clause, where the candidates are UNRELATED documents (not a linked "
+        "instrument family) and multiple of them could have such a clause\n\n"
         "A question does NOT need disambiguation when it is a cross-document comparison or "
         "general legal question that intentionally spans all documents.\n\n"
         "Respond with JSON only:\n"
@@ -6905,7 +7165,11 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
         "- It names a specific document AND states what to do with it\n"
         "- Standard legal analysis is implied\n"
         "- The intent is obvious from context or conversation history\n"
-        "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n\n"
+        "- It asks for a specific deliverable (table, list, summary, review, recommendation)\n"
+        "- It asks about a clause/topic that a linked family of instruments would "
+        "cover together (e.g. an MSA plus its DPA and SOW, which explicitly "
+        "incorporate and cross-reference one another) — answer using all of "
+        "them rather than asking which one\n\n"
         "When in doubt, answer directly — do NOT ask for clarification.\n\n"
         f"Available documents: {', '.join(clean_docs)}\n"
         f"{conv_snippet}\n"
