@@ -31,7 +31,7 @@ from flask import Flask, render_template, request, jsonify, Response, stream_wit
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft, redaction
+from services import wiki, hybrid, advanced_modes, draft, redaction, tracing
 import threading
 
 # ---------------------------------------------------------------------------
@@ -735,6 +735,19 @@ def get_messages():
     return jsonify({"messages": messages})
 
 
+@app.route("/trace/<int:message_id>")
+def get_trace_route(message_id):
+    """Return the recorded pipeline trace for one assistant chat message —
+    stage timings, retrieval detail, LLM calls. See services/tracing.py."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Tracing requires database mode"}), 400
+    from services import db as _db
+    trace = _db.get_trace_by_message_id(message_id)
+    if not trace:
+        return jsonify({"error": "No trace found for this message"}), 404
+    return jsonify(trace)
+
+
 @app.route("/document/locate")
 def locate_in_document():
     """Find the page number and character offset of a quote in a source document."""
@@ -830,6 +843,8 @@ def query_route():
     def generate():
         from services import intent_agent
         final_emitted = False
+        last_msg_id = None
+        trace, trace_token = tracing.start_trace(question, session_id, wiki_session_id)
         try:
             for ev in intent_agent.run_query_stream(question, wiki_session_id, target_doc, is_followup,
                                                      exclude_cached_answers,
@@ -843,7 +858,7 @@ def query_route():
                     # and the original question (so a page reload can still
                     # resolve a typed reply) leave the server.
                     payload = ev.get("payload", {})
-                    _store_chat_msg(session_id, "assistant", payload.get("message", ""),
+                    last_msg_id = _store_chat_msg(session_id, "assistant", payload.get("message", ""),
                                     "disambiguation",
                                     {"original_question": payload.get("original_question", question)})
                     final_emitted = True
@@ -855,7 +870,7 @@ def query_route():
 
                 elif etype == "clarification":
                     payload = ev.get("payload", {})
-                    _store_chat_msg(session_id, "assistant", payload.get("message", ""),
+                    last_msg_id = _store_chat_msg(session_id, "assistant", payload.get("message", ""),
                                     "clarification",
                                     {"options": payload.get("options", []),
                                      "original_question": question})
@@ -875,7 +890,7 @@ def query_route():
                     debug_context = wiki_result.pop("_debug_context", "")
                     wiki_result["answer"] = redaction.redact_pii(wiki_result.get("answer", ""))
                     wiki_result["elapsed_ms"] = round((time.time() - t0) * 1000)
-                    _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
+                    last_msg_id = _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
                                     "answer", {
                                         "confidence_score": wiki_result.get("confidence_score", 0),
                                         "files_used": wiki_result.get("files_used", []),
@@ -918,6 +933,7 @@ def query_route():
                     except Exception as log_err:
                         logger.error("Failed to log RAG query: %s", log_err)
                     final_emitted = True
+                    wiki_result["message_id"] = last_msg_id
                     logger.info("SSE answer: intent=%s conf=%s%%",
                                 wiki_result.get("intent"), wiki_result.get("confidence_score"))
                     yield _sse({
@@ -932,6 +948,8 @@ def query_route():
         except Exception as e:
             logger.error("Query stream failed (%s): %s", type(e).__name__, e)
             yield _sse({"type": "error", "error": f"{type(e).__name__}: {e}"})
+        finally:
+            tracing.finish_and_persist(trace, trace_token, message_id=last_msg_id)
 
         if not final_emitted:
             yield _sse({"type": "error", "error": "No answer was produced."})

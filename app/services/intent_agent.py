@@ -33,6 +33,7 @@ import config
 from services import wiki
 from services import llm
 from services import db
+from services import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +414,7 @@ def _emit(event: dict) -> None:
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
+@tracing.traced_node("classify_intent")
 def classify_intent_node(state: QueryState) -> dict:
     logger.info("[AGENT] classify_intent_node: question=%r", state["question"][:80])
     _emit({"stage": "classifying", "status": "active", "message": "Classifying intent…"})
@@ -432,6 +434,7 @@ def classify_intent_node(state: QueryState) -> dict:
     }
 
 
+@tracing.traced_node("check_disambiguation")
 def check_disambiguation_node(state: QueryState) -> dict:
     logger.info("[AGENT] check_disambiguation_node")
     # Deliberately does NOT bypass on is_followup: classify_query() already has
@@ -712,6 +715,7 @@ def _question_precisely_names_a_document(question: str, session_id: str) -> bool
         return False
 
 
+@tracing.traced_node("check_clarification")
 def check_clarification_node(state: QueryState) -> dict:
     # Must read the per-thread chat session, not the shared wiki/doc session —
     # build_conversation_context(state["session_id"]) pulled "recent conversation"
@@ -752,6 +756,7 @@ def check_clarification_node(state: QueryState) -> dict:
     return {"needs_clarification": False, "conversation_context": conv}
 
 
+@tracing.traced_node("resolve_scope")
 def resolve_scope_node(state: QueryState) -> dict:
     """Resolve where retrieval is allowed to search (Phase 2) — single document,
     a document family, or the whole corpus — in one place, before retrieval.
@@ -770,9 +775,13 @@ def resolve_scope_node(state: QueryState) -> dict:
     logger.info("[AGENT] scope=%s family=%s broad=%s method=%s",
                 decision.get("scope"), decision.get("target_family"),
                 decision.get("is_broad"), decision.get("method"))
+    _trace = tracing.get_trace()
+    if _trace:
+        _trace.log_scope_decision(decision)
     return {"scope_decision": decision}
 
 
+@tracing.traced_node("retrieve_context")
 def retrieve_context_node(state: QueryState) -> dict:
     logger.info("[AGENT] retrieve_context_node: intent=%s", state.get("intent"))
     _emit({"stage": "retrieving", "status": "active", "message": "Retrieving relevant pages…"})
@@ -848,6 +857,7 @@ def retrieve_context_node(state: QueryState) -> dict:
     }
 
 
+@tracing.traced_node("generate_answer")
 def generate_answer_node(state: QueryState) -> dict:
     logger.info("[AGENT] generate_answer_node: intent=%s pages=%d",
                 state.get("intent"), len(state.get("selected_titles", [])))
@@ -1674,6 +1684,7 @@ def _check_term_presence(question: str, context: str, answer: str,
     return _done()
 
 
+@tracing.traced_node("validate_response")
 def validate_response_node(state: QueryState) -> dict:
     logger.info("[AGENT] validate_response_node: intent=%s", state.get("intent"))
     wr = state.get("answer_result") or {}
@@ -1734,6 +1745,10 @@ def validate_response_node(state: QueryState) -> dict:
             "quotes_total": cite.get("total", 0),
             "quotes_unverified": cite.get("unverified", 0) + cite.get("misattributed", 0),
         }
+
+    _trace = tracing.get_trace()
+    if _trace:
+        _trace.log_validation({"valid": valid, "warning": warning, "grounding": grounding})
 
     _emit({"stage": "complete", "status": "done", "type": "answer",
            "payload": wr, "message": "Done"})
