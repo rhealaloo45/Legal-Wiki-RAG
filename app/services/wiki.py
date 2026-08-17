@@ -23,6 +23,7 @@ from functools import lru_cache
 
 import config
 from services import llm
+from services import tracing
 from services.reader import read_file as _read_file
 
 if config.USE_DATABASE:
@@ -2171,6 +2172,12 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         selected_titles = file_pages
         logger.info("Single-document scope (%s): scoped to %d page(s), supplementary retrieval skipped",
                      target_doc or f"party:{sorted(forced_set)}", len(file_pages))
+        _trace = tracing.get_trace()
+        if _trace:
+            _trace.log_page_selection(
+                "pinned to document(s)" if strict_scope else "pinned to target_doc",
+                selected=file_pages, pinned_docs=sorted(forced_set) if strict_scope else [target_doc],
+            )
     elif file_pages:
         # File mention detected from the question text (not an explicit UI pin) — force
         # those pages in, then add topic-collision-filtered supplementary pages.
@@ -2331,6 +2338,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
     total_chars = sum(len(p) for p in wiki_parts)
     pages_omitted = 0
+    _trace_pages = []
 
     for title in selected_titles:
         if title in pages:
@@ -2340,6 +2348,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
 
             page = pages[title]
             content = page.get("content", "") if isinstance(page, dict) else page
+            _orig_chars = len(content)
 
             if isinstance(page, dict) and page.get("contradiction_flagged"):
                 content = "[WARNING: This page contains conflicting claims. Surface the conflict explicitly in your answer. Do not resolve it.]\n" + content
@@ -2399,6 +2408,15 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             part = f"\n---\n## {display_title}\n[From: {from_label}]\n{content}\n"
             wiki_parts.append(part)
             total_chars += len(part)
+            _trace_pages.append({
+                "title": display_title, "source_doc": from_label,
+                "chars_included": len(content), "chars_original": _orig_chars,
+                "truncated": len(content) < _orig_chars,
+            })
+
+    _trace = tracing.get_trace()
+    if _trace:
+        _trace.log_pages(_trace_pages, pages_omitted, total_chars, _TOTAL_CAP)
 
     if pages_omitted:
         wiki_parts.append(
@@ -7446,6 +7464,12 @@ def _select_relevant_pages(
                         "(vector=%d, bm25=%d, embeddings_in_db=%d, broad=%s)",
                         len(hybrid), len(valid_vector), len(bm25_ranking), emb_count, is_broad,
                     )
+                    _trace = tracing.get_trace()
+                    if _trace:
+                        _trace.log_page_selection(
+                            "vector+bm25 RRF fusion", vector=valid_vector, bm25=bm25_ranking,
+                            selected=hybrid, embeddings_in_db=emb_count, is_broad=is_broad,
+                        )
                     return hybrid, {}
 
                 logger.warning(
@@ -7488,6 +7512,11 @@ def _select_relevant_pages(
                     "Page selection: %d pages selected by LLM (from %d BM25 candidates)",
                     len(valid), len(candidate_pages),
                 )
+                _trace = tracing.get_trace()
+                if _trace:
+                    _trace.log_page_selection(
+                        "BM25 prefilter + LLM select", candidates=candidate_titles, selected=valid,
+                    )
                 return valid, usage
         logger.warning("Page selection: LLM returned unparseable result — using keyword fallback")
     except (RuntimeError, Exception) as e:
@@ -7498,6 +7527,9 @@ def _select_relevant_pages(
     # ------------------------------------------------------------------ #
     fallback = _keyword_fallback_pages(pages, question)
     logger.info("Page selection fallback: %d pages via keyword scoring", len(fallback))
+    _trace = tracing.get_trace()
+    if _trace:
+        _trace.log_page_selection("BM25 keyword-only fallback", selected=fallback)
     return fallback, {}
 
 
