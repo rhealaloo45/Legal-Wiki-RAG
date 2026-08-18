@@ -164,7 +164,7 @@ def _delete_progress(session_id: str) -> None:
         config.PROGRESS_STORE.pop(session_id, None)
 
 
-ALLOWED_EXTENSIONS = {".txt", ".pdf"}
+ALLOWED_EXTENSIONS = {".txt", ".pdf", ".docx"}
 
 # ---------------------------------------------------------------------------
 # RAG Query Logging — append every query/context/response to a JSON file
@@ -511,7 +511,7 @@ def upload():
         logger.info("Saved upload: %s with relative path: %s", save_path, rel_path)
 
     if not saved_paths:
-        return jsonify({"error": "No valid files (.txt, .pdf) found"}), 400
+        return jsonify({"error": "No valid files (.txt, .pdf, .docx) found"}), 400
 
     # Initialize progress with per-document tracking
     progress = {
@@ -1194,7 +1194,16 @@ def get_document_raw():
         return "Document not found", 404
 
     ext = os.path.splitext(target)[1].lower()
-    mime = "application/pdf" if ext == ".pdf" else "text/plain"
+    if ext == ".pdf":
+        mime = "application/pdf"
+    elif ext == ".docx":
+        # Browsers can't render this inline — it downloads/prompts rather than
+        # displaying, unlike the text/plain garbling a wrong mimetype would
+        # cause. The doc-reader/citation panels use extracted text for
+        # preview instead; this route is the "view original" fallback.
+        mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    else:
+        mime = "text/plain"
     return send_file(target, mimetype=mime)
 
 
