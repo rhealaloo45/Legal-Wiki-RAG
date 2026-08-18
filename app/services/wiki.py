@@ -273,8 +273,7 @@ def _make_doc_identifier(doc_name: str) -> str:
     # Strip UUID prefix and extension
     clean = re.sub(r'^[a-f0-9-]{36}_', '', doc_name)
     clean = re.sub(r'_redacted\.pdf$', '', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'\.pdf$', '', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'\.txt$', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\.(pdf|txt|docx)$', '', clean, flags=re.IGNORECASE)
     # Replace separators
     clean = clean.replace('_', ' ').replace('-', ' ').strip()
 
