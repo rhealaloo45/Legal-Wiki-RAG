@@ -85,11 +85,17 @@ def read_file_with_positions(file_path: str) -> dict:
     if ext == ".pdf":
         return _read_pdf_with_positions(file_path)
 
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-        text = f.read()
+    if ext == ".docx":
+        text = _read_docx(file_path)
+    else:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = text.strip()
+    # .docx has no reliable page boundary without actually laying the document
+    # out (Word paginates at render time; explicit page-break markers are
+    # optional and frequently absent) — treated as one page, same as .txt.
     return {
         "text": text,
         "page_map": [{"page_num": 1, "char_start": 0, "char_end": len(text)}],
@@ -97,7 +103,7 @@ def read_file_with_positions(file_path: str) -> dict:
 
 
 def read_file(file_path: str) -> str:
-    """Read text from a .txt or .pdf file, using OCR for scanned pages.
+    """Read text from a .txt, .pdf, or .docx file, using OCR for scanned PDF pages.
 
     Returns the full document text as a single string.
     """
@@ -105,6 +111,8 @@ def read_file(file_path: str) -> str:
 
     if ext == ".pdf":
         text = _read_pdf(file_path)
+    elif ext == ".docx":
+        text = _read_docx(file_path)
     else:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
@@ -244,6 +252,64 @@ def _read_pdf(file_path: str) -> str:
     logger.info("OCR complete for %s: %d/%d pages successfully OCR'd", fname, ocr_count, len(needs_ocr))
 
     return "\n".join(pypdf_texts)
+
+
+# ---------------------------------------------------------------------------
+# DOCX reading
+# ---------------------------------------------------------------------------
+def _iter_docx_block_items(document):
+    """Yield each paragraph and table in a .docx in true document order.
+
+    python-docx exposes .paragraphs and .tables as two separate flat lists
+    with no ordering between them — reading them separately would put every
+    table (schedules, signature blocks, fee tables) after all body text
+    instead of where it actually sits. Walking the body XML directly and
+    wrapping each <w:p>/<w:tbl> child preserves reading order.
+    """
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    for child in document.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, document)
+
+
+def _read_docx(file_path: str) -> str:
+    """Extract text from a .docx, preserving paragraph/table reading order.
+
+    Table rows are rendered as pipe-separated cells (matching how
+    _read_pdf's plain extraction reads a table row left-to-right) rather
+    than being dropped — legal .docx files routinely put fee schedules,
+    defined-term tables, and signature blocks in actual Word tables, not
+    paragraphs.
+    """
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    try:
+        document = Document(file_path)
+    except Exception as e:
+        logger.error("Failed to open %s as a .docx: %s", os.path.basename(file_path), e)
+        return ""
+
+    parts: list[str] = []
+    for block in _iter_docx_block_items(document):
+        if isinstance(block, Paragraph):
+            text = block.text.strip()
+            if text:
+                parts.append(text)
+        elif isinstance(block, Table):
+            for row in block.rows:
+                cells = [c.text.strip() for c in row.cells]
+                line = " | ".join(cells).strip(" |")
+                if line:
+                    parts.append(line)
+
+    return "\n".join(parts)
 
 
 def _preprocess_for_ocr(img: "Image.Image") -> "Image.Image":

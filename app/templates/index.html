@@ -2820,11 +2820,11 @@
               <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
             </div>
 
-            <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+            <input type="file" id="file-input" accept=".txt,.pdf,.docx" class="d-none" multiple>
             <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
             <div class="upl-zone" id="upload-zone">
               <i class="ti ti-upload upl-icon"></i>
-              <div class="upl-text-p">Drop .txt / .pdf files or folders here</div>
+              <div class="upl-text-p">Drop .txt / .pdf / .docx files or folders here</div>
               <div class="upl-text-s" id="staged-label">or choose below</div>
             </div>
 
@@ -3056,7 +3056,7 @@
             <div class="ctrl-card">
               <div class="ctrl-title">Upload to compare</div>
               <div class="up-zone" id="compare-upload-zone">
-                <input type="file" id="compare-file" accept=".txt,.pdf" class="d-none">
+                <input type="file" id="compare-file" accept=".txt,.pdf,.docx" class="d-none">
                 <i class="ti ti-upload" style="font-size:16px;color:var(--text-muted)"></i>
                 <div class="up-zone-t" style="margin-top:5px">Drop file or browse</div>
                 <div class="up-badge d-none" id="compare-staged-badge"><i class="ti ti-bolt"
@@ -3692,15 +3692,33 @@
     }
     function handleOverlayClick(e) { if (e.target === document.getElementById('graph-overlay')) toggleGraph(); }
 
-    function openDoc(name) {
+    async function openDoc(name) {
       document.getElementById('doc-reader-name').textContent = name;
       document.getElementById('doc-reader').style.display = 'flex';
       const ext = name.split('.').pop().toLowerCase();
-      const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+      const body = document.getElementById('doc-reader-body');
       if (ext === 'pdf') {
-        document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}#toolbar=1"></iframe>`;
+        const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+        body.innerHTML = `<iframe src="${url}#toolbar=1"></iframe>`;
+      } else if (ext === 'docx') {
+        // Browsers can't render a .docx inline the way they can a PDF or
+        // plain text — show the extracted text instead of an iframe pointed
+        // at raw bytes, which would just render as garbled binary.
+        body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--text-muted)">Loading…</div>`;
+        try {
+          const res = await fetch(`/document/get?session_id=${SID}&name=${encodeURIComponent(name)}`);
+          const data = await res.json();
+          if (data.error) {
+            body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--red)">${escapeHtmlRule(data.error)}</div>`;
+          } else {
+            body.innerHTML = `<div style="padding:20px;font-size:13px;line-height:1.7;color:var(--text-primary);white-space:pre-wrap;">${escapeHtmlRule(data.text || '')}</div>`;
+          }
+        } catch (e) {
+          body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--red)">Failed to load document: ${escapeHtmlRule(String(e))}</div>`;
+        }
       } else {
-        document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}" style="padding:20px"></iframe>`;
+        const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+        body.innerHTML = `<iframe src="${url}" style="padding:20px"></iframe>`;
       }
     }
     function closeDoc() { document.getElementById('doc-reader').style.display = 'none'; }
@@ -4958,9 +4976,9 @@
     function openFilePickerModal(collected) {
       const valid = collected.filter(e => {
         const ext = e.file.name.split('.').pop().toLowerCase();
-        return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100 * 1024 * 1024;
+        return (ext === 'txt' || ext === 'pdf' || ext === 'docx') && e.file.size <= 100 * 1024 * 1024;
       });
-      if (!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+      if (!valid.length) { showToast('No valid .txt/.pdf/.docx files found', 'error'); return; }
 
       fpCollected = valid;
       const tree = fpBuildTree(valid);
@@ -5075,9 +5093,9 @@
     function processValidFiles(collected) {
       const valid = collected.filter(e => {
         const ext = e.file.name.split('.').pop().toLowerCase();
-        return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100 * 1024 * 1024;
+        return (ext === 'txt' || ext === 'pdf' || ext === 'docx') && e.file.size <= 100 * 1024 * 1024;
       });
-      if (!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+      if (!valid.length) { showToast('No valid .txt/.pdf/.docx files found', 'error'); return; }
       stagedFiles = valid;
 
       document.getElementById('staged-label').textContent = `${stagedFiles.length} file(s) ready`;
