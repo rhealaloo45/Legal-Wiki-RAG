@@ -22,16 +22,19 @@ import json
 import shutil
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 
-from flask import Flask, render_template, request, jsonify, Response, stream_with_context
+from flask import (
+    Flask, render_template, request, jsonify, Response, stream_with_context,
+    session, redirect, url_for,
+)
 
 # Ensure project root is on the path so `import config` works
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft, redaction, tracing
+from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth
 import threading
 
 # ---------------------------------------------------------------------------
@@ -42,6 +45,38 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 256 * 1024 * 1024  # 256 MB total upload limit (folder uploads)
+
+# ---------------------------------------------------------------------------
+# Session / auth config — see services/auth.py and config.py for the rationale
+# behind each setting. Applied whether or not AUTH_ENABLED, so that turning
+# auth on later doesn't also silently change cookie behaviour.
+# ---------------------------------------------------------------------------
+if config.FLASK_SECRET_KEY:
+    app.secret_key = config.FLASK_SECRET_KEY
+else:
+    # Ephemeral key: sessions die on restart, and multiple gunicorn workers
+    # would each sign with a different key (so logins would appear random).
+    # Fine for a local dev run, never acceptable deployed — hence the warning.
+    app.secret_key = os.urandom(32)
+    if config.AUTH_ENABLED:
+        logger.warning(
+            "FLASK_SECRET_KEY is not set — using a random per-process key. "
+            "Sessions will not survive a restart and will break across gunicorn "
+            "workers. Set FLASK_SECRET_KEY in .env for anything but local dev."
+        )
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,          # JS can't read the cookie
+    SESSION_COOKIE_SAMESITE="Lax",         # blocks cross-site POST rides
+    SESSION_COOKIE_SECURE=config.SESSION_COOKIE_SECURE,  # HTTPS-only; see config.py
+    PERMANENT_SESSION_LIFETIME=timedelta(days=config.SESSION_LIFETIME_DAYS),
+)
+
+if not config.AUTH_ENABLED:
+    logger.warning(
+        "AUTH_ENABLED=false — every route is publicly reachable with no login. "
+        "This is only appropriate for a trusted local instance."
+    )
 
 # Stores for Review/Compare modes
 REVIEW_STORE = {}
@@ -265,6 +300,116 @@ def _allowed_file(filename: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Auth gate
+#
+# Deliberately a global before_request hook rather than a decorator on each
+# route. There are ~47 routes and more coming with the target-architecture
+# work; an allowlist fails CLOSED (a new route is protected unless someone
+# opts it out on purpose), while per-route decorators fail OPEN the first
+# time someone forgets one. That failure is silent and the route is the
+# whole vulnerability.
+# ---------------------------------------------------------------------------
+
+# Endpoint names (not URL paths) reachable without a session.
+#   login/logout — the gate itself, obviously
+#   health       — Azure App Service probes it unauthenticated
+#   static       — CSS/JS/favicon; the login page needs them to render
+_PUBLIC_ENDPOINTS = {"login", "logout", "health", "static"}
+
+
+def _wants_html() -> bool:
+    """True for a browser navigating, false for the SPA's fetch() calls.
+
+    Browser address-bar navigation sends `Accept: text/html,...`; fetch()
+    defaults to `*/*`. Decides redirect-to-login vs. 401-JSON so the SPA gets
+    a status it can act on instead of a login page rendered into a JSON parse.
+    """
+    return request.method == "GET" and "text/html" in request.headers.get("Accept", "")
+
+
+def _safe_next(target: str) -> str:
+    """Only allow same-site relative redirects.
+
+    Without this, `/login?next=https://evil.example` turns the login form into
+    an open redirect — a credential-phishing primitive, since the URL genuinely
+    starts on this trusted origin. A leading `//` is also rejected: browsers
+    read `//evil.example` as protocol-relative and leave the site.
+    """
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return "/"
+    return target
+
+
+@app.before_request
+def _require_login():
+    if not config.AUTH_ENABLED:
+        return None
+    if request.endpoint in _PUBLIC_ENDPOINTS:
+        return None
+    if session.get("user_id"):
+        return None
+
+    if _wants_html():
+        return redirect(url_for("login", next=request.full_path.rstrip("?")))
+    return jsonify({"error": "Authentication required", "login_required": True}), 401
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not config.AUTH_ENABLED:
+        return redirect("/")
+
+    # Already signed in — no reason to show the form again.
+    if request.method == "GET" and session.get("user_id"):
+        return redirect("/")
+
+    next_url = _safe_next(request.args.get("next", "/"))
+
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        ip = auth.client_ip(request)
+
+        try:
+            user, error, retry_after = auth.verify_login(username, password, ip)
+        except Exception as e:
+            logger.error("Login failed with an unexpected error: %s", e)
+            return render_template(
+                "login.html", error="Login is unavailable — check the server logs.",
+                next_url=next_url, username=username,
+            ), 500
+
+        if user is None:
+            if retry_after:
+                minutes = max(1, round(retry_after / 60))
+                error = f"{error} Locked for about {minutes} minute{'s' if minutes != 1 else ''}."
+            # 401 for a bad password, 429 when the limiter refused it — the
+            # form renders identically, but the status is honest to anything
+            # reading it programmatically.
+            return render_template(
+                "login.html", error=error, next_url=next_url, username=username,
+            ), (429 if retry_after else 401)
+
+        # Rotate the session id on privilege change so a session fixation
+        # attempt (attacker plants a known cookie pre-login) can't survive
+        # into the authenticated session.
+        session.clear()
+        session["user_id"] = user["id"]
+        session["username"] = user["username"]
+        session.permanent = True
+        logger.info("Login succeeded for user=%r from ip=%r", user["username"], ip)
+        return redirect(next_url)
+
+    return render_template("login.html", error="", next_url=next_url, username="")
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 @app.route("/")
@@ -278,7 +423,9 @@ def index():
     return render_template("index.html", llm_provider="AZURE OPENAI",
                             production_mode=bool(main_session_id),
                             production_wiki_name=production_wiki_name,
-                            ingest_disabled=config.DISABLE_INGEST)
+                            ingest_disabled=config.DISABLE_INGEST,
+                            auth_enabled=config.AUTH_ENABLED,
+                            username=session.get("username", ""))
 
 
 @app.route("/health")
