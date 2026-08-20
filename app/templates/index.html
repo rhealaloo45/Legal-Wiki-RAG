@@ -374,7 +374,7 @@
 
     /* ASK PANEL */
     .ask-wrap {
-      max-width: 740px;
+      max-width: 860px;
       margin: 0 auto;
       width: 100%;
       display: flex;
@@ -419,7 +419,8 @@
     }
     .chat-msg-assistant .chat-bubble {
       background: var(--bg-surface);
-      border: 0.5px solid var(--border);
+      border: none;
+      box-shadow: var(--shadow-card);
       color: var(--text-primary);
       border-bottom-left-radius: 4px
     }
@@ -555,8 +556,8 @@
 
     .answer-card {
       background: var(--bg-surface);
-      border: 0.5px solid var(--border);
-      border-top: 2px solid var(--btn-primary);
+      border: none;
+      box-shadow: var(--shadow-card);
       border-radius: var(--radius-lg);
       overflow: hidden;
       margin-bottom: 20px
@@ -2819,11 +2820,11 @@
               <div class="upl-sub">Drag and drop files to begin knowledge ingestion.</div>
             </div>
 
-            <input type="file" id="file-input" accept=".txt,.pdf" class="d-none" multiple>
+            <input type="file" id="file-input" accept=".txt,.pdf,.docx" class="d-none" multiple>
             <input type="file" id="folder-input" class="d-none" webkitdirectory mozdirectory directory multiple>
             <div class="upl-zone" id="upload-zone">
               <i class="ti ti-upload upl-icon"></i>
-              <div class="upl-text-p">Drop .txt / .pdf files or folders here</div>
+              <div class="upl-text-p">Drop .txt / .pdf / .docx files or folders here</div>
               <div class="upl-text-s" id="staged-label">or choose below</div>
             </div>
 
@@ -3055,7 +3056,7 @@
             <div class="ctrl-card">
               <div class="ctrl-title">Upload to compare</div>
               <div class="up-zone" id="compare-upload-zone">
-                <input type="file" id="compare-file" accept=".txt,.pdf" class="d-none">
+                <input type="file" id="compare-file" accept=".txt,.pdf,.docx" class="d-none">
                 <i class="ti ti-upload" style="font-size:16px;color:var(--text-muted)"></i>
                 <div class="up-zone-t" style="margin-top:5px">Drop file or browse</div>
                 <div class="up-badge d-none" id="compare-staged-badge"><i class="ti ti-bolt"
@@ -3691,15 +3692,33 @@
     }
     function handleOverlayClick(e) { if (e.target === document.getElementById('graph-overlay')) toggleGraph(); }
 
-    function openDoc(name) {
+    async function openDoc(name) {
       document.getElementById('doc-reader-name').textContent = name;
       document.getElementById('doc-reader').style.display = 'flex';
       const ext = name.split('.').pop().toLowerCase();
-      const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+      const body = document.getElementById('doc-reader-body');
       if (ext === 'pdf') {
-        document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}#toolbar=1"></iframe>`;
+        const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+        body.innerHTML = `<iframe src="${url}#toolbar=1"></iframe>`;
+      } else if (ext === 'docx') {
+        // Browsers can't render a .docx inline the way they can a PDF or
+        // plain text — show the extracted text instead of an iframe pointed
+        // at raw bytes, which would just render as garbled binary.
+        body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--text-muted)">Loading…</div>`;
+        try {
+          const res = await fetch(`/document/get?session_id=${SID}&name=${encodeURIComponent(name)}`);
+          const data = await res.json();
+          if (data.error) {
+            body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--red)">${escapeHtmlRule(data.error)}</div>`;
+          } else {
+            body.innerHTML = `<div style="padding:20px;font-size:13px;line-height:1.7;color:var(--text-primary);white-space:pre-wrap;">${escapeHtmlRule(data.text || '')}</div>`;
+          }
+        } catch (e) {
+          body.innerHTML = `<div style="padding:20px;font-size:12px;color:var(--red)">Failed to load document: ${escapeHtmlRule(String(e))}</div>`;
+        }
       } else {
-        document.getElementById('doc-reader-body').innerHTML = `<iframe src="${url}" style="padding:20px"></iframe>`;
+        const url = `/document/raw?session_id=${SID}&name=${encodeURIComponent(name)}`;
+        body.innerHTML = `<iframe src="${url}" style="padding:20px"></iframe>`;
       }
     }
     function closeDoc() { document.getElementById('doc-reader').style.display = 'none'; }
@@ -4957,9 +4976,9 @@
     function openFilePickerModal(collected) {
       const valid = collected.filter(e => {
         const ext = e.file.name.split('.').pop().toLowerCase();
-        return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100 * 1024 * 1024;
+        return (ext === 'txt' || ext === 'pdf' || ext === 'docx') && e.file.size <= 100 * 1024 * 1024;
       });
-      if (!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+      if (!valid.length) { showToast('No valid .txt/.pdf/.docx files found', 'error'); return; }
 
       fpCollected = valid;
       const tree = fpBuildTree(valid);
@@ -5074,9 +5093,9 @@
     function processValidFiles(collected) {
       const valid = collected.filter(e => {
         const ext = e.file.name.split('.').pop().toLowerCase();
-        return (ext === 'txt' || ext === 'pdf') && e.file.size <= 100 * 1024 * 1024;
+        return (ext === 'txt' || ext === 'pdf' || ext === 'docx') && e.file.size <= 100 * 1024 * 1024;
       });
-      if (!valid.length) { showToast('No valid .txt/.pdf files found', 'error'); return; }
+      if (!valid.length) { showToast('No valid .txt/.pdf/.docx files found', 'error'); return; }
       stagedFiles = valid;
 
       document.getElementById('staged-label').textContent = `${stagedFiles.length} file(s) ready`;
@@ -5530,12 +5549,14 @@
           : '';
         const helpDiv = document.createElement('div');
         helpDiv.className = 'chat-msg chat-msg-assistant';
+        helpDiv.dataset.msgId = wikiResult.message_id || '';
         helpDiv.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
           <div class="answer-card" style="margin-bottom:0">
             <div class="answer-topbar">
               <div class="answer-tags">${gkTag}</div>
               <div class="answer-actions">
                 <button class="act-btn" onclick="copyAnswerFromEl(this)"><i class="ti ti-copy"></i>Copy</button>
+                <button class="act-btn" onclick="viewTrace(this)" style="margin-left:8px"><i class="ti ti-list-details"></i>Trace</button>
               </div>
             </div>
             ${gkBanner}
@@ -5667,6 +5688,7 @@
 
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
+      div.dataset.msgId = wikiResult.message_id || '';
       div.innerHTML = `<div class="chat-bubble" style="padding:0;border:none;background:none;">
         <div class="answer-card" style="margin-bottom:0">
           <div class="answer-topbar">
@@ -5678,6 +5700,7 @@
               <span class="answer-time">Tokens: ${tokens}</span>
               <span class="answer-time" style="margin-left:8px">${elapsed}s</span>
               <button class="act-btn" onclick="copyAnswerFromEl(this)" style="margin-left:8px"><i class="ti ti-copy"></i>Copy</button>
+              <button class="act-btn" onclick="viewTrace(this)" style="margin-left:8px"><i class="ti ti-list-details"></i>Trace</button>
             </div>
           </div>
           <div class="answer-body">${md}</div>
@@ -6007,6 +6030,7 @@
           } else if (msg.msg_type === 'answer') {
             const meta = msg.metadata || {};
             appendAnswerMsg({
+              message_id: msg.id,
               answer: msg.content,
               confidence_score: meta.confidence_score || 0,
               files_used: meta.files_used || [],
@@ -6053,6 +6077,148 @@
         btn.classList.add('copied');
         setTimeout(() => { btn.innerHTML = orig; btn.classList.remove('copied'); }, 2000);
       });
+    }
+
+    // ============================================================
+    // Query trace viewer — "how did the app arrive at this answer":
+    // stage timings, retrieval detail, every LLM call. See /trace/<id>
+    // (app.py) and services/tracing.py.
+    // ============================================================
+    async function viewTrace(btn) {
+      const msgEl = btn.closest('.chat-msg');
+      const msgId = msgEl && msgEl.dataset.msgId;
+      if (!msgId) {
+        showToast('No trace available for this message', 'info');
+        return;
+      }
+      closeTraceModal();
+      const overlay = document.createElement('div');
+      overlay.id = 'trace-modal-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,15,30,0.55);z-index:200;display:flex;align-items:center;justify-content:center;';
+      overlay.onclick = (e) => { if (e.target === overlay) closeTraceModal(); };
+      overlay.innerHTML = `<div style="background:var(--bg-surface);border-radius:var(--radius-lg);border:0.5px solid var(--border);width:85%;max-width:820px;height:85%;display:flex;flex-direction:column;overflow:hidden;">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0;">
+          <span style="font-size:13px;font-weight:500;color:var(--text-primary);display:flex;align-items:center;gap:6px;"><i class="ti ti-list-details"></i>Query Trace</span>
+          <button class="act-btn" onclick="closeTraceModal()"><i class="ti ti-x"></i></button>
+        </div>
+        <div id="trace-modal-body" style="flex:1;overflow-y:auto;padding:16px 20px;font-size:12px;color:var(--text-secondary);">
+          Loading…
+        </div>
+      </div>`;
+      document.body.appendChild(overlay);
+
+      try {
+        const res = await fetch(`/trace/${msgId}`);
+        const data = await res.json();
+        const body = document.getElementById('trace-modal-body');
+        if (!body) return;
+        if (!res.ok) {
+          body.innerHTML = `<div style="color:var(--text-muted)">${escapeHtmlRule(data.error || 'No trace found for this message.')}</div>`;
+          return;
+        }
+        body.innerHTML = renderTraceHtml(data);
+      } catch (e) {
+        const body = document.getElementById('trace-modal-body');
+        if (body) body.innerHTML = `<div style="color:var(--red)">Failed to load trace: ${escapeHtmlRule(String(e))}</div>`;
+      }
+    }
+
+    function closeTraceModal() {
+      const el = document.getElementById('trace-modal-overlay');
+      if (el) el.remove();
+    }
+
+    function renderTraceHtml(data) {
+      const t = data.trace || {};
+      const stages = t.stages || [];
+      const llmCalls = t.llm_calls || [];
+      const pages = t.pages || [];
+      const scope = t.scope_decision || {};
+      const retrieval = t.retrieval || {};
+      const validation = t.validation || {};
+
+      const section = (title, inner) => `
+        <div style="margin-bottom:18px">
+          <div style="font-family:var(--font-heading);font-size:11px;font-weight:600;text-transform:uppercase;color:var(--text-secondary);letter-spacing:0.05em;margin-bottom:8px;">${title}</div>
+          ${inner}
+        </div>`;
+
+      const summaryHtml = section('Summary', `
+        <div style="display:flex;flex-wrap:wrap;gap:16px;font-size:12px;">
+          <div><strong style="color:var(--text-primary)">${data.total_ms || 0}ms</strong> total</div>
+          <div><strong style="color:var(--text-primary)">${llmCalls.length}</strong> LLM call(s)</div>
+          <div><strong style="color:var(--text-primary)">${t.total_prompt_tokens || 0}</strong> prompt tokens</div>
+          <div><strong style="color:var(--text-primary)">${t.total_completion_tokens || 0}</strong> completion tokens</div>
+          <div><strong style="color:var(--text-primary)">${pages.length}</strong> page(s) in context</div>
+        </div>
+        <div style="margin-top:8px;color:var(--text-muted);font-style:italic;">${escapeHtmlRule(data.question || '')}</div>
+      `);
+
+      const maxDur = Math.max(1, ...stages.map(s => s.duration_ms || 0));
+      const stagesHtml = stages.length ? section('Stage timings', stages.map(s => `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
+          <div style="width:130px;flex-shrink:0;color:var(--text-primary);">${escapeHtmlRule(s.name)}${s.error ? ' <i class="ti ti-alert-triangle" style="color:var(--red)"></i>' : ''}</div>
+          <div style="flex:1;background:var(--bg-hover);border-radius:3px;overflow:hidden;height:14px;">
+            <div style="width:${Math.max(2, (s.duration_ms || 0) / maxDur * 100)}%;background:var(--accent);height:100%;"></div>
+          </div>
+          <div style="width:60px;text-align:right;flex-shrink:0;">${s.duration_ms}ms</div>
+        </div>`).join('')) : '';
+
+      const scopeHtml = Object.keys(scope).length ? section('Scope decision', `
+        <div style="background:var(--bg-hover);border-radius:6px;padding:8px 12px;">
+          scope=<strong>${escapeHtmlRule(scope.scope || '')}</strong>,
+          method=<strong>${escapeHtmlRule(scope.method || '')}</strong>,
+          confidence=<strong>${scope.confidence != null ? scope.confidence : '—'}</strong>
+          ${scope.target_family ? `, family=<strong>${escapeHtmlRule(scope.target_family)}</strong>` : ''}
+          ${scope.target_docs && scope.target_docs.length ? `<br>target_docs: ${scope.target_docs.map(escapeHtmlRule).join(', ')}` : ''}
+        </div>
+      `) : '';
+
+      const retrievalHtml = retrieval.method ? section('Page selection', `
+        <div style="background:var(--bg-hover);border-radius:6px;padding:8px 12px;">
+          method=<strong>${escapeHtmlRule(retrieval.method)}</strong>
+          ${retrieval.vector ? `<div style="margin-top:6px"><em>vector top hits:</em> ${retrieval.vector.map(escapeHtmlRule).join(' · ')}</div>` : ''}
+          ${retrieval.bm25 ? `<div style="margin-top:4px"><em>bm25 top hits:</em> ${retrieval.bm25.map(escapeHtmlRule).join(' · ')}</div>` : ''}
+        </div>
+      `) : '';
+
+      const pagesHtml = pages.length ? section(`Pages in context (${pages.length}${t.pages_meta && t.pages_meta.omitted_for_budget ? `, ${t.pages_meta.omitted_for_budget} omitted for budget` : ''})`, `
+        <table style="width:100%;border-collapse:collapse;font-size:11px;">
+          <tr style="text-align:left;color:var(--text-muted);"><th style="padding:4px 6px">Title</th><th style="padding:4px 6px">Source</th><th style="padding:4px 6px">Chars</th></tr>
+          ${pages.map(p => `<tr style="border-top:0.5px solid var(--border)">
+            <td style="padding:4px 6px">${escapeHtmlRule(p.title)}</td>
+            <td style="padding:4px 6px;color:var(--text-muted)">${escapeHtmlRule(p.source_doc || '')}</td>
+            <td style="padding:4px 6px">${p.chars_included}${p.truncated ? ` <span style="color:var(--amber)">(truncated from ${p.chars_original})</span>` : ''}</td>
+          </tr>`).join('')}
+        </table>
+      `) : '';
+
+      const llmHtml = llmCalls.length ? section('LLM calls', llmCalls.map((c, i) => `
+        <details style="margin-bottom:8px;border:0.5px solid var(--border);border-radius:6px;">
+          <summary style="cursor:pointer;padding:8px 12px;font-size:12px;">
+            <strong style="color:var(--text-primary)">${i + 1}. ${escapeHtmlRule(c.pipeline)}</strong>
+            — ${escapeHtmlRule(c.model)}${c.fast ? ' (fast)' : ''}
+            — ${c.latency_ms}ms
+            — ${c.prompt_tokens}→${c.completion_tokens} tok
+            ${c.finish_reason && c.finish_reason !== 'stop' ? ` — <span style="color:var(--amber)">${escapeHtmlRule(c.finish_reason)}</span>` : ''}
+          </summary>
+          <div style="padding:0 12px 10px;">
+            <div style="color:var(--text-muted);margin-bottom:4px;">Prompt (${c.prompt_chars} chars):</div>
+            <pre style="white-space:pre-wrap;background:var(--bg-hover);border-radius:6px;padding:8px;max-height:200px;overflow-y:auto;font-family:var(--font-sans);font-size:11px;">${escapeHtmlRule(c.prompt_preview)}${c.prompt_chars > c.prompt_preview.length ? '…' : ''}</pre>
+            <div style="color:var(--text-muted);margin:6px 0 4px;">Response (${c.response_chars} chars):</div>
+            <pre style="white-space:pre-wrap;background:var(--bg-hover);border-radius:6px;padding:8px;max-height:200px;overflow-y:auto;font-family:var(--font-sans);font-size:11px;">${escapeHtmlRule(c.response_preview)}${c.response_chars > c.response_preview.length ? '…' : ''}</pre>
+          </div>
+        </details>
+      `).join('')) : '';
+
+      const validationHtml = validation && (validation.grounding || validation.warning) ? section('Validation', `
+        <div style="background:var(--bg-hover);border-radius:6px;padding:8px 12px;">
+          ${validation.grounding && validation.grounding.grounding_score != null ? `grounding=<strong>${validation.grounding.grounding_score}%</strong> — ${escapeHtmlRule(validation.grounding.summary || '')}<br>` : ''}
+          ${validation.warning ? `<span style="color:var(--amber)">${escapeHtmlRule(validation.warning)}</span>` : ''}
+        </div>
+      `) : '';
+
+      return summaryHtml + stagesHtml + scopeHtml + retrievalHtml + pagesHtml + llmHtml + validationHtml;
     }
 
     function copyAnswer(btn) {

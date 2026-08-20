@@ -383,6 +383,31 @@ def _run_schema_statements(conn, text) -> None:
             )
         """))
 
+        # Per-query trace — stage timings, retrieval detail, LLM calls, for
+        # the "how did the app arrive at this answer" debugging view. One row
+        # per /query request, linked to the assistant chat_messages row it
+        # produced. See services/tracing.py.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS query_traces (
+                id              BIGSERIAL PRIMARY KEY,
+                session_id      TEXT NOT NULL,
+                wiki_session_id TEXT,
+                message_id      BIGINT,
+                question        TEXT NOT NULL,
+                total_ms        INT NOT NULL DEFAULT 0,
+                trace           JSONB NOT NULL,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS query_traces_session_idx
+            ON query_traces (session_id, created_at)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS query_traces_message_idx
+            ON query_traces (message_id)
+        """))
+
         conn.commit()
 
 
@@ -1142,6 +1167,56 @@ def insert_message(
         ).fetchone()
         conn.commit()
         return row.id
+
+
+def insert_trace(
+    session_id: str,
+    wiki_session_id: str,
+    message_id: "int | None",
+    question: str,
+    total_ms: int,
+    trace: dict,
+) -> int:
+    """Insert a query trace and return its id. See services/tracing.py."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                INSERT INTO query_traces (session_id, wiki_session_id, message_id, question, total_ms, trace)
+                VALUES (:sid, :wsid, :mid, :q, :tms, CAST(:trace AS jsonb))
+                RETURNING id
+            """),
+            {
+                "sid": session_id, "wsid": wiki_session_id, "mid": message_id,
+                "q": question, "tms": total_ms, "trace": json.dumps(trace),
+            },
+        ).fetchone()
+        conn.commit()
+        return row.id
+
+
+def get_trace_by_message_id(message_id: int) -> "dict | None":
+    """Return the most recent trace for a chat message, or None if untraced
+    (e.g. it predates tracing, or was answered by a fast-path with DB off)."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, session_id, wiki_session_id, question, total_ms, trace, created_at
+                FROM query_traces WHERE message_id = :mid
+                ORDER BY id DESC LIMIT 1
+            """),
+            {"mid": message_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "id": row.id, "session_id": row.session_id, "wiki_session_id": row.wiki_session_id,
+            "question": row.question, "total_ms": row.total_ms, "trace": row.trace,
+            "created_at": row.created_at.isoformat() if row.created_at else "",
+        }
 
 
 def get_messages(session_id: str, limit: int = 50) -> list[dict]:
