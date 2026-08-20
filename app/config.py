@@ -1,7 +1,14 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Resolve .env next to this file rather than relative to the process CWD.
+# The scripts in this directory (manage_user.py, ingest_docs.py, the backfill
+# utilities) get run both from the repo root and from app/, and a CWD-relative
+# lookup silently yields an empty DATABASE_URL from the wrong one — which looks
+# like "the database is empty", not "the config didn't load".
+# load_dotenv does not override already-set variables, so real environment
+# settings (App Service config on Azure) still take precedence over this file.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ---------------------------------------------------------------------------
 # Database — set DATABASE_URL to enable PostgreSQL storage (Phase 2+).
@@ -9,6 +16,44 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 USE_DATABASE = bool(DATABASE_URL)
+
+# ---------------------------------------------------------------------------
+# Authentication — single-user login (target architecture § 01.4).
+# One password-gated account with full access. No roles, no ACL, no per-user
+# chat isolation; all deferred by design. Credentials live in the `users`
+# table, so AUTH_ENABLED requires DATABASE_URL to be set.
+#
+# AUTH_ENABLED defaults ON: a login layer that silently no-ops when a config
+# value is missing is worse than one that refuses to start. Set it to false
+# only to deliberately run an ungated instance (e.g. the file-storage fallback
+# mode with no DATABASE_URL) — app.py logs a loud warning when it's off.
+# ---------------------------------------------------------------------------
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() == "true"
+
+# Signs the session cookie. MUST be set to a fixed random value in any
+# real deployment — app.py generates an ephemeral one when this is empty,
+# which logs every user out on each restart and breaks entirely across
+# multiple gunicorn workers (each would sign with a different key).
+FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "")
+
+# Marks the session cookie HTTPS-only. Cannot default to True: on plain
+# http://localhost the browser silently drops a Secure cookie, so login would
+# appear to succeed and then bounce straight back to the login page with no
+# visible error. Left False for local dev, set SESSION_COOKIE_SECURE=true in
+# any deployment that terminates TLS (Azure App Service does).
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+
+# How long a login lasts before re-authentication is required.
+SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "7"))
+
+# Login rate limiting. Counted over a rolling window from the login_attempts
+# table (DB-backed so the limit holds across gunicorn workers, not per-process).
+# Attempts made while already locked out are NOT recorded — otherwise a
+# persistent attacker would keep extending the window and lock the single
+# legitimate user out indefinitely.
+LOGIN_RATE_WINDOW_MINUTES = int(os.getenv("LOGIN_RATE_WINDOW_MINUTES", "15"))
+LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "5"))
+LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "10"))
 
 # ---------------------------------------------------------------------------
 # Production wiki mode — every wiki-scoped call (retrieval, files, graph) is
