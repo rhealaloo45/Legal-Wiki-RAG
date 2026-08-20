@@ -5,8 +5,10 @@ Entry point: ask(prompt, pipeline) -> tuple[str, dict]
 
 import logging
 import re
+import time
 from openai import OpenAI, RateLimitError
 import config
+from services import tracing
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +170,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         client = get_client()
         model_name = config.AZURE_FAST_DEPLOYMENT if fast else config.AZURE_OPENAI_DEPLOYMENT
 
+    _t0 = time.time()
     try:
         kwargs = _completion_kwargs(model_name, prompt, max_tokens, reasoning_effort)
         response = client.chat.completions.create(**kwargs)
@@ -177,6 +180,10 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
             "finish_reason": getattr(response.choices[0], "finish_reason", None),
         }
+        _trace = tracing.get_trace()
+        if _trace:
+            _trace.log_llm_call(pipeline, model_name, prompt, content, usage,
+                                 (time.time() - _t0) * 1000, fast=fast)
         return content, usage
     except RateLimitError:
         raise  # bubble up — callers must stop on 429, not silently skip
