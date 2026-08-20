@@ -2779,6 +2779,10 @@
             class="ti ti-list-check"></i></div>
         <div class="help-btn" aria-label="help" onclick="startTutorial()" title="Take the tour"><i
             class="ti ti-help-circle"></i></div>
+        {% if auth_enabled %}
+        <div class="icon-btn" aria-label="sign out" onclick="logout()"
+             title="Sign out{% if username %} ({{ username }}){% endif %}"><i class="ti ti-logout"></i></div>
+        {% endif %}
       </div>
     </div>
 
@@ -4439,6 +4443,14 @@
       const highlights = locationsString ? locationsString.split('|||') : [];
       openPdfModal(canonicalName, scrollToText || '', highlights, pageNum || null);
     };
+
+    // POST rather than a plain link to /logout: a GET logout can be fired by
+    // any third-party page embedding it as an image, which just annoys the
+    // user. SameSite=Lax blocks the cross-site POST equivalent.
+    function logout() {
+      fetch('/logout', { method: 'POST' })
+        .finally(() => { window.location.href = '/login'; });
+    }
 
     async function toggleLog() {
       const o = document.getElementById('log-overlay');

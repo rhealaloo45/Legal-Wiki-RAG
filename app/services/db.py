@@ -408,6 +408,44 @@ def _run_schema_statements(conn, text) -> None:
             ON query_traces (message_id)
         """))
 
+        # Single-user auth (target architecture § 01.4). One row in practice
+        # this pass. `role` is inert — no code reads it — but the column costs
+        # nothing now and saves a migration if the deferred admin/user split is
+        # ever built; see services/auth.py for why it's here and not deferred
+        # along with the rest of the role system.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                id             BIGSERIAL PRIMARY KEY,
+                username       TEXT NOT NULL UNIQUE,
+                password_hash  TEXT NOT NULL,
+                role           TEXT NOT NULL DEFAULT 'admin',
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                last_login_at  TIMESTAMPTZ
+            )
+        """))
+
+        # Login attempt log — backs the rate limiter AND doubles as an audit
+        # trail. Deliberately in the DB rather than in-process memory: gunicorn
+        # runs multiple workers, and a per-process counter would let an attacker
+        # get N attempts per worker instead of N total.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id          BIGSERIAL PRIMARY KEY,
+                username    TEXT,
+                ip          TEXT,
+                success     BOOLEAN NOT NULL,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS login_attempts_username_idx
+            ON login_attempts (username, created_at DESC)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS login_attempts_ip_idx
+            ON login_attempts (ip, created_at DESC)
+        """))
+
         conn.commit()
 
 
