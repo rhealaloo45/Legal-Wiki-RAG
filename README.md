@@ -127,6 +127,27 @@ DATABASE_URL=postgresql://user:password@localhost:5432/legalwiki
 
 > **Runtime provider switch:** `/api/settings/llm` and `/api/settings/embedding` let you switch providers from the UI without restarting — but the change is in-memory only (`config.LLM_PROVIDER` / `config.EMBEDDING_PROVIDER`) and reverts on process restart; it does not persist to `.env`. Separately, the Flask server runs with `FLASK_USE_RELOADER=0` by default (so long-running ingests survive file saves), which means any edit to `.env`, `prompts.py`, `wiki.py`, `intent_agent.py`, or `llm.py` requires a **manual process restart** to take effect.
 
+### Switching branches with multiple databases
+
+`app/.env` is git-ignored, so it does **not** follow the checked-out branch automatically — `git checkout` never touches it. If you keep more than one branch pointed at different databases (e.g. `optimize` → `legal_wiki`, `target-architecture-v2` → `legalwiki_v2`), a per-branch `.env.<branch>` file holds that branch's `DATABASE_URL`, and you copy the right one over `app/.env` by hand after switching:
+
+```powershell
+git checkout optimize
+copy app\.env.optimize app\.env
+
+git checkout target-architecture-v2
+copy app\.env.v2 app\.env
+```
+
+Or use the helper script, which does the same copy:
+
+```powershell
+.\app\switch-env.ps1 -Branch optimize
+.\app\switch-env.ps1 -Branch v2
+```
+
+There is no git hook or auto-swap — forgetting this step means `app/.env` still points at whichever database you last selected, regardless of which branch is checked out.
+
 ### Database Setup
 
 The app uses **PostgreSQL + pgvector** as its primary store. Tables are created automatically on first connect — no manual migrations needed.
