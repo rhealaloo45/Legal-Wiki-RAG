@@ -1648,15 +1648,24 @@ def review_queue_resolve():
     clause_id = data.get("clause_id")
     action = data.get("action", "")
     edited_text = data.get("edited_text")
+    # Clauses live in `clauses`, every other flagged kind in `review_queue`.
+    # The client echoes back the item_kind it was given rather than the server
+    # guessing — an id collision across the two tables is otherwise silently
+    # resolvable against the wrong row.
+    item_kind = (data.get("item_kind") or "clause").strip()
     if not session_id or clause_id is None:
         return jsonify({"error": "session_id and clause_id are required"}), 400
     session_id = _get_main_session_id() or session_id
     from services import db as _db
     try:
-        ok = _db.resolve_clause(session_id, int(clause_id), action, edited_text)
+        if item_kind == "clause":
+            ok = _db.resolve_clause(session_id, int(clause_id), action, edited_text)
+        else:
+            ok = _db.resolve_review_item(session_id, int(clause_id), action, edited_text)
         if not ok:
-            return jsonify({"error": "Clause not found, or already resolved"}), 404
-        return jsonify({"status": "resolved", "clause_id": clause_id, "action": action})
+            return jsonify({"error": "Item not found, or already resolved"}), 404
+        return jsonify({"status": "resolved", "clause_id": clause_id,
+                        "item_kind": item_kind, "action": action})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1683,6 +1692,7 @@ def review_queue_bulk_accept():
     from services import db as _db
     try:
         n = _db.bulk_accept_clauses(session_id, float(min_confidence))
+        n += _db.bulk_accept_review_items(session_id, float(min_confidence))
         return jsonify({"status": "accepted", "accepted": n})
     except Exception as e:
         logger.error("Review Queue bulk accept failed: %s", e)
