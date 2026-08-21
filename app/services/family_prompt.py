@@ -111,6 +111,25 @@ document's. A question the page cannot answer is worse than no question — it \
 will surface this page for a query it has nothing to say about.""")
 
     parts.append("""
+DOCUMENT REFERENCES — return a "document_references" array for every OTHER \
+document this text refers to ("as defined in the Master Services Agreement \
+dated 3 March 2024", "this Amendment No. 2 to the Shareholders' Agreement"):
+[
+  {
+    "reference_text": "The exact sentence or phrase making the reference, verbatim",
+    "referenced_document": "The other document's name/title as this text gives it",
+    "relationship": "amends | superseded_by | ancillary_to | references",
+    "confidence": 1.0
+  }
+]
+Use "amends" only where this document expressly changes the other one's \
+terms, and "superseded_by" only where this document says it has been replaced. \
+Those two assert which text currently governs, so state them only from \
+explicit language — never infer an amendment from two documents merely \
+covering the same subject. Anything weaker is "references". Return an empty \
+array if the text refers to no other document.""")
+
+    parts.append("""
 TABLES AND FIGURES — if the text contains a table or describes a chart, \
 diagram or image, return it in "tables" / "figures" rather than flattening it \
 into page prose:
@@ -128,7 +147,8 @@ def family_output_keys() -> tuple[str, ...]:
     them out before the payload reaches the existing page-merge logic (which
     ignores unknown keys, but is easier to reason about when they're gone)."""
     return ("family_metadata", "citations", "structural_anchors",
-            "hypothetical_questions", "tables", "figures")
+            "hypothetical_questions", "tables", "figures",
+            "document_references")
 
 
 def metadata_spec(family_key: str | None) -> dict[str, str]:
