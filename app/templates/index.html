@@ -3594,6 +3594,10 @@
               <span class="admin-nav-left"><i class="ti ti-checklist" style="font-size:16px"></i>Review Queue</span>
               <span class="admin-nav-badge d-none" id="admin-review-badge">0</span>
             </div>
+            <div class="admin-rail-label" style="margin-top:16px">Corpus</div>
+            <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
+              <span class="admin-nav-left"><i class="ti ti-database" style="font-size:16px"></i>Wikis</span>
+            </div>
           </div>
 
           <div class="admin-content">
@@ -3635,6 +3639,21 @@
                 <button type="button" class="admin-pill-btn accent" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i>Knowledge graph</button>
               </div>
               <div class="admin-card" id="admin-wiki-page-list"></div>
+            </div>
+
+            <div id="admin-panel-wikis" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Wikis</div>
+                  <div class="admin-section-sub" id="admin-wikis-sub">Isolated corpora — one active at a time</div>
+                </div>
+                <button type="button" class="admin-pill-btn primary" title="Create a new empty wiki" onclick="adminCreateWiki()"><i class="ti ti-plus" style="font-size:14px"></i>New wiki</button>
+              </div>
+              <div class="admin-card" style="padding:14px 18px;margin-bottom:14px;font-size:12px;line-height:1.6;color:var(--text-muted)">
+                <i class="ti ti-alert-triangle" style="font-size:13px;vertical-align:-1px;margin-right:4px;color:var(--gold)"></i>
+                Switching the active wiki changes what every feature reads and writes — chat, Review Table, ingest, the Review Queue. Requests already running keep the wiki they started with.
+              </div>
+              <div class="admin-card" id="admin-wikis-list"></div>
             </div>
 
             <div id="admin-panel-review" class="d-none" style="display:none" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
@@ -4067,6 +4086,7 @@
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'wikis') loadAdminWikis();
       else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
       // Badge the Review Queue nav item even when it isn't the active section
       refreshAdminReviewBadge();
@@ -4075,14 +4095,97 @@
     function switchAdminTab(name, el) {
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      ['ingest', 'documents', 'wiki', 'review'].forEach(n => {
+      ['ingest', 'documents', 'wiki', 'review', 'wikis'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'wikis') loadAdminWikis();
       else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
+    }
+
+    async function loadAdminWikis() {
+      const el = document.getElementById('admin-wikis-list');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch('/admin/wikis');
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load wikis');
+        const rows = d.wikis || [];
+        document.getElementById('admin-wikis-sub').textContent =
+          `${rows.length} wiki${rows.length === 1 ? '' : 's'} — one active at a time`;
+        el.innerHTML = `
+          <div class="admin-row" style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">
+            <span style="flex:1">Name</span><span style="width:90px">Pages</span>
+            <span style="width:90px">Docs</span><span style="width:90px">Status</span>
+            <span style="width:150px;text-align:right">Actions</span>
+          </div>` + rows.map(w => {
+            const isActive = w.is_active;
+            const archived = w.status !== 'active';
+            return `<div class="admin-row">
+              <span style="flex:1;min-width:0;display:flex;align-items:center;gap:7px">
+                ${isActive ? '<i class="ti ti-circle-check-filled" style="color:var(--green-text);font-size:14px" title="Active wiki"></i>' : '<i class="ti ti-circle" style="color:var(--text-muted);font-size:14px"></i>'}
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(w.name)}</span>
+              </span>
+              <span style="width:90px;font-family:var(--font-mono,monospace);font-size:11.5px">${w.page_count.toLocaleString()}</span>
+              <span style="width:90px;font-family:var(--font-mono,monospace);font-size:11.5px">${w.document_count.toLocaleString()}</span>
+              <span style="width:90px"><span class="admin-badge ${isActive ? 'green' : archived ? 'muted' : ''}">${isActive ? 'active' : w.status}</span></span>
+              <span style="width:150px;display:flex;gap:5px;justify-content:flex-end">
+                ${isActive || archived ? '' : `<button type="button" class="admin-icon-btn" title="Make this the active wiki" onclick="adminActivateWiki('${w.id}','${escapeHtmlRule(w.name).replace(/'/g, "\\'")}')"><i class="ti ti-switch-horizontal" style="font-size:13px"></i></button>`}
+                ${isActive || archived ? '' : `<button type="button" class="admin-icon-btn danger" title="Archive this wiki" onclick="adminArchiveWiki('${w.id}','${escapeHtmlRule(w.name).replace(/'/g, "\\'")}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`}
+              </span>
+            </div>`;
+          }).join('');
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    async function adminCreateWiki() {
+      const name = window.prompt('Name for the new wiki:');
+      if (!name || !name.trim()) return;
+      try {
+        const res = await fetch('/admin/wikis/create', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Create failed');
+        showToast('Wiki created — it starts empty', 'success');
+        loadAdminWikis();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function adminActivateWiki(wikiId, name) {
+      // Worth an explicit confirm: this changes what every feature in the app
+      // is reading, not just what this screen shows.
+      if (!window.confirm(`Switch the active wiki to "${name}"?\n\nEvery feature — chat, Review Table, ingest, the Review Queue — will read and write this wiki from now on.`)) return;
+      try {
+        const res = await fetch('/admin/wikis/activate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wiki_id: wikiId }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Switch failed');
+        showToast(`Active wiki is now "${name}"`, 'success');
+        loadAdminWikis();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function adminArchiveWiki(wikiId, name) {
+      if (!window.confirm(`Archive "${name}"?\n\nIts documents and pages are kept, but it can no longer be made active.`)) return;
+      try {
+        const res = await fetch('/admin/wikis/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wiki_id: wikiId, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Archive failed');
+        showToast('Wiki archived', 'success');
+        loadAdminWikis();
+      } catch (e) { showToast(e.message, 'error'); }
     }
 
     async function refreshAdminReviewBadge() {
