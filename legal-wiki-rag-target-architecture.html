@@ -862,8 +862,12 @@
         <h3 class="sub-title" style="margin-top:32px;">Encryption at rest</h3>
         <p>Document content and extracted structured data encrypted at rest by default. Real client documents will land in wikis eventually — privileged, confidential legal material — and this needs to be on from day one, not bolted on once client data is already flowing in.</p>
 
-        <h3 class="sub-title" style="margin-top:32px;">Cost pre-flight gate on bulk operations</h3>
+        <h3 class="sub-title" style="margin-top:32px;">Cost pre-flight gate on bulk operations <span class="badge done">shipped</span></h3>
         <p>Per-run caps already exist (Review/Compare hard-capped at 20 docs, broad retrieval has a total cap) — but nothing stops a large batch operation from firing an uncapped burst of calls. Before executing bulk re-ingest, a wiki-wide reprocess, or any operation above a document-count threshold, estimate the call count/cost and require explicit confirmation — the same instinct as the 20-doc cap, applied one level up at the operation level rather than the per-run level.</p>
+        <div class="callout">
+          <div class="callout-label" style="color:var(--done);">Shipped</div>
+          <p style="margin-bottom:0;">Built on <code>target-architecture-v2</code> as <code>services/cost_estimate.py</code>, wired into both existing bulk entry points: <code>/upload</code> and <code>/resume_ingest</code> (re-ingest-by-family and wiki-wide reprocess don't exist yet — they'll get the same gate once built, via the same shared helper). A batch of ≥3 files, or an estimated cost ≥$0.25 (both env-overridable), is held — files saved and registered, but not queued to the ingest executor — until the caller re-POSTs with <code>confirm=true</code>; the frontend shows the estimate and asks. Call-count is exact, not guessed: it replicates <code>wiki._SINGLE_CALL_THRESHOLD</code>'s single-call/overview+detail branching and calls <code>wiki._split_segments</code> directly rather than re-deriving it, so the estimate can't silently drift from what <code>ingest()</code> actually does. Token/cost figures are a deliberately conservative approximation (each call's configured <code>max_tokens</code> ceiling, public list pricing for the configured deployment) — a pre-flight warning, not an invoice. The whole module makes zero LLM/embedding calls itself; verified via the DB-mode test client that a 3-file batch is held with nothing written to <code>pages</code> until confirmed.</p>
+        </div>
 
         <div class="callout flag">
           <div class="callout-label">Deferred — real cost, matters at a scale not reached yet</div>
@@ -1084,7 +1088,7 @@
         <div class="phase">
           <div class="phase-label">Phase 0, parallel<span class="sub">Independent</span></div>
           <div>
-            <div class="phase-items"><span style="color:var(--done);">Compare Mode cost fix · Basic single-user login (hashed passwords, rate-limited) · Admin document lifecycle (add/archive/delete) · File-upload validation</span> <span style="color:var(--gold);">· Cost pre-flight gate on bulk operations</span></div>
+            <div class="phase-items"><span style="color:var(--done);">Compare Mode cost fix · Basic single-user login (hashed passwords, rate-limited) · Admin document lifecycle (add/archive/delete) · File-upload validation · Cost pre-flight gate on bulk operations</span></div>
             <p class="phase-desc">Compare Mode fix doesn't touch ingestion: port the metadata-cache check, drop the narrative call to the fast model, replace truncate-at-6,000-chars with document-scoped hybrid retrieval. Login is a straightforward auth layer with no schema dependency — password hashing and rate-limiting are floor requirements on it, not a later hardening pass. File-upload validation sits at the pipeline's front door, independent of what the schema inside looks like. Add/archive/delete need no backbone dependency either — <strong style="color:var(--gold)">re-ingest</strong> is the one admin-lifecycle action that does depend on Phase 0's schema-version stamping, so it ships once that stamp exists, not before. The cost pre-flight gate wraps any bulk operation (bulk upload, re-ingest by family, wiki-wide reprocess) regardless of which phase that operation itself belongs to.</p>
           </div>
         </div>
@@ -1168,7 +1172,7 @@
               <li><strong>Admin lifecycle:</strong> <span class="badge done">shipped</span> Add (default path already established) + Archive / Hard-delete with cascade handling on <code>relations</code>/embeddings.</li>
               <li><strong>Compare Mode cost fix:</strong> <span class="badge done">shipped</span> metadata-cache check, fast-model narrative call, document-scoped hybrid retrieval instead of truncation, 20-doc cap. Pre-existing (<code>00187fc</code>), confirmed by code review this pass — see § 05.</li>
               <li><strong>File-upload validation gate:</strong> <span class="badge done">shipped</span> size caps, magic-byte check, and a timeout-bounded structural probe (page count, encryption, content-stream decode) — before parsing starts, malformed/malicious files never reach <code>wiki.ingest</code>.</li>
-              <li><strong>Cost pre-flight gate</strong> on bulk operations (bulk upload, re-ingest by family, wiki-wide reprocess).</li>
+              <li><strong>Cost pre-flight gate:</strong> <span class="badge done">shipped</span> exact call-count estimate (reuses <code>wiki._split_segments</code>, not re-derived) plus a conservative cost figure; holds <code>/upload</code> and <code>/resume_ingest</code> for explicit confirmation on a bulk-sized batch.</li>
             </ul>
             <p class="phase-desc" style="margin-bottom:0;"><strong style="color:var(--flag)">Exception:</strong> Re-ingest is the one admin-lifecycle action that <em>does</em> wait on Phase 0's schema-version stamp — it ships in Phase 1, not here.</p>
           </div>
