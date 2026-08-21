@@ -34,7 +34,7 @@ from flask import (
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth, upload_validation
+from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth, upload_validation, cost_estimate
 import threading
 
 # ---------------------------------------------------------------------------
@@ -680,21 +680,37 @@ def upload():
             "rejected": rejected,
         }), 400
 
+    # Cost pre-flight gate — target architecture § Phase 0-parallel, "Cost
+    # pre-flight gate on bulk operations". Zero LLM calls: estimate_ingest_cost
+    # only reads the just-saved files locally. A bulk-sized batch (see
+    # cost_estimate.needs_confirmation) is held here — saved to disk and
+    # registered in sessions.json so it's visible in the UI, but NOT queued to
+    # the executor — until the caller re-POSTs with confirm=true. Only
+    # meaningful in DB mode, since /resume_ingest (the confirm step below) is.
+    estimate = None
+    hold_for_confirmation = False
+    if config.USE_DATABASE:
+        estimate = cost_estimate.estimate_ingest_cost(saved_paths)
+        confirmed = request.form.get("confirm", "").lower() == "true"
+        hold_for_confirmation = cost_estimate.needs_confirmation(estimate, len(saved_paths)) and not confirmed
+
     # Initialize progress with per-document tracking
+    doc_status = "awaiting_confirmation" if hold_for_confirmation else "queued"
     progress = {
-        "phase": "processing",
+        "phase": "awaiting_confirmation" if hold_for_confirmation else "processing",
         "docs": {"total": len(saved_paths), "wiki_done": 0},
-        "wiki": {"step": "queued", "message": "", "pages_total": 0, "relations_total": 0},
+        "wiki": {"step": doc_status, "message": "", "pages_total": 0, "relations_total": 0},
         "docs_list": [
-            {"name": os.path.basename(p), "status": "queued", "pages": 0, "step": ""}
+            {"name": os.path.basename(p), "status": doc_status, "pages": 0, "step": ""}
             for p in saved_paths
         ],
     }
     _set_progress(session_id, progress)
 
-    # Submit all tasks to executor (non-blocking)
-    for save_path, meta in zip(saved_paths, metadata_list):
-        executor.submit(_ingest_single_doc_wiki, save_path, session_id)
+    if not hold_for_confirmation:
+        # Submit all tasks to executor (non-blocking)
+        for save_path, meta in zip(saved_paths, metadata_list):
+            executor.submit(_ingest_single_doc_wiki, save_path, session_id)
 
     # Save session metadata
     sessions = load_sessions()
@@ -709,12 +725,22 @@ def upload():
     }
     save_sessions(sessions)
 
+    if hold_for_confirmation:
+        return jsonify({
+            "status": "confirm_required",
+            "estimate": estimate,
+            "files_queued": 0,
+            "session_id": session_id,
+            "rejected": rejected,
+        })
+
     # Return immediately — frontend will poll /progress
     return jsonify({
         "status": "accepted",
         "files_queued": len(saved_paths),
         "session_id": session_id,
         "rejected": rejected,
+        "estimate": estimate,
     })
 
 
@@ -793,6 +819,23 @@ def resume_ingest():
                     "already_indexed": len(indexed),
                 })
 
+            # Cost pre-flight gate — same rule as /upload (see there for
+            # rationale): a bulk-sized "missing" batch is held for explicit
+            # confirm=true before it's queued, whether this call originated
+            # from /upload's own hold or a direct crash-recovery resume.
+            missing_paths = [os.path.join(config.UPLOAD_PATH, f) for f in missing]
+            estimate = cost_estimate.estimate_ingest_cost(missing_paths)
+            confirmed = request.args.get("confirm", "").lower() == "true"
+            if cost_estimate.needs_confirmation(estimate, len(missing)) and not confirmed:
+                return jsonify({
+                    "status": "confirm_required",
+                    "estimate": estimate,
+                    "uploaded": len(uploaded),
+                    "already_indexed": len(indexed),
+                    "pending": len(missing),
+                    "session_id": session_id,
+                })
+
             new_progress = {
                 "phase": "processing",
                 "docs": {"total": len(missing), "wiki_done": 0},
@@ -815,6 +858,7 @@ def resume_ingest():
                 "already_indexed": len(indexed),
                 "resuming": len(missing),
                 "session_id": session_id,
+                "estimate": estimate,
             })
         finally:
             lock_conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": lock_key})
