@@ -12,6 +12,7 @@ falls back to pypdf-only extraction (original behavior) and logs a warning
 so the user knows scanned pages were skipped.
 """
 
+import contextlib
 import io
 import os
 import re
@@ -82,14 +83,15 @@ def read_file_with_positions(file_path: str) -> dict:
     """
     ext = os.path.splitext(file_path)[1].lower()
 
-    if ext == ".pdf":
-        return _read_pdf_with_positions(file_path)
+    with _decrypted_source(file_path) as src:
+        if ext == ".pdf":
+            return _read_pdf_with_positions(src)
 
-    if ext == ".docx":
-        text = _read_docx(file_path)
-    else:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+        if ext == ".docx":
+            text = _read_docx(src)
+        else:
+            with open(src, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
     text = re.sub(r"\n{3,}", "\n\n", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     text = text.strip()
@@ -102,6 +104,33 @@ def read_file_with_positions(file_path: str) -> dict:
     }
 
 
+@contextlib.contextmanager
+def _decrypted_source(file_path: str):
+    """Yield a readable path for a source file, decrypting it if encrypted.
+
+    Every reader below takes a path (pypdf, PyMuPDF, python-docx all do), so
+    an encrypted upload is decrypted to a temp file for the duration of the
+    read and deleted immediately after — including on exception, which is why
+    this is a context manager rather than two calls a caller has to pair up
+    correctly. Plaintext files pass straight through with no copy.
+    """
+    from services import crypto
+
+    tmp = None
+    try:
+        if crypto.is_encrypted_file(file_path):
+            tmp = crypto.decrypt_file_to_temp(file_path)
+            yield tmp or file_path
+        else:
+            yield file_path
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError as err:
+                logger.warning("Could not remove decrypted temp file %s: %s", tmp, err)
+
+
 def read_file(file_path: str) -> str:
     """Read text from a .txt, .pdf, or .docx file, using OCR for scanned PDF pages.
 
@@ -109,13 +138,14 @@ def read_file(file_path: str) -> str:
     """
     ext = os.path.splitext(file_path)[1].lower()
 
-    if ext == ".pdf":
-        text = _read_pdf(file_path)
-    elif ext == ".docx":
-        text = _read_docx(file_path)
-    else:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            text = f.read()
+    with _decrypted_source(file_path) as src:
+        if ext == ".pdf":
+            text = _read_pdf(src)
+        elif ext == ".docx":
+            text = _read_docx(src)
+        else:
+            with open(src, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
 
     # Collapse excessive whitespace (shared cleanup)
     text = re.sub(r"\n{3,}", "\n\n", text)
