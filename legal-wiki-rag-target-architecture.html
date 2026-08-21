@@ -1189,6 +1189,13 @@
                 <p style="margin:.5rem 0 0;">Confidence drops on failure but is never raised on success — a cleanly-validating value is still only as good as the model behind it. The doc's own calibration spot-check stays open; this layer does not substitute for it. <code>entities</code> ships with <code>UNIQUE (wiki_id, canonical_key)</code>, so the canonicalization race is closed by the constraint rather than by caller discipline; the upsert path that uses it lands with entity extraction.</p>
               </li>
             </ul>
+
+            <div class="callout" style="margin-top:1rem;">
+              <p style="margin-top:0;"><strong style="color:var(--text)">Validated end to end — one document per category, seven categories.</strong> Every real family in this corpus was ingested through the full rebuilt pipeline: Court Case Document, Judgment, Legal Opinion, NDA, Service Agreement, Joint Venture Agreement, Shareholders' Agreement.</p>
+              <p>All seven classified correctly at 0.98 with folder agreement. Typed rows routed by family — 4 <code>contracts</code>, 2 <code>litigation_facts</code>, 1 <code>opinions</code> — alongside 163 structural anchors, 8 citations, 5 figures, 98 wiki pages, 128 relations and 188 hypothetical-question embeddings.</p>
+              <p><strong style="color:var(--text)">The clearest signal that family routing works:</strong> 108 clauses extracted, <em>all 108 from the four contracts</em>, zero from the judgment, plaint or opinion. Clause suppression held on real documents at scale, not just in the single-document test — and 12 of those clauses were tiered high-stakes on clause type alone.</p>
+              <p style="margin-bottom:0;"><strong style="color:var(--flag)">One real defect this run exposed.</strong> The entity registry had accepted "a limited liability company duly incorporated under the laws of…" and "Service Provider" as canonical parties. Legal drafting writes <em>"Tata Sons Private Limited, a company incorporated under the laws of India"</em>, and comma-splitting fractured the description off as a phantom party — indistinguishable downstream from a real one that clauses get attributed to. Fixed in both layers: commas only separate when what follows starts like a name, and the registry now refuses descriptive appositions and bare role labels. Worth recording because it was invisible in every synthetic test and only appeared once real party clauses went through it.</p>
+            </div>
           </div>
         </div>
 
