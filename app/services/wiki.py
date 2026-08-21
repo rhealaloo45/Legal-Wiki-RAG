@@ -921,6 +921,73 @@ def _collect_structured(parsed: dict, bucket: dict) -> None:
                 store.setdefault(title, []).extend(str(q) for q in qs if q)
 
 
+# Cap per page. The synthesis call is asked for 2-4; this bounds what a
+# runaway response can cost, since every question is a vector to embed and
+# store. Truncating is safe — the questions are alternative handles on the
+# same page, so losing the fifth costs a little recall, not correctness.
+_MAX_QUESTIONS_PER_PAGE = 6
+
+
+def _embed_hypothetical_questions(session_id: str, doc_name: str,
+                                  questions_by_page: dict,
+                                  doc_family: str | None) -> None:
+    """Stage 06 — embed the questions each page can answer.
+
+    The third embedding type. A lawyer asks "can they terminate for
+    convenience?"; the page is titled "Term and Termination" and says
+    "either party may terminate on 30 days' notice without cause". Page-level
+    similarity has to bridge that gap on vocabulary alone. A stored question
+    phrased the way a lawyer would ask it closes it directly.
+
+    Only pages that actually exist get questions stored. A question keyed to
+    a title the merge didn't produce (a hallucinated or renamed page) would
+    be an orphan vector that surfaces a page which isn't there.
+    """
+    if not config.USE_DATABASE or not questions_by_page:
+        return
+    try:
+        from services import embedder
+
+        existing = set(_db.get_page_titles(session_id))
+        pairs: list[tuple[str, str]] = []
+        skipped_unknown = 0
+        for title, questions in questions_by_page.items():
+            if title not in existing:
+                skipped_unknown += 1
+                continue
+            seen: set[str] = set()
+            for q in questions[:_MAX_QUESTIONS_PER_PAGE]:
+                q = str(q).strip()
+                key = q.lower()
+                if q and key not in seen:
+                    seen.add(key)
+                    pairs.append((title, q))
+
+        if skipped_unknown:
+            logger.info("Stage 06: skipped questions for %d page title(s) that "
+                        "no page exists under (%s)", skipped_unknown, doc_name)
+        if not pairs:
+            return
+
+        vectors = embedder.embed_batch([q for _, q in pairs], is_query=False)
+        by_page: dict[str, list[tuple[str, list[float]]]] = {}
+        for (title, q), vec in zip(pairs, vectors):
+            if vec:
+                by_page.setdefault(title, []).append((q, vec))
+
+        total = 0
+        for title, items in by_page.items():
+            total += _db.upsert_question_embeddings(
+                session_id, title, items, doc_family, doc_name)
+        logger.info("Stage 06: embedded %d hypothetical question(s) across %d page(s) for %s",
+                    total, len(by_page), doc_name)
+    except Exception as err:
+        # Same containment rule as the typed tables: this is additive
+        # retrieval signal, and losing it must not fail an ingest whose pages
+        # and structured rows are already correct.
+        logger.error("Stage 06 question embedding failed for %s: %s", doc_name, err)
+
+
 def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
                         classification: dict, meta_report, family: str | None,
                         tables: list, figures: list) -> None:
@@ -1236,6 +1303,12 @@ def ingest(file_path: str, session_id: str) -> dict:
     # --- Stage 04: reconcile + swap in the typed rows ----------------------
     _update_doc_step(session_id, doc_name, "persisting")
     _persist_structured(session_id, doc_name, structured, classification, anchors)
+
+    # --- Stage 06: hypothetical-question embeddings ------------------------
+    _embed_hypothetical_questions(
+        session_id, doc_name, structured.get("hypothetical_questions") or {},
+        classification.get("doc_family"),
+    )
 
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
     _log_event(session_id, "INGEST",
