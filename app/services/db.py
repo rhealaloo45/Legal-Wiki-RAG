@@ -524,7 +524,405 @@ def _run_schema_statements(conn, text) -> None:
             ON clauses (session_id, review_status)
         """))
 
+        _init_backbone_schema(conn, text)
+
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 Backbone — wikis + typed per-family tables (target architecture § 03)
+# ---------------------------------------------------------------------------
+
+# The wiki every pre-backbone row belongs to. Existing corpora were ingested
+# before `wikis` existed, so they can't be attributed to a wiki the admin
+# actually chose — they all belong to the one implicit corpus that was there
+# all along. Fixed UUID rather than a lookup so backfill is deterministic and
+# re-runnable.
+DEFAULT_WIKI_ID = "00000000-0000-0000-0000-000000000001"
+DEFAULT_WIKI_NAME = "Default wiki"
+
+# Tables that predate the backbone and are getting `wiki_id` added rather than
+# created with it. Listed explicitly (not discovered) so a table added later
+# without a wiki_id is a visible omission here, not a silent isolation hole.
+_LEGACY_WIKI_SCOPED_TABLES = (
+    "pages",
+    "relations",
+    "page_metadata",
+    "clauses",
+    "contradictions",
+    "clause_map",
+    "document_status",
+)
+
+
+def _init_backbone_schema(conn, text) -> None:
+    """Phase 0 Backbone tables. Additive only — nothing existing is dropped
+    or restructured, per the architecture doc's "What the database gains".
+
+    Every table here carries `wiki_id` at creation, never as a retrofit. The
+    legacy tables above get it added + backfilled instead, which is the one
+    retrofit the doc explicitly accepts (they existed before the primitive did).
+    """
+    # --- wikis: the isolation primitive itself -----------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS wikis (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'active',
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_by  TEXT
+        )
+    """))
+    conn.execute(text("""
+        INSERT INTO wikis (id, name, status, created_by)
+        VALUES (:id, :name, 'active', 'system')
+        ON CONFLICT (id) DO NOTHING
+    """), {"id": DEFAULT_WIKI_ID, "name": DEFAULT_WIKI_NAME})
+
+    # System-level active-wiki pointer (§ Wikis — "switch-based, not
+    # simultaneous"). A settings row rather than a wikis.is_active flag:
+    # exactly one pointer can exist by construction, so two rows can never
+    # both claim active.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key         TEXT PRIMARY KEY,
+            value       TEXT NOT NULL,
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        INSERT INTO app_settings (key, value)
+        VALUES ('active_wiki_id', :id)
+        ON CONFLICT (key) DO NOTHING
+    """), {"id": DEFAULT_WIKI_ID})
+
+    # --- documents: one row per document, any family -----------------------
+    # Generalized from the original `contracts` design. `schema_version` is
+    # what re-ingest's transactional swap keys off (§ 01.4) — it exists from
+    # the first row so re-ingest never has to guess at un-stamped history.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS documents (
+            id                BIGSERIAL PRIMARY KEY,
+            wiki_id           TEXT NOT NULL,
+            session_id        TEXT NOT NULL,
+            source_doc        TEXT NOT NULL,
+            doc_family        TEXT,
+            doc_type          TEXT,
+            jurisdiction      TEXT,
+            parties           JSONB,
+            effective_date    TEXT,
+            expiry_date       TEXT,
+            status            TEXT,
+            lifecycle         TEXT NOT NULL DEFAULT 'current',
+            role              TEXT,
+            binding_status    TEXT,
+            family_confidence REAL,
+            family_method     TEXT,
+            folder_hint       TEXT,
+            schema_version    INT NOT NULL DEFAULT 1,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS documents_wiki_family_idx
+        ON documents (wiki_id, doc_family)
+    """))
+
+    # --- contracts: Family 1 (+2) --------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS contracts (
+            id              BIGSERIAL PRIMARY KEY,
+            wiki_id         TEXT NOT NULL,
+            document_id     BIGINT,
+            session_id      TEXT NOT NULL,
+            source_doc      TEXT NOT NULL,
+            governing_law   TEXT,
+            liability_cap   TEXT,
+            term_length     TEXT,
+            renewal_terms   TEXT,
+            termination     TEXT,
+            binding_status  TEXT,
+            exclusivity     TEXT,
+            typed_value     JSONB,
+            confidence      REAL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc)
+        )
+    """))
+
+    # --- obligations: Family 1 (+2) ------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS obligations (
+            id               BIGSERIAL PRIMARY KEY,
+            wiki_id          TEXT NOT NULL,
+            document_id      BIGINT,
+            session_id       TEXT NOT NULL,
+            source_doc       TEXT NOT NULL,
+            obligated_party  TEXT,
+            entity_id        BIGINT,
+            duty             TEXT,
+            trigger          TEXT,
+            deadline         TEXT,
+            notice_period    TEXT,
+            consequence      TEXT,
+            source_clause_id BIGINT,
+            verbatim_text    TEXT,
+            page_num         INT,
+            confidence       REAL,
+            review_status    TEXT NOT NULL DEFAULT 'pending',
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS obligations_wiki_doc_idx
+        ON obligations (wiki_id, session_id, source_doc)
+    """))
+
+    # --- litigation_facts: Family 3 ------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS litigation_facts (
+            id                  BIGSERIAL PRIMARY KEY,
+            wiki_id             TEXT NOT NULL,
+            document_id         BIGINT,
+            session_id          TEXT NOT NULL,
+            source_doc          TEXT NOT NULL,
+            court               TEXT,
+            case_number         TEXT,
+            plaintiffs          JSONB,
+            defendants          JSONB,
+            procedural_posture  TEXT,
+            holding             TEXT,
+            relief_granted      TEXT,
+            disposition         TEXT,
+            decided_date        TEXT,
+            typed_value         JSONB,
+            confidence          REAL,
+            review_status       TEXT NOT NULL DEFAULT 'pending',
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc)
+        )
+    """))
+
+    # --- authorizations: Family 4 --------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS authorizations (
+            id                  BIGSERIAL PRIMARY KEY,
+            wiki_id             TEXT NOT NULL,
+            document_id         BIGINT,
+            session_id          TEXT NOT NULL,
+            source_doc          TEXT NOT NULL,
+            grantor             TEXT,
+            grantee             TEXT,
+            scope_of_authority  TEXT,
+            limitations         TEXT,
+            resolving_body      TEXT,
+            effective_date      TEXT,
+            expiry_date         TEXT,
+            typed_value         JSONB,
+            confidence          REAL,
+            review_status       TEXT NOT NULL DEFAULT 'pending',
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc)
+        )
+    """))
+
+    # --- opinions: Family 5 --------------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS opinions (
+            id                   BIGSERIAL PRIMARY KEY,
+            wiki_id              TEXT NOT NULL,
+            document_id          BIGINT,
+            session_id           TEXT NOT NULL,
+            source_doc           TEXT NOT NULL,
+            addressee            TEXT,
+            matters_opined       JSONB,
+            assumptions          JSONB,
+            qualifications       JSONB,
+            conclusion           TEXT,
+            reliance_limitation  TEXT,
+            opinion_date         TEXT,
+            typed_value          JSONB,
+            confidence           REAL,
+            review_status        TEXT NOT NULL DEFAULT 'pending',
+            created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc)
+        )
+    """))
+
+    # --- citations: all families --------------------------------------------
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS citations (
+            id              BIGSERIAL PRIMARY KEY,
+            wiki_id         TEXT NOT NULL,
+            document_id     BIGINT,
+            session_id      TEXT NOT NULL,
+            source_doc      TEXT NOT NULL,
+            citation_text   TEXT NOT NULL,
+            authority_type  TEXT,
+            normalized_form TEXT,
+            page_title      TEXT,
+            anchor_id       BIGINT,
+            clause_id       BIGINT,
+            page_num        INT,
+            confidence      REAL,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS citations_wiki_doc_idx
+        ON citations (wiki_id, session_id, source_doc)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS citations_normalized_idx
+        ON citations (wiki_id, normalized_form)
+    """))
+
+    # --- structural_anchors: section/¶ numbering -----------------------------
+    # Also the input to structure-aware segmentation (§ 01 Segmentation) — the
+    # anchor parse runs before the segment decision, so these rows exist for
+    # the same document the segments were cut from.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS structural_anchors (
+            id            BIGSERIAL PRIMARY KEY,
+            wiki_id       TEXT NOT NULL,
+            document_id   BIGINT,
+            session_id    TEXT NOT NULL,
+            source_doc    TEXT NOT NULL,
+            anchor_label  TEXT NOT NULL,
+            anchor_kind   TEXT,
+            heading_text  TEXT,
+            char_start    INT,
+            char_end      INT,
+            page_num      INT,
+            page_title    TEXT,
+            ordinal       INT,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS structural_anchors_doc_idx
+        ON structural_anchors (wiki_id, session_id, source_doc, ordinal)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS structural_anchors_label_idx
+        ON structural_anchors (wiki_id, session_id, anchor_label)
+    """))
+
+    # --- entities / entity_aliases: canonical party registry -----------------
+    # The UNIQUE on (wiki_id, canonical_key) is the hardening item, not an
+    # afterthought: canonicalization that races two spellings of "Acme Corp"
+    # into two rows defeats the whole point, so the constraint carries it and
+    # writes go through an upsert (see upsert_entity).
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS entities (
+            id             BIGSERIAL PRIMARY KEY,
+            wiki_id        TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            canonical_key  TEXT NOT NULL,
+            entity_type    TEXT,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, canonical_key)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS entity_aliases (
+            id         BIGSERIAL PRIMARY KEY,
+            wiki_id    TEXT NOT NULL,
+            entity_id  BIGINT NOT NULL,
+            alias      TEXT NOT NULL,
+            alias_key  TEXT NOT NULL,
+            source_doc TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, alias_key)
+        )
+    """))
+
+    # --- tables / figures: § 01.1 -------------------------------------------
+    # `tables` and `figures` are the doc's own names and both are unreserved
+    # keywords in Postgres, so they're used verbatim rather than renamed —
+    # keeping code and architecture doc reading the same.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS tables (
+            id           BIGSERIAL PRIMARY KEY,
+            wiki_id      TEXT NOT NULL,
+            document_id  BIGINT,
+            session_id   TEXT NOT NULL,
+            source_doc   TEXT NOT NULL,
+            page_num     INT,
+            page_title   TEXT,
+            caption      TEXT,
+            columns      JSONB,
+            rows         JSONB,
+            confidence   REAL,
+            extraction_method TEXT,
+            review_status TEXT NOT NULL DEFAULT 'pending',
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS tables_wiki_doc_idx
+        ON tables (wiki_id, session_id, source_doc)
+    """))
+
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS figures (
+            id           BIGSERIAL PRIMARY KEY,
+            wiki_id      TEXT NOT NULL,
+            document_id  BIGINT,
+            session_id   TEXT NOT NULL,
+            source_doc   TEXT NOT NULL,
+            page_num     INT,
+            page_title   TEXT,
+            figure_kind  TEXT,
+            description  TEXT,
+            image_ref    TEXT,
+            confidence   REAL,
+            extraction_method TEXT,
+            review_status TEXT NOT NULL DEFAULT 'pending',
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS figures_wiki_doc_idx
+        ON figures (wiki_id, session_id, source_doc)
+    """))
+
+    # --- wiki_id on the legacy tables ---------------------------------------
+    # DEFAULT is set so rows written by not-yet-threaded code paths still land
+    # in the default wiki rather than NULL (a NULL wiki_id would silently fall
+    # out of every wiki-scoped predicate — invisible data loss, not an error).
+    for _tbl in _LEGACY_WIKI_SCOPED_TABLES:
+        try:
+            conn.execute(text(
+                f"ALTER TABLE {_tbl} ADD COLUMN IF NOT EXISTS wiki_id TEXT "
+                f"NOT NULL DEFAULT '{DEFAULT_WIKI_ID}'"
+            ))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {_tbl}_wiki_idx ON {_tbl} (wiki_id)"
+            ))
+        except Exception as _wiki_col_err:
+            logger.warning(
+                "Could not add wiki_id to %s (table may not exist yet): %s",
+                _tbl, _wiki_col_err,
+            )
+            conn.rollback()
+
+    # Embedding tables are per-provider and discovered, not listed — a provider
+    # switch creates a new one, and it needs the column too.
+    try:
+        for _emb_tbl in _page_embedding_tables(conn):
+            conn.execute(text(
+                f"ALTER TABLE {_emb_tbl} ADD COLUMN IF NOT EXISTS wiki_id TEXT "
+                f"NOT NULL DEFAULT '{DEFAULT_WIKI_ID}'"
+            ))
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {_emb_tbl}_wiki_idx "
+                f"ON {_emb_tbl} (wiki_id)"
+            ))
+    except Exception as _emb_wiki_err:
+        logger.warning("Could not add wiki_id to embedding tables: %s", _emb_wiki_err)
+        conn.rollback()
 
 
 # ---------------------------------------------------------------------------
