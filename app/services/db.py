@@ -888,6 +888,43 @@ def _init_backbone_schema(conn, text) -> None:
         ON figures (wiki_id, session_id, source_doc)
     """))
 
+    # --- review_queue: the non-clause flag kinds -----------------------------
+    # The shipped clause queue (the `clauses` table) stays exactly as it is —
+    # it works, it's tested, and its stakes split is already correct. This
+    # table carries the kinds the backbone adds: doc-type misclassification,
+    # per-family metadata fields, and low-confidence table/figure extraction.
+    # get_review_queue() unions the two so the admin panel keeps showing one
+    # queue; two separate queues would be a worse answer than one join.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS review_queue (
+            id             BIGSERIAL PRIMARY KEY,
+            wiki_id        TEXT NOT NULL,
+            session_id     TEXT NOT NULL,
+            source_doc     TEXT NOT NULL,
+            item_kind      TEXT NOT NULL,
+            item_label     TEXT NOT NULL,
+            item_value     TEXT,
+            typed_value    JSONB,
+            confidence     REAL NOT NULL DEFAULT 0.0,
+            stakes         TEXT NOT NULL DEFAULT 'low',
+            reason         TEXT,
+            page_num       INT,
+            review_status  TEXT NOT NULL DEFAULT 'pending',
+            resolution     TEXT,
+            reviewed_at    TIMESTAMPTZ,
+            superseded_at  TIMESTAMPTZ,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS review_queue_session_status_idx
+        ON review_queue (session_id, review_status)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS review_queue_doc_idx
+        ON review_queue (wiki_id, session_id, source_doc)
+    """))
+
     # --- wiki_id on the legacy tables ---------------------------------------
     # DEFAULT is set so rows written by not-yet-threaded code paths still land
     # in the default wiki rather than NULL (a NULL wiki_id would silently fall
@@ -1233,32 +1270,139 @@ def _is_high_stakes_clause_type(clause_type: str) -> bool:
     return any(h in lowered for h in _HIGH_STAKES_CLAUSE_TYPES)
 
 
-def get_review_queue(session_id: str) -> list[dict]:
-    """Pending clauses for one session, sorted by stakes (high first, so
-    the items requiring individual sign-off surface before the bulk-accept
-    pile) then confidence ascending (the ones most likely wrong first)."""
+# Review Queue item kinds beyond clauses. Doc-type is deliberately always
+# high stakes: it decides which schema is applied to the WHOLE document, so a
+# wrong call there is not one bad field but the wrong set of fields entirely
+# — strictly higher stakes than any single value within the right set.
+_ALWAYS_HIGH_STAKES_KINDS = {"doc_type"}
+
+
+def insert_review_items(wiki_id: str, session_id: str, source_doc: str,
+                        items: list[dict]) -> int:
+    """Queue non-clause flagged extractions.
+
+    `stakes` is computed here, never taken from the caller's payload and
+    never from the model — same rule the clause queue already enforces, for
+    the same reason: the bulk-accept split is only meaningful if the thing
+    deciding it can't be talked into a different answer.
+    """
+    if not items:
+        return 0
+    from sqlalchemy import text
+    engine = get_engine()
+    inserted = 0
+    with engine.connect() as conn:
+        for it in items:
+            kind = (it.get("item_kind") or "").strip()
+            label = (it.get("item_label") or "").strip()
+            if not kind or not label:
+                continue
+            if kind in _ALWAYS_HIGH_STAKES_KINDS:
+                stakes = "high"
+            elif it.get("high_stakes"):
+                stakes = "high"
+            else:
+                stakes = "low"
+            conn.execute(text("""
+                INSERT INTO review_queue
+                    (wiki_id, session_id, source_doc, item_kind, item_label,
+                     item_value, typed_value, confidence, stakes, reason, page_num)
+                VALUES
+                    (:w, :sid, :doc, :kind, :label, :val, :tval, :conf, :stakes,
+                     :reason, :page)
+            """), {
+                "w": wiki_id, "sid": session_id, "doc": source_doc,
+                "kind": kind, "label": label,
+                "val": (str(it["item_value"])[:4000]
+                        if it.get("item_value") is not None else None),
+                "tval": json.dumps(it["typed_value"]) if it.get("typed_value") is not None else None,
+                "conf": float(it.get("confidence") or 0.0),
+                "stakes": stakes, "reason": it.get("reason"),
+                "page": it.get("page_num"),
+            })
+            inserted += 1
+        conn.commit()
+    return inserted
+
+
+def supersede_review_items(session_id: str, source_doc: str) -> int:
+    """On re-ingest, move a document's prior pending items to `superseded`
+    rather than deleting them.
+
+    The doc is explicit that old resolutions are archived, not dropped: a
+    reviewer's judgement on a previous version is evidence about how this
+    document was read, and destroying it on every re-ingest would quietly
+    erase the audit trail the queue exists to create.
+    """
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
-        rows = conn.execute(
+        res = conn.execute(text("""
+            UPDATE review_queue
+            SET review_status = 'superseded', superseded_at = now()
+            WHERE session_id = :sid AND source_doc = :doc
+              AND review_status = 'pending'
+        """), {"sid": session_id, "doc": source_doc})
+        conn.commit()
+        return res.rowcount or 0
+
+
+def get_review_queue(session_id: str) -> list[dict]:
+    """Pending review items for one session — clauses and every other flagged
+    extraction kind in one queue.
+
+    Sorted by stakes (high first, so items needing individual sign-off surface
+    before the bulk-accept pile) then confidence ascending (most likely wrong
+    first). `item_kind` tells the caller which store a row came from, and
+    resolution routes on it.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        clause_rows = conn.execute(
             text("""
                 SELECT id, source_doc, clause_type, verbatim_text, typed_value,
                        confidence, page_num, stakes, created_at
                 FROM clauses
                 WHERE session_id = :sid AND review_status = 'pending'
-                ORDER BY (stakes = 'high') DESC, confidence ASC
             """),
             {"sid": session_id},
-        )
-        return [
-            {
-                "id": r.id, "source_doc": r.source_doc, "clause_type": r.clause_type,
-                "verbatim_text": r.verbatim_text, "typed_value": r.typed_value,
-                "confidence": r.confidence, "page_num": r.page_num, "stakes": r.stakes,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ]
+        ).fetchall()
+        other_rows = conn.execute(
+            text("""
+                SELECT id, source_doc, item_kind, item_label, item_value,
+                       typed_value, confidence, page_num, stakes, reason, created_at
+                FROM review_queue
+                WHERE session_id = :sid AND review_status = 'pending'
+            """),
+            {"sid": session_id},
+        ).fetchall()
+
+    items = [
+        {
+            "id": r.id, "item_kind": "clause", "source_doc": r.source_doc,
+            "clause_type": r.clause_type, "verbatim_text": r.verbatim_text,
+            "typed_value": r.typed_value, "confidence": r.confidence,
+            "page_num": r.page_num, "stakes": r.stakes, "reason": None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in clause_rows
+    ]
+    items += [
+        {
+            # `clause_type` / `verbatim_text` are populated for every kind so
+            # the shipped Review Queue UI renders these without a special case
+            # — the label is what the card shows, the value is its body.
+            "id": r.id, "item_kind": r.item_kind, "source_doc": r.source_doc,
+            "clause_type": r.item_label, "verbatim_text": r.item_value or "",
+            "typed_value": r.typed_value, "confidence": r.confidence,
+            "page_num": r.page_num, "stakes": r.stakes, "reason": r.reason,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in other_rows
+    ]
+    items.sort(key=lambda i: (i["stakes"] != "high", i["confidence"] or 0.0))
+    return items
 
 
 def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: str | None = None) -> bool:
@@ -1301,6 +1445,60 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
             )
         conn.commit()
         return (result.rowcount or 0) > 0
+
+
+def resolve_review_item(session_id: str, item_id: int, action: str,
+                        edited_text: str | None = None) -> bool:
+    """Resolve one non-clause review item. Mirrors resolve_clause exactly,
+    including the still-pending guard, so a double-submit from the UI can't
+    silently overwrite an earlier reviewer's decision."""
+    from sqlalchemy import text
+    engine = get_engine()
+    resolution_map = {"accept": "individual_accept", "reject": "individual_reject",
+                      "edit": "edited"}
+    if action not in resolution_map:
+        raise ValueError(f"Unknown action {action!r} — expected accept, reject, or edit")
+    review_status = "rejected" if action == "reject" else "approved"
+    with engine.connect() as conn:
+        params = {"sid": session_id, "id": item_id, "status": review_status,
+                  "resolution": resolution_map[action]}
+        if action == "edit":
+            if not edited_text or not edited_text.strip():
+                raise ValueError("edited_text is required for action=edit")
+            result = conn.execute(text("""
+                UPDATE review_queue SET review_status = :status, resolution = :resolution,
+                       item_value = :val, reviewed_at = now()
+                WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+            """), {**params, "val": edited_text.strip()})
+        else:
+            result = conn.execute(text("""
+                UPDATE review_queue SET review_status = :status, resolution = :resolution,
+                       reviewed_at = now()
+                WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+            """), params)
+        conn.commit()
+        return (result.rowcount or 0) > 0
+
+
+def bulk_accept_review_items(session_id: str, min_confidence: float) -> int:
+    """Bulk-accept low-stakes non-clause items at or above the threshold.
+
+    Same server-side exclusion as clauses: high stakes is filtered in the
+    WHERE clause, so a request body claiming otherwise changes nothing. This
+    also means doc-type items are never bulk-acceptable, since they are
+    always recorded as high stakes.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(text("""
+            UPDATE review_queue
+            SET review_status = 'approved', resolution = 'bulk_accepted', reviewed_at = now()
+            WHERE session_id = :sid AND review_status = 'pending'
+              AND stakes = 'low' AND confidence >= :min_conf
+        """), {"sid": session_id, "min_conf": min_confidence})
+        conn.commit()
+        return result.rowcount or 0
 
 
 def bulk_accept_clauses(session_id: str, min_confidence: float) -> int:

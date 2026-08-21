@@ -4317,24 +4317,38 @@
         el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Nothing pending — every extracted clause has been reviewed.</div>';
         return;
       }
+      // Kind labels for the non-clause flags the backbone adds. A doc-type
+      // card and a clause card are triaged very differently, so the kind is
+      // shown rather than left for the reviewer to infer from the text.
+      const KIND_LABEL = {
+        clause: null, doc_type: 'Doc type', metadata: 'Metadata',
+        table: 'Table', figure: 'Figure',
+      };
       const cardHtml = (c, idx, badgeClass) => {
         const selected = idx === reviewQueueSelected;
         const pct = Math.round(c.confidence * 100);
+        const kind = c.item_kind || 'clause';
+        const kindLabel = KIND_LABEL[kind];
+        const body = c.verbatim_text || '';
         return `<div class="review-card${selected ? ' selected' : ''}" onclick="reviewQueueSelected=${idx};renderReviewQueue()">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
-              <span class="admin-badge ${badgeClass}">${escapeHtmlRule(c.clause_type)}</span>
-              <span style="display:flex;align-items:center;gap:6px">
+              <span style="display:flex;align-items:center;gap:6px;min-width:0">
+                ${kindLabel ? `<span class="admin-badge amber" style="flex:none">${escapeHtmlRule(kindLabel)}</span>` : ''}
+                <span class="admin-badge ${badgeClass}">${escapeHtmlRule(c.clause_type)}</span>
+              </span>
+              <span style="display:flex;align-items:center;gap:6px;flex:none">
                 <span class="review-conf-track"><span class="review-conf-fill" style="width:${pct}%;background:${_confidenceBarColor(c.confidence)}"></span></span>
                 <span style="font-size:11px;font-weight:700;font-family:var(--font-mono,monospace);color:${_confidenceColor(c.confidence)}">${pct}%</span>
               </span>
             </div>
-            <div style="font-size:12.5px;line-height:1.55;color:var(--text-primary);font-style:italic">&ldquo;${escapeHtmlRule(c.verbatim_text)}&rdquo;</div>
+            ${body ? `<div style="font-size:12.5px;line-height:1.55;color:var(--text-primary);font-style:italic">&ldquo;${escapeHtmlRule(body)}&rdquo;</div>` : ''}
+            ${c.reason ? `<div style="font-size:11.5px;line-height:1.5;color:var(--text-muted);margin-top:${body ? '7px' : '0'}"><i class="ti ti-alert-triangle" style="font-size:12px;vertical-align:-1px;margin-right:3px"></i>${escapeHtmlRule(c.reason)}</div>` : ''}
             <div style="display:flex;align-items:center;justify-content:space-between;margin-top:11px">
-              <span style="font-size:11px;color:var(--text-muted)">${escapeHtmlRule(c.source_doc || '')}${c.page_num ? ` · p.${c.page_num}` : ''}</span>
+              <span style="font-size:11px;color:var(--text-muted)">${escapeHtmlRule(_shortSourceDoc(c.source_doc || ''))}${c.page_num ? ` · p.${c.page_num}` : ''}</span>
               <span style="display:flex;gap:5px">
-                <button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept')"><i class="ti ti-check" style="font-size:13px"></i></button>
-                <button type="button" class="admin-icon-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id})"><i class="ti ti-edit" style="font-size:13px"></i></button>
-                <button type="button" class="admin-icon-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject')"><i class="ti ti-x" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept','${kind}')"><i class="ti ti-check" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id},'${kind}')"><i class="ti ti-edit" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject','${kind}')"><i class="ti ti-x" style="font-size:13px"></i></button>
               </span>
             </div>
           </div>`;
@@ -4355,9 +4369,14 @@
         </div>`;
     }
 
-    async function adminResolveClause(clauseId, action, editedText) {
+    async function adminResolveClause(clauseId, action, itemKind, editedText) {
       try {
-        const body = { session_id: SID, clause_id: clauseId, action };
+        // item_kind decides which table the server resolves against. Ids are
+        // per-table, so sending the wrong kind would resolve a different row
+        // that happens to share the id — echo back what the queue gave us.
+        const item = reviewQueueItems.find(c => c.id === clauseId);
+        const kind = itemKind || (item && item.item_kind) || 'clause';
+        const body = { session_id: SID, clause_id: clauseId, action, item_kind: kind };
         if (editedText) body.edited_text = editedText;
         const res = await fetch('/review_queue/resolve', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -4372,11 +4391,15 @@
       }
     }
 
-    function adminEditClause(clauseId) {
-      const current = reviewQueueItems.find(c => c.id === clauseId);
-      const edited = window.prompt('Corrected verbatim text:', current ? current.verbatim_text : '');
+    function adminEditClause(clauseId, itemKind) {
+      const kind = itemKind || 'clause';
+      // Match on id AND kind: the two backing tables number their rows
+      // independently, so an id alone can name two different items.
+      const current = reviewQueueItems.find(
+        c => c.id === clauseId && (c.item_kind || 'clause') === kind);
+      const edited = window.prompt('Corrected value:', current ? current.verbatim_text : '');
       if (!edited || !edited.trim()) return;
-      adminResolveClause(clauseId, 'edit', edited.trim());
+      adminResolveClause(clauseId, 'edit', kind, edited.trim());
     }
 
     async function adminBulkAcceptClauses() {
@@ -4406,11 +4429,10 @@
         reviewQueueSelected = Math.max(reviewQueueSelected - 1, 0);
         renderReviewQueue();
         event.preventDefault();
-      } else if (key === 'a' && reviewQueueSelected >= 0) {
-        adminResolveClause(reviewQueueItems[reviewQueueSelected].id, 'accept');
-        event.preventDefault();
-      } else if (key === 'r' && reviewQueueSelected >= 0) {
-        adminResolveClause(reviewQueueItems[reviewQueueSelected].id, 'reject');
+      } else if ((key === 'a' || key === 'r') && reviewQueueSelected >= 0) {
+        const sel = reviewQueueItems[reviewQueueSelected];
+        adminResolveClause(sel.id, key === 'a' ? 'accept' : 'reject',
+                           sel.item_kind || 'clause');
         event.preventDefault();
       }
     }

@@ -921,6 +921,104 @@ def _collect_structured(parsed: dict, bucket: dict) -> None:
                 store.setdefault(title, []).extend(str(q) for q in qs if q)
 
 
+def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
+                        classification: dict, meta_report, family: str | None,
+                        tables: list, figures: list) -> None:
+    """Stage 07 — the evaluation gate, extended past clause confidence.
+
+    Everything flagged upstream converges here: a doubtful doc-type call, a
+    metadata field that failed validation or came back low-confidence, and a
+    table or figure the model wasn't sure it read correctly. Below threshold
+    an extraction lands in the queue instead of entering the index silently,
+    which is the whole point — silence is the failure mode, not low
+    confidence itself.
+    """
+    from services import schema_registry as _sr
+
+    # Prior pending items for this document are archived, never deleted — a
+    # reviewer's earlier judgement is evidence about how this document reads.
+    try:
+        n = _db.supersede_review_items(session_id, doc_name)
+        if n:
+            logger.info("Superseded %d prior review item(s) for %s", n, doc_name)
+    except Exception as err:
+        logger.warning("Could not supersede prior review items for %s: %s", doc_name, err)
+
+    items: list[dict] = []
+
+    if classification.get("flagged"):
+        items.append({
+            "item_kind": "doc_type",
+            "item_label": f"Document type: {classification.get('doc_family')}",
+            "item_value": (classification.get("doc_type")
+                           or classification.get("doc_family")),
+            "confidence": classification.get("family_confidence") or 0.0,
+            "reason": classification.get("flag_reason"),
+            "typed_value": {
+                "family": classification.get("doc_family"),
+                "folder_family": classification.get("folder_family"),
+                "folder_hint": classification.get("folder_hint"),
+                "method": classification.get("family_method"),
+                "reasoning": classification.get("reasoning"),
+            },
+        })
+
+    fam_def = _sr.get(family)
+    for field_name, result in (meta_report.fields or {}).items():
+        if field_name == "__payload__":
+            continue
+        if not result.flagged:
+            continue
+        items.append({
+            "item_kind": "metadata",
+            "item_label": f"{field_name} ({fam_def.key})",
+            "item_value": result.raw if result.raw is not None else result.value,
+            "confidence": result.confidence,
+            # High-stakes metadata is per-family, from the registry — a
+            # contract's governing law and a judgment's holding both need
+            # individual sign-off, but for different reasons and in
+            # different families.
+            "high_stakes": _sr.is_high_stakes_metadata(family, field_name),
+            "reason": result.reason,
+            "typed_value": {"coerced": result.coerced, "value": result.value},
+        })
+
+    for kind, rows in (("table", tables), ("figure", figures)):
+        for row in rows:
+            conf = row.get("confidence") or row.get("_confidence") or 0.0
+            if conf > _TABLE_FIGURE_REVIEW_THRESHOLD and not row.get("_flagged"):
+                continue
+            label = (row.get("caption") or row.get("description")
+                     or f"unlabelled {kind}")
+            items.append({
+                "item_kind": kind,
+                "item_label": f"{kind.title()}: {str(label)[:120]}",
+                "item_value": json.dumps(
+                    {k: v for k, v in row.items() if not k.startswith("_")},
+                    ensure_ascii=False, default=str,
+                )[:4000],
+                "confidence": conf,
+                "page_num": row.get("page_num"),
+                "reason": "; ".join(row.get("_validation_notes") or [])
+                          or f"low {kind} extraction confidence",
+            })
+
+    if not items:
+        return
+    try:
+        n = _db.insert_review_items(wiki_id, session_id, doc_name, items)
+        logger.info("Review Queue: %d item(s) flagged for %s", n, doc_name)
+    except Exception as err:
+        logger.error("Could not queue review items for %s: %s", doc_name, err)
+
+
+# A table or figure below this lands in the queue. Structure extraction is
+# the least reliable thing in the pipeline — a table reconstructed from a
+# guess at its layout looks exactly as authoritative as one read correctly,
+# so the bar for letting one through unreviewed is higher than for prose.
+_TABLE_FIGURE_REVIEW_THRESHOLD = 0.75
+
+
 def _persist_structured(session_id: str, doc_name: str, bucket: dict,
                         classification: dict, anchors_from_text: list) -> None:
     """Stage 04 — reconcile the structured rows and swap them in.
@@ -1013,6 +1111,10 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
 
         for party in (family_row.get("parties") or []):
             backbone.upsert_entity(wiki_id, str(party), "party", doc_name)
+
+        # --- Stage 07: evaluation gate --------------------------------------
+        _queue_review_items(wiki_id, session_id, doc_name, classification,
+                            meta_report, family, tables, figures)
 
     except Exception as err:
         logger.error("Backbone persistence failed for %s (wiki pages unaffected): %s",
