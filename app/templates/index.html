@@ -1218,6 +1218,240 @@
       border-color: var(--red-border);
     }
 
+    /* ============================================================
+       Admin panel — dedicated nav rail + dashboard-style sections.
+       ============================================================ */
+    .admin-rail {
+      width: 196px;
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border-right: .5px solid var(--border);
+      padding: 16px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .admin-rail-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 0 10px;
+      margin: 4px 0 8px;
+    }
+
+    .admin-nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 10px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .admin-nav-item:hover {
+      background: var(--bg-hover);
+    }
+
+    .admin-nav-item.active {
+      background: var(--accent-light);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .admin-nav-item .admin-nav-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .admin-nav-badge {
+      font-size: 10px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--red);
+      border-radius: 20px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .admin-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 26px 32px;
+    }
+
+    .admin-section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .admin-section-title {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .admin-section-sub {
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      margin-top: 3px;
+    }
+
+    .admin-card {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+    }
+
+    .admin-pill-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: var(--radius-md);
+      padding: 7px 13px;
+      cursor: pointer;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      transition: background .15s;
+      white-space: nowrap;
+    }
+
+    .admin-pill-btn:hover { background: var(--bg-hover); }
+
+    .admin-pill-btn.primary {
+      background: var(--btn-primary);
+      color: #fff;
+      border-color: var(--btn-primary);
+    }
+    .admin-pill-btn.primary:hover { background: #000; }
+
+    .admin-pill-btn.accent {
+      background: var(--accent-light);
+      color: var(--accent);
+      border-color: var(--accent-border);
+    }
+    .admin-pill-btn.accent:hover { background: #E3E9FE; }
+
+    .admin-badge {
+      font-size: 10.5px;
+      font-family: var(--font-mono, monospace);
+      font-weight: 600;
+      border-radius: 20px;
+      padding: 2px 8px;
+      letter-spacing: .01em;
+      white-space: nowrap;
+    }
+    .admin-badge.green { color: var(--green-text); background: var(--green-light); border: 1px solid var(--green-border); }
+    .admin-badge.amber { color: var(--amber); background: var(--amber-light); border: 1px solid var(--amber-border); }
+    .admin-badge.red { color: var(--red); background: var(--red-light); border: 1px solid var(--red-border); }
+    .admin-badge.muted { color: var(--text-muted); background: var(--bg-hover); border: 1px solid var(--border); }
+
+    .admin-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+
+    .admin-stat-tile {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 16px 18px;
+    }
+
+    .admin-stat-val { font-size: 24px; font-weight: 700; }
+    .admin-stat-label { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+
+    .admin-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 18px;
+      border-bottom: .5px solid var(--border);
+    }
+    .admin-row:last-child { border-bottom: none; }
+
+    .admin-icon-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: var(--radius-md);
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    .admin-icon-btn:hover { background: var(--bg-hover); }
+    .admin-icon-btn.danger { color: var(--red); }
+
+    .review-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .review-col-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .review-card {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 14px 16px;
+      margin-bottom: 10px;
+    }
+
+    .review-card.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-light);
+    }
+
+    .review-conf-track {
+      width: 52px;
+      height: 5px;
+      border-radius: 4px;
+      background: var(--bg-hover);
+      overflow: hidden;
+    }
+    .review-conf-fill { display: block; height: 100%; border-radius: 4px; }
+
+    @media (max-width: 860px) {
+      .review-cols { grid-template-columns: 1fr; }
+      .admin-stat-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
     .ftree-card-icon .ti-file-type-pdf { color: var(--red) }
     .ftree-card-icon .ti-file-text { color: var(--text-muted) }
 
@@ -3343,52 +3577,80 @@
         </div>
 
         <!-- ADMIN -->
-        <div id="panel-admin" class="files-panel d-none" style="display:none">
-          <div class="files-toolbar">
-            <div style="display:flex;align-items:center;gap:8px">
-              <button type="button" class="icon-btn" title="Back to chat" onclick="switchTab('ask', document.querySelector('.tab[data-target=&quot;ask&quot;]'))"><i class="ti ti-arrow-left"></i></button>
-              <span class="files-title">Admin</span>
+        <div id="panel-admin" class="d-none" style="display:none;flex:1;flex-direction:row;overflow:hidden">
+          <div class="admin-rail">
+            <button type="button" class="icon-btn" style="margin-bottom:10px" title="Back to chat" onclick="switchTab('ask', document.querySelector('.tab[data-target=&quot;ask&quot;]'))"><i class="ti ti-arrow-left"></i></button>
+            <div class="admin-rail-label">Operations</div>
+            <div class="admin-nav-item active" id="adminNav-ingest" data-target="ingest" onclick="switchAdminTab('ingest',this)">
+              <span class="admin-nav-left"><i class="ti ti-upload" style="font-size:16px"></i>Ingest</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-documents" data-target="documents" onclick="switchAdminTab('documents',this)">
+              <span class="admin-nav-left"><i class="ti ti-files" style="font-size:16px"></i>Documents</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-wiki" data-target="wiki" onclick="switchAdminTab('wiki',this)">
+              <span class="admin-nav-left"><i class="ti ti-topology-star-ring" style="font-size:16px"></i>Wiki</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-review" data-target="review" onclick="switchAdminTab('review',this)">
+              <span class="admin-nav-left"><i class="ti ti-checklist" style="font-size:16px"></i>Review Queue</span>
+              <span class="admin-nav-badge d-none" id="admin-review-badge">0</span>
             </div>
           </div>
-          <div class="tabs" id="adminSubTabs" style="padding:0 20px;flex-shrink:0">
-            <div class="tab active" data-target="ingest" onclick="switchAdminTab('ingest',this)"><i class="ti ti-upload" style="font-size:13px"></i>Ingest</div>
-            <div class="tab" data-target="documents" onclick="switchAdminTab('documents',this)"><i class="ti ti-files" style="font-size:13px"></i>Documents</div>
-            <div class="tab" data-target="wiki" onclick="switchAdminTab('wiki',this)"><i class="ti ti-topology-star-ring" style="font-size:13px"></i>Wiki</div>
-            <div class="tab" data-target="review" onclick="switchAdminTab('review',this)"><i class="ti ti-checklist" style="font-size:13px"></i>Review Queue</div>
-          </div>
 
-          <div id="admin-panel-ingest" class="panel" style="overflow-y:auto">
-            <div class="files-toolbar" style="padding:0 0 12px">
-              <span class="files-title" style="font-size:13px">Ingest status — current session</span>
-              <div style="display:flex;gap:8px">
-                <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Re-queue any uploaded docs that never finished ingesting" onclick="adminResumeIngest()"><i class="ti ti-refresh" style="font-size:14px"></i><span>Resume ingest</span></button>
-                <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Start a new ingest" onclick="newSession()"><i class="ti ti-upload" style="font-size:14px"></i><span>New ingest</span></button>
+          <div class="admin-content">
+
+            <div id="admin-panel-ingest">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Ingest</div>
+                  <div class="admin-section-sub">Current session — <span id="admin-ingest-session-name">this session</span></div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button type="button" class="admin-pill-btn" title="Re-queue any uploaded docs that never finished ingesting" onclick="adminResumeIngest()"><i class="ti ti-refresh" style="font-size:14px"></i>Resume ingest</button>
+                  <button type="button" class="admin-pill-btn primary" title="Start a new ingest" onclick="newSession()"><i class="ti ti-upload" style="font-size:14px"></i>New ingest</button>
+                </div>
+              </div>
+              <div class="admin-stat-grid" id="admin-ingest-stats"></div>
+              <div class="admin-card">
+                <div style="padding:14px 18px;border-bottom:.5px solid var(--border);font-size:12.5px;font-weight:600">Recent activity</div>
+                <div id="admin-ingest-status"></div>
               </div>
             </div>
-            <div class="ftree" id="admin-ingest-status" style="margin:0"></div>
-          </div>
 
-          <div id="admin-panel-documents" class="panel d-none" style="display:none;overflow-y:auto">
-            <div class="ftree" id="document-manage-list" style="margin:0"></div>
-          </div>
-
-          <div id="admin-panel-wiki" class="panel d-none" style="display:none;overflow-y:auto">
-            <div class="files-toolbar" style="padding:0 0 12px">
-              <span class="files-title" style="font-size:13px">Wiki pages</span>
-              <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i><span>Knowledge graph</span></button>
-            </div>
-            <div class="ftree" id="admin-wiki-page-list" style="margin:0"></div>
-          </div>
-
-          <div id="admin-panel-review" class="panel d-none" style="display:none;overflow-y:auto" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
-            <div class="files-toolbar" style="padding:0 0 12px">
-              <div>
-                <span class="files-title" style="font-size:13px">Review Queue</span>
-                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">A accept · R reject · J/K navigate</span>
+            <div id="admin-panel-documents" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Documents</div>
+                  <div class="admin-section-sub" id="admin-documents-sub">&nbsp;</div>
+                </div>
               </div>
-              <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Bulk-accept every low-stakes item at or above 60% confidence" onclick="adminBulkAcceptClauses()"><i class="ti ti-checks" style="font-size:14px"></i><span>Accept all ≥0.6 (low-stakes)</span></button>
+              <div class="admin-card" id="document-manage-list"></div>
             </div>
-            <div id="admin-review-queue-list"></div>
+
+            <div id="admin-panel-wiki" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Wiki pages</div>
+                  <div class="admin-section-sub" id="admin-wiki-sub">&nbsp;</div>
+                </div>
+                <button type="button" class="admin-pill-btn accent" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i>Knowledge graph</button>
+              </div>
+              <div class="admin-card" id="admin-wiki-page-list"></div>
+            </div>
+
+            <div id="admin-panel-review" class="d-none" style="display:none" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
+              <div class="admin-section-head" style="margin-bottom:6px">
+                <div>
+                  <div class="admin-section-title">Review Queue</div>
+                  <div class="admin-section-sub" id="admin-review-sub">&nbsp;</div>
+                </div>
+                <button type="button" class="admin-pill-btn accent" title="Bulk-accept every low-stakes item at or above 60% confidence" onclick="adminBulkAcceptClauses()"><i class="ti ti-checks" style="font-size:14px"></i>Accept all ≥0.6 (low-stakes)</button>
+              </div>
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:18px">
+                <b style="color:var(--text-secondary)">A</b> accept · <b style="color:var(--text-secondary)">R</b> reject · <b style="color:var(--text-secondary)">J/K</b> navigate
+              </div>
+              <div id="admin-review-queue-list"></div>
+            </div>
+
           </div>
         </div>
 
@@ -3793,18 +4055,20 @@
       document.querySelectorAll('#modeTabs .tab').forEach(t => t.classList.remove('active'));
       const ap = document.getElementById('panel-admin');
       ap.style.setProperty('display', 'flex', 'important');
-      ap.style.flexDirection = 'column';
-      // Refresh whichever sub-tab is currently active
-      const activeSub = document.querySelector('#adminSubTabs .tab.active');
+      document.getElementById('admin-ingest-session-name').textContent = document.getElementById('top-session-name').textContent || 'this session';
+      // Refresh whichever sub-section is currently active
+      const activeSub = document.querySelector('#panel-admin .admin-nav-item.active');
       const name = activeSub ? activeSub.dataset.target : 'ingest';
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
+      // Badge the Review Queue nav item even when it isn't the active section
+      refreshAdminReviewBadge();
     }
 
     function switchAdminTab(name, el) {
-      document.querySelectorAll('#adminSubTabs .tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
       ['ingest', 'documents', 'wiki', 'review'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
@@ -3816,30 +4080,63 @@
       else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
     }
 
+    async function refreshAdminReviewBadge() {
+      try {
+        const res = await fetch(`/review_queue?session_id=${SID}`);
+        const data = await res.json();
+        const n = (data.clauses || []).length;
+        const badge = document.getElementById('admin-review-badge');
+        badge.textContent = n;
+        badge.classList.toggle('d-none', n === 0);
+      } catch (e) { /* non-critical */ }
+    }
+
+    function _ingestStatusMeta(status) {
+      if (status === 'done') return { label: 'indexed', cls: 'green' };
+      if (status === 'error') return { label: 'error', cls: 'red' };
+      if (status === 'awaiting_confirmation') return { label: 'awaiting confirm', cls: 'amber' };
+      return { label: status || 'queued', cls: 'muted' };
+    }
+
     async function loadAdminIngestStatus() {
-      const el = document.getElementById('admin-ingest-status');
-      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      const statsEl = document.getElementById('admin-ingest-stats');
+      const listEl = document.getElementById('admin-ingest-status');
+      listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
       try {
         const res = await fetch(`/progress?session_id=${SID}`);
         const data = await res.json();
         const docs = data.docs_list || [];
+
+        const counts = { total: docs.length, indexed: 0, processing: 0, errors: 0 };
+        docs.forEach(d => {
+          if (d.status === 'done') counts.indexed++;
+          else if (d.status === 'error') counts.errors++;
+          else counts.processing++;
+        });
+        statsEl.innerHTML = `
+          <div class="admin-stat-tile"><div class="admin-stat-val">${counts.total}</div><div class="admin-stat-label">Total documents</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--green-border)"><div class="admin-stat-val" style="color:var(--green-text)">${counts.indexed}</div><div class="admin-stat-label">Indexed</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--accent-border)"><div class="admin-stat-val" style="color:var(--accent)">${counts.processing}</div><div class="admin-stat-label">Processing / queued</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--red-border)"><div class="admin-stat-val" style="color:var(--red)">${counts.errors}</div><div class="admin-stat-label">Errors</div></div>
+        `;
+
         if (!docs.length) {
-          el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No ingest activity for this session yet.</div>';
+          listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No ingest activity for this session yet.</div>';
           return;
         }
-        const statusColor = s => s === 'done' ? 'var(--green,#1a7f37)' : s === 'error' ? 'var(--red)' : s === 'awaiting_confirmation' ? 'var(--amber)' : 'var(--text-muted)';
-        el.innerHTML = `<div class="ftree-row" style="border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)">
-            Phase: <strong style="color:var(--text-primary);margin-left:4px">${escapeHtmlRule(data.phase || 'idle')}</strong>
-            <span style="margin-left:auto">${data.docs?.wiki_done || 0} / ${data.docs?.total || 0} docs done</span>
-          </div>` +
-          docs.map(d => `<div class="ftree-row">
-              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted)"></i>
+        listEl.innerHTML = docs.map(d => {
+          const meta = _ingestStatusMeta(d.status);
+          return `<div class="admin-row">
+              <i class="ti ti-file-text" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
               <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px">${escapeHtmlRule(d.name)}</span>
-              <span style="font-size:11px;color:${statusColor(d.status)};flex-shrink:0">${escapeHtmlRule(d.status)}${d.pages ? ` · ${d.pages} pages` : ''}</span>
-            </div>`).join('');
+              <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${d.pages ? `${d.pages} pages` : ''}</span>
+              <span class="admin-badge ${meta.cls}" style="flex-shrink:0;width:96px;text-align:center">${meta.label}</span>
+            </div>`;
+        }).join('');
       } catch (e) {
         console.error('loadAdminIngestStatus error:', e);
-        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load ingest status.</div>';
+        statsEl.innerHTML = '';
+        listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load ingest status.</div>';
       }
     }
 
@@ -3871,30 +4168,36 @@
 
     async function loadAdminWikiPages() {
       const el = document.getElementById('admin-wiki-page-list');
+      const sub = document.getElementById('admin-wiki-sub');
       el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
       try {
         const res = await fetch(`/admin/wiki/pages?session_id=${SID}`);
         const data = await res.json();
         const pages = data.pages || [];
+        sub.textContent = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
         if (!pages.length) {
           el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No wiki pages yet.</div>';
           return;
         }
-        el.innerHTML = pages.map(p => {
+        const header = `<div class="admin-row" style="font-size:10.5px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding-top:9px;padding-bottom:9px">
+            <span style="flex:1">Title</span>
+            <span style="width:150px">Source</span>
+            <span style="width:70px;text-align:right">Chars</span>
+            <span style="width:96px;text-align:right">Actions</span>
+          </div>`;
+        el.innerHTML = header + pages.map(p => {
           const escTitle = p.title.replace(/'/g, "\\'");
           const flag = p.contradiction_flagged
-            ? `<span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:var(--red);background:var(--red-light,#fee);border:1px solid var(--red-border,#fbb);border-radius:10px;padding:2px 8px;margin-left:8px">contradiction</span>`
+            ? `<i class="ti ti-alert-triangle" style="color:var(--red);font-size:13px;flex-shrink:0" title="Contradiction flagged"></i>`
             : '';
-          return `<div class="ftree-row" style="align-items:flex-start">
-              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted);margin-top:2px"></i>
-              <span style="flex:1;min-width:0">
-                <div style="font-size:12.5px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(p.title)}${flag}</div>
-                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${escapeHtmlRule(p.source_doc || '')} · ${p.char_count || 0} chars</div>
-              </span>
-              <span style="display:flex;gap:6px;flex-shrink:0">
-                <button type="button" class="ftree-manage-btn" title="Rename this page" onclick="adminRenamePage('${escTitle}')"><i class="ti ti-edit"></i> Rename</button>
-                <button type="button" class="ftree-manage-btn" title="Merge this page into another" onclick="adminMergePage('${escTitle}')"><i class="ti ti-git-merge"></i> Merge</button>
-                <button type="button" class="ftree-manage-btn danger" title="Delete this page" onclick="adminDeletePage('${escTitle}')"><i class="ti ti-trash"></i> Delete</button>
+          return `<div class="admin-row">
+              <span style="flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px">${escapeHtmlRule(p.title)}${flag}</span>
+              <span style="width:150px;font-size:11.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(p.source_doc || '')}</span>
+              <span style="width:70px;text-align:right;font-size:11.5px;color:var(--text-muted)">${p.char_count || 0}</span>
+              <span style="width:96px;display:flex;gap:5px;justify-content:flex-end">
+                <button type="button" class="admin-icon-btn" title="Rename" onclick="adminRenamePage('${escTitle}')"><i class="ti ti-edit" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" title="Merge into another page" onclick="adminMergePage('${escTitle}')"><i class="ti ti-git-merge" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn danger" title="Delete" onclick="adminDeletePage('${escTitle}')"><i class="ti ti-trash" style="font-size:13px"></i></button>
               </span>
             </div>`;
         }).join('');
@@ -3965,13 +4268,20 @@
 
     async function loadAdminReviewQueue() {
       const el = document.getElementById('admin-review-queue-list');
+      const sub = document.getElementById('admin-review-sub');
       el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
       try {
         const res = await fetch(`/review_queue?session_id=${SID}`);
         const data = await res.json();
         reviewQueueItems = data.clauses || [];
         reviewQueueSelected = reviewQueueItems.length ? 0 : -1;
+        const highCount = reviewQueueItems.filter(c => c.stakes === 'high').length;
+        const lowCount = reviewQueueItems.length - highCount;
+        sub.textContent = `${reviewQueueItems.length} pending · ${highCount} high-stakes · ${lowCount} low-stakes`;
         renderReviewQueue();
+        const badge = document.getElementById('admin-review-badge');
+        badge.textContent = reviewQueueItems.length;
+        badge.classList.toggle('d-none', reviewQueueItems.length === 0);
       } catch (e) {
         console.error('loadAdminReviewQueue error:', e);
         el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load the Review Queue.</div>';
@@ -3979,7 +4289,10 @@
     }
 
     function _confidenceColor(c) {
-      return c >= 0.8 ? 'var(--green,#1a7f37)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
+      return c >= 0.8 ? 'var(--green-text)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
+    }
+    function _confidenceBarColor(c) {
+      return c >= 0.8 ? 'var(--green)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
     }
 
     function renderReviewQueue() {
@@ -3988,35 +4301,42 @@
         el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Nothing pending — every extracted clause has been reviewed.</div>';
         return;
       }
-      const rowHtml = (c, idx) => {
+      const cardHtml = (c, idx, badgeClass) => {
         const selected = idx === reviewQueueSelected;
-        return `<div class="ftree-row" style="align-items:flex-start;${selected ? 'background:var(--bg-hover)' : ''}" onclick="reviewQueueSelected=${idx};renderReviewQueue()">
-            <span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:${_confidenceColor(c.confidence)};flex-shrink:0;margin-top:2px;width:38px">${Math.round(c.confidence * 100)}%</span>
-            <span style="flex:1;min-width:0">
-              <div style="font-size:12.5px;color:var(--text-primary);font-weight:500">${escapeHtmlRule(c.clause_type)}</div>
-              <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;white-space:pre-wrap">${escapeHtmlRule(c.verbatim_text)}</div>
-              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${escapeHtmlRule(c.source_doc || '')}${c.page_num ? ` · page ${c.page_num}` : ''}</div>
-            </span>
-            <span style="display:flex;gap:6px;flex-shrink:0">
-              <button type="button" class="ftree-manage-btn" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept')"><i class="ti ti-check"></i></button>
-              <button type="button" class="ftree-manage-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id})"><i class="ti ti-edit"></i></button>
-              <button type="button" class="ftree-manage-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject')"><i class="ti ti-x"></i></button>
-            </span>
+        const pct = Math.round(c.confidence * 100);
+        return `<div class="review-card${selected ? ' selected' : ''}" onclick="reviewQueueSelected=${idx};renderReviewQueue()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+              <span class="admin-badge ${badgeClass}">${escapeHtmlRule(c.clause_type)}</span>
+              <span style="display:flex;align-items:center;gap:6px">
+                <span class="review-conf-track"><span class="review-conf-fill" style="width:${pct}%;background:${_confidenceBarColor(c.confidence)}"></span></span>
+                <span style="font-size:11px;font-weight:700;font-family:var(--font-mono,monospace);color:${_confidenceColor(c.confidence)}">${pct}%</span>
+              </span>
+            </div>
+            <div style="font-size:12.5px;line-height:1.55;color:var(--text-primary);font-style:italic">&ldquo;${escapeHtmlRule(c.verbatim_text)}&rdquo;</div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:11px">
+              <span style="font-size:11px;color:var(--text-muted)">${escapeHtmlRule(c.source_doc || '')}${c.page_num ? ` · p.${c.page_num}` : ''}</span>
+              <span style="display:flex;gap:5px">
+                <button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept')"><i class="ti ti-check" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id})"><i class="ti ti-edit" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject')"><i class="ti ti-x" style="font-size:13px"></i></button>
+              </span>
+            </div>
           </div>`;
       };
       const highStakes = [];
       const lowStakes = [];
       reviewQueueItems.forEach((c, idx) => (c.stakes === 'high' ? highStakes : lowStakes).push([c, idx]));
-      let html = '';
-      if (highStakes.length) {
-        html += `<div style="font-size:11px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:.04em;padding:10px 14px 4px">High-stakes — individual sign-off only (${highStakes.length})</div>`;
-        html += highStakes.map(([c, idx]) => rowHtml(c, idx)).join('');
-      }
-      if (lowStakes.length) {
-        html += `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding:10px 14px 4px">Low-stakes — bulk-eligible (${lowStakes.length})</div>`;
-        html += lowStakes.map(([c, idx]) => rowHtml(c, idx)).join('');
-      }
-      el.innerHTML = `<div class="ftree" style="margin:0">${html}</div>`;
+      const emptyTier = 'Nothing pending in this tier.';
+      el.innerHTML = `<div class="review-cols">
+          <div>
+            <div class="review-col-head" style="color:var(--red)"><span style="width:7px;height:7px;border-radius:50%;background:var(--red)"></span>High-stakes — individual sign-off only</div>
+            ${highStakes.length ? highStakes.map(([c, idx]) => cardHtml(c, idx, 'red')).join('') : `<div class="admin-card" style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">${emptyTier}</div>`}
+          </div>
+          <div>
+            <div class="review-col-head" style="color:var(--text-muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--text-muted)"></span>Low-stakes — bulk-eligible</div>
+            ${lowStakes.length ? lowStakes.map(([c, idx]) => cardHtml(c, idx, 'muted')).join('') : `<div class="admin-card" style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">${emptyTier}</div>`}
+          </div>
+        </div>`;
     }
 
     async function adminResolveClause(clauseId, action, editedText) {
@@ -6932,11 +7252,13 @@
 
     async function loadDocumentManageList() {
       const manageDiv = document.getElementById('document-manage-list');
+      const sub = document.getElementById('admin-documents-sub');
       manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
       try {
         const res = await fetch(`/document/list?session_id=${SID}`);
         const data = await res.json();
         const docs = data.documents || [];
+        sub.textContent = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
         if (!docs.length) {
           manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No documents ingested yet.</div>';
           return;
@@ -6945,17 +7267,14 @@
           const archived = doc.status === 'archived';
           const escPath = doc.path.replace(/'/g, "\\'");
           const escSrc = doc.source_doc.replace(/'/g, "\\'");
-          const statusBadge = archived
-            ? `<span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:var(--amber);background:var(--amber-light);border:1px solid var(--amber-border);border-radius:10px;padding:2px 8px;margin-left:8px">archived</span>`
-            : '';
           const actionBtns = archived
-            ? `<button type="button" class="ftree-manage-btn" title="Restore to active" onclick="restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate"></i> Restore</button>
-               <button type="button" class="ftree-manage-btn danger" title="Permanently delete" onclick="deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash"></i> Delete</button>`
-            : `<button type="button" class="ftree-manage-btn" title="Archive — hides from search/chat, fully reversible" onclick="archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive"></i> Archive</button>`;
-          return `<div class="ftree-row" style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border)">
-              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted)"></i>
-              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:${archived ? 'var(--text-muted)' : 'var(--text-primary)'};${archived ? 'text-decoration:line-through' : ''}" title="${doc.path.replace(/"/g, '&quot;')}">${doc.path}</span>
-              ${statusBadge}
+            ? `<button type="button" class="admin-icon-btn" title="Restore to active" onclick="restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate" style="font-size:13px"></i></button>
+               <button type="button" class="admin-icon-btn danger" title="Permanently delete" onclick="deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash" style="font-size:13px"></i></button>`
+            : `<button type="button" class="admin-icon-btn" title="Archive — hides from search/chat, fully reversible" onclick="archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`;
+          return `<div class="admin-row">
+              <i class="ti ti-file-text" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;${archived ? 'color:var(--text-muted);text-decoration:line-through' : ''}" title="${doc.path.replace(/"/g, '&quot;')}">${escapeHtmlRule(doc.path)}</span>
+              <span class="admin-badge ${archived ? 'amber' : 'green'}" style="flex-shrink:0">${archived ? 'archived' : 'active'}</span>
               <span style="display:flex;gap:6px;flex-shrink:0">${actionBtns}</span>
             </div>`;
         }).join('');
