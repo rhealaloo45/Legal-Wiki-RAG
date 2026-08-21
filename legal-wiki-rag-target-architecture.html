@@ -1016,10 +1016,11 @@
         </div>
 
         <div class="qmode">
-          <h4>Compare</h4>
+          <h4>Compare <span class="badge done">shipped</span></h4>
           <div class="row"><div class="k">Today</div><div class="v">Same worker as Review Table but no metadata-cache check at all, full-model narrative call, no doc-count cap.</div></div>
           <div class="row"><div class="k">Target</div><div class="v">Identical fixes as Review Table: cache check, fast-model narrative call, document-scoped retrieval, 20-doc cap.</div></div>
           <div class="row cost"><div class="k">Cost</div><div class="v">Up to ~₹26 worst-case → ~₹0.60 typical, ~₹10 worst-case</div></div>
+          <div class="row"><div class="k" style="color:var(--done)">Verified</div><div class="v">Confirmed against <code>advanced_modes.py</code> — <code>_lookup_cached_metadata</code> gates every extraction, <code>_get_wiki_text_for_doc</code> uses hybrid retrieval (truncation only as a documented last-resort fallback), all calls run on <code>llm.fast_ask</code>, and <code>_chunk_docs</code>/<code>MAX_DOC_SELECTION</code> cap concurrency identically to Review Table — same functions, not parallel copies. Landed pre-session in <code>00187fc</code>; not new work this pass, confirmed by code review only, no LLM calls spent verifying it.</div></div>
         </div>
 
         <div class="qmode">
@@ -1079,7 +1080,7 @@
         <div class="phase">
           <div class="phase-label">Phase 0, parallel<span class="sub">Independent</span></div>
           <div>
-            <div class="phase-items">Compare Mode cost fix <span style="color:var(--gold);">· Basic single-user login (hashed passwords, rate-limited) · Admin document lifecycle (add/archive/delete) · File-upload validation · Cost pre-flight gate on bulk operations</span></div>
+            <div class="phase-items"><span style="color:var(--done);">Compare Mode cost fix · Basic single-user login (hashed passwords, rate-limited) · Admin document lifecycle (add/archive/delete)</span> <span style="color:var(--gold);">· File-upload validation · Cost pre-flight gate on bulk operations</span></div>
             <p class="phase-desc">Compare Mode fix doesn't touch ingestion: port the metadata-cache check, drop the narrative call to the fast model, replace truncate-at-6,000-chars with document-scoped hybrid retrieval. Login is a straightforward auth layer with no schema dependency — password hashing and rate-limiting are floor requirements on it, not a later hardening pass. File-upload validation sits at the pipeline's front door, independent of what the schema inside looks like. Add/archive/delete need no backbone dependency either — <strong style="color:var(--gold)">re-ingest</strong> is the one admin-lifecycle action that does depend on Phase 0's schema-version stamping, so it ships once that stamp exists, not before. The cost pre-flight gate wraps any bulk operation (bulk upload, re-ingest by family, wiki-wide reprocess) regardless of which phase that operation itself belongs to.</p>
           </div>
         </div>
@@ -1161,7 +1162,7 @@
             <ul style="margin-bottom:8px;">
               <li><strong style="color:var(--gold)">Login</strong> <span class="badge done">shipped</span> — hashed password, rate-limited, HTTPS-only session. Trivial, zero dependency: build first, gives a working gated shell immediately.</li>
               <li><strong>Admin lifecycle:</strong> <span class="badge done">shipped</span> Add (default path already established) + Archive / Hard-delete with cascade handling on <code>relations</code>/embeddings.</li>
-              <li><strong>Compare Mode cost fix:</strong> metadata-cache check, fast-model narrative call, document-scoped hybrid retrieval instead of truncation, 20-doc cap.</li>
+              <li><strong>Compare Mode cost fix:</strong> <span class="badge done">shipped</span> metadata-cache check, fast-model narrative call, document-scoped hybrid retrieval instead of truncation, 20-doc cap. Pre-existing (<code>00187fc</code>), confirmed by code review this pass — see § 05.</li>
               <li><strong>File-upload validation gate</strong> — malformed/malicious PDF handling, before parsing starts.</li>
               <li><strong>Cost pre-flight gate</strong> on bulk operations (bulk upload, re-ingest by family, wiki-wide reprocess).</li>
             </ul>
