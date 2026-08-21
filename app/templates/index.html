@@ -5198,7 +5198,33 @@
           showToast(`${d.rejected.length} file(s) skipped: ${d.rejected.map(r => `${r.filename} (${r.reason})`).join('; ')}`, 'error');
         }
 
-        totalFilesQueued = d.files_queued || 0;
+        if (d.status === 'confirm_required') {
+          // Cost pre-flight gate tripped (bulk-sized batch) — files are
+          // already saved, just not queued for ingest yet. See services/cost_estimate.py.
+          const est = d.estimate || {};
+          const cost = (est.estimated_cost_usd ?? 0).toFixed(2);
+          const msg = `Bulk upload: ${est.document_count ?? stagedFiles.length} file(s), ` +
+            `~${est.estimated_llm_calls ?? '?'} LLM calls, ~$${cost} estimated cost.\n\nProceed with ingestion?`;
+          if (!window.confirm(msg)) {
+            document.getElementById('ingest-dash').classList.add('d-none');
+            document.getElementById('upload-zone').style.display = '';
+            document.getElementById('pick-btns-wrap').classList.remove('d-none');
+            document.getElementById('upl-title-wrap').style.display = '';
+            document.getElementById('upload-btn').disabled = false;
+            showToast('Upload cancelled', 'error');
+            return;
+          }
+          const cRes = await fetch(`/resume_ingest?session_id=${SID}&confirm=true`);
+          const cData = await cRes.json();
+          if (cData.error) {
+            showToast(cData.error, 'error');
+            document.getElementById('upload-btn').disabled = false;
+            return;
+          }
+          totalFilesQueued = cData.resuming || 0;
+        } else {
+          totalFilesQueued = d.files_queued || 0;
+        }
 
         const pollTimer = setInterval(async () => {
           try {
