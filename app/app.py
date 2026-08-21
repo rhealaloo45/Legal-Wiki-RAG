@@ -27,7 +27,7 @@ import threading
 
 from flask import (
     Flask, render_template, request, jsonify, Response, stream_with_context,
-    session, redirect, url_for,
+    session, redirect, url_for, has_request_context,
 )
 
 # Ensure project root is on the path so `import config` works
@@ -911,12 +911,29 @@ def locate_in_document():
     return jsonify({"found": False, "page_num": 0, "char_offset": 0})
 
 
+def _current_user_id():
+    """Authenticated user id, or None when auth is off or there's no request.
+
+    Guarded rather than reading session directly: the /query writer runs
+    inside a stream_with_context generator (request context alive, fine), but
+    a future caller on a plain background thread would otherwise raise instead
+    of just recording an unattributed message.
+    """
+    try:
+        if has_request_context():
+            return session.get("user_id")
+    except Exception:
+        pass
+    return None
+
+
 def _store_chat_msg(session_id, role, content, msg_type="text", metadata=None):
     """Insert a chat message if DB is enabled, otherwise no-op."""
     if config.USE_DATABASE:
         from services import db as _db
         try:
-            return _db.insert_message(session_id, role, content, msg_type, metadata)
+            return _db.insert_message(session_id, role, content, msg_type, metadata,
+                                      user_id=_current_user_id())
         except Exception as e:
             logger.error("Failed to store chat message: %s", e)
     return None

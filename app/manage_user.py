@@ -11,6 +11,7 @@ Usage (from the repo root, with the venv active):
     python app/manage_user.py set-password admin
     python app/manage_user.py list
     python app/manage_user.py prune-attempts 90
+    python app/manage_user.py backfill-chat-owner admin
 
 Runs against whatever DATABASE_URL the current .env points at — check with
 `app/switch-env.ps1` first if you keep per-branch env files.
@@ -67,6 +68,38 @@ def cmd_list() -> None:
         print(f"{r['username']:<24} {r['role']:<10} {created:<22} {last}")
 
 
+def cmd_backfill_chat_owner(username: str) -> None:
+    """Assign every unattributed chat_messages row to one account.
+
+    Only correct while exactly one account exists — then every historical
+    message provably belongs to it. Refuses to run otherwise rather than
+    silently mis-attributing another user's history. See the user_id column
+    comment in services/db.py.
+    """
+    from sqlalchemy import text
+    from services import db
+
+    total = auth.user_count()
+    if total != 1:
+        _fail(
+            f"{total} accounts exist. Backfill is only unambiguous with exactly one — "
+            "with more, historical messages can't be attributed automatically."
+        )
+
+    user = auth.get_user(username)
+    if not user:
+        _fail(f"No such account: {username!r}")
+
+    with db.get_engine().connect() as conn:
+        updated = conn.execute(
+            text("UPDATE chat_messages SET user_id = :uid WHERE user_id IS NULL"),
+            {"uid": user["id"]},
+        ).rowcount
+        conn.commit()
+
+    print(f"Attributed {updated} previously unowned chat message(s) to {username!r}.")
+
+
 def cmd_prune_attempts(days: int) -> None:
     deleted = auth.prune_old_attempts(days)
     print(f"Deleted {deleted} login attempt record(s) older than {days} days.")
@@ -90,8 +123,15 @@ def main() -> None:
         cmd_list()
     elif cmd == "prune-attempts":
         cmd_prune_attempts(int(args[1]) if len(args) > 1 else 90)
+    elif cmd == "backfill-chat-owner":
+        if len(args) < 2:
+            _fail("Usage: manage_user.py backfill-chat-owner <username>")
+        cmd_backfill_chat_owner(args[1])
     else:
-        _fail(f"Unknown command {cmd!r}. Expected: set-password | list | prune-attempts")
+        _fail(
+            f"Unknown command {cmd!r}. Expected: "
+            "set-password | list | prune-attempts | backfill-chat-owner"
+        )
 
 
 if __name__ == "__main__":
