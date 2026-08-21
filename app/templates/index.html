@@ -4023,6 +4023,7 @@
     function switchTab(name, el) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
+      document.getElementById('sidebar').style.display = '';
       document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
@@ -4053,6 +4054,10 @@
       document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
       document.getElementById('doc-reader').style.display = 'none';
       document.querySelectorAll('#modeTabs .tab').forEach(t => t.classList.remove('active'));
+      // Admin is its own dedicated view, not a chat surface — the session
+      // sidebar has nothing to do with it, so it goes away while open
+      // rather than sitting between the topbar and the admin nav rail.
+      document.getElementById('sidebar').style.display = 'none';
       const ap = document.getElementById('panel-admin');
       ap.style.setProperty('display', 'flex', 'important');
       document.getElementById('admin-ingest-session-name').textContent = document.getElementById('top-session-name').textContent || 'this session';
@@ -4166,6 +4171,16 @@
       }
     }
 
+    // source_doc is "<session_id>_<relative/path/flattened/with/underscores>"
+    // (see flatten_doc_key in services/documents.py) — the UUID prefix is
+    // meaningless to a human and, being first, is exactly what a
+    // left-to-right ellipsis keeps while cutting off the actual filename.
+    // Strip the prefix, and truncate from the front (not the end) so the
+    // filename — always last, extension included — stays visible.
+    function _shortSourceDoc(sourceDoc) {
+      return (sourceDoc || '').replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/i, '');
+    }
+
     async function loadAdminWikiPages() {
       const el = document.getElementById('admin-wiki-page-list');
       const sub = document.getElementById('admin-wiki-sub');
@@ -4190,9 +4205,10 @@
           const flag = p.contradiction_flagged
             ? `<i class="ti ti-alert-triangle" style="color:var(--red);font-size:13px;flex-shrink:0" title="Contradiction flagged"></i>`
             : '';
+          const shortSource = _shortSourceDoc(p.source_doc);
           return `<div class="admin-row">
               <span style="flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px">${escapeHtmlRule(p.title)}${flag}</span>
-              <span style="width:150px;font-size:11.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(p.source_doc || '')}</span>
+              <span style="width:150px;font-size:11.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left" title="${escapeHtmlRule(p.source_doc || '')}">${escapeHtmlRule(shortSource)}</span>
               <span style="width:70px;text-align:right;font-size:11.5px;color:var(--text-muted)">${p.char_count || 0}</span>
               <span style="width:96px;display:flex;gap:5px;justify-content:flex-end">
                 <button type="button" class="admin-icon-btn" title="Rename" onclick="adminRenamePage('${escTitle}')"><i class="ti ti-edit" style="font-size:13px"></i></button>
