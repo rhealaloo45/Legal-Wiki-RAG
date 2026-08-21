@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Legal Wiki RAG — Target Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0E1012;
+    --bg-elev:#16181B;
+    --bg-elev-2:#1C1F23;
+    --border:#2A2D31;
+    --border-soft:#212327;
+    --text:#E7E4DD;
+    --text-dim:#A6A29B;
+    --text-faint:#6B6862;
+    --gold:#C9A227;
+    --gold-dim:#8f7420;
+    --teal:#4F9B9D;
+    --teal-dim:#2f5c5d;
+    --grey-badge:#6b6f75;
+    --flag:#C97A57;
+    --flag-dim:#7a4530;
+    --done:#5BAE6B;
+    --done-dim:#356b3f;
+    --font-display:'Fraunces', serif;
+    --font-body:'IBM Plex Sans', -apple-system, sans-serif;
+    --font-mono:'IBM Plex Mono', monospace;
+    --maxw:920px;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--font-body);
+    font-size:16px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit;}
+
+  /* ---------- layout shell ---------- */
+  .shell{
+    display:grid;
+    grid-template-columns:240px minmax(0,1fr);
+    max-width:1280px;
+    margin:0 auto;
+  }
+  @media (max-width:900px){
+    .shell{grid-template-columns:1fr;}
+    .toc{position:relative; top:0; height:auto; border-right:none; border-bottom:1px solid var(--border);}
+  }
+
+  /* ---------- TOC ---------- */
+  .toc{
+    position:sticky;
+    top:0;
+    align-self:start;
+    height:100vh;
+    overflow-y:auto;
+    padding:32px 20px 40px 28px;
+    border-right:1px solid var(--border-soft);
+  }
+  .toc-brand{
+    font-family:var(--font-mono);
+    font-size:11px;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+    color:var(--gold);
+    margin-bottom:6px;
+  }
+  .toc-title{
+    font-family:var(--font-display);
+    font-size:17px;
+    font-weight:600;
+    color:var(--text);
+    margin-bottom:28px;
+    line-height:1.3;
+  }
+  .toc nav a{
+    display:block;
+    font-size:13px;
+    color:var(--text-dim);
+    text-decoration:none;
+    padding:6px 0;
+    border-left:2px solid transparent;
+    padding-left:12px;
+    margin-left:-13px;
+    transition:color .15s ease, border-color .15s ease;
+  }
+  .toc nav a:hover{color:var(--text); border-left-color:var(--border);}
+  .toc nav a.new-marker::after{
+    content:"";
+    display:inline-block;
+    width:5px; height:5px;
+    border-radius:50%;
+    background:var(--gold);
+    margin-left:7px;
+    vertical-align:middle;
+  }
+  .toc-group-label{
+    font-family:var(--font-mono);
+    font-size:10px;
+    letter-spacing:.1em;
+    text-transform:uppercase;
+    color:var(--text-faint);
+    margin:22px 0 4px;
+  }
+
+  /* ---------- main column ---------- */
+  main{padding:56px 40px 120px; min-width:0;}
+  @media (max-width:900px){ main{padding:40px 24px 100px;} }
+  .doc{max-width:var(--maxw);}
+
+  header.masthead{margin-bottom:8px;}
+  .eyebrow{
+    font-family:var(--font-mono);
+    font-size:12px;
+    letter-spacing:.14em;
+    text-transform:uppercase;
+    color:var(--gold);
+    margin-bottom:14px;
+  }
+  h1.title{
+    font-family:var(--font-display);
+    font-weight:600;
+    font-size:clamp(34px, 4.4vw, 50px);
+    line-height:1.08;
+    margin:0 0 18px;
+    letter-spacing:-.01em;
+  }
+  .lede{
+    font-size:17.5px;
+    color:var(--text-dim);
+    max-width:700px;
+    margin:0 0 28px;
+  }
+
+  .revision-note{
+    background:var(--bg-elev);
+    border:1px solid var(--border);
+    border-left:3px solid var(--gold);
+    border-radius:2px;
+    padding:16px 20px;
+    font-size:14px;
+    color:var(--text-dim);
+    margin:0 0 48px;
+  }
+  .revision-note strong{color:var(--text); font-weight:600;}
+
+  /* ---------- legend ---------- */
+  .legend{
+    display:flex; flex-wrap:wrap; gap:20px;
+    padding:18px 0 40px;
+    border-bottom:1px solid var(--border-soft);
+    margin-bottom:44px;
+  }
+  .legend-item{display:flex; align-items:center; gap:9px; font-size:13px; color:var(--text-dim);}
+  .dot{width:9px; height:9px; border-radius:50%; flex:none;}
+  .dot.new{background:var(--gold);}
+  .dot.ext{background:var(--teal);}
+  .dot.unc{background:var(--grey-badge);}
+  .dot.flag{background:var(--flag);}
+
+  /* ---------- section chrome ---------- */
+  section{margin-bottom:76px; scroll-margin-top:24px;}
+  section.subsection{margin-bottom:56px;}
+  .section-num{
+    font-family:var(--font-mono);
+    font-size:13px;
+    color:var(--text-faint);
+    letter-spacing:.05em;
+  }
+  h2.section-title{
+    font-family:var(--font-display);
+    font-weight:600;
+    font-size:30px;
+    margin:6px 0 6px;
+    letter-spacing:-.01em;
+  }
+  .section-kicker{
+    font-size:15px;
+    color:var(--text-dim);
+    max-width:680px;
+    margin:0 0 30px;
+  }
+  h3.sub-title{
+    font-family:var(--font-display);
+    font-weight:600;
+    font-size:21px;
+    margin:0 0 6px;
+  }
+  p{margin:0 0 16px; color:var(--text);}
+  p.dim{color:var(--text-dim);}
+  ul, ol{margin:0 0 16px; padding-left:22px;}
+  li{margin-bottom:8px; color:var(--text);}
+  code, .mono{font-family:var(--font-mono); font-size:.92em;}
+  code{
+    background:var(--bg-elev-2);
+    border:1px solid var(--border-soft);
+    padding:1px 6px;
+    border-radius:3px;
+    color:var(--teal);
+  }
+
+  /* ---------- badges ---------- */
+  .badge{
+    display:inline-flex;
+    align-items:center;
+    gap:6px;
+    font-family:var(--font-mono);
+    font-size:10.5px;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    padding:3px 9px 3px 8px;
+    border-radius:20px;
+    border:1px solid transparent;
+    white-space:nowrap;
+  }
+  .badge.new{color:var(--gold); border-color:var(--gold-dim); background:rgba(201,162,39,.08);}
+  .badge.ext{color:var(--teal); border-color:var(--teal-dim); background:rgba(79,155,157,.08);}
+  .badge.unc{color:var(--grey-badge); border-color:#3a3d42; background:rgba(107,111,117,.06);}
+  .badge.flag{color:var(--flag); border-color:var(--flag-dim); background:rgba(201,122,87,.09);}
+  .badge.done{color:var(--done); border-color:var(--done-dim); background:rgba(91,174,107,.1);}
+  .dot.done{background:var(--done);}
+
+  /* ---------- pipeline stage strip ---------- */
+  .stage-strip{
+    display:grid;
+    grid-template-columns:repeat(7, 1fr);
+    gap:2px;
+    background:var(--border-soft);
+    border:1px solid var(--border);
+    border-radius:6px;
+    overflow:hidden;
+    margin-bottom:14px;
+  }
+  @media (max-width:760px){ .stage-strip{grid-template-columns:repeat(2,1fr);} }
+  .stage-cell{
+    background:var(--bg-elev);
+    padding:16px 12px;
+    text-align:center;
+  }
+  .stage-cell .num{font-family:var(--font-mono); font-size:11px; color:var(--text-faint); margin-bottom:8px;}
+  .stage-cell .label{font-size:13px; font-weight:500; line-height:1.3; margin-bottom:10px; min-height:34px;}
+  .stage-cell .tag{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em;}
+  .stage-cell .tag.new{color:var(--gold);}
+  .stage-cell .tag.ext{color:var(--teal);}
+  .stage-cell .tag.unc{color:var(--grey-badge);}
+  .fig-caption{
+    font-size:12.5px;
+    color:var(--text-faint);
+    margin:0 0 40px;
+    font-style:normal;
+  }
+
+  /* ---------- stage detail cards ---------- */
+  .stage-card{
+    border:1px solid var(--border);
+    border-radius:6px;
+    background:var(--bg-elev);
+    padding:22px 24px;
+    margin-bottom:16px;
+  }
+  .stage-card-head{
+    display:flex;
+    align-items:center;
+    gap:12px;
+    margin-bottom:10px;
+  }
+  .stage-card-head .num{font-family:var(--font-mono); color:var(--text-faint); font-size:13px;}
+  .stage-card-head h4{
+    font-family:var(--font-display);
+    font-weight:600;
+    font-size:17px;
+    margin:0;
+    flex:1;
+  }
+  .stage-card p:last-child{margin-bottom:0;}
+  .callout{
+    border:1px solid var(--border);
+    border-left:3px solid var(--teal);
+    background:var(--bg-elev);
+    border-radius:2px;
+    padding:16px 20px;
+    margin:18px 0;
+  }
+  .callout.flag{border-left-color:var(--flag);}
+  .callout p:last-child{margin-bottom:0;}
+  .callout-label{
+    font-family:var(--font-mono);
+    font-size:11px;
+    letter-spacing:.08em;
+    text-transform:uppercase;
+    color:var(--teal);
+    margin-bottom:8px;
+  }
+  .callout.flag .callout-label{color:var(--flag);}
+
+  /* ---------- flow diagram (simple css) ---------- */
+  .flow{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:0;
+    margin:22px 0 10px;
+    padding:24px;
+    background:var(--bg-elev);
+    border:1px solid var(--border);
+    border-radius:6px;
+  }
+  .flow-node{
+    font-size:13px;
+    padding:10px 14px;
+    border:1px solid var(--border);
+    border-radius:5px;
+    background:var(--bg-elev-2);
+    text-align:center;
+    line-height:1.3;
+  }
+  .flow-node.unchanged{border-style:dashed; color:var(--text-dim);}
+  .flow-node.new{border-color:var(--gold-dim); color:var(--gold);}
+  .flow-node.ext{border-color:var(--teal-dim); color:var(--teal);}
+  .flow-node.flag{border-color:var(--flag-dim); color:var(--flag);}
+  .flow-arrow{
+    font-family:var(--font-mono);
+    color:var(--text-faint);
+    padding:0 10px;
+    font-size:14px;
+  }
+  .flow-branch-label{
+    font-family:var(--font-mono);
+    font-size:11px;
+    color:var(--text-faint);
+    width:100%;
+    margin:8px 0 -4px 2px;
+  }
+
+  /* ---------- family cards ---------- */
+  .family-grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:14px;
+    margin:20px 0 8px;
+  }
+  @media (max-width:700px){ .family-grid{grid-template-columns:1fr;} }
+  .family-card{
+    border:1px solid var(--border);
+    border-radius:6px;
+    padding:18px 20px;
+    background:var(--bg-elev);
+  }
+  .family-card .fam-num{font-family:var(--font-mono); font-size:11px; color:var(--gold); margin-bottom:6px;}
+  .family-card h4{font-family:var(--font-display); font-size:16.5px; font-weight:600; margin:0 0 6px;}
+  .family-card .folders{font-size:12px; color:var(--text-faint); margin-bottom:10px; font-family:var(--font-mono); line-height:1.5;}
+  .family-card p{font-size:13.5px; color:var(--text-dim); margin:0;}
+
+  /* ---------- storage table ---------- */
+  .db-table{
+    border:1px solid var(--border);
+    border-radius:6px;
+    overflow:hidden;
+    margin:20px 0 8px;
+  }
+  .db-row{
+    display:grid;
+    grid-template-columns:180px 90px 1fr;
+    gap:16px;
+    padding:16px 20px;
+    border-bottom:1px solid var(--border-soft);
+    align-items:start;
+  }
+  .db-row:last-child{border-bottom:none;}
+  .db-row:nth-child(odd){background:var(--bg-elev);}
+  @media (max-width:700px){
+    .db-row{grid-template-columns:1fr; gap:6px;}
+  }
+  .db-name{font-family:var(--font-mono); font-size:13.5px; color:var(--text); padding-top:2px;}
+  .db-desc{font-size:13.5px; color:var(--text-dim); line-height:1.55;}
+
+  /* ---------- query mode cards ---------- */
+  .qmode{
+    border:1px solid var(--border);
+    border-radius:6px;
+    padding:20px 22px;
+    margin-bottom:14px;
+    background:var(--bg-elev);
+  }
+  .qmode h4{font-family:var(--font-display); font-weight:600; font-size:17px; margin:0 0 12px;}
+  .qmode .row{display:grid; grid-template-columns:78px 1fr; gap:14px; margin-bottom:10px; font-size:13.5px;}
+  .qmode .row:last-child{margin-bottom:0;}
+  .qmode .row .k{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-faint); padding-top:2px;}
+  .qmode .row .v{color:var(--text-dim); line-height:1.55;}
+  .qmode .row.cost .v{color:var(--gold);}
+  .qmode.newrow{border-left:3px solid var(--gold);}
+
+  /* ---------- phase timeline ---------- */
+  .phase{
+    display:grid;
+    grid-template-columns:150px 1fr;
+    gap:22px;
+    padding:20px 0;
+    border-bottom:1px solid var(--border-soft);
+  }
+  .phase:last-child{border-bottom:none;}
+  @media (max-width:700px){ .phase{grid-template-columns:1fr; gap:8px;} }
+  .phase-label{font-family:var(--font-mono); font-size:12px; color:var(--gold); letter-spacing:.04em;}
+  .phase-label .sub{display:block; color:var(--text-faint); font-size:11px; margin-top:4px;}
+  .phase-items{font-size:13.5px; color:var(--text); margin-bottom:8px; font-weight:500;}
+  .phase-items span{color:var(--text-faint); font-weight:400;}
+  .phase-desc{font-size:13.5px; color:var(--text-dim); line-height:1.6; margin:0;}
+
+  /* ---------- footer ---------- */
+  footer{
+    max-width:var(--maxw);
+    padding-top:32px;
+    border-top:1px solid var(--border-soft);
+    font-size:12.5px;
+    color:var(--text-faint);
+    line-height:1.7;
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="toc">
+    <div class="toc-brand">Legal Wiki RAG</div>
+    <div class="toc-title">Target Architecture — Working Reference</div>
+    <nav>
+      <a href="#scope">Scope</a>
+      <a href="#families" class="new-marker">Document Families</a>
+      <a href="#ingestion">01 · Ingestion</a>
+      <a href="#extraction" class="new-marker">Tables, Charts &amp; Images</a>
+      <a href="#relations" class="new-marker">Cross-Document Relations</a>
+      <a href="#retrieval" class="new-marker">Retrieval Enhancements</a>
+      <a href="#access" class="new-marker">Access &amp; Admin Lifecycle</a>
+      <a href="#wikis" class="new-marker">Wikis — Isolated Corpora</a>
+      <a href="#hardening" class="new-marker">Production Hardening</a>
+      <a href="#review-queue">02 · Review Queue</a>
+      <a href="#storage">03 · Storage</a>
+      <a href="#online">04 · Online Fast Path</a>
+      <a href="#query-modes">05 · Query Modes</a>
+      <a href="#unchanged">06 · Unchanged</a>
+      <a href="#sequencing">07 · Sequencing</a>
+      <a href="#net-effect">08 · Net Effect</a>
+      <a href="#build-plan" class="new-marker">09 · Build Plan</a>
+      <div class="toc-group-label">Legend</div>
+      <a style="pointer-events:none; padding-top:2px;"><span class="dot new" style="display:inline-block;margin-right:8px;"></span>New since original doc</a>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="doc">
+
+      <header class="masthead">
+        <div class="eyebrow">Part 2 — Working Draft</div>
+        <h1 class="title">The Structured Wiki</h1>
+        <p class="lede">Target architecture for a legal RAG system meant to serve any lawyer, in any organization, asking any kind of question — not just commercial-contract review. Every step from ingestion to query response.</p>
+      </header>
+
+      <div class="revision-note">
+        <strong>This revision</strong> folds in the brainstorm decisions made on top of the original Part 2 doc: document-type schema families, structural anchors, citation extraction, table/chart/image handling, cross-document relations, hypothetical-question retrieval, and a flagged prompt-injection gap. Sections carrying new content since the original are marked <span class="dot new" style="display:inline-block; margin:0 2px -1px;"></span> in the sidebar. Nothing already locked in has been removed — only extended.
+      </div>
+
+      <div class="legend">
+        <div class="legend-item"><span class="dot new"></span>New</div>
+        <div class="legend-item"><span class="dot ext"></span>Existing, extended</div>
+        <div class="legend-item"><span class="dot unc"></span>Existing, unchanged</div>
+        <div class="legend-item"><span class="dot flag"></span>Flagged — open design item</div>
+        <div class="legend-item"><span class="dot done"></span>Shipped — built &amp; verified on target-architecture-v2</div>
+      </div>
+
+      <!-- ================= SCOPE ================= -->
+      <section id="scope">
+        <div class="section-num">§ 00</div>
+        <h2 class="section-title">Scope</h2>
+        <p class="section-kicker">Nothing below replaces the retrieval and grounding pipeline already in production — hybrid RRF fusion, the independent grounding check, deterministic citation verification. Every addition either sits in front of it as a shortcut, or feeds it richer material at ingest time. Any question the new structured layer doesn't cover falls straight through to the exact pipeline running today.</p>
+
+        <h3 class="sub-title">Locked in — seven features</h3>
+        <ul>
+          <li>Playbooks</li>
+          <li>Precedent layer</li>
+          <li>Review Table, upgraded</li>
+          <li>Obligation &amp; Deadline tracker</li>
+          <li>Contract Register</li>
+          <li>Risk / Deviation dashboard</li>
+          <li>Collections (shared plumbing under Playbooks &amp; the dashboard)</li>
+        </ul>
+        <p class="dim">All seven stay locked — but are now built <strong style="color:var(--text)">family-aware</strong> off a schema registry, not shaped around commercial contracts by default. See <a href="#families" style="color:var(--gold);">Document Families</a>.</p>
+
+        <h3 class="sub-title">Also fixing</h3>
+        <ul>
+          <li>Review Queue — confidence-tiered, keyboard-driven, non-blocking</li>
+          <li>Claim-verification tally surfaced on every answer</li>
+          <li>Typed structured fields (date / currency / number / boolean / enum)</li>
+          <li>Compare Mode's missing metadata cache, oversized model call, and truncate-instead-of-retrieve fallback</li>
+          <li>Review/Compare capped at 20 documents per run</li>
+          <li>Draft Mode's dump-and-truncate context gathering — same pattern as Compare Mode, with a worse documented bug history</li>
+          <li>Prompt library</li>
+          <li><span class="badge new">new</span>&nbsp; Structural anchors (section / paragraph-level addressing)</li>
+          <li><span class="badge new">new</span>&nbsp; Citation extraction (statute / case references)</li>
+          <li><span class="badge new">new</span>&nbsp; Table, chart, and image extraction</li>
+          <li><span class="badge new">new</span>&nbsp; Cross-document relation graph (amendments, transaction clusters, litigation links)</li>
+          <li><span class="badge new">new</span>&nbsp; Hypothetical-question retrieval bridge</li>
+          <li><span class="badge new">new</span>&nbsp; Basic single-user login (see <a href="#access" style="color:var(--gold);">Access &amp; Admin Lifecycle</a>)</li>
+          <li><span class="badge new">new</span>&nbsp; Admin document lifecycle — add / archive-or-delete / re-ingest on logic change</li>
+          <li><span class="badge new">new</span>&nbsp; Wikis — isolated, admin-switchable corpora for client/test data separation (see <a href="#wikis" style="color:var(--gold);">Wikis</a>)</li>
+          <li><span class="badge new">new</span>&nbsp; Production hardening — concurrency locks, LLM-output validation, upload/login/encryption hygiene, cost pre-flight gate (see <a href="#hardening" style="color:var(--gold);">Production Hardening</a>)</li>
+          <li><span class="badge flag">flagged</span>&nbsp; Prompt-injection defense on ingested content — added to plan, placement still open (see <a href="#online" style="color:var(--flag);">§ 04</a>)</li>
+        </ul>
+
+        <h3 class="sub-title">Out of scope, this pass</h3>
+        <ul>
+          <li>Agentic workflows</li>
+          <li>Email / evidence intelligence</li>
+          <li>Deep research / litigation workflows</li>
+          <li>Full ACL, multi-role permissions &amp; Matters — a two-role (admin/user) design with per-user chat isolation was scoped but deferred; only a single-user login is in scope this pass, see <a href="#access" style="color:var(--gold);">Access &amp; Admin Lifecycle</a></li>
+          <li class="dim">Continuous eval / regression harness — parked for later, per brainstorm</li>
+          <li class="dim">Cross-encoder reranker — tried internally, accuracy issues; not adopted</li>
+        </ul>
+      </section>
+
+      <!-- ================= DOCUMENT FAMILIES ================= -->
+      <section id="families">
+        <div class="section-num">§ 00.1 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Document Families &amp; Schema Registry</h2>
+        <p class="section-kicker">The current target schema — <code>clauses[]</code> / <code>obligations[]</code> / <code>entities[]</code> / <code>relationships[]</code> — is a contract schema wearing a general-purpose name. Serving "any lawyer, any question" means the extraction schema is looked up per document type, not hardcoded. The 24 folders in the working taxonomy cluster into five families.</p>
+
+        <div class="family-grid">
+          <div class="family-card">
+            <div class="fam-num">Family 1</div>
+            <h4>Bilateral commercial contracts</h4>
+            <div class="folders">Consulting · DPA · Employment · Escrow · IP Assignment · Joint Venture · Lease · License · Loan · NDA · Service · SLA · SPA · Shareholder · Subscription · Supply — 16 of 24 folders</div>
+            <p>Parties, clauses, obligations, dates, termination/renewal. Already well served by the existing <code>clauses</code>/<code>obligations</code> schema — minimal change needed.</p>
+          </div>
+          <div class="family-card">
+            <div class="fam-num">Family 2</div>
+            <h4>Deal-stage / pre-binding</h4>
+            <div class="folders">Term Sheet</div>
+            <p>Proposed terms, not obligations. Carries a <code>binding_status</code> flag, exclusivity window, conditions precedent — otherwise forcing it through the obligation schema risks misrepresenting indicative terms as enforceable.</p>
+          </div>
+          <div class="family-card">
+            <div class="fam-num">Family 3</div>
+            <h4>Litigation / dispute</h4>
+            <div class="folders">Court Judgment · Pleading · Brand Judgements</div>
+            <p>Case citations, procedural posture, holding, relief granted, parties as plaintiff/defendant. Needs paragraph-level structural anchoring and citation extraction — nothing to do with clause/obligation.</p>
+          </div>
+          <div class="family-card">
+            <div class="fam-num">Family 4</div>
+            <h4>Corporate / authorization instruments</h4>
+            <div class="folders">Board Resolution · Power of Attorney</div>
+            <p>Grants of authority, not agreements. Schema: grantor, grantee, scope of authority, effective/expiry, limitations, resolving body.</p>
+          </div>
+          <div class="family-card">
+            <div class="fam-num">Family 5</div>
+            <h4>Advisory</h4>
+            <div class="folders">Legal Opinion</div>
+            <p>Addressee, matters opined on, assumptions/qualifications, conclusion, scope-of-reliance limitation. An opinion advises — it doesn't obligate anyone.</p>
+          </div>
+          <div class="family-card" style="border-style:dashed; border-color:var(--flag-dim);">
+            <div class="fam-num" style="color:var(--flag);">Residual</div>
+            <h4>Ungrouped / generic fallback</h4>
+            <div class="folders">Whatever doesn't match Families 1–5</div>
+            <p>Today's "Ungrouped" folder is a live signal, not just a bucket — the generic fallback schema matters more the moment this system serves a second organization with a different document mix.</p>
+          </div>
+        </div>
+
+        <div class="callout">
+          <div class="callout-label">Classification mechanism — revised: content-primary, folder-assisted</div>
+          <p>Doc-type classification runs on <strong style="color:var(--text)">every</strong> document regardless of whether a folder is present — one mechanism, not two separate code paths for "filed" vs. "ad-hoc upload." A bulk/library upload with folder placement gets a confidence boost when content classification agrees with the folder — resolves fast, low Review Queue hit-rate. An ad-hoc single-file upload (chat, Review/Compare/Draft — no folder context exists there by definition) runs on content alone, same threshold, no boost available.</p>
+          <p style="margin-bottom:0;"><strong style="color:var(--text)">Folder raises confidence when it agrees, never lowers scrutiny when it might disagree.</strong> A document sitting in the wrong folder (mis-filed, legacy structure, human error) still routes to the Review Queue as a mismatch — folder is never trusted as ground truth over what the content actually says. No taxonomy is required from the user to make this work; the 5 families are the system's internal schema, not a filing structure lawyers need to learn.</p>
+        </div>
+
+        <div class="callout flag">
+          <div class="callout-label">Open item — family set is a first cut</div>
+          <p>The 5 families were derived from this org's own 24-folder list. Whether they hold up against a genuinely different organization's document mix (a trust deed, a regulatory consent order — anything outside this seed list) is untested. Watch what actually lands in the generic fallback once uploads from outside this list start arriving — that's the real signal for whether a 6th family is needed, not something to decide blind now.</p>
+        </div>
+
+        <h3 class="sub-title" style="margin-top:36px;">Per-family metadata extraction</h3>
+        <p>The existing <code>page_metadata</code> cache — what Review Table reads first, before falling to LLM extraction — is fixed to 12 hardcoded, contract-shaped fields (governing law, dates, caps, etc.). Same problem clauses/obligations had before the schema registry: a litigation doc doesn't have a liability cap, it has a case number, court, and disposition. Fix is the same mechanism applied here — the standard-field list becomes <strong style="color:var(--text)">per-family</strong>, pulled from the schema registry rather than one fixed list for every document.</p>
+        <p>Low-confidence metadata values feed the <strong style="color:var(--text)">same Review Queue, same stakes-tier split</strong> already built for clauses — not a separate mechanism. A low-stakes field (e.g. a contract's stated address) is bulk-accept eligible; a high-stakes one (governing law, liability cap) requires individual sign-off, same reasoning as lifecycle status. And because doc-type classification confidence gates which family's metadata schema even gets applied, a low-confidence doc-type call is arguably the higher-stakes flag of the two — it risks extracting the wrong <em>set</em> of fields entirely, not just one wrong value within the right set.</p>
+        <div class="callout">
+          <div class="callout-label">Open simplification — not urgent</div>
+          <p>Once family-specific typed tables (<code>documents</code>, <code>contracts</code>, <code>litigation_facts</code>, <code>authorizations</code>, <code>opinions</code>) hold typed values populated at ingest, <code>page_metadata</code> may be a redundant middle layer rather than a needed one. Worth deciding later: keep it as a denormalized fast-read cache, or drop it and read the family tables directly.</p>
+        </div>
+      </section>
+
+      <!-- ================= 01 INGESTION ================= -->
+      <section id="ingestion">
+        <div class="section-num">§ 01 — Offline</div>
+        <h2 class="section-title">Ingestion, stage by stage</h2>
+        <p class="section-kicker">The adaptive ingest strategy — single-call for short documents, overview-plus-segments for long ones — doesn't change shape. What changes is <em>which</em> schema each call returns, how the document gets segmented, and what happens to the result afterward.</p>
+
+        <div class="stage-strip">
+          <div class="stage-cell"><div class="num">01</div><div class="label">File read + tiered OCR</div><div class="tag ext">EXTENDED</div></div>
+          <div class="stage-cell"><div class="num">02</div><div class="label">Role + lifecycle + doc-type + jurisdiction tags</div><div class="tag ext">EXTENDED</div></div>
+          <div class="stage-cell"><div class="num">03</div><div class="label">Adaptive synthesis call</div><div class="tag ext">EXTENDED</div></div>
+          <div class="stage-cell"><div class="num">04</div><div class="label">Merge + provenance</div><div class="tag ext">EXTENDED</div></div>
+          <div class="stage-cell"><div class="num">05</div><div class="label">Compaction</div><div class="tag unc">UNCHANGED</div></div>
+          <div class="stage-cell"><div class="num">06</div><div class="label">Embeddings (+ clause + question-level)</div><div class="tag ext">EXTENDED</div></div>
+          <div class="stage-cell"><div class="num">07</div><div class="label">Evaluation gate</div><div class="tag new">NEW</div></div>
+        </div>
+        <p class="fig-caption">Fig. 1 — Still seven stages, same shape as the original doc. Stage 02 now carries doc-type + jurisdiction alongside role/lifecycle; every extended stage grew a step, none were replaced.</p>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">01</span><h4>File read + OCR</h4><span class="badge ext">extended</span></div>
+          <p>pypdf first, OCR fallback under 50 chars/page — unchanged. A confidence classifier still decides whether Tesseract's output is good enough before ever calling Azure Vision, so the expensive vision model only sees genuinely difficult pages.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong> the page classifier gains two more classes beyond text / scanned — <strong>table-bearing</strong> and <strong>image/chart-bearing</strong>. Today, a table that extracts "successfully" by char-count still has its row/column structure silently flattened, and a chart on a page with &gt;50 surrounding characters never triggers OCR at all — zero extraction of the visual content. Azure Vision also gains a second prompt mode: <em>description</em>, not just transcription, for chart/diagram pages — the existing strict-transcription prompt stays for scanned text.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">02</span><h4>Role + lifecycle + doc-type + jurisdiction tagging</h4><span class="badge ext">extended</span></div>
+          <p>Role (precedent / active-matter / both) and lifecycle (current / superseded) tagging as before — role still set by upload location, never by the AI reading it. Lifecycle status still always requires individual Review Queue sign-off, never bulk-accepted.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong> a document-type classification pass runs here too, upstream of the length fork — deciding which of the five schema families (or the generic fallback) applies before the synthesis call in stage 03 is even made. Runs content-first on <em>every</em> document, whether or not a folder path exists: folder placement, when present, is a confidence boost on agreement, never a substitute for running this pass, and never a reason to lower scrutiny when it disagrees with what the content shows (full mechanism in <a href="#families" style="color:var(--gold);">Document Families</a>). A <strong>jurisdiction</strong> tag is added alongside it: a "notice period" or "reasonable time" standard means different things under different governing law, so jurisdiction can't stay implicit inside a <code>contracts.governing_law</code> field once the system spans multiple organizations. Low-confidence doc-type classification routes to the Review Queue — arguably higher stakes than a single misclassified field, since it determines what gets extracted from the whole document.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">03</span><h4>Adaptive synthesis call</h4><span class="badge ext">extended</span></div>
+          <p>Same single-call-or-segments structure as today. Structured-output schema still grows alongside the wiki prose: <code>clauses[]</code>, <code>obligations[]</code>, <code>entities[]</code>, <code>relationships[]</code> — every field still typed (date / currency / number / boolean / enum / text), still one extended call, not several new ones.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong></p>
+          <ul>
+            <li>Schema is no longer fixed — it's pulled from the <strong>schema registry</strong> by family (§ Document Families), with org-level overrides merged in before the call.</li>
+            <li>Page-count target and extraction emphasis become a <strong>per-family parameter</strong>, not the fixed "extract 10–30 pages, cover thoroughly" instruction — a citation-dense litigation doc needs finer granularity; a short opinion doesn't need padding to reach 10 pages.</li>
+            <li>New output fields, folded into the same call: <code>citations[]</code> (statute/case references, normalized), <code>structural_anchors[]</code> (section/¶ numbering), <code>hypothetical_questions[]</code> (see <a href="#retrieval" style="color:var(--gold);">Retrieval Enhancements</a>), <code>tables[]</code> and <code>figures[]</code> routed to their own structured stores rather than prose, and <code>binding_status</code> for Family 2 (term sheets).</li>
+            <li><code>relationships[]</code> gains a doc-reference resolution sub-step — an in-text mention like <em>"as defined in the Master Service Agreement dated..."</em> gets fuzzy-matched against the <code>documents</code> registry (same mechanism class as entity canonicalization) and written as a resolved edge, or an explicit <code>references-unresolved</code> edge if no match is found — never silently dropped.</li>
+          </ul>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">04</span><h4>Merge + provenance</h4><span class="badge ext">extended</span></div>
+          <p>Contradiction detection and source-attribution labeling continue for wiki pages as today. Every extracted clause, obligation, and entity still written with a confidence score and a pointer back to its exact evidence span.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong> a reconciliation/dedup step for structured rows (clauses, obligations, citations) that straddle a segment boundary — today's merge logic only dedupes wiki <em>pages</em>, not structured fields, and that gap now matters because structured extraction, not just prose, is happening per segment. Contradiction detection is also re-sequenced to run <em>after</em> amendment-chain edges (§ Cross-Document Relations) are written, so a superseded clause and its amendment aren't flagged as a contradiction instead of a resolved version chain.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">05</span><h4>Compaction</h4><span class="badge unc">unchanged</span></div>
+          <p>Pages over 5 appends or 8,000 chars still get re-synthesized. Structured rows don't accumulate the same way prose does, so they don't need it.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">06</span><h4>Embeddings</h4><span class="badge ext">extended</span></div>
+          <p>Page-level embeddings unchanged. Clause-level embeddings for the subset used in precedent matching, unchanged.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong> a third embedding type — <strong>hypothetical-question embeddings</strong> — generated per page/clause during the same synthesis call in stage 03, embedded alongside page content. Full rationale in <a href="#retrieval" style="color:var(--gold);">Retrieval Enhancements</a>.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">07</span><h4>Evaluation gate</h4><span class="badge new">new</span></div>
+          <p>Every extracted clause, obligation, and entity carries the confidence score it was born with. Below threshold, it lands in the Review Queue instead of entering the index silently.</p>
+          <p><strong style="color:var(--gold);">New in this revision:</strong> the same threshold logic now also covers doc-type misclassification confidence and table/figure extraction confidence — not just clause/obligation fields.</p>
+        </div>
+
+        <div class="callout">
+          <div class="callout-label">Segmentation — mechanism change, not just schema growth</div>
+          <p>Today's segmentation is a blind 40,000-char cut with 500-char overlap — arithmetic, no respect for document structure. That was tolerable when only prose pages were being merged; it isn't once structured rows (clauses, citations) are being persisted, since a blind cut can split a clause or sever a citation string mid-way, producing duplicate or garbled DB rows. <strong style="color:var(--text)">Fix:</strong> run the structural-anchor parse (cheap regex pass) before the segmentation decision, and segment along section/¶ boundaries — packing sections up to the ~40k budget instead of cutting blind. This removes the split risk at the source rather than papering over it with overlap.</p>
+        </div>
+      </section>
+
+      <!-- ================= TABLES / CHARTS / IMAGES ================= -->
+      <section id="extraction">
+        <div class="section-num">§ 01.1 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Tables, Charts &amp; Images</h2>
+        <p class="section-kicker">Confirmed absent from both the current system and the original Part 2 target — not a mechanism to upgrade, genuinely new scope. Today, a table-bearing page either extracts successfully with its row/column structure silently destroyed, or — if scanned — gets transcribed as loose text at best. A chart or diagram on a page with &gt;50 surrounding characters never triggers OCR at all: zero extraction of the visual content, silently.</p>
+
+        <h3 class="sub-title">Tables — own path, not squashed into wiki prose</h3>
+        <p>Table pages route to structured extraction (vision-LLM with a table-output prompt, or a dedicated table-parse step). Output is rows/columns as typed data, not a prose sentence, stored in a new <code>tables</code> table with the same evidence-pointer and confidence discipline as everything else. The wiki page can reference that a table exists and summarize it, but the exact values live in the structured store — queryable, citation-checkable. Prose-only storage makes exact numbers unrecoverable and unverifiable, which is the worst possible spot for hallucination given a wrong payment figure carries real consequence. A markdown-serialized fallback representation of the table is also worth keeping alongside the structured rows, so the wiki-prose layer can still reference table shape even without hitting the structured store directly.</p>
+
+        <h3 class="sub-title">Calculations — split into two separate targets</h3>
+        <p>A <strong>rule/formula</strong> ("cap = 2× fees, prior 12 months") is a clause — prose + typed value, existing path. A <strong>computed value</strong> (the actual numbers in a payment schedule) is a table. These answer two different lawyer questions — "how is the cap calculated" versus "what is the cap today" — and conflating them into one page loses one or the other.</p>
+
+        <h3 class="sub-title">Charts, diagrams &amp; images</h3>
+        <p>Routed to the vision-LLM under the new <em>description</em> prompt mode (not the transcription-only mode used for scanned text). Output is a synthesized wiki page tagged as image-derived, plus a pointer to the source image, stored in a new <code>figures</code> table alongside a generated description and confidence score.</p>
+
+        <div class="callout">
+          <div class="callout-label">Cost — genuinely new, not folded-in</div>
+          <p>Unlike citations, jurisdiction, or entity canonicalization — all of which ride free inside the existing synthesis call — table and image extraction require real new vision-model calls. This is a new cost category, scaling with how table/image-dense the actual corpus is, which is currently unmeasured.</p>
+        </div>
+      </section>
+
+      <!-- ================= CROSS-DOCUMENT RELATIONS ================= -->
+      <section id="relations">
+        <div class="section-num">§ 01.2 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Cross-Document Relations</h2>
+        <p class="section-kicker">The original <code>relations</code> table already extends to party↔clause, clause↔clause, and document↔document (precedent lineage) edges, and shared-concept pages already merge across documents implicitly. What the brainstorm surfaced is everything that's <em>not</em> covered by those three edge types.</p>
+
+        <div class="db-table">
+          <div class="db-row">
+            <div class="db-name">amends /<br>superseded-by</div>
+            <div class="db-desc">Amendment chains — not the same as precedent lineage. Precedent lineage means "we've used this clause language before, in a different deal." This means "this is the same deal, version 2." The <code>lifecycle</code> column (current/superseded) must <em>derive</em> from this edge, not be set independently, or the flag and the graph drift apart.</div>
+          </div>
+          <div class="db-row">
+            <div class="db-name">ancillary-to</div>
+            <div class="db-desc">Transaction clusters — genuinely new, nothing covers this today. Real deals ship as a bundle (SPA + Shareholder Agreement + Escrow Agreement) that cross-reference each other. A lawyer asking about the SPA's indemnity terms probably also needs the Escrow Agreement's release conditions.</div>
+          </div>
+          <div class="db-row">
+            <div class="db-name">litigation-<br>disputes</div>
+            <div class="db-desc">Links a <code>litigation_facts</code> row to the specific <code>clauses</code> row it's litigating — only possible now that litigation is its own schema family with its own structural anchors.</div>
+          </div>
+          <div class="db-row">
+            <div class="db-name">references-<br>unresolved</div>
+            <div class="db-desc">An in-text document reference that couldn't be fuzzy-matched to anything in the <code>documents</code> registry — written explicitly rather than silently dropped, since "the referenced document isn't even in our system" is itself useful for a lawyer to know.</div>
+          </div>
+        </div>
+
+        <p>Entity-based aggregation ("every contract with Acme Corp") is already handled by <code>entities</code>/<code>entity_aliases</code> canonicalization — no new relation type needed there, just reaffirming it as the answer to that shape of question.</p>
+
+        <div class="callout">
+          <div class="callout-label">Retrieval-side consequence</div>
+          <p>Structured cross-doc questions ("show me every amendment to this MSA," "what else is part of this transaction") resolve via a SQL join over <code>relations</code>/<code>entities</code> — same fast-path tier as a clause lookup, not the broad-retrieval fallback (80 candidates, per-doc cap 4). Broad retrieval stays the fallback only for cross-doc questions the relation graph doesn't structurally cover.</p>
+        </div>
+
+        <p class="dim" style="font-size:13.5px;">Cost: no new category — rides inside the existing <code>relationships[]</code> extraction, same call, wider edge-type vocabulary. Doc-reference fuzzy-match is the same cheap class as entity canonicalization.</p>
+      </section>
+
+      <!-- ================= RETRIEVAL ENHANCEMENTS ================= -->
+      <section id="retrieval">
+        <div class="section-num">§ 01.3 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Retrieval Enhancements</h2>
+
+        <h3 class="sub-title">Hypothetical-question embeddings</h3>
+        <p>At ingest, alongside normal page synthesis, the LLM generates 3–5 questions a page/clause plausibly answers — phrased how a <em>user</em> would ask, not how the document reads. Those get embedded too, pointing back to the same page.</p>
+        <p class="dim">The problem it fixes: embedding similarity works on phrasing closeness, not just topic. A clause reading <em>"either party may terminate upon 60 days written notice following an uncured material breach"</em> and a lawyer asking <em>"what happens if they walk away on us"</em> are topically related but far apart in embedding space. Question-to-question comparison closes that gap — a direct, cheap countermeasure to the phrasing-mismatch problem that motivated moving off a single contract-shaped schema in the first place.</p>
+        <p class="dim">Fits with minimal disruption: folds into the existing synthesis call (one new schema field, no new LLM call), writes new embedding rows into the same Tier 1 hybrid pool, dedupe-by-source-page before RRF fusion. Blast radius if the generated questions are systematically off-target is low — purely additive to the candidate pool, doesn't replace anything; grounding and citation checks downstream still catch a bad candidate that slipped through. Gate: log real query hit-rate against question-embeddings vs. page-embeddings once live, drop it if it's not earning its keep.</p>
+
+        <h3 class="sub-title" style="margin-top:32px;">Prompt-injection defense</h3>
+        <span class="badge flag" style="margin-bottom:14px; display:inline-flex;">flagged — open design item</span>
+        <p class="dim">Confirmed absent from both the current system and the original Part 2 doc. This system ingests arbitrary uploaded legal documents — a malicious or compromised document could embed instructions in clause text aimed at the answer LLM. Added to the plan; exact placement in the pipeline (likely a screening check on ingested content before it reaches system-prompt or answer-LLM context) is still an open design item, not yet located in the online fast-path diagram. See <a href="#online" style="color:var(--flag);">§ 04</a>.</p>
+      </section>
+
+      <!-- ================= ACCESS & ADMIN LIFECYCLE ================= -->
+      <section id="access">
+        <div class="section-num">§ 01.4 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Access &amp; Admin Document Lifecycle</h2>
+        <p class="section-kicker">Scoped down deliberately: no ACL, no matters, no multi-role permissions this pass — a single login, plus a proper answer to "how do documents get added, removed, and refreshed without re-paying to reprocess everything."</p>
+
+        <h3 class="sub-title">Login — single user, this pass <span class="badge done">shipped</span></h3>
+        <p>One password-gated account with full access — ingestion, Review Queue, document management, wiki management, chat, and every query mode. No role split, no per-user chat isolation, no ACL — all deferred (see <a href="#scope" style="color:var(--gold);">Scope</a>).</p>
+        <div class="callout">
+          <div class="callout-label" style="color:var(--done);">Shipped</div>
+          <p style="margin-bottom:0;">Built on <code>target-architecture-v2</code>: scrypt password hashing, DB-backed login rate limiting (5 failures/user, 10/IP, 15-min rolling window), HttpOnly/SameSite session cookies with <code>SESSION_COOKIE_SECURE</code> for TLS deployments, and a global <code>before_request</code> gate covering all routes by default rather than per-route opt-in. Also added ahead of schedule: a nullable <code>user_id</code> column on <code>chat_messages</code> — inert today, but keeps the deferred per-user chat isolation buildable without an unrecoverable retrofit later (see this section's own warning above).</p>
+        </div>
+        <div class="callout">
+          <div class="callout-label">Deferred design, kept for later reference</div>
+          <p style="margin-bottom:0;">A two-role version was scoped earlier in the brainstorm — <code>admin</code> (ingestion, Review Queue, document management, Playbook authoring) and <code>user</code> (chat plus read/query features only, each with private chat history from every other user, including admin) — feature-gated rather than document-gated, since both roles would see the same corpus. Worth revisiting once more than one person actually needs access; the <code>users</code> table and role column are cheap to add later, but per-user chat isolation needs a <code>user_id</code> FK on conversation records from the start if it's ever built, not retrofitted.</p>
+        </div>
+
+        <h3 class="sub-title" style="margin-top:32px;">Ingestion — additive by document, never corpus-level</h3>
+        <p>The fix to "adding 3 docs forces reprocessing all 500": ingestion is a per-document, additive operation against a persistent store, not a corpus-level rebuild. Three mechanics make this real, not just conceptual:</p>
+        <ul>
+          <li><strong>Hash-gate at the door</strong> — content hash checked against <code>documents</code> before anything else runs. Exact match → skip entirely, zero cost.</li>
+          <li><strong>New-doc-against-existing-index, every merge step</strong> — entity/citation resolution fuzzy-matches the new document against the <em>existing</em> <code>entities</code>/<code>entity_aliases</code> table; cross-document relations resolve the new doc's <code>relationships[]</code> against the <em>existing</em> <code>documents</code> registry; wiki-page merging appends to existing shared-concept pages with compaction re-synthesizing only that page past threshold; embeddings insert incrementally into the HNSW index. Cost scales with the new document, never with corpus size.</li>
+          <li><strong>Version/amendment detection</strong> — a re-upload that's clearly a new version of an existing document writes an <code>amends</code>/<code>superseded-by</code> edge and flips the old document's lifecycle tag automatically, rather than landing as an unrelated new document.</li>
+        </ul>
+
+        <h3 class="sub-title" style="margin-top:32px;">Admin document lifecycle — three actions</h3>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">＋</span><h4>Add</h4><span class="badge unc">default path</span></div>
+          <p>The additive pipeline above, unchanged — no other document is touched.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">－</span><h4>Remove</h4><span class="badge new">new</span></div>
+          <p><strong>Archive by default</strong> — a status flag flips, the document drops out of search/chat/registers immediately, nothing physically removed. Right default for legal context: litigation holds, audits, a wrongly-deleted document are all worse outcomes than a slightly larger database.</p>
+          <p><strong>Hard delete</strong> is a separate, deliberate action with its own confirmation — only this path purges rows. Cascade handling either way: archive excludes via a join filter on active queries; hard delete physically removes the document's embeddings from the vector index, and any <code>relations</code> edges pointing to it get marked (same <code>references-unresolved</code> treatment as an unresolved doc-reference) rather than left orphaned or silently dropped.</p>
+        </div>
+
+        <div class="stage-card">
+          <div class="stage-card-head"><span class="num">↻</span><h4>Re-ingest</h4><span class="badge new">new</span></div>
+          <p>For when ingestion logic changes and existing documents need reprocessing under the new schema/prompt version. Different from Add — it's a <strong>replacement</strong> of a document's extracted data, not an addition.</p>
+          <ul style="margin-bottom:0;">
+            <li><strong>Pipeline/schema version stamped per document</strong> — a version number tied to the schema registry, so admin can target exactly which documents are stale relative to current logic instead of guessing.</li>
+            <li><strong>Granularity</strong> — single document, a Collection, or the most useful case in practice: everything still on an old schema version, filtered by family (e.g. only Family 3 after a litigation-schema change). Full corpus stays available as the deliberate nuclear option.</li>
+            <li><strong>Transactional swap, not blend</strong> — new extraction runs same as a fresh upload; once it succeeds, old <code>clauses</code>/<code>obligations</code>/wiki-page/embedding rows for that document are superseded in one step, not merged or appended. Relations/entities pointing to the old clause IDs are re-resolved against the new ones as part of the same operation.</li>
+            <li><strong>Review Queue resets fresh</strong> — a prior sign-off was a judgment on the old extraction; it doesn't map onto new values once logic changes, and leaving it in place would show a stale "confirmed" badge next to a fact that's now different. Active queue state is fully wiped under the new logic. The old resolution record itself moves to a superseded/archived row rather than being deleted outright — same never-silently-drop discipline used for <code>references-unresolved</code> edges and archived documents — so "was this reviewed before the schema changed" still has an answer.</li>
+            <li><strong>Queued, background, visible progress</strong> — same status pattern as bulk upload, not a synchronous action that locks the admin's session. Cost is the same per-document ingestion cost as a fresh upload, re-paid intentionally on admin's explicit call, not accidentally on every routine add.</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- ================= WIKIS ================= -->
+      <section id="wikis">
+        <div class="section-num">§ 01.5 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Wikis — Isolated Corpora</h2>
+        <p class="section-kicker">The same underlying need as multi-org tenancy, scoped down sensibly: not simultaneous multi-org visibility or ACL — isolated corpora, one active at a time, admin-switched. Solves test-data-vs-client-data cleanly, and the general multi-client case along with it.</p>
+
+        <h3 class="sub-title">New primitive: <code>wikis</code></h3>
+        <p>id, name, status (active/archived), created_at, created_by — a container, nothing more.</p>
+
+        <h3 class="sub-title" style="margin-top:28px;">Every table in § 03 gets a <code>wiki_id</code> scoping column</h3>
+        <p><code>documents</code>, <code>contracts</code>, <code>litigation_facts</code>, <code>authorizations</code>, <code>opinions</code>, <code>clauses</code>, <code>obligations</code>, <code>citations</code>, <code>structural_anchors</code>, <code>entities</code>/<code>entity_aliases</code>, <code>tables</code>, <code>figures</code>, <code>relations</code>, <code>pages</code>, <code>page_metadata</code>, <code>review_queue</code>, <code>document_sets</code>, <code>playbooks</code>, <code>playbook_runs</code> — mechanical (one column, one index) but has to be threaded through consistently, since isolation breaks in exactly whichever table gets missed.</p>
+
+        <div class="callout flag">
+          <div class="callout-label">Isolation has to be real, not a display filter</div>
+          <p style="margin-bottom:0;">Same warning as ACL, higher stakes here — a client's confidential documents leaking into another client's wiki via embedding similarity search is worse than a UI showing the wrong row. <code>wiki_id</code> must be a mandatory predicate inside every retrieval and extraction-matching query itself — hybrid RRF vector search, entity resolution, relation detection, fast-path SQL lookups — not a filter applied after results come back.</p>
+        </div>
+
+        <h3 class="sub-title" style="margin-top:28px;">Active wiki — switch-based, not simultaneous</h3>
+        <p>A system-level "active wiki" pointer; admin switches it, every read/write feature — chat, Review Table, Contract Register, Playbooks, everything — resolves against whichever wiki is currently active. The admin document-lifecycle actions above (add / remove / re-ingest) all operate within the selected wiki. Simplest version matching a single-user setup — genuinely simultaneous multi-wiki querying would be a different, more complex design, not assumed here.</p>
+
+        <h3 class="sub-title" style="margin-top:28px;">What stays shared vs. what's now per-wiki</h3>
+        <ul>
+          <li><strong>Schema registry (the 5 families) stays shared/global</strong> across wikis — no reason to duplicate it per wiki. The org-level schema-override concept from <a href="#families" style="color:var(--gold);">Document Families</a> is exactly where a client's taxonomy quirks would plug in per wiki, if ever needed.</li>
+          <li><strong>Playbooks are wiki-scoped</strong> — <code>playbooks</code> and <code>playbook_runs</code> carry <code>wiki_id</code>; each wiki authors its own rule sets rather than drawing from a shared default. A firm's own house rules and a client's differing playbook don't cross wikis.</li>
+        </ul>
+
+        <div class="callout">
+          <div class="callout-label">No new ingestion mechanism needed</div>
+          <p style="margin-bottom:0;">Creating a wiki is just an empty container; ingesting into it is the exact same per-document, additive pipeline already designed — every write just carries a <code>wiki_id</code>. Nothing about the cost model changes.</p>
+        </div>
+      </section>
+
+      <!-- ================= PRODUCTION HARDENING ================= -->
+      <section id="hardening">
+        <div class="section-num">§ 01.6 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Production Hardening</h2>
+        <p class="section-kicker">From a senior-architect audit of the plan so far. Everything below is scoped as accommodate-now: cheap to build into tables and pipelines that don't exist yet, expensive to retrofit once they do — or trivial floor-level hygiene with no reason to defer. A separate, larger set of findings was deliberately deferred; see the callout at the end.</p>
+
+        <h3 class="sub-title">Concurrency &amp; race conditions</h3>
+        <p class="dim">Everything designed so far assumes sequential operation. It isn't, once bulk upload and background re-ingest run in parallel. Scoped down to what actually matters at current single-user scale — not the full multi-user version.</p>
+        <div class="stage-card">
+          <div class="stage-card-head"><h4>Entity canonicalization race</h4><span class="badge flag">check-then-act</span></div>
+          <p style="margin-bottom:0;">Two documents ingesting in parallel, both mentioning "Acme Corp" for the first time — both check <code>entities</code>, both find nothing, both create a new row. <strong style="color:var(--text)">Fix:</strong> a unique constraint plus upsert (or advisory lock) on the canonical-name key, not a plain look-up-else-create.</p>
+        </div>
+        <div class="stage-card">
+          <div class="stage-card-head"><h4>Compaction race</h4><span class="badge flag">concurrent write</span></div>
+          <p style="margin-bottom:0;">Two concurrent appends to the same wiki page could both cross the re-synthesis threshold and trigger compaction at once, producing two competing rewrites. <strong style="color:var(--text)">Fix:</strong> per-page lock during compaction.</p>
+        </div>
+        <div class="stage-card">
+          <div class="stage-card-head"><h4>Active-wiki binding</h4><span class="badge flag">mutable global</span></div>
+          <p style="margin-bottom:0;">The active-wiki pointer (<a href="#wikis" style="color:var(--flag);">Wikis</a>) is a mutable global — if admin switches wikis mid-request, a request that started resolving against wiki A could finish reading from wiki B. <strong style="color:var(--text)">Fix:</strong> <code>wiki_id</code> bound once per request at entry, carried through the whole call, never re-read from a live pointer mid-pipeline.</p>
+        </div>
+
+        <h3 class="sub-title" style="margin-top:32px;">LLM output is untrusted input — treat it that way</h3>
+        <ul>
+          <li><strong>Schema validation/coercion before write</strong> — nothing today rejects or coerces a malformed LLM response. A model returning a string where a <code>date</code> or <code>currency</code> field is expected would either fail silently or corrupt a typed column. A validation layer sits between LLM output and DB write; a failed field drops confidence and routes to the Review Queue rather than being trusted and inserted raw.</li>
+          <li><strong>Retry / idempotency</strong> — an extraction call that times out or errors mid-segment needs a retry path that can't double-write partial structured rows. Matters most once background re-ingest jobs run unattended.</li>
+          <li><strong>Confidence scores are self-reported by the same model doing the extraction</strong> — LLMs are known to be poorly calibrated, often overconfident on exactly the cases they get wrong. The entire Review Queue stakes-tier system rests on this number meaning something. Worth a periodic calibration spot-check — sample high-confidence extractions, verify manually, see if confidence actually tracks accuracy — rather than assuming it does.</li>
+        </ul>
+
+        <h3 class="sub-title" style="margin-top:32px;">File-upload validation</h3>
+        <p>Malformed or malicious PDFs — decompression bombs, corrupt structures designed to hang pypdf or Tesseract — can cause resource exhaustion before any content-level defense even runs. A validation/sandboxing gate belongs at the front door, before parsing starts, not after.</p>
+
+        <h3 class="sub-title" style="margin-top:32px;">Login hardening</h3>
+        <p>Floor-level hygiene, not deferrable even at single-user scope: password hashing (bcrypt/argon2, never reversible), rate-limiting on login attempts, HTTPS-only session cookies.</p>
+
+        <h3 class="sub-title" style="margin-top:32px;">Encryption at rest</h3>
+        <p>Document content and extracted structured data encrypted at rest by default. Real client documents will land in wikis eventually — privileged, confidential legal material — and this needs to be on from day one, not bolted on once client data is already flowing in.</p>
+
+        <h3 class="sub-title" style="margin-top:32px;">Cost pre-flight gate on bulk operations</h3>
+        <p>Per-run caps already exist (Review/Compare hard-capped at 20 docs, broad retrieval has a total cap) — but nothing stops a large batch operation from firing an uncapped burst of calls. Before executing bulk re-ingest, a wiki-wide reprocess, or any operation above a document-count threshold, estimate the call count/cost and require explicit confirmation — the same instinct as the 20-doc cap, applied one level up at the operation level rather than the per-run level.</p>
+
+        <div class="callout flag">
+          <div class="callout-label">Deferred — real cost, matters at a scale not reached yet</div>
+          <p style="margin-bottom:0;">Named in the audit, deliberately not built now: HNSW index vacuum/reclaim job (matters at real deletion volume), embedding-model version tracking (matters on model upgrade), re-ingest dry-run/rollback and diff-before-commit, a "flag this answer as wrong" feedback loop back into the Review Queue, basic observability (ingestion failure rate, Review Queue backlog size), schema/code version skew during rolling deploys, amendment-ordering and re-ingest-vs-live-read races, and third-party LLM data-exposure handling for privileged content — a vendor/compliance decision to make before real client data flows in, not a code change to make now.</p>
+        </div>
+      </section>
+
+      <!-- ================= 02 REVIEW QUEUE ================= -->
+      <section id="review-queue">
+        <div class="section-num">§ 02 — Human-in-the-loop</div>
+        <h2 class="section-title">The Review Queue</h2>
+        <p class="section-kicker">Structured facts get their own thresholds, separate from wiki prose — a wrong liability cap costs more than a wrong notice-period phrasing. What happens next depends on how much that fact matters.</p>
+
+        <div class="flow">
+          <div class="flow-node flag">Flagged extraction<br>(below threshold)</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node new">Stakes check</div>
+          <div class="flow-branch-label" style="margin-left:0;">↙ low-stakes&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↘ high-stakes</div>
+          <div class="flow-node ext">Bulk accept —<br>"accept all ≥ 0.6" — one click</div>
+          <div class="flow-arrow">·</div>
+          <div class="flow-node ext">Individual sign-off only —<br>liability · indemnity · termination · lifecycle</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node unchanged">Trusted — enters the index</div>
+        </div>
+        <p class="fig-caption">Fig. 3 — Every flagged fact reaches the index eventually; the stakes check decides one-click bulk vs. individual sign-off.</p>
+
+        <ul>
+          <li><strong>Keyboard-driven triage</strong> — A to approve, R to reject, J/K to move between items.</li>
+          <li><strong>Non-blocking, "fails open"</strong> — a flagged fact still surfaces with a persistent confidence badge, same posture PII redaction already takes.</li>
+          <li><strong>Provenance-marked on resolution</strong> — accept, edit, or reject all write a "human-confirmed" marker.</li>
+          <li>Every chat answer carries a claim-verification tally in its footer (e.g. "11 of 12 claims verified").</li>
+        </ul>
+
+        <div class="callout">
+          <div class="callout-label">New in this revision</div>
+          <p><strong style="color:var(--text)">Doc-type misclassification</strong> is now its own stakes-check branch entering this same queue — arguably higher stakes than a single flagged field, since it determines the schema applied to the entire document, not just one value within it.</p>
+          <p><strong style="color:var(--text)">Per-family metadata fields</strong> (see <a href="#families" style="color:var(--gold);">Document Families</a>) feed this same queue and the same stakes tiering — a wrong governing-law or liability-cap value is high-stakes, individual sign-off; a low-stakes field like an address is bulk-accept eligible. No new mechanism, metadata is just another category flowing through it.</p>
+          <p style="margin-bottom:0;"><strong style="color:var(--text)">Re-ingest resets active queue state fresh</strong> (see <a href="#access" style="color:var(--gold);">Access &amp; Admin Lifecycle</a>) — a prior sign-off doesn't carry forward when the underlying extraction logic changes. The old resolution is archived, not deleted, so provenance isn't lost even though it no longer applies.</p>
+        </div>
+      </section>
+
+      <!-- ================= 03 STORAGE ================= -->
+      <section id="storage">
+        <div class="section-num">§ 03 — Storage</div>
+        <h2 class="section-title">What the database gains</h2>
+        <p class="section-kicker">Every addition is new tables or new columns — nothing in the existing schema is dropped or restructured.</p>
+
+        <div class="db-table">
+          <div class="db-row"><div class="db-name">wikis <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Isolated corpus container — id, name, status, created_at/by. Every table below carries a <code>wiki_id</code> foreign key, enforced as a mandatory predicate at retrieval time, not a display filter. See <a href="#wikis" style="color:var(--gold);">Wikis</a>.</div></div>
+          <div class="db-row"><div class="db-name">documents <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc"><strong style="color:var(--text)">Generalized from <code>contracts</code>.</strong> One row per document, any family — parties, type, effective/expiry dates, status, lifecycle tag, jurisdiction. Populated automatically at ingest.</div></div>
+          <div class="db-row"><div class="db-name">contracts <span class="badge unc" style="margin-left:6px;">scoped</span></div><div class="db-desc">Stays, now scoped to Family 1 (+ Family 2 with the added <code>binding_status</code> field for term sheets). The Contract Register lives here.</div></div>
+          <div class="db-row"><div class="db-name">clauses</div><div class="db-desc">One row per extracted clause: type, verbatim text, page, typed value, confidence, evidence-span pointer. Scoped to Family 1(+2).</div></div>
+          <div class="db-row"><div class="db-name">obligations</div><div class="db-desc">Obligated party, duty, trigger, deadline, notice period, consequence, source clause — persisted at ingest. The Obligation Register lives here.</div></div>
+          <div class="db-row"><div class="db-name">litigation_facts <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Family 3 — parties as plaintiff/defendant, holding, relief granted, procedural posture. Linked to disputed clauses via the <code>litigation-disputes</code> edge.</div></div>
+          <div class="db-row"><div class="db-name">authorizations <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Family 4 — grantor, grantee, scope of authority, effective/expiry, limitations, resolving body.</div></div>
+          <div class="db-row"><div class="db-name">opinions <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Family 5 — addressee, matters opined on, assumptions/qualifications, conclusion, scope-of-reliance limitation.</div></div>
+          <div class="db-row"><div class="db-name">citations <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Statute/case references — citation string, authority type, normalized form, pointer back to the clause or paragraph citing it.</div></div>
+          <div class="db-row"><div class="db-name">structural_anchors <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Persisted section/¶ numbering, linked to pages and clauses by position — answers "what does ¶14 say."</div></div>
+          <div class="db-row"><div class="db-name">entities /<br>entity_aliases <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Canonical party registry — "Acme Corp" / "Acme Corporation" resolve to one row. Clauses, obligations, and citations reference <code>entity_id</code>, not raw strings.</div></div>
+          <div class="db-row"><div class="db-name">tables <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Structured cell data per table-bearing page — rows/columns, evidence pointer, confidence.</div></div>
+          <div class="db-row"><div class="db-name">figures <span class="badge new" style="margin-left:6px;">new</span></div><div class="db-desc">Page, generated description, image pointer, confidence — for charts, diagrams, and standalone images.</div></div>
+          <div class="db-row"><div class="db-name">document_sets</div><div class="db-desc">Collections — a named, reusable set of documents. Shared plumbing for Review Table, Playbooks, and the Deviation Dashboard.</div></div>
+          <div class="db-row"><div class="db-name">playbooks <span class="badge ext" style="margin-left:6px;">wiki-scoped</span></div><div class="db-desc">Admin-authored rule sets: standard / fallback / unacceptable position per clause type, guidance, approved alternative language. <strong style="color:var(--text)">Now carries <code>wiki_id</code></strong> — each wiki authors its own playbooks, no shared-default set across wikis.</div></div>
+          <div class="db-row"><div class="db-name">playbook_runs <span class="badge ext" style="margin-left:6px;">wiki-scoped</span></div><div class="db-desc">One row per clause per document per playbook run. The Deviation Dashboard is a SQL aggregation over this table. Carries <code>wiki_id</code> alongside <code>playbooks</code>.</div></div>
+          <div class="db-row"><div class="db-name">review_queue <span class="badge ext" style="margin-left:6px;">extended</span></div><div class="db-desc">One row per flagged extraction. <strong style="color:var(--text)">Now also</strong> flags doc-type misclassification and per-family metadata fields, not just clause/obligation confidence. On re-ingest, prior resolutions for that document move to a superseded/archived state rather than being deleted — see <a href="#access" style="color:var(--gold);">Access &amp; Admin Lifecycle</a>.</div></div>
+          <div class="db-row"><div class="db-name">page_metadata <span class="badge ext" style="margin-left:6px;">extended</span></div><div class="db-desc">Already exists as a cache, now guaranteed populated at ingest. <strong style="color:var(--text)">The fixed 12-field list is now per-family</strong>, pulled from the schema registry — governing law/caps for contracts, case number/court/disposition for litigation, etc. Possibly redundant once family tables are populated directly — open simplification, see <a href="#families" style="color:var(--gold);">Document Families</a>.</div></div>
+          <div class="db-row"><div class="db-name">relations <span class="badge ext" style="margin-left:6px;">extended further</span></div><div class="db-desc">Party↔clause, clause↔clause, document↔document — <strong style="color:var(--text)">plus</strong> <code>amends</code>/<code>superseded-by</code>, <code>ancillary-to</code>, <code>litigation-disputes</code>, <code>references-unresolved</code>.</div></div>
+          <div class="db-row"><div class="db-name">pages</div><div class="db-desc">Role column (precedent / active-matter / both) and lifecycle column (current / superseded) — lifecycle now <strong style="color:var(--text)">derived from</strong> the <code>supersedes</code> edge, not set independently.</div></div>
+        </div>
+      </section>
+
+      <!-- ================= 04 ONLINE ================= -->
+      <section id="online">
+        <div class="section-num">§ 04 — Online</div>
+        <h2 class="section-title">The fast path in front of the existing pipeline</h2>
+        <p class="section-kicker">A deterministic lookup is tried first; the full pipeline — hybrid retrieval, answer synthesis, grounding, citation checks — is still there underneath, untouched, for anything the lookup can't answer.</p>
+
+        <div class="flow">
+          <div class="flow-node unchanged">Question</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node unchanged">Scope resolution</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node new">Structured lookup</div>
+          <div class="flow-branch-label">↙ hit&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↘ miss</div>
+          <div class="flow-node new">Fast path — SQL lookup<br>+ light synthesis</div>
+          <div class="flow-arrow">·</div>
+          <div class="flow-node unchanged">Hybrid RRF retrieval<br>+ full answer LLM</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node unchanged">Deterministic citation +<br>term-presence checks</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node ext">Grounding LLM — tiered</div>
+          <div class="flow-arrow">→</div>
+          <div class="flow-node unchanged">Answer</div>
+        </div>
+        <p class="fig-caption">Fig. 2 — Nothing removed from today's pipeline; the fast path is a shortcut ahead of it.</p>
+
+        <div class="callout">
+          <div class="callout-label">New fast-path branch</div>
+          <p>Cross-document relation questions — "every amendment to this MSA," "what's part of this transaction" — resolve via SQL join over <code>relations</code>/<code>entities</code>, same tier as a clause lookup, not the broad-retrieval fallback.</p>
+        </div>
+
+        <div class="callout flag">
+          <div class="callout-label">Open design item</div>
+          <p>Prompt-injection screening on ingested content needs a home somewhere in this diagram — not yet placed. Most likely a check between ingestion and any point where document content reaches system-prompt or answer-LLM context. Flagged in the plan, location not yet decided.</p>
+        </div>
+      </section>
+
+      <!-- ================= 05 QUERY MODES ================= -->
+      <section id="query-modes">
+        <div class="section-num">§ 05</div>
+        <h2 class="section-title">Query modes — how a lawyer gets an answer</h2>
+        <p class="section-kicker">A lawyer picks whichever fits what they're doing. Cost lines are directional estimates on gpt-5-nano pricing, not measured.</p>
+
+        <div class="qmode">
+          <h4>Simple fact / exact clause</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Scope → hybrid retrieval → full answer LLM → grounding LLM.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Structured hit → deterministic lookup + light synthesis. No hit → today's pipeline, untouched.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.08/query → ~₹0.01 on a hit (falls back to ~₹0.08 on a miss)</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Cross-document structured</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Broad-question retrieval pulls up to 60 pages, LLM reads and filters.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Filtered SQL query over <code>clauses</code>/<code>obligations</code>; LLM only summarizes the filtered set.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.19/query → ~₹0.03/query</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Cross-document relation <span class="badge new">new</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — relies on broad retrieval luck to surface amendment chains or transaction bundles.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">SQL join over <code>relations</code>/<code>entities</code> — amendment chains, transaction clusters, litigation↔instrument links.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0 (pure DB read, same class as Contract Register)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Structural / citation lookup <span class="badge new">new</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">No equivalent — no persisted notion of "¶14" or a specific case citation to jump to.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Direct lookup via <code>structural_anchors</code> / <code>citations</code> — "what does ¶14 say," "what cases does this cite."</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → near-₹0, DB read + evidence-span retrieval</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Contract Register</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "every contract with X" means asking chat and hoping retrieval covers it.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Every document appears automatically as a row the moment it finishes ingest.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0 (pure DB read)</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Review Table</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Metadata cache for 12 hardcoded fields; a miss calls <code>extract_cell()</code> against wiki text truncated at 6,000 chars, 5 workers parallel.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Standard columns — now a <em>per-family</em> set, not one fixed list — resolve from <code>clauses</code>/family tables with zero LLM calls, typed and filterable. Novel columns use document-scoped hybrid retrieval instead of truncation. Hard-capped at 20 documents per run.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">Up to ~₹26 worst-case/20-doc run → ~₹0.60 typical, ~₹10 worst-case</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Compare</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Same worker as Review Table but no metadata-cache check at all, full-model narrative call, no doc-count cap.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Identical fixes as Review Table: cache check, fast-model narrative call, document-scoped retrieval, 20-doc cap.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">Up to ~₹26 worst-case → ~₹0.60 typical, ~₹10 worst-case</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Playbook run</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — nearest equivalent is a generic House Rule injected into every prompt.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Per clause type: pull clause → classify vs. standard/fallback/unacceptable → suggest redline → citation check. Rolls into the Deviation Dashboard.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0.02/clause (~₹0.30/document across ~15 clause types)</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Obligation Register</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Obligation Mode computes obligations fresh, per query.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Extracted once at ingest, persisted. "Due in 90 days" is a date filter, not an LLM read.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.19/query → ~₹0</div></div>
+        </div>
+
+        <div class="qmode">
+          <h4>Draft Mode</h4>
+          <div class="row"><div class="k">Today</div><div class="v">Dump-then-truncate context gathering with a documented history of silently losing wiki grounding.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Reads from clause-level embeddings, scoped to role-tagged precedent documents, ranked by relevance — never a page dump.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.10/draft → ~₹0.11/draft — the win is reliability, not price</div></div>
+        </div>
+      </section>
+
+      <!-- ================= 06 UNCHANGED ================= -->
+      <section id="unchanged">
+        <div class="section-num">§ 06</div>
+        <h2 class="section-title">What stays exactly as it is</h2>
+        <p class="section-kicker">The anti-hallucination scaffolding isn't touched by any of this — it's the thing every new feature is built to sit on top of.</p>
+        <ul>
+          <li><strong>Grounding check</strong> — independent LLM audit plus deterministic term-presence layer, unchanged, invoked less often on the fast path; claim-verification count now surfaced on every answer.</li>
+          <li><strong>Citation + attribution verification</strong> — substring and source-attribution checks, same one corrective retry on failure.</li>
+          <li><strong>PII redaction</strong> — fails open, strips matches from final answers, unchanged.</li>
+          <li><strong>Scope / ambiguity handling</strong> — disambiguation, clarification, and scope carryover run before any lookup.</li>
+          <li><strong>House Rules</strong> — still injected into every prompt; Playbooks are a structured superset, not a replacement.</li>
+        </ul>
+        <div class="callout flag">
+          <div class="callout-label">Correction from original doc</div>
+          <p><strong style="color:var(--text)">Hybrid RRF retrieval can no longer be listed as fully unchanged.</strong> The candidate pool now draws from page-embeddings <em>and</em> hypothetical-question-embeddings before RRF fusion runs — still the same fallback for anything the structured layer doesn't cover, but the input to fusion has grown.</p>
+        </div>
+      </section>
+
+      <!-- ================= 07 SEQUENCING ================= -->
+      <section id="sequencing">
+        <div class="section-num">§ 07</div>
+        <h2 class="section-title">What ships in what order</h2>
+        <p class="section-kicker">Most features are thin layers on the same backbone — building out of order means redoing work.</p>
+
+        <div class="phase">
+          <div class="phase-label">Phase 0<span class="sub">Backbone</span></div>
+          <div>
+            <div class="phase-items">Extended ingestion schema · Typed fields · Role/lifecycle/doc-type/jurisdiction tagging · Review Queue · New tables <span style="color:var(--gold);">+ Schema registry</span> · <span style="color:var(--gold);">Table/figure extraction</span> · <span style="color:var(--gold);">Prompt-injection defense</span> · <span style="color:var(--gold);">Relation edge types + doc-reference resolution</span> · <span style="color:var(--gold);">wikis table + wiki_id on every table</span> · <span style="color:var(--gold);">Encryption at rest</span> · <span style="color:var(--gold);">LLM output validation/coercion layer</span> · <span style="color:var(--gold);">entity + compaction race locks</span> · <span style="color:var(--gold);">wiki_id request-binding</span></div>
+            <p class="phase-desc">Nothing else can start meaningfully before this exists — every feature below reads from what this phase writes. Doc-type classification, table/figure handling, prompt-injection screening, and the <code>wiki_id</code> scoping column all belong here: retrofitting tenancy isolation after tables already exist is the same painful sequencing mistake ACL would have been if built after the fact. Encryption at rest, the write-validation layer, and the two concurrency locks belong here for the same reason — cheaper to build into tables and write-paths that don't exist yet than to retrofit once real documents are flowing through them. See <a href="#hardening" style="color:var(--gold);">Production Hardening</a>.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 0, parallel<span class="sub">Independent</span></div>
+          <div>
+            <div class="phase-items">Compare Mode cost fix <span style="color:var(--gold);">· Basic single-user login (hashed passwords, rate-limited) · Admin document lifecycle (add/archive/delete) · File-upload validation · Cost pre-flight gate on bulk operations</span></div>
+            <p class="phase-desc">Compare Mode fix doesn't touch ingestion: port the metadata-cache check, drop the narrative call to the fast model, replace truncate-at-6,000-chars with document-scoped hybrid retrieval. Login is a straightforward auth layer with no schema dependency — password hashing and rate-limiting are floor requirements on it, not a later hardening pass. File-upload validation sits at the pipeline's front door, independent of what the schema inside looks like. Add/archive/delete need no backbone dependency either — <strong style="color:var(--gold)">re-ingest</strong> is the one admin-lifecycle action that does depend on Phase 0's schema-version stamping, so it ships once that stamp exists, not before. The cost pre-flight gate wraps any bulk operation (bulk upload, re-ingest by family, wiki-wide reprocess) regardless of which phase that operation itself belongs to.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 1<span class="sub">Direct consumers</span></div>
+          <div>
+            <div class="phase-items">Contract Register · Obligation tracker · Review Table upgrade <span style="color:var(--gold);">+ Hypothetical-question embeddings</span></div>
+            <p class="phase-desc">Thin reads over the backbone — cheapest of the seven to ship once Phase 0 lands. Hypothetical questions can ship here too — additive to embeddings, no backbone dependency of its own.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 2<span class="sub">Shared plumbing</span></div>
+          <div>
+            <div class="phase-items">Collections · Playbooks · Precedent layer</div>
+            <p class="phase-desc">Collections ships alongside Playbooks — batch runs need "a named set of documents" as much as the dashboard does. Precedent layer adds role-tagged corpus + clause embeddings, becomes the retrieval mechanism Draft Mode reads from.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 3<span class="sub">Depends on Phase 2</span></div>
+          <div>
+            <div class="phase-items">Deviation Dashboard · Prompt library</div>
+            <p class="phase-desc">The dashboard is a SQL aggregation over <code>playbook_runs</code> — dead until Playbooks has run against a Collection.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 08 NET EFFECT ================= -->
+      <section id="net-effect">
+        <div class="section-num">§ 08</div>
+        <h2 class="section-title">Net effect — what actually changes, honestly</h2>
+
+        <p><strong style="color:var(--text)">Ingestion gets heavier — compounding, not replacing.</strong> The original Part 2 estimate was +20–50% ingest LLM cost from one extended structured-output call. This revision stacks <strong style="color:var(--gold)">a further +10–20%</strong> on top of that, driven almost entirely by the new doc-type classification pre-pass (a new short call, every document, not just long ones) and the fatter main schema — not by each new extraction category costing separately, since most of them (structural anchors, jurisdiction, citations, entity match) fold into the existing call at near-zero marginal cost.</p>
+
+        <p><strong style="color:var(--text)">Table and image extraction is a genuinely new cost line</strong>, not a delta on an existing one — real vision-model calls, scaling with corpus table/image density, currently unmeasured.</p>
+
+        <p><strong style="color:var(--text)">Query gets lighter for structured question types</strong> — simple fact lookups, exact clause questions, filtered cross-document lists, obligation checks, cross-document relation queries, and structural/citation lookups all become mostly database reads with a light synthesis call. Complex comparison, playbook reasoning, and precedent drafting still need the full LLM pipeline.</p>
+
+        <p><strong style="color:var(--text)">Review and Compare Mode stop scaling with (documents × columns).</strong> Once standard columns resolve from <code>clauses</code>/<code>obligations</code> and Compare Mode gets the same cache check, only genuinely novel columns still cost a call — bounded by how many a lawyer types in, not by corpus size.</p>
+
+        <p>At the real operating scale — 20 documents per run — the numbers stay trivial. Worst case: <strong>~₹10</strong> on gpt-5-nano, <strong>~₹26</strong> on gpt-4o-mini. A realistic run: <strong>~₹0.60</strong> on gpt-5-nano, <strong>~₹1.50</strong> on gpt-4o-mini.</p>
+
+        <div class="callout">
+          <div class="callout-label">Standing caveat — carried forward</div>
+          <p>These are directional, not measured. The original doc's own honest next step is still outstanding: instrument the current pipeline to see which stage actually eats the reported 20–30 seconds, before betting engineering time on the size of the win. That instrumentation gap now also applies to ingest cost specifically — there's still no ₹-baseline for ingestion to price any of this revision's deltas against.</p>
+        </div>
+      </section>
+
+      <!-- ================= 09 BUILD PLAN ================= -->
+      <section id="build-plan">
+        <div class="section-num">§ 09 <span class="badge new" style="margin-left:8px;">new</span></div>
+        <h2 class="section-title">Implementation Build Plan</h2>
+        <p class="section-kicker"><code>§ 07</code> establishes the dependency logic; this turns it into an actual checklist. The key correction worth stating up front: <strong style="color:var(--text)">Phase 0 is the heaviest lift, but not a full gate</strong> — only the feature layers built on top of the backbone wait on it. A parallel track has zero dependency and should start alongside Phase 0, not after it.</p>
+
+        <div class="phase">
+          <div class="phase-label">Phase 0<span class="sub">Backbone — blocks everything below</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li><strong>DB:</strong> create <code>wikis</code>, <code>documents</code> (generalized from <code>contracts</code>), <code>litigation_facts</code>, <code>authorizations</code>, <code>opinions</code>, <code>citations</code>, <code>structural_anchors</code>, <code>entities</code>/<code>entity_aliases</code>, <code>tables</code>, <code>figures</code> — every table gets <code>wiki_id</code> at creation, not retrofit.</li>
+              <li><strong>Schema registry:</strong> 5-family definitions (contracts / term-sheet / litigation / authority / opinion) + generic fallback, config-driven.</li>
+              <li><strong>Ingestion stage 01:</strong> table-bearing + image/chart page classes, Azure Vision description-mode prompt.</li>
+              <li><strong>Ingestion stage 02:</strong> doc-type classification (content-primary, folder-boost when present) + jurisdiction tag.</li>
+              <li><strong>Ingestion stage 03:</strong> schema-registry-driven synthesis call — <code>citations[]</code>, <code>structural_anchors[]</code>, <code>hypothetical_questions[]</code>, <code>tables[]</code>, <code>figures[]</code>, <code>binding_status</code>, doc-reference resolution.</li>
+              <li><strong>Segmentation:</strong> structure-aware split along <code>structural_anchors</code>, replacing the blind 40k-char cut.</li>
+              <li><strong>Ingestion stage 04:</strong> reconciliation/dedup for structured rows across segments; contradiction-check reordered to run after amendment edges.</li>
+              <li><strong>Ingestion stage 06:</strong> hypothetical-question embeddings as a 3rd embedding type.</li>
+              <li><strong>Ingestion stage 07:</strong> evaluation gate extended to doc-type + table/figure confidence.</li>
+              <li><strong>Review Queue:</strong> doc-type misclassification + per-family metadata branches.</li>
+              <li><strong>Hardening, same phase:</strong> LLM-output validation/coercion layer before every write; entity-canonicalization unique-constraint/upsert; per-page compaction lock; <code>wiki_id</code> bound once per request; encryption at rest on document + structured storage.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 0, parallel<span class="sub">Zero dependency — start now</span></div>
+          <div>
+            <ul style="margin-bottom:8px;">
+              <li><strong style="color:var(--gold)">Login</strong> <span class="badge done">shipped</span> — hashed password, rate-limited, HTTPS-only session. Trivial, zero dependency: build first, gives a working gated shell immediately.</li>
+              <li><strong>Admin lifecycle:</strong> Add (default path already established) + Archive / Hard-delete with cascade handling on <code>relations</code>/embeddings.</li>
+              <li><strong>Compare Mode cost fix:</strong> metadata-cache check, fast-model narrative call, document-scoped hybrid retrieval instead of truncation, 20-doc cap.</li>
+              <li><strong>File-upload validation gate</strong> — malformed/malicious PDF handling, before parsing starts.</li>
+              <li><strong>Cost pre-flight gate</strong> on bulk operations (bulk upload, re-ingest by family, wiki-wide reprocess).</li>
+            </ul>
+            <p class="phase-desc" style="margin-bottom:0;"><strong style="color:var(--flag)">Exception:</strong> Re-ingest is the one admin-lifecycle action that <em>does</em> wait on Phase 0's schema-version stamp — it ships in Phase 1, not here.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 1<span class="sub">Direct consumers — gated by Phase 0</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li>Contract Register, Obligation tracker, Review Table upgrade (per-family standard fields, not one fixed list).</li>
+              <li>Hypothetical-question embeddings live in the retrieval candidate pool.</li>
+              <li>Structural/citation lookup + cross-document relation SQL-join fast path.</li>
+              <li><strong>Re-ingest</strong> — single-document / Collection / by-schema-version-and-family, transactional swap not blend, Review Queue reset with old resolutions archived not deleted, queued/background for anything beyond a handful of documents.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 2<span class="sub">Shared plumbing + judgment</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li>Collections, Playbooks (wiki-scoped — no shared-default set across wikis), Precedent layer.</li>
+              <li>Draft Mode and the Ask tab's drafting intent both switch to clause-level embeddings, scoped to role-tagged precedent documents.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 3<span class="sub">Depends on Phase 2</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li>Deviation Dashboard (SQL aggregation over <code>playbook_runs</code>).</li>
+              <li>Prompt library.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Ongoing<span class="sub">Not phase-gated</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li>Cost/latency instrumentation — still outstanding from the original doc, applies to both query and ingest cost.</li>
+              <li>Watch fallback-schema hit-rate to validate whether the 5-family taxonomy holds up against document types outside the original 24-folder seed list.</li>
+              <li>Hypothetical-question hit-rate check — log real query performance against question-embeddings vs. page-embeddings; drop the feature if it's not earning its keep.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        Playbooks · Precedent layer · Review Table · Obligation tracker · Contract Register · Deviation Dashboard · Collections · Document Families · Cross-Document Relations · Table/Chart/Image extraction — plus the Review Queue, the Compare Mode cost fix, and hypothetical-question retrieval. Agentic workflows, email intelligence, deep research, access control, continuous eval, and cross-encoder reranking held for a later, separate decision.
+      </footer>
+
+    </div>
+  </main>
+</div>
+
+</body>
+</html>
