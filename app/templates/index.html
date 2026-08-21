@@ -7266,6 +7266,84 @@
     // archive.
     // ============================================================
 
+    // Builds the same nested {folder: {...}} shape loadFileTree() gets from
+    // /files, but from /document/list's flat array — so leaves carry the
+    // full doc object (status, source_doc) instead of just the string
+    // 'file', and archived documents (which /files deliberately excludes,
+    // see db.get_pages's archived_clause) are included.
+    function _buildAdminDocTree(docs) {
+      const root = {};
+      for (const doc of docs) {
+        const parts = doc.path.split('/');
+        let curr = root;
+        for (let i = 0; i < parts.length; i++) {
+          if (i === parts.length - 1) {
+            curr[parts[i]] = doc;
+          } else {
+            curr[parts[i]] = (curr[parts[i]] && typeof curr[parts[i]] === 'object' && !curr[parts[i]].path) ? curr[parts[i]] : {};
+            curr = curr[parts[i]];
+          }
+        }
+      }
+      return root;
+    }
+
+    function _isAdminDocLeaf(node) {
+      return node && typeof node === 'object' && typeof node.path === 'string';
+    }
+
+    // Same collapsible folder-row behavior as loadFileTree()'s renderNode
+    // (root open, everything below starts collapsed) — leaves render as
+    // admin rows (badge + archive/restore/delete) instead of the Files
+    // tab's icon-card grid, since there's action buttons to fit here.
+    function _renderAdminDocNode(node, depth) {
+      let html = '';
+      const indent = depth * 18;
+      const keys = Object.keys(node).sort((a, b) => a.localeCompare(b));
+      const folderKeys = keys.filter(k => !_isAdminDocLeaf(node[k]));
+      const fileKeys = keys.filter(k => _isAdminDocLeaf(node[k]));
+      const openByDefault = depth === 0;
+
+      function countLeaves(n) {
+        let c = 0;
+        for (const k in n) c += _isAdminDocLeaf(n[k]) ? 1 : countLeaves(n[k]);
+        return c;
+      }
+
+      for (const k of folderKeys) {
+        const childCount = countLeaves(node[k]);
+        const folderId = 'adoc_' + Math.random().toString(36).slice(2, 8);
+        const chevron = openByDefault ? 'ti-chevron-down' : 'ti-chevron-right';
+        const childDisplay = openByDefault ? '' : 'none';
+        html += `<div class="ftree-row folder-row" style="padding-left:${14 + indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
+          + `<i class="ti ${chevron} ftree-icon fold-chevron" style="color:var(--accent)"></i>`
+          + `<span class="folder-name">${escapeHtmlRule(k)}</span>`
+          + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
+          + `</div>`;
+        html += `<div id="${folderId}" style="display:${childDisplay}">${_renderAdminDocNode(node[k], depth + 1)}</div>`;
+      }
+
+      for (const k of fileKeys) {
+        const doc = node[k];
+        const archived = doc.status === 'archived';
+        const escPath = doc.path.replace(/'/g, "\\'");
+        const escSrc = doc.source_doc.replace(/'/g, "\\'");
+        const ext = k.split('.').pop().toLowerCase();
+        const icon = ext === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text';
+        const actionBtns = archived
+          ? `<button type="button" class="admin-icon-btn" title="Restore to active" onclick="event.stopPropagation();restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate" style="font-size:13px"></i></button>
+             <button type="button" class="admin-icon-btn danger" title="Permanently delete" onclick="event.stopPropagation();deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash" style="font-size:13px"></i></button>`
+          : `<button type="button" class="admin-icon-btn" title="Archive — hides from search/chat, fully reversible" onclick="event.stopPropagation();archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`;
+        html += `<div class="admin-row" style="padding-left:${14 + indent}px;cursor:pointer" title="View ${k.replace(/"/g, '&quot;')}" onclick="openDoc('${escPath}')">
+            <i class="ti ${icon}" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;${archived ? 'color:var(--text-muted);text-decoration:line-through' : ''}">${escapeHtmlRule(k)}</span>
+            <span class="admin-badge ${archived ? 'amber' : 'green'}" style="flex-shrink:0">${archived ? 'archived' : 'active'}</span>
+            <span style="display:flex;gap:6px;flex-shrink:0">${actionBtns}</span>
+          </div>`;
+      }
+      return html;
+    }
+
     async function loadDocumentManageList() {
       const manageDiv = document.getElementById('document-manage-list');
       const sub = document.getElementById('admin-documents-sub');
@@ -7279,21 +7357,8 @@
           manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No documents ingested yet.</div>';
           return;
         }
-        manageDiv.innerHTML = docs.map(doc => {
-          const archived = doc.status === 'archived';
-          const escPath = doc.path.replace(/'/g, "\\'");
-          const escSrc = doc.source_doc.replace(/'/g, "\\'");
-          const actionBtns = archived
-            ? `<button type="button" class="admin-icon-btn" title="Restore to active" onclick="restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate" style="font-size:13px"></i></button>
-               <button type="button" class="admin-icon-btn danger" title="Permanently delete" onclick="deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash" style="font-size:13px"></i></button>`
-            : `<button type="button" class="admin-icon-btn" title="Archive — hides from search/chat, fully reversible" onclick="archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`;
-          return `<div class="admin-row">
-              <i class="ti ti-file-text" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
-              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;${archived ? 'color:var(--text-muted);text-decoration:line-through' : ''}" title="${doc.path.replace(/"/g, '&quot;')}">${escapeHtmlRule(doc.path)}</span>
-              <span class="admin-badge ${archived ? 'amber' : 'green'}" style="flex-shrink:0">${archived ? 'archived' : 'active'}</span>
-              <span style="display:flex;gap:6px;flex-shrink:0">${actionBtns}</span>
-            </div>`;
-        }).join('');
+        const tree = _buildAdminDocTree(docs);
+        manageDiv.innerHTML = _renderAdminDocNode(tree, 0);
       } catch (e) {
         console.error('loadDocumentManageList error:', e);
         manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load documents.</div>';
