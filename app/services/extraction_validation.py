@@ -337,18 +337,53 @@ def coerce_duration(value: Any) -> tuple[Any, bool, str | None]:
             True, None)
 
 
+def _split_list_string(value: str) -> list[str]:
+    """Split a delimited string into items without fracturing legal names.
+
+    Semicolons and newlines are unambiguous separators. Commas are not: a
+    party in a legal document is routinely written as
+    `Acme Corp, a company incorporated under the laws of India`, where the
+    comma introduces a *description of the same party*, not a second one.
+    Splitting there produces a phantom party — and worse, one that reads as a
+    real name to everything downstream.
+
+    So a comma only separates when what follows starts like a new name
+    (capital letter, digit, or a bracketed redaction marker). A fragment
+    starting lowercase is an apposition and stays attached.
+    """
+    # Semicolons and newlines first — always real separators.
+    coarse = [p for p in re.split(r"\s*[;\n]\s*", value) if p.strip()]
+    out: list[str] = []
+    for chunk in coarse:
+        buf = ""
+        # Keep parenthesised commas intact ("Smith, Jones and Co (India, Ltd)").
+        for piece in re.split(r",(?![^(]*\))", chunk):
+            piece_stripped = piece.strip()
+            if not piece_stripped:
+                continue
+            starts_new = bool(re.match(r"^[A-Z0-9\[\"']", piece_stripped))
+            if buf and starts_new:
+                out.append(buf.strip())
+                buf = piece_stripped
+            elif buf:
+                buf = f"{buf}, {piece_stripped}"
+            else:
+                buf = piece_stripped
+        if buf.strip():
+            out.append(buf.strip())
+    return [p for p in out if p and not is_nullish(p)]
+
+
 def coerce_list(value: Any) -> tuple[Any, bool, str | None]:
     """A list of non-empty strings. A model given a list field routinely
-    returns a comma-joined string instead; that is recoverable."""
+    returns a delimited string instead; that is recoverable."""
     if is_nullish(value):
         return [], False, None
     if isinstance(value, list):
         out = [str(v).strip() for v in value if not is_nullish(v)]
         return out, len(out) != len(value), None
     if isinstance(value, str):
-        parts = [p.strip() for p in re.split(r"\s*(?:;|\n|,(?![^(]*\)))\s*", value)
-                 if p.strip() and not is_nullish(p)]
-        return parts, True, None
+        return _split_list_string(value), True, None
     if isinstance(value, dict):
         return [f"{k}: {v}" for k, v in value.items()], True, None
     return [str(value)], True, None
