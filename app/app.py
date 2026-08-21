@@ -709,6 +709,16 @@ def upload():
                 pass
             continue
 
+        # Encrypt at rest — after validation, so a malformed file is rejected
+        # while still readable rather than encrypted first and inspected later.
+        # No-op unless ENCRYPTION_KEY is set; readers decrypt transparently.
+        try:
+            from services import crypto as _crypto
+            if _crypto.encrypt_file(save_path):
+                logger.info("Encrypted upload at rest: %s", os.path.basename(save_path))
+        except Exception as _enc_err:
+            logger.error("Could not encrypt %s: %s", save_path, _enc_err)
+
         saved_paths.append(save_path)
         metadata_list.append({
             "relative_path": rel_path if rel_path else file.filename,
