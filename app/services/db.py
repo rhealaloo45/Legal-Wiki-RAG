@@ -30,6 +30,63 @@ def _emb_table_name() -> str:
     return "page_embeddings" if provider == "nvidia" else f"page_embeddings_{provider}"
 
 
+def page_compaction_lock(session_id: str, title: str):
+    """Per-page advisory lock guarding compaction (§ 01.6 Concurrency).
+
+    A Postgres advisory lock rather than a Python threading.Lock because
+    compaction runs under gunicorn: a thread lock only serializes within one
+    worker process, and the race the doc describes is between concurrent
+    ingests that may be in different processes entirely.
+
+    Non-blocking — yields False rather than waiting. A caller that can't get
+    the lock should skip the page, not queue behind it: whoever holds it is
+    about to produce a fresh compaction of that same page, so waiting only to
+    redo the work is the outcome worth avoiding.
+    """
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _lock():
+        from sqlalchemy import text
+        # Two 32-bit keys: a fixed namespace and the page hash. Postgres
+        # advisory locks are a flat global space, so the namespace keeps these
+        # from colliding with the schema-init lock or anything added later.
+        key = _stable_lock_key(f"{session_id}:{title}")
+        conn = get_engine().connect()
+        acquired = False
+        try:
+            acquired = bool(conn.execute(
+                text("SELECT pg_try_advisory_lock(:ns, :key)"),
+                {"ns": _COMPACTION_LOCK_NAMESPACE, "key": key},
+            ).scalar())
+            yield acquired
+        finally:
+            try:
+                if acquired:
+                    conn.execute(text("SELECT pg_advisory_unlock(:ns, :key)"),
+                                 {"ns": _COMPACTION_LOCK_NAMESPACE, "key": key})
+                    conn.commit()
+            finally:
+                conn.close()
+
+    return _lock()
+
+
+_COMPACTION_LOCK_NAMESPACE = 0x4C57  # "LW"
+
+
+def _stable_lock_key(s: str) -> int:
+    """Deterministic signed-32-bit key from a string.
+
+    Not Python's hash(): that is randomized per process by PYTHONHASHSEED, so
+    two workers would compute different keys for the same page and neither
+    would ever block the other — a lock that silently never locks.
+    """
+    import hashlib
+    digest = hashlib.sha256(s.encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big", signed=True)
+
+
 def _question_table_name() -> str:
     """Hypothetical-question vectors, per embedding provider — same
     one-table-per-provider convention as _emb_table_name, so switching
