@@ -251,7 +251,91 @@ def _read_pdf(file_path: str) -> str:
     )
     logger.info("OCR complete for %s: %d/%d pages successfully OCR'd", fname, ocr_count, len(needs_ocr))
 
+    _enrich_structural_pages(file_path, pypdf_texts, needs_ocr, fname)
+
     return "\n".join(pypdf_texts)
+
+
+def _enrich_structural_pages(file_path: str, page_texts: list[str],
+                             already_ocred: list[int], fname: str) -> None:
+    """Stage 01 — second look at table-bearing and figure-bearing pages.
+
+    These pages extract *successfully* by character count, so nothing else in
+    the pipeline flags them: a table's rows and columns are flattened into
+    loose text, and a chart on a page with a caption is never looked at. Both
+    fail silently, which is what makes them worth a dedicated pass.
+
+    Off unless STRUCTURAL_VISION_ENABLED. This is the only place in ingest
+    that can fire a vision call on a page that already read fine, so it does
+    not turn itself on — the cost is per page across every document, and that
+    is a decision to make deliberately rather than inherit.
+    """
+    if not getattr(config, "STRUCTURAL_VISION_ENABLED", False):
+        return
+    if config.OCR_ENGINE != "azure_vision":
+        # Tesseract cannot do either job: it reads glyphs, so a chart yields
+        # nothing and a table yields cells stripped of the layout that gave
+        # them meaning. Escalating to it would spend time to learn nothing.
+        logger.info("Structural vision enabled but OCR_ENGINE is %s — skipping "
+                    "(Tesseract cannot read table structure or describe figures)",
+                    config.OCR_ENGINE)
+        return
+
+    from services import page_classifier
+
+    budget = getattr(config, "STRUCTURAL_VISION_MAX_PAGES", 5)
+    ocred = set(already_ocred)
+    candidates: list[tuple[float, int, dict]] = []
+
+    try:
+        doc = fitz.open(file_path)
+    except Exception as err:
+        logger.warning("Could not reopen %s for structural pass: %s", fname, err)
+        return
+
+    try:
+        for i, text in enumerate(page_texts):
+            if i in ocred or i >= len(doc):
+                continue  # already read as an image; a second pass adds nothing
+            img_count, img_ratio = page_classifier.page_image_stats(doc[i])
+            verdict = page_classifier.classify_page(text, img_count, img_ratio)
+            if verdict["kind"] in (page_classifier.TABLE_BEARING,
+                                   page_classifier.FIGURE_BEARING):
+                rank = max(verdict["table_score"], verdict["figure_score"])
+                candidates.append((rank, i, verdict))
+
+        if not candidates:
+            return
+
+        # Strongest signals first, then capped. A document that looks like
+        # tables on every page is usually a false positive on its layout, and
+        # spending a vision call per page to find that out is the expensive
+        # way to learn it.
+        candidates.sort(reverse=True, key=lambda c: c[0])
+        if len(candidates) > budget:
+            logger.info("%s: %d structural page(s) detected, processing the "
+                        "top %d by signal strength", fname, len(candidates), budget)
+        for rank, i, verdict in candidates[:budget]:
+            try:
+                extra = _ocr_page_azure_vision(doc[i], verdict["vision_mode"])
+            except Exception as err:
+                logger.warning("Structural vision failed on page %d of %s: %s",
+                               i + 1, fname, err)
+                continue
+            if not extra.strip():
+                continue
+            # Appended, never substituted. The pypdf text is the verbatim
+            # source of truth that quote verification checks against; replacing
+            # it with a model's reading would make every quote on that page
+            # unverifiable against the original.
+            page_texts[i] = (
+                f"{page_texts[i]}\n\n[STRUCTURED EXTRACTION — {verdict['kind']}, "
+                f"{verdict['reason']}]\n{extra}"
+            )
+            logger.info("Stage 01: enriched page %d of %s (%s, +%d chars)",
+                        i + 1, fname, verdict["kind"], len(extra))
+    finally:
+        doc.close()
 
 
 # ---------------------------------------------------------------------------
@@ -417,13 +501,55 @@ _VISION_OCR_PROMPT = (
     "transcription only, no preamble."
 )
 
+# Second vision mode (§ 01 stage 01). The transcription prompt above stays as
+# it is for scanned text — this one is for pages whose content is structural
+# or visual, where transcribing loose words in reading order destroys exactly
+# the thing worth capturing.
+_VISION_TABLE_PROMPT = (
+    "This legal document page contains one or more tables. Reproduce each table "
+    "as GitHub-flavoured Markdown, preserving the original row and column "
+    "structure exactly — every header, every cell, in its own column. Keep cell "
+    "values verbatim, including units, currency symbols and footnote markers. "
+    "If a cell is genuinely empty, leave it empty rather than guessing what "
+    "belongs there. Where a merged cell spans columns, repeat its value across "
+    "the columns it covers and note the merge beneath the table. Transcribe any "
+    "text outside the table normally, after the table. Output the content only, "
+    "no preamble and no commentary."
+)
 
-def _ocr_page_azure_vision(page) -> str:
-    """Render a page and OCR it via the Azure OpenAI vision-capable deployment.
+_VISION_DESCRIBE_PROMPT = (
+    "This legal document page contains a chart, diagram, figure or other visual "
+    "content. Do two things, in this order.\n"
+    "1. Transcribe all visible text on the page verbatim, in reading order.\n"
+    "2. Then, under a line reading exactly 'VISUAL CONTENT:', describe what the "
+    "visual actually shows — its type (chart, flowchart, org chart, photograph, "
+    "screenshot, signature, seal, map), what it depicts, every axis label, "
+    "legend entry and data label you can read, and the relationship or trend it "
+    "conveys.\n"
+    "Report only what is legible. If a value or label cannot be read with "
+    "confidence, say so explicitly rather than estimating it — an invented data "
+    "point is far worse than an acknowledged gap in a legal record."
+)
+
+_VISION_PROMPTS = {
+    "transcribe": _VISION_OCR_PROMPT,
+    "table": _VISION_TABLE_PROMPT,
+    "describe": _VISION_DESCRIBE_PROMPT,
+}
+
+
+def _ocr_page_azure_vision(page, mode: str = "transcribe") -> str:
+    """Render a page and read it via the Azure OpenAI vision-capable deployment.
 
     Used instead of Tesseract when OCR_ENGINE=azure_vision — helpful for scans
     Tesseract garbles (skew, low DPI originals, redaction artefacts) since the
     model reads the rendered image directly rather than running local OCR.
+
+    `mode` selects the prompt: strict transcription for scanned text, table
+    reconstruction for table-bearing pages, description for chart/diagram
+    pages. Tesseract has no equivalent of the latter two — it reads glyphs,
+    so a chart yields nothing and a table yields its cells with the layout
+    that gave them meaning discarded.
     """
     import base64
     from services import llm
@@ -431,12 +557,13 @@ def _ocr_page_azure_vision(page) -> str:
     mat = fitz.Matrix(300 / 72, 300 / 72)
     pix = page.get_pixmap(matrix=mat)
     image_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+    prompt = _VISION_PROMPTS.get(mode, _VISION_OCR_PROMPT)
 
     try:
-        text, _usage = llm.ask_vision(image_b64, _VISION_OCR_PROMPT, max_tokens=4096, fast=True)
+        text, _usage = llm.ask_vision(image_b64, prompt, max_tokens=4096, fast=True)
         return text.strip()
     except Exception as e:
-        logger.warning("Azure vision OCR failed for a page: %s", e)
+        logger.warning("Azure vision (%s) failed for a page: %s", mode, e)
         return ""
 
 
