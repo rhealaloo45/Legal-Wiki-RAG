@@ -83,6 +83,53 @@ _ENTITY_SUFFIXES = (
 _ENTITY_NOISE = re.compile(r"[^a-z0-9&\s]")
 _WS = re.compile(r"\s+")
 
+# A party's *description* is not a party. Legal drafting writes
+# "Acme Corp, a company incorporated under the laws of India", and any
+# extraction that hands the second half over as a name pollutes the canonical
+# registry with entries that read as real parties to everything downstream.
+_ENTITY_DESCRIPTOR = re.compile(
+    r"^(a|an|the)\s+.*\b(company|corporation|partnership|entity|firm|"
+    r"body corporate|limited liability|incorporated|organized|organised|"
+    r"registered|existing|duly)\b",
+    re.IGNORECASE,
+)
+# Contractual role labels. Real and useful in the document, but they name a
+# position in the agreement, not a legal person — and the same label refers
+# to different companies in different documents, so canonicalizing on it
+# would merge unrelated parties into one entity.
+_ENTITY_ROLE_WORDS = frozenset({
+    "service provider", "provider", "supplier", "customer", "client",
+    "vendor", "purchaser", "buyer", "seller", "licensor", "licensee",
+    "lessor", "lessee", "borrower", "lender", "disclosing party",
+    "receiving party", "party", "parties", "company", "counterparty",
+    "employer", "employee", "contractor", "consultant", "the company",
+    "first party", "second party", "plaintiff", "defendant", "petitioner",
+    "respondent", "grantor", "grantee", "assignor", "assignee",
+})
+
+
+def is_probable_entity_name(name: str) -> bool:
+    """Whether a string looks like a legal person rather than a description
+    or a role label.
+
+    Conservative in the direction of *rejecting*: a missing entity is a gap
+    someone can notice and fill, while a bogus entity silently becomes an
+    authoritative party that clauses and obligations get attributed to.
+    """
+    s = (name or "").strip()
+    if len(s) < 2 or len(s) > 200:
+        return False
+    if _ENTITY_DESCRIPTOR.match(s):
+        return False
+    if s.lower().strip(" .") in _ENTITY_ROLE_WORDS:
+        return False
+    # Must contain a capitalised token or a bracketed redaction marker —
+    # this corpus redacts party names as "[Redacted Financial Investor]",
+    # which is a real (if anonymised) party and must survive.
+    if s.startswith("[") or re.search(r"\b[A-Z][A-Za-z&.-]", s):
+        return True
+    return False
+
 
 def _text():
     from sqlalchemy import text
@@ -140,6 +187,10 @@ def upsert_entity(wiki_id: str, name: str, entity_type: str | None = None,
     exactly the concurrency bulk upload creates.
     """
     if not _enabled() or not (name or "").strip():
+        return None
+    if not is_probable_entity_name(name):
+        logger.debug("Not registering %r as an entity — reads as a description "
+                     "or role label, not a party name", name[:80])
         return None
     key = canonical_key(name)
     if not key:
