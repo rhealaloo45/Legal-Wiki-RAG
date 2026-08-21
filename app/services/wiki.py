@@ -682,7 +682,8 @@ than explicitly stated, 0.0 = you are not actually confident this is a real clau
 Extract every clause you can identify — do not filter by confidence, low-confidence entries are \
 exactly what the Review Queue is for.
 
-Extract 10-30 pages and 10-40 relations. Cover the document thoroughly.
+Extract 10-40 relations. Cover the document thoroughly.
+{family_block}
 
 DOCUMENT:
 {text}"""
@@ -816,6 +817,7 @@ when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact ver
 no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
 clause is implied rather than explicitly stated, 0.0 = you are not actually confident this is a \
 real clause. Extract every clause you can identify — do not filter by confidence.
+{family_block}
 
 DOCUMENT SEGMENT:
 {text}"""
@@ -888,6 +890,135 @@ def _persist_clauses(session_id: str, doc_name: str, parsed: dict) -> None:
         logger.error("Failed to persist clauses for %s: %s", doc_name, e)
 
 
+def _collect_structured(parsed: dict, bucket: dict) -> None:
+    """Accumulate stage 03's structured output across passes.
+
+    Each segment contributes its own rows; they're reconciled once at the end
+    rather than per segment, because a duplicate is only detectable against
+    the rows the *other* segments produced.
+    """
+    if not isinstance(parsed, dict):
+        return
+    for key in ("citations", "structural_anchors", "tables", "figures"):
+        rows = parsed.get(key)
+        if isinstance(rows, list):
+            bucket.setdefault(key, []).extend(r for r in rows if isinstance(r, dict))
+    meta = parsed.get("family_metadata")
+    if isinstance(meta, dict):
+        # First non-null wins per field. Later segments see less of the
+        # document, so a value from an earlier pass is the better-sourced one;
+        # this also means a segment that "helpfully" restates a field it can't
+        # actually see can't overwrite the pass that genuinely read it.
+        merged = bucket.setdefault("family_metadata", {})
+        for k, v in meta.items():
+            if k not in merged or merged[k] is None:
+                merged[k] = v
+    hq = parsed.get("hypothetical_questions")
+    if isinstance(hq, dict):
+        store = bucket.setdefault("hypothetical_questions", {})
+        for title, qs in hq.items():
+            if isinstance(qs, list):
+                store.setdefault(title, []).extend(str(q) for q in qs if q)
+
+
+def _persist_structured(session_id: str, doc_name: str, bucket: dict,
+                        classification: dict, anchors_from_text: list) -> None:
+    """Stage 04 — reconcile the structured rows and swap them in.
+
+    Deliberately wrapped: a failure to persist typed rows must not fail the
+    ingest of a document whose wiki pages merged fine. The typed tables are
+    additive to the existing pipeline, and taking the whole ingest down with
+    them would make the backbone a liability rather than an addition.
+    """
+    if not config.USE_DATABASE:
+        return
+    try:
+        from services import backbone, extraction_validation as _ev
+        from services import family_prompt, wikis
+
+        wiki_id = wikis.active_wiki_id()
+        family = classification.get("doc_family")
+
+        document_id = backbone.upsert_document(
+            wiki_id, session_id, doc_name,
+            doc_family=family,
+            doc_type=classification.get("doc_type"),
+            jurisdiction=classification.get("jurisdiction"),
+            family_confidence=classification.get("family_confidence"),
+            family_method=classification.get("family_method"),
+            folder_hint=classification.get("folder_hint"),
+        )
+
+        raw_meta = bucket.get("family_metadata") or {}
+        meta_report = _ev.validate_payload(
+            raw_meta, family_prompt.metadata_spec(family),
+            base_confidence=classification.get("family_confidence") or 0.8,
+        )
+        family_row = dict(meta_report.values)
+        family_row["confidence"] = meta_report.confidence
+        family_row["typed_value"] = {
+            "validated": meta_report.values,
+            "flagged_fields": meta_report.flagged,
+            "notes": meta_report.notes(),
+        }
+
+        citations, _ = _ev.sanitize_rows(
+            bucket.get("citations"),
+            {"citation_text": "text", "authority_type": "text",
+             "normalized_form": "text", "page": "number", "confidence": "number"},
+            required=("citation_text",),
+        )
+        citations = backbone.reconcile_rows(citations, ("normalized_form",)) \
+            if all(c.get("normalized_form") for c in citations) \
+            else backbone.reconcile_rows(citations, ("citation_text",))
+        for c in citations:
+            c["page_num"] = c.pop("page", None)
+            c["confidence"] = c.get("confidence") or c.get("_confidence")
+
+        tables, _ = _ev.sanitize_rows(
+            bucket.get("tables"),
+            {"caption": "text", "columns": "list", "rows": "list",
+             "page": "number", "confidence": "number"},
+        )
+        for t in tables:
+            t["page_num"] = t.pop("page", None)
+            t["extraction_method"] = "synthesis"
+            t["confidence"] = t.get("confidence") or t.get("_confidence")
+
+        figures, _ = _ev.sanitize_rows(
+            bucket.get("figures"),
+            {"figure_kind": "text", "description": "text", "page": "number",
+             "confidence": "number"},
+            required=("description",),
+        )
+        for f in figures:
+            f["page_num"] = f.pop("page", None)
+            f["extraction_method"] = "synthesis"
+            f["confidence"] = f.get("confidence") or f.get("_confidence")
+
+        # Anchors come from the deterministic regex parse, not the model —
+        # the model's "structural_anchors" output is used only to confirm what
+        # the parse already found. A regex over the real text cannot invent a
+        # paragraph number; a language model can, and an invented anchor is a
+        # confident-looking pointer to text that isn't there.
+        anchor_rows = [a.as_row() for a in anchors_from_text]
+
+        written = backbone.replace_document_rows(
+            wiki_id, session_id, doc_name, document_id,
+            family_row=family_row, family_key=family,
+            citations=citations, anchors=anchor_rows,
+            tables=tables, figures=figures,
+        )
+        logger.info("Backbone rows for %s: %s (family=%s)", doc_name, written, family)
+
+        for party in (family_row.get("parties") or []):
+            backbone.upsert_entity(wiki_id, str(party), "party", doc_name)
+
+    except Exception as err:
+        logger.error("Backbone persistence failed for %s (wiki pages unaffected): %s",
+                     doc_name, err, exc_info=True)
+
+
 def ingest(file_path: str, session_id: str) -> dict:
     """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
 
@@ -911,25 +1042,48 @@ def ingest(file_path: str, session_id: str) -> dict:
 
     logger.info("Wiki ingest: %s (%d chars, %d pages)", doc_name, len(text), len(page_map))
 
+    # --- Stage 02: doc-type + jurisdiction classification -------------------
+    # Runs before the length fork, because which family applies decides which
+    # schema stage 03 asks for — deciding it after would mean extracting the
+    # contract schema from a judgment and then relabelling the result.
+    _update_doc_step(session_id, doc_name, "classifying")
+    try:
+        from services import classifier as _classifier
+        classification = _classifier.classify_document(text, file_path)
+    except Exception as _cls_err:
+        logger.error("Classification failed for %s, using generic: %s", doc_name, _cls_err)
+        classification = {"doc_family": "generic", "family_confidence": 0.0,
+                          "flagged": True, "flag_reason": str(_cls_err)}
+    family_key = classification.get("doc_family")
+
+    # --- Structural anchors: one deterministic parse, two consumers ---------
+    from services import structure as _structure
+    anchors = _structure.parse_anchors(text)
+    logger.info("Structure: %d anchor(s) in %s (%.1f per 10k chars)",
+                len(anchors), doc_name, _structure.structure_ratio(text, anchors))
+
     # Signal: file has been read, starting synthesis
     _update_doc_step(session_id, doc_name, "synthesizing")
 
     total_contradictions = 0
+    structured: dict = {}
 
     if len(text) <= _SINGLE_CALL_THRESHOLD:
         # --- Short document: single LLM call ---
         _update_wiki_progress(session_id, {"current": 0, "total": 1,
                                             "message": f"Processing {doc_name}..."})
         _update_doc_step(session_id, doc_name, "synthesizing", "1/1")
-        parsed = _ingest_single_call(text, doc_name)
+        parsed = _ingest_single_call(text, doc_name, family_key)
         _persist_clauses(session_id, doc_name, parsed)
+        _collect_structured(parsed, structured)
         _update_doc_step(session_id, doc_name, "merging")
         _update_wiki_progress(session_id, {"current": 1, "total": 1,
                                             "message": f"Processing {doc_name}..."})
         total_pages, total_rels, total_contradictions = _atomic_merge(session_id, parsed, doc_name)
     else:
         # --- Long document: two-phase approach ---
-        segments = _split_segments(text)
+        segments = [s.text for s in
+                    _structure.split_segments(text, _INGEST_CHUNK_SIZE, anchors)]
         total_steps = 1 + len(segments)
         _update_wiki_progress(session_id, {"current": 0, "total": total_steps,
                                             "message": f"Overview pass for {doc_name}..."})
@@ -951,7 +1105,8 @@ def ingest(file_path: str, session_id: str) -> dict:
         completed_segments = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.WIKI_MAX_WORKERS) as executor:
             future_to_index = {
-                executor.submit(_ingest_detail_segment, seg, topics, doc_name, doc_type): i
+                executor.submit(_ingest_detail_segment, seg, topics, doc_name,
+                                doc_type, family_key): i
                 for i, seg in enumerate(segments)
             }
 
@@ -967,6 +1122,7 @@ def ingest(file_path: str, session_id: str) -> dict:
                 try:
                     parsed = future.result()
                     _persist_clauses(session_id, doc_name, parsed)
+                    _collect_structured(parsed, structured)
                     p, r, c = _atomic_merge(session_id, parsed, doc_name)
                     total_pages += p
                     total_rels += r
@@ -975,9 +1131,16 @@ def ingest(file_path: str, session_id: str) -> dict:
                     logger.error("Segment %d for %s generated an exception: %s", i, doc_name, exc)
                     _log_event(session_id, "ERROR", f"Doc: {doc_name} | Segment {i} failed: {exc}")
 
+    # --- Stage 04: reconcile + swap in the typed rows ----------------------
+    _update_doc_step(session_id, doc_name, "persisting")
+    _persist_structured(session_id, doc_name, structured, classification, anchors)
+
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
     _log_event(session_id, "INGEST",
                f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
+    if classification.get("flagged"):
+        _log_event(session_id, "REVIEW",
+                   f"Doc: {doc_name} | Classification flagged: {classification.get('flag_reason')}")
 
     # S3: compact any pages that have grown beyond the quality thresholds
     try:
@@ -1074,9 +1237,13 @@ def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
     return parsed
 
 
-def _ingest_single_call(text: str, doc_name: str) -> dict:
+def _ingest_single_call(text: str, doc_name: str, family_key: str | None = None) -> dict:
     """Process a short document in one LLM call."""
-    prompt = INGEST_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
+    from services import family_prompt
+    prompt = INGEST_PROMPT_TEMPLATE.format(
+        text=text, doc_name=doc_name,
+        family_block=family_prompt.build_supplement(family_key),
+    )
     try:
         raw, _ = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
     except RuntimeError as e:
@@ -1127,10 +1294,15 @@ def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
     return doc_type, topics, {"pages": doc_pages, "relations": []}
 
 
-def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str) -> dict:
+def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str,
+                           family_key: str | None = None) -> dict:
     """Phase 2: extract detailed pages from a segment with known topic context."""
+    from services import family_prompt
     topics_str = ", ".join(topics) if topics else "None identified yet"
-    prompt = DETAIL_PROMPT_TEMPLATE.format(text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type)
+    prompt = DETAIL_PROMPT_TEMPLATE.format(
+        text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type,
+        family_block=family_prompt.build_supplement(family_key, segment_mode=True),
+    )
     try:
         raw, _ = llm.ask(
             prompt,
