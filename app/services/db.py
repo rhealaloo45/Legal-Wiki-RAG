@@ -543,6 +543,209 @@ def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict
         return pages
 
 
+def get_page_list(session_id: str, include_archived: bool = False) -> list[dict]:
+    """Lightweight admin listing: title, source_doc, char_count,
+    contradiction_flagged, last_modified — for the Wiki page browser.
+
+    Separate from get_pages() (the retrieval-critical path every query
+    funnels through) so this admin-only listing can carry extra columns
+    without touching that path.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    archived_clause = "" if include_archived else """
+                AND NOT EXISTS (
+                    SELECT 1 FROM document_status ds
+                    WHERE ds.session_id = pages.session_id
+                      AND ds.source_doc = pages.source_doc
+                      AND ds.status = 'archived'
+                )"""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(f"""
+                SELECT title, source_doc, char_count, contradiction_flagged, last_modified
+                FROM pages
+                WHERE session_id = :sid{archived_clause}
+                ORDER BY title
+            """),
+            {"sid": session_id},
+        )
+        return [
+            {
+                "title": r.title,
+                "source_doc": r.source_doc,
+                "char_count": r.char_count,
+                "contradiction_flagged": r.contradiction_flagged,
+                "last_modified": r.last_modified.isoformat() if r.last_modified else None,
+            }
+            for r in rows
+        ]
+
+
+def _page_embedding_tables(conn) -> list[str]:
+    """Every page_embeddings* table across every embedding provider ever
+    used — see _emb_table_name(): switching EMBEDDING_PROVIDER doesn't
+    merge or drop the previous provider's table, so a page mutation that
+    only touched the currently-active table would leave a stale row under
+    an inactive provider. Shared by rename_page/delete_page/merge_pages,
+    same lookup delete_document_data already uses.
+    """
+    from sqlalchemy import text
+    return [r[0] for r in conn.execute(text(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name LIKE 'page_embeddings%'"
+    ))]
+
+
+def rename_page(session_id: str, old_title: str, new_title: str) -> bool:
+    """Rename a wiki page and every table that references it by title.
+
+    Returns False if old_title doesn't exist, or new_title is already taken
+    — both checked inside the same transaction as the writes to avoid a
+    check-then-write race. Embedding vectors are updated in place (title
+    column only) — content didn't change, only its label, so no re-embed
+    is needed.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": old_title},
+        ).first()
+        if not exists:
+            return False
+        clash = conn.execute(
+            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": new_title},
+        ).first()
+        if clash:
+            return False
+
+        params = {"sid": session_id, "new": new_title, "old": old_title}
+        conn.execute(text("UPDATE pages SET title = :new WHERE session_id = :sid AND title = :old"), params)
+        conn.execute(text("UPDATE relations SET from_title = :new WHERE session_id = :sid AND from_title = :old"), params)
+        conn.execute(text("UPDATE relations SET to_title = :new WHERE session_id = :sid AND to_title = :old"), params)
+        conn.execute(text("UPDATE clause_map SET page_title = :new WHERE session_id = :sid AND page_title = :old"), params)
+        conn.execute(text("UPDATE contradictions SET page_title = :new WHERE session_id = :sid AND page_title = :old"), params)
+
+        for emb_table in _page_embedding_tables(conn):
+            conn.execute(
+                text(f'UPDATE "{emb_table}" SET title = :new WHERE session_id = :sid AND title = :old'),
+                params,
+            )
+
+        conn.commit()
+    return True
+
+
+def delete_page(session_id: str, title: str) -> bool:
+    """Delete one wiki page and every row across the schema that
+    references it by title. Returns False if the page doesn't exist.
+
+    Closes a real gap delete_document_data has today: that whole-document
+    delete only clears clause_map/source_positions by source_doc, never
+    contradictions or clause_map by page title (see its own docstring) —
+    not retrofitted there, since that path is already tested at the
+    document-cascade granularity; this is a new, separate, page-scoped
+    delete for the Wiki admin section.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": title},
+        ).first()
+        if not exists:
+            return False
+
+        params = {"sid": session_id, "t": title}
+        conn.execute(text("DELETE FROM pages WHERE session_id = :sid AND title = :t"), params)
+        conn.execute(text("DELETE FROM relations WHERE session_id = :sid AND (from_title = :t OR to_title = :t)"), params)
+        conn.execute(text("DELETE FROM clause_map WHERE session_id = :sid AND page_title = :t"), params)
+        conn.execute(text("DELETE FROM contradictions WHERE session_id = :sid AND page_title = :t"), params)
+
+        for emb_table in _page_embedding_tables(conn):
+            conn.execute(
+                text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = :t'),
+                params,
+            )
+
+        conn.commit()
+    return True
+
+
+def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
+    """Absorb source_title's content into target_title, then remove
+    source_title. Returns False if either page doesn't exist.
+
+    Relations pointing at source_title are re-pointed to target_title (the
+    concept they describe still exists post-merge) rather than deleted,
+    then de-duplicated in case the re-point created an exact duplicate edge
+    or a self-loop. Target's embedding row is deleted, not re-embedded —
+    its content just changed, so the vector is now stale; the existing
+    /wiki/backfill_embeddings pass picks it up on its next run like any
+    other missing embedding. No LLM/embedding call fires as part of merge.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        src = conn.execute(
+            text("SELECT content, summary FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": source_title},
+        ).first()
+        tgt = conn.execute(
+            text("SELECT content, summary FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": target_title},
+        ).first()
+        if not src or not tgt:
+            return False
+
+        merged_content = f"{tgt.content}\n\n{src.content}"
+        merged_summary = tgt.summary or src.summary
+
+        conn.execute(
+            text("""UPDATE pages SET content = :c, summary = :s, char_count = :cc, last_modified = now()
+                     WHERE session_id = :sid AND title = :t"""),
+            {"c": merged_content, "s": merged_summary, "cc": len(merged_content),
+             "sid": session_id, "t": target_title},
+        )
+        conn.execute(
+            text("DELETE FROM pages WHERE session_id = :sid AND title = :t"),
+            {"sid": session_id, "t": source_title},
+        )
+
+        repoint = {"sid": session_id, "tgt": target_title, "src": source_title}
+        conn.execute(text("UPDATE relations SET from_title = :tgt WHERE session_id = :sid AND from_title = :src"), repoint)
+        conn.execute(text("UPDATE relations SET to_title = :tgt WHERE session_id = :sid AND to_title = :src"), repoint)
+        # A re-point can create a self-loop (if source and target were
+        # already directly connected) or an exact duplicate of an edge that
+        # already existed under target_title — both are noise now, drop them.
+        conn.execute(
+            text("DELETE FROM relations WHERE session_id = :sid AND from_title = :tgt AND to_title = :tgt"),
+            {"sid": session_id, "tgt": target_title},
+        )
+        conn.execute(text("""
+            DELETE FROM relations a USING relations b
+            WHERE a.session_id = :sid AND b.session_id = :sid
+              AND a.ctid > b.ctid
+              AND a.from_title = b.from_title AND a.to_title = b.to_title AND a.label = b.label
+        """), {"sid": session_id})
+
+        conn.execute(text("UPDATE clause_map SET page_title = :tgt WHERE session_id = :sid AND page_title = :src"), repoint)
+        conn.execute(text("UPDATE contradictions SET page_title = :tgt WHERE session_id = :sid AND page_title = :src"), repoint)
+
+        for emb_table in _page_embedding_tables(conn):
+            conn.execute(
+                text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = ANY(:titles)'),
+                {"sid": session_id, "titles": [source_title, target_title]},
+            )
+
+        conn.commit()
+    return True
+
+
 def get_page(session_id: str, title: str) -> dict | None:
     """Return a single page dict or None if it does not exist."""
     from sqlalchemy import text
