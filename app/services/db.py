@@ -493,6 +493,37 @@ def _run_schema_statements(conn, text) -> None:
             )
         """))
 
+        # Review Queue, first slice (target architecture § 02). One row per
+        # extracted clause, additive to the existing ingest LLM call — see
+        # wiki.py's INGEST_PROMPT_TEMPLATE/DETAIL_PROMPT_TEMPLATE. `stakes`
+        # is computed in Python from clause_type against a fixed high-stakes
+        # set (see app.py's _HIGH_STAKES_CLAUSE_TYPES), never LLM-decided —
+        # the whole bulk-accept-vs-individual-sign-off split depends on that
+        # not being a number the extracting model can quietly game.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clauses (
+                id             BIGSERIAL PRIMARY KEY,
+                session_id     TEXT NOT NULL,
+                source_doc     TEXT NOT NULL,
+                clause_type    TEXT NOT NULL,
+                verbatim_text  TEXT NOT NULL,
+                typed_value    JSONB,
+                confidence     REAL NOT NULL,
+                page_num       INT,
+                char_start     INT,
+                char_end       INT,
+                stakes         TEXT NOT NULL DEFAULT 'low',
+                review_status  TEXT NOT NULL DEFAULT 'pending',
+                resolution     TEXT,
+                reviewed_at    TIMESTAMPTZ,
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clauses_session_status_idx
+            ON clauses (session_id, review_status)
+        """))
+
         conn.commit()
 
 
@@ -744,6 +775,158 @@ def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
 
         conn.commit()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Review Queue — clauses (target architecture § 02, first slice)
+# ---------------------------------------------------------------------------
+
+def insert_clauses(session_id: str, source_doc: str, clauses: list[dict]) -> int:
+    """Persist clauses extracted alongside a document's ingest LLM call.
+
+    Called independently of _atomic_merge/_merge_wiki — clause rows are
+    append-only per ingest, no merge-by-title logic like pages have, so
+    this never touches that (complex, already-tested) machinery. Silently
+    skips any clause missing a usable type/text/confidence rather than
+    raising, since a single malformed entry in an LLM's JSON output
+    shouldn't drop the rest of a real extraction.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    inserted = 0
+    with engine.connect() as conn:
+        for c in clauses:
+            clause_type = (c.get("type") or "").strip()
+            verbatim_text = (c.get("text") or "").strip()
+            confidence = c.get("confidence")
+            if not clause_type or not verbatim_text or not isinstance(confidence, (int, float)):
+                continue
+            stakes = "high" if _is_high_stakes_clause_type(clause_type) else "low"
+            conn.execute(
+                text("""
+                    INSERT INTO clauses
+                        (session_id, source_doc, clause_type, verbatim_text,
+                         typed_value, confidence, page_num, stakes)
+                    VALUES
+                        (:sid, :doc, :ctype, :vtext, :tval, :conf, :page, :stakes)
+                """),
+                {
+                    "sid": session_id, "doc": source_doc, "ctype": clause_type,
+                    "vtext": verbatim_text,
+                    "tval": json.dumps(c["typed_value"]) if c.get("typed_value") is not None else None,
+                    "conf": float(confidence), "page": c.get("page"), "stakes": stakes,
+                },
+            )
+            inserted += 1
+        conn.commit()
+    return inserted
+
+
+# Fixed set drawn directly from the target architecture doc's own Fig. 3
+# flow text ("liability · indemnity · termination · lifecycle") — computed
+# here in Python, never left to the extracting LLM to self-report, since
+# the whole bulk-accept/individual-sign-off split depends on this being a
+# rule the model can't quietly route around.
+_HIGH_STAKES_CLAUSE_TYPES = {"liability", "indemnity", "termination", "lifecycle"}
+
+
+def _is_high_stakes_clause_type(clause_type: str) -> bool:
+    lowered = clause_type.lower()
+    return any(h in lowered for h in _HIGH_STAKES_CLAUSE_TYPES)
+
+
+def get_review_queue(session_id: str) -> list[dict]:
+    """Pending clauses for one session, sorted by stakes (high first, so
+    the items requiring individual sign-off surface before the bulk-accept
+    pile) then confidence ascending (the ones most likely wrong first)."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, source_doc, clause_type, verbatim_text, typed_value,
+                       confidence, page_num, stakes, created_at
+                FROM clauses
+                WHERE session_id = :sid AND review_status = 'pending'
+                ORDER BY (stakes = 'high') DESC, confidence ASC
+            """),
+            {"sid": session_id},
+        )
+        return [
+            {
+                "id": r.id, "source_doc": r.source_doc, "clause_type": r.clause_type,
+                "verbatim_text": r.verbatim_text, "typed_value": r.typed_value,
+                "confidence": r.confidence, "page_num": r.page_num, "stakes": r.stakes,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+
+def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: str | None = None) -> bool:
+    """Resolve one clause: accept, reject, or edit (accept with a corrected
+    verbatim_text). Returns False if the clause doesn't exist, isn't in this
+    session, or isn't still pending. Provenance-marked via `resolution`,
+    per the doc's "accept, edit, or reject all write a human-confirmed
+    marker" requirement.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    resolution_map = {"accept": "individual_accept", "reject": "individual_reject", "edit": "edited"}
+    if action not in resolution_map:
+        raise ValueError(f"Unknown action {action!r} — expected accept, reject, or edit")
+    review_status = "rejected" if action == "reject" else "approved"
+    with engine.connect() as conn:
+        params = {
+            "sid": session_id, "id": clause_id,
+            "status": review_status, "resolution": resolution_map[action],
+        }
+        if action == "edit":
+            if not edited_text or not edited_text.strip():
+                raise ValueError("edited_text is required for action=edit")
+            result = conn.execute(
+                text("""
+                    UPDATE clauses SET review_status = :status, resolution = :resolution,
+                           verbatim_text = :vtext, reviewed_at = now()
+                    WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                """),
+                {**params, "vtext": edited_text.strip()},
+            )
+        else:
+            result = conn.execute(
+                text("""
+                    UPDATE clauses SET review_status = :status, resolution = :resolution,
+                           reviewed_at = now()
+                    WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                """),
+                params,
+            )
+        conn.commit()
+        return (result.rowcount or 0) > 0
+
+
+def bulk_accept_clauses(session_id: str, min_confidence: float) -> int:
+    """Accept every pending LOW-stakes clause at or above min_confidence.
+
+    High-stakes clauses are excluded by the WHERE clause itself, not by
+    trusting the caller — "individual sign-off only" for liability/
+    indemnity/termination/lifecycle is enforced here regardless of what a
+    request body claims, per the doc's stakes-tier split.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("""
+                UPDATE clauses
+                SET review_status = 'approved', resolution = 'bulk_accepted', reviewed_at = now()
+                WHERE session_id = :sid AND review_status = 'pending'
+                  AND stakes = 'low' AND confidence >= :min_conf
+            """),
+            {"sid": session_id, "min_conf": min_confidence},
+        )
+        conn.commit()
+        return result.rowcount or 0
 
 
 def get_page(session_id: str, title: str) -> dict | None:
