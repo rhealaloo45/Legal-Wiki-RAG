@@ -659,8 +659,28 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
   }},
   "relations": [
     {{"from": "Page Title A", "to": "Page Title B", "label": "short verb phrase"}}
+  ],
+  "clauses": [
+    {{
+      "type": "Short clause category, e.g. 'Liability Cap', 'Termination for Convenience', 'Indemnity', 'Payment Terms'",
+      "text": "Exact verbatim clause text from the document",
+      "typed_value": {{"...": "..."}} or null,
+      "confidence": 1.0,
+      "page": 3
+    }}
   ]
 }}
+
+CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
+clause as a separate entry in "clauses". "text" must be an exact verbatim quote — never paraphrase. \
+"typed_value" is an optional small object holding the clause's structured value when it has one \
+(e.g. {{"multiplier": 2, "basis": "prior 12 months' fees"}} for a liability cap) — use null when the \
+clause doesn't reduce to a simple structured value. Rate "confidence" using this rubric, the same \
+one used elsewhere in this system: 1.0 = exact verbatim match with no ambiguity, 0.8 = clearly \
+stated but the exact wording required light interpretation, 0.5 = the clause is implied rather \
+than explicitly stated, 0.0 = you are not actually confident this is a real clause in the text. \
+Extract every clause you can identify — do not filter by confidence, low-confidence entries are \
+exactly what the Review Queue is for.
 
 Extract 10-30 pages and 10-40 relations. Cover the document thoroughly.
 
@@ -777,8 +797,25 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
   }},
   "relations": [
     {{"from": "Page Title A", "to": "Page Title B", "label": "short verb phrase"}}
+  ],
+  "clauses": [
+    {{
+      "type": "Short clause category, e.g. 'Liability Cap', 'Termination for Convenience', 'Indemnity', 'Payment Terms'",
+      "text": "Exact verbatim clause text from this segment",
+      "typed_value": {{"...": "..."}} or null,
+      "confidence": 1.0,
+      "page": 3
+    }}
   ]
 }}
+
+CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
+clause in this segment as a separate entry in "clauses". "text" must be an exact verbatim quote — \
+never paraphrase. "typed_value" is an optional small object holding the clause's structured value \
+when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact verbatim match with \
+no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
+clause is implied rather than explicitly stated, 0.0 = you are not actually confident this is a \
+real clause. Extract every clause you can identify — do not filter by confidence.
 
 DOCUMENT SEGMENT:
 {text}"""
@@ -828,6 +865,29 @@ def _update_doc_step(session_id: str, doc_name: str, status: str, step: str = ""
     _save_session_progress(session_id, progress)
 
 
+def _persist_clauses(session_id: str, doc_name: str, parsed: dict) -> None:
+    """Write out any "clauses" the ingest LLM call returned alongside its
+    pages/relations — Review Queue § 02 first slice. Independent of
+    _atomic_merge/_merge_wiki on purpose: clauses are append-only per
+    ingest call, no merge-by-title logic like pages have, so this never
+    touches that (complex, already-tested) machinery. Only called for the
+    single-call and per-segment detail passes, not the overview pass —
+    the overview reads a coarse excerpt, not full page content, so it has
+    nothing reliable to extract clauses from.
+    """
+    if not config.USE_DATABASE:
+        return
+    clauses = parsed.get("clauses") or []
+    if not clauses:
+        return
+    try:
+        n = _db.insert_clauses(session_id, doc_name, clauses)
+        if n:
+            logger.info("Persisted %d clause(s) for %s into the Review Queue", n, doc_name)
+    except Exception as e:
+        logger.error("Failed to persist clauses for %s: %s", doc_name, e)
+
+
 def ingest(file_path: str, session_id: str) -> dict:
     """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
 
@@ -862,6 +922,7 @@ def ingest(file_path: str, session_id: str) -> dict:
                                             "message": f"Processing {doc_name}..."})
         _update_doc_step(session_id, doc_name, "synthesizing", "1/1")
         parsed = _ingest_single_call(text, doc_name)
+        _persist_clauses(session_id, doc_name, parsed)
         _update_doc_step(session_id, doc_name, "merging")
         _update_wiki_progress(session_id, {"current": 1, "total": 1,
                                             "message": f"Processing {doc_name}..."})
@@ -905,6 +966,7 @@ def ingest(file_path: str, session_id: str) -> dict:
                                                     "total": total_steps, "message": msg})
                 try:
                     parsed = future.result()
+                    _persist_clauses(session_id, doc_name, parsed)
                     p, r, c = _atomic_merge(session_id, parsed, doc_name)
                     total_pages += p
                     total_rels += r

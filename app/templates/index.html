@@ -3380,8 +3380,15 @@
             <div class="ftree" id="admin-wiki-page-list" style="margin:0"></div>
           </div>
 
-          <div id="admin-panel-review" class="panel d-none" style="display:none;overflow-y:auto">
-            <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Coming next — clause-level Review Queue.</div>
+          <div id="admin-panel-review" class="panel d-none" style="display:none;overflow-y:auto" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
+            <div class="files-toolbar" style="padding:0 0 12px">
+              <div>
+                <span class="files-title" style="font-size:13px">Review Queue</span>
+                <span style="font-size:11px;color:var(--text-muted);margin-left:8px">A accept · R reject · J/K navigate</span>
+              </div>
+              <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Bulk-accept every low-stakes item at or above 60% confidence" onclick="adminBulkAcceptClauses()"><i class="ti ti-checks" style="font-size:14px"></i><span>Accept all ≥0.6 (low-stakes)</span></button>
+            </div>
+            <div id="admin-review-queue-list"></div>
           </div>
         </div>
 
@@ -3793,6 +3800,7 @@
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
     }
 
     function switchAdminTab(name, el) {
@@ -3805,6 +3813,7 @@
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'review') { loadAdminReviewQueue(); document.getElementById('admin-panel-review').focus(); }
     }
 
     async function loadAdminIngestStatus() {
@@ -3943,6 +3952,130 @@
         loadAdminWikiPages();
       } catch (e) {
         showToast(e.message, 'error');
+      }
+    }
+
+    // ============================================================
+    // Review Queue — target architecture § 02, first slice.
+    // Flagged clause -> stakes check -> bulk-accept (low-stakes,
+    // >=0.6) or individual sign-off (high-stakes) -> trusted.
+    // ============================================================
+    let reviewQueueItems = [];
+    let reviewQueueSelected = -1;
+
+    async function loadAdminReviewQueue() {
+      const el = document.getElementById('admin-review-queue-list');
+      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/review_queue?session_id=${SID}`);
+        const data = await res.json();
+        reviewQueueItems = data.clauses || [];
+        reviewQueueSelected = reviewQueueItems.length ? 0 : -1;
+        renderReviewQueue();
+      } catch (e) {
+        console.error('loadAdminReviewQueue error:', e);
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load the Review Queue.</div>';
+      }
+    }
+
+    function _confidenceColor(c) {
+      return c >= 0.8 ? 'var(--green,#1a7f37)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
+    }
+
+    function renderReviewQueue() {
+      const el = document.getElementById('admin-review-queue-list');
+      if (!reviewQueueItems.length) {
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Nothing pending — every extracted clause has been reviewed.</div>';
+        return;
+      }
+      const rowHtml = (c, idx) => {
+        const selected = idx === reviewQueueSelected;
+        return `<div class="ftree-row" style="align-items:flex-start;${selected ? 'background:var(--bg-hover)' : ''}" onclick="reviewQueueSelected=${idx};renderReviewQueue()">
+            <span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:${_confidenceColor(c.confidence)};flex-shrink:0;margin-top:2px;width:38px">${Math.round(c.confidence * 100)}%</span>
+            <span style="flex:1;min-width:0">
+              <div style="font-size:12.5px;color:var(--text-primary);font-weight:500">${escapeHtmlRule(c.clause_type)}</div>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;white-space:pre-wrap">${escapeHtmlRule(c.verbatim_text)}</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:4px">${escapeHtmlRule(c.source_doc || '')}${c.page_num ? ` · page ${c.page_num}` : ''}</div>
+            </span>
+            <span style="display:flex;gap:6px;flex-shrink:0">
+              <button type="button" class="ftree-manage-btn" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept')"><i class="ti ti-check"></i></button>
+              <button type="button" class="ftree-manage-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id})"><i class="ti ti-edit"></i></button>
+              <button type="button" class="ftree-manage-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject')"><i class="ti ti-x"></i></button>
+            </span>
+          </div>`;
+      };
+      const highStakes = [];
+      const lowStakes = [];
+      reviewQueueItems.forEach((c, idx) => (c.stakes === 'high' ? highStakes : lowStakes).push([c, idx]));
+      let html = '';
+      if (highStakes.length) {
+        html += `<div style="font-size:11px;font-weight:600;color:var(--red);text-transform:uppercase;letter-spacing:.04em;padding:10px 14px 4px">High-stakes — individual sign-off only (${highStakes.length})</div>`;
+        html += highStakes.map(([c, idx]) => rowHtml(c, idx)).join('');
+      }
+      if (lowStakes.length) {
+        html += `<div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding:10px 14px 4px">Low-stakes — bulk-eligible (${lowStakes.length})</div>`;
+        html += lowStakes.map(([c, idx]) => rowHtml(c, idx)).join('');
+      }
+      el.innerHTML = `<div class="ftree" style="margin:0">${html}</div>`;
+    }
+
+    async function adminResolveClause(clauseId, action, editedText) {
+      try {
+        const body = { session_id: SID, clause_id: clauseId, action };
+        if (editedText) body.edited_text = editedText;
+        const res = await fetch('/review_queue/resolve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Resolve failed');
+        showToast(action === 'reject' ? 'Rejected' : 'Accepted', 'success');
+        loadAdminReviewQueue();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    function adminEditClause(clauseId) {
+      const current = reviewQueueItems.find(c => c.id === clauseId);
+      const edited = window.prompt('Corrected verbatim text:', current ? current.verbatim_text : '');
+      if (!edited || !edited.trim()) return;
+      adminResolveClause(clauseId, 'edit', edited.trim());
+    }
+
+    async function adminBulkAcceptClauses() {
+      if (!window.confirm('Accept every pending low-stakes clause at or above 60% confidence?\n\nHigh-stakes clauses (liability, indemnity, termination, lifecycle) always require individual sign-off and are never included.')) return;
+      try {
+        const res = await fetch('/review_queue/bulk_accept', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, min_confidence: 0.6 }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Bulk accept failed');
+        showToast(`Accepted ${d.accepted} clause(s)`, 'success');
+        loadAdminReviewQueue();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    function handleReviewQueueKeydown(event) {
+      if (!reviewQueueItems.length) return;
+      const key = event.key.toLowerCase();
+      if (key === 'j') {
+        reviewQueueSelected = Math.min(reviewQueueSelected + 1, reviewQueueItems.length - 1);
+        renderReviewQueue();
+        event.preventDefault();
+      } else if (key === 'k') {
+        reviewQueueSelected = Math.max(reviewQueueSelected - 1, 0);
+        renderReviewQueue();
+        event.preventDefault();
+      } else if (key === 'a' && reviewQueueSelected >= 0) {
+        adminResolveClause(reviewQueueItems[reviewQueueSelected].id, 'accept');
+        event.preventDefault();
+      } else if (key === 'r' && reviewQueueSelected >= 0) {
+        adminResolveClause(reviewQueueItems[reviewQueueSelected].id, 'reject');
+        event.preventDefault();
       }
     }
 

@@ -1620,6 +1620,75 @@ def admin_wiki_page_delete():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/review_queue")
+def review_queue_list():
+    """Pending clauses for the Review Queue — target architecture § 02,
+    first slice. See services/db.py's get_review_queue for sort order."""
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    return jsonify({"clauses": _db.get_review_queue(session_id)})
+
+
+@app.route("/review_queue/resolve", methods=["POST"])
+def review_queue_resolve():
+    """Resolve one clause: accept, reject, or edit. See
+    services/db.py's resolve_clause for the provenance-marking rule."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    clause_id = data.get("clause_id")
+    action = data.get("action", "")
+    edited_text = data.get("edited_text")
+    if not session_id or clause_id is None:
+        return jsonify({"error": "session_id and clause_id are required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    try:
+        ok = _db.resolve_clause(session_id, int(clause_id), action, edited_text)
+        if not ok:
+            return jsonify({"error": "Clause not found, or already resolved"}), 404
+        return jsonify({"status": "resolved", "clause_id": clause_id, "action": action})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Review Queue resolve failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/review_queue/bulk_accept", methods=["POST"])
+def review_queue_bulk_accept():
+    """Accept every pending LOW-stakes clause at or above min_confidence in
+    one call — high-stakes clauses are excluded server-side regardless of
+    what's sent, see services/db.py's bulk_accept_clauses."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    min_confidence = data.get("min_confidence", 0.6)
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    try:
+        n = _db.bulk_accept_clauses(session_id, float(min_confidence))
+        return jsonify({"status": "accepted", "accepted": n})
+    except Exception as e:
+        logger.error("Review Queue bulk accept failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 def _find_upload(session_id, doc_name):
     """Find an uploaded file by session ID and document name."""
     # Strip the compare mode upload marker if present
