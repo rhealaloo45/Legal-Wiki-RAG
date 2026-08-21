@@ -87,6 +87,17 @@ def _stable_lock_key(s: str) -> int:
     return int.from_bytes(digest[:4], "big", signed=True)
 
 
+def _crypto():
+    """Lazy handle on the encryption helpers.
+
+    Imported lazily so `db` has no import-time dependency on `crypto`, and so
+    a deployment with no key configured never touches the cryptography
+    package at all.
+    """
+    from services import crypto
+    return crypto
+
+
 def _question_table_name() -> str:
     """Hypothetical-question vectors, per embedding provider — same
     one-table-per-provider convention as _emb_table_name, so switching
@@ -1378,8 +1389,12 @@ def insert_clauses(session_id: str, source_doc: str, clauses: list[dict]) -> int
                 """),
                 {
                     "sid": session_id, "doc": source_doc, "ctype": clause_type,
-                    "vtext": verbatim_text,
-                    "tval": json.dumps(c["typed_value"]) if c.get("typed_value") is not None else None,
+                    # Verbatim clause text is the most sensitive thing this
+                    # table holds — it is the client's actual contract wording.
+                    # Encrypted at rest; no-op when no key is configured.
+                    "vtext": _crypto().encrypt(verbatim_text),
+                    "tval": json.dumps(_crypto().encrypt_json(c["typed_value"]))
+                            if c.get("typed_value") is not None else None,
                     "conf": float(confidence), "page": c.get("page"), "stakes": stakes,
                 },
             )
@@ -1444,9 +1459,10 @@ def insert_review_items(wiki_id: str, session_id: str, source_doc: str,
             """), {
                 "w": wiki_id, "sid": session_id, "doc": source_doc,
                 "kind": kind, "label": label,
-                "val": (str(it["item_value"])[:4000]
+                "val": (_crypto().encrypt(str(it["item_value"])[:4000])
                         if it.get("item_value") is not None else None),
-                "tval": json.dumps(it["typed_value"]) if it.get("typed_value") is not None else None,
+                "tval": json.dumps(_crypto().encrypt_json(it["typed_value"]))
+                        if it.get("typed_value") is not None else None,
                 "conf": float(it.get("confidence") or 0.0),
                 "stakes": stakes, "reason": it.get("reason"),
                 "page": it.get("page_num"),
@@ -1509,11 +1525,17 @@ def get_review_queue(session_id: str) -> list[dict]:
             {"sid": session_id},
         ).fetchall()
 
+    # Decrypt on the way out. decrypt_safe rather than decrypt: one row written
+    # under a rotated key should not blank the whole queue — it shows as
+    # unreadable and the rest still triages.
+    _c = _crypto()
     items = [
         {
             "id": r.id, "item_kind": "clause", "source_doc": r.source_doc,
-            "clause_type": r.clause_type, "verbatim_text": r.verbatim_text,
-            "typed_value": r.typed_value, "confidence": r.confidence,
+            "clause_type": r.clause_type,
+            "verbatim_text": _c.decrypt_safe(r.verbatim_text, "[unreadable — encryption key mismatch]"),
+            "typed_value": _c.decrypt_json(r.typed_value),
+            "confidence": r.confidence,
             "page_num": r.page_num, "stakes": r.stakes, "reason": None,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
@@ -1525,8 +1547,10 @@ def get_review_queue(session_id: str) -> list[dict]:
             # the shipped Review Queue UI renders these without a special case
             # — the label is what the card shows, the value is its body.
             "id": r.id, "item_kind": r.item_kind, "source_doc": r.source_doc,
-            "clause_type": r.item_label, "verbatim_text": r.item_value or "",
-            "typed_value": r.typed_value, "confidence": r.confidence,
+            "clause_type": r.item_label,
+            "verbatim_text": _c.decrypt_safe(r.item_value, "") or "",
+            "typed_value": _c.decrypt_json(r.typed_value),
+            "confidence": r.confidence,
             "page_num": r.page_num, "stakes": r.stakes, "reason": r.reason,
             "created_at": r.created_at.isoformat() if r.created_at else None,
         }
@@ -1563,7 +1587,9 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
                            verbatim_text = :vtext, reviewed_at = now()
                     WHERE session_id = :sid AND id = :id AND review_status = 'pending'
                 """),
-                {**params, "vtext": edited_text.strip()},
+                # A reviewer's corrected wording is as sensitive as the
+                # extracted original, so it is encrypted on the same terms.
+                {**params, "vtext": _crypto().encrypt(edited_text.strip())},
             )
         else:
             result = conn.execute(
@@ -1600,7 +1626,7 @@ def resolve_review_item(session_id: str, item_id: int, action: str,
                 UPDATE review_queue SET review_status = :status, resolution = :resolution,
                        item_value = :val, reviewed_at = now()
                 WHERE session_id = :sid AND id = :id AND review_status = 'pending'
-            """), {**params, "val": edited_text.strip()})
+            """), {**params, "val": _crypto().encrypt(edited_text.strip())})
         else:
             result = conn.execute(text("""
                 UPDATE review_queue SET review_status = :status, resolution = :resolution,

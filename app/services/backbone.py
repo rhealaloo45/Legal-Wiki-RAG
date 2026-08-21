@@ -140,13 +140,35 @@ def _enabled() -> bool:
     return bool(config.USE_DATABASE)
 
 
+# Columns holding the client's own words rather than derived structure.
+# Encrypted at rest (§ 01.6). Names and dates stay in the clear so the
+# registry remains queryable — a fully-encrypted documents table could not
+# answer "which contracts expire this quarter" without decrypting every row.
+_ENCRYPTED_COLUMNS = frozenset({
+    "verbatim_text", "typed_value", "holding", "relief_granted",
+    "scope_of_authority", "limitations", "conclusion", "assumptions",
+    "qualifications", "reliance_limitation", "duty", "consequence",
+    "description", "caption", "rows", "columns", "heading_text",
+})
+
+
 def _coerce_param(column: str, value: Any) -> Any:
     if value is None:
         return None
+    from services import crypto
+
     if column in _JSON_COLUMNS and not isinstance(value, str):
+        if column in _ENCRYPTED_COLUMNS:
+            return json.dumps(crypto.encrypt_json(value), ensure_ascii=False,
+                              default=str)
         return json.dumps(value, ensure_ascii=False, default=str)
     if isinstance(value, (dict, list)):
+        if column in _ENCRYPTED_COLUMNS:
+            return json.dumps(crypto.encrypt_json(value), ensure_ascii=False,
+                              default=str)
         return json.dumps(value, ensure_ascii=False, default=str)
+    if column in _ENCRYPTED_COLUMNS and isinstance(value, str):
+        return crypto.encrypt(value)
     return value
 
 
