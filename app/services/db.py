@@ -30,6 +30,14 @@ def _emb_table_name() -> str:
     return "page_embeddings" if provider == "nvidia" else f"page_embeddings_{provider}"
 
 
+def _question_table_name() -> str:
+    """Hypothetical-question vectors, per embedding provider — same
+    one-table-per-provider convention as _emb_table_name, so switching
+    providers never mixes vector dimensions in one table."""
+    import config
+    return f"question_embeddings_{config.EMBEDDING_PROVIDER}"
+
+
 def get_engine():
     global _engine
     if _engine is not None:
@@ -925,6 +933,40 @@ def _init_backbone_schema(conn, text) -> None:
         ON review_queue (wiki_id, session_id, source_doc)
     """))
 
+    # --- hypothetical-question embeddings (§ 01 stage 06) --------------------
+    # The third embedding type, alongside page-level and clause-level. Its own
+    # table rather than extra rows in the page table: a question and a page
+    # are different things, and mixing them would make every existing
+    # page-similarity query silently start returning questions.
+    #
+    # Vector dimension follows the same per-provider convention as the page
+    # tables (see _emb_table_name) so a provider switch never mixes dimensions.
+    try:
+        import config as _cfg
+        _emb_dims = _cfg.get_embedding_dimensions()
+        _q_tbl = _question_table_name()
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {_q_tbl} (
+                id          BIGSERIAL PRIMARY KEY,
+                wiki_id     TEXT NOT NULL DEFAULT '{DEFAULT_WIKI_ID}',
+                session_id  TEXT NOT NULL,
+                title       TEXT NOT NULL,
+                question    TEXT NOT NULL,
+                embedding   vector({_emb_dims}),
+                doc_family  TEXT,
+                source_doc  TEXT,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (session_id, title, question)
+            )
+        """))
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {_q_tbl}_session_idx "
+            f"ON {_q_tbl} (session_id, title)"
+        ))
+    except Exception as _q_err:
+        logger.warning("Could not create question-embedding table: %s", _q_err)
+        conn.rollback()
+
     # --- wiki_id on the legacy tables ---------------------------------------
     # DEFAULT is set so rows written by not-yet-threaded code paths still land
     # in the default wiki rather than NULL (a NULL wiki_id would silently fall
@@ -1768,6 +1810,87 @@ def delete_document_data(session_id: str, source_doc: str) -> dict:
 # ---------------------------------------------------------------------------
 # Embeddings (Phase 3 — pgvector search)
 # ---------------------------------------------------------------------------
+
+def upsert_question_embeddings(session_id: str, title: str,
+                               questions: list[tuple[str, list[float]]],
+                               doc_family: str | None = None,
+                               source_doc: str | None = None) -> int:
+    """Store hypothetical-question vectors for one page (§ 01 stage 06).
+
+    Questions are written per page and replaced wholesale for that page, so a
+    re-ingest can't leave a page answering questions its current content no
+    longer supports — a stale question is worse than a missing one, because it
+    surfaces the page confidently for a query it can't actually answer.
+    """
+    if not questions:
+        return 0
+    from sqlalchemy import text
+    engine = get_engine()
+    tbl = _question_table_name()
+    with engine.connect() as conn:
+        conn.execute(text(f"DELETE FROM {tbl} WHERE session_id = :sid AND title = :title"),
+                     {"sid": session_id, "title": title})
+        n = 0
+        for question, vector in questions:
+            if not question or not vector:
+                continue
+            emb_str = "[" + ",".join(f"{x:.8f}" for x in vector) + "]"
+            conn.execute(text(f"""
+                INSERT INTO {tbl}
+                    (session_id, title, question, embedding, doc_family, source_doc)
+                VALUES (:sid, :title, :q, CAST(:embedding AS vector), :fam, :doc)
+                ON CONFLICT (session_id, title, question) DO UPDATE SET
+                    embedding = EXCLUDED.embedding
+            """), {"sid": session_id, "title": title, "q": question[:2000],
+                   "embedding": emb_str, "fam": doc_family, "doc": source_doc})
+            n += 1
+        conn.commit()
+    return n
+
+
+def search_similar_questions(session_id: str, query_embedding: list[float],
+                             limit: int = 10,
+                             doc_family: str | None = None) -> list[dict]:
+    """Find pages whose hypothetical questions match the query.
+
+    Returns page titles, not questions — the question is a retrieval handle,
+    and what the caller ultimately needs is the page that can answer it. Each
+    page appears once, at its best-matching question's score.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    tbl = _question_table_name()
+    emb_str = "[" + ",".join(f"{x:.8f}" for x in query_embedding) + "]"
+    family_clause = " AND doc_family = :fam" if doc_family else ""
+    params = {"sid": session_id, "embedding": emb_str, "limit": limit}
+    if doc_family:
+        params["fam"] = doc_family
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT DISTINCT ON (title)
+                   title, question,
+                   1 - (embedding <=> CAST(:embedding AS vector)) AS score
+            FROM {tbl}
+            WHERE session_id = :sid{family_clause}
+            ORDER BY title, embedding <=> CAST(:embedding AS vector)
+            LIMIT :limit
+        """), params).fetchall()
+    out = [{"title": r.title, "question": r.question, "score": float(r.score)}
+           for r in rows]
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
+
+
+def count_question_embeddings(session_id: str) -> int:
+    from sqlalchemy import text
+    try:
+        with get_engine().connect() as conn:
+            return int(conn.execute(text(
+                f"SELECT COUNT(*) FROM {_question_table_name()} WHERE session_id = :sid"
+            ), {"sid": session_id}).scalar() or 0)
+    except Exception:
+        return 0
+
 
 def upsert_embedding(session_id: str, title: str, embedding: list[float],
                      doc_family: str | None = None) -> None:
