@@ -1972,11 +1972,31 @@ def run_compaction(session_id: str) -> int:
     logger.info("Compaction: %d pages due for session %s", len(due), session_id)
     compacted = 0
     for page_data in due:
+        title = page_data["title"]
+        # Per-page lock (§ 01.6 Concurrency). Two concurrent ingests can both
+        # push the same page past the threshold and both start re-synthesising
+        # it — two LLM calls producing two competing rewrites, one of which
+        # silently overwrites the other. The lock is per page rather than per
+        # session so unrelated pages still compact in parallel.
         try:
-            _compact_page(session_id, page_data["title"], dict(page_data))
-            compacted += 1
+            with _db.page_compaction_lock(session_id, title) as acquired:
+                if not acquired:
+                    logger.info("Compaction: '%s' already being compacted "
+                                "elsewhere — skipping", title)
+                    continue
+                # Re-read under the lock: the holder we just waited behind may
+                # have already compacted this page, in which case the row we
+                # were handed is stale and recompacting would burn a call to
+                # rewrite something already rewritten.
+                fresh = _db.get_page(session_id, title)
+                if fresh and fresh.get("append_count", 0) < config.COMPACTION_APPEND_THRESHOLD \
+                        and len(fresh.get("content", "")) < config.COMPACTION_CHAR_THRESHOLD:
+                    logger.info("Compaction: '%s' no longer due after lock wait", title)
+                    continue
+                _compact_page(session_id, title, dict(fresh or page_data))
+                compacted += 1
         except Exception as e:
-            logger.error("Compaction failed for page '%s': %s", page_data["title"], e)
+            logger.error("Compaction failed for page '%s': %s", title, e)
 
     _log_event(session_id, "COMPACTION", f"Compacted {compacted}/{len(due)} pages")
     return compacted
