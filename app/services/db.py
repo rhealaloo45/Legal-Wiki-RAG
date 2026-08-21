@@ -477,6 +477,22 @@ def _run_schema_statements(conn, text) -> None:
             ON login_attempts (ip, created_at DESC)
         """))
 
+        # Admin document lifecycle (target architecture § 01.4). One row per
+        # archived document; absence of a row means active — deliberately not
+        # a NOT NULL status column with a default, so "is anything archived
+        # at all" is a cheap existence check rather than a full table scan.
+        # See services/documents.py for the archive/delete orchestration and
+        # the known limitation around pages merged from multiple documents.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS document_status (
+                session_id   TEXT NOT NULL,
+                source_doc   TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'archived',
+                archived_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (session_id, source_doc)
+            )
+        """))
+
         conn.commit()
 
 
@@ -484,14 +500,32 @@ def _run_schema_statements(conn, text) -> None:
 # Pages
 # ---------------------------------------------------------------------------
 
-def get_pages(session_id: str) -> dict[str, dict]:
-    """Return all pages for a session as {title: {content, summary, source_doc, ...}}."""
+def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict]:
+    """Return all pages for a session as {title: {content, summary, source_doc, ...}}.
+
+    include_archived=False (the default, used everywhere retrieval/browsing
+    happens) excludes pages whose source_doc is archived — this is THE
+    enforcement point for "an archived document drops out of search/chat":
+    every caller (wiki index load, hybrid retrieval, /wiki/graph, /wiki/pages)
+    funnels through here, so filtering once here covers all of them rather
+    than needing the same check re-added at every call site.
+    """
     from sqlalchemy import text
     engine = get_engine()
+    archived_clause = "" if include_archived else """
+                AND NOT EXISTS (
+                    SELECT 1 FROM document_status ds
+                    WHERE ds.session_id = pages.session_id
+                      AND ds.source_doc = pages.source_doc
+                      AND ds.status = 'archived'
+                )"""
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT title, content, summary, source_doc, contradiction_flagged, variants "
-                 "FROM pages WHERE session_id = :sid"),
+            text(f"""
+                SELECT title, content, summary, source_doc, contradiction_flagged, variants
+                FROM pages
+                WHERE session_id = :sid{archived_clause}
+            """),
             {"sid": session_id},
         )
         pages: dict[str, dict] = {}
@@ -579,6 +613,174 @@ def count_relations(session_id: str) -> int:
             {"sid": session_id},
         ).scalar()
         return result or 0
+
+
+# ---------------------------------------------------------------------------
+# Document lifecycle (target architecture § 01.4 — Archive / Hard-delete)
+#
+# See services/documents.py for the orchestration layer (file deletion,
+# sessions.json bookkeeping) and the disclosed limitation around pages
+# merged from multiple source documents — everything here operates on
+# whatever pages.source_doc currently records, which for a merged page is
+# only the most recent contributing document, not the full set.
+# ---------------------------------------------------------------------------
+
+def get_document_statuses(session_id: str) -> dict[str, dict]:
+    """Return {source_doc: {status, archived_at}} for every document that has
+    ever been archived. A document with no row here is active."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT source_doc, status, archived_at FROM document_status WHERE session_id = :sid"),
+            {"sid": session_id},
+        )
+        return {
+            r.source_doc: {
+                "status": r.status,
+                "archived_at": r.archived_at.isoformat() if r.archived_at else None,
+            }
+            for r in rows
+        }
+
+
+def archive_document(session_id: str, source_doc: str) -> None:
+    """Mark a document archived. Idempotent — archiving twice just refreshes archived_at."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO document_status (session_id, source_doc, status, archived_at)
+                VALUES (:sid, :doc, 'archived', now())
+                ON CONFLICT (session_id, source_doc)
+                DO UPDATE SET status = 'archived', archived_at = now()
+            """),
+            {"sid": session_id, "doc": source_doc},
+        )
+        conn.commit()
+
+
+def unarchive_document(session_id: str, source_doc: str) -> None:
+    """Restore an archived document to active by removing its status row —
+    keeps "row exists" == "archived" a valid invariant everywhere else that
+    reads this table, rather than also needing to check a status value."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM document_status WHERE session_id = :sid AND source_doc = :doc"),
+            {"sid": session_id, "doc": source_doc},
+        )
+        conn.commit()
+
+
+def is_document_archived(session_id: str, source_doc: str) -> bool:
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT 1 FROM document_status
+                WHERE session_id = :sid AND source_doc = :doc AND status = 'archived'
+            """),
+            {"sid": session_id, "doc": source_doc},
+        ).first()
+        return row is not None
+
+
+def delete_document_data(session_id: str, source_doc: str) -> dict:
+    """Cascade-delete every DB row cleanly attributable to one document.
+
+    Does NOT touch the uploaded file on disk or sessions.json — see
+    services/documents.py, which owns those and calls this for the DB side.
+
+    Deliberately scoped to what pages.source_doc actually records: a
+    shared/merged concept page (a statute, a clause type referenced by
+    several documents) holds only its LAST contributing document in that
+    column — see wiki.py's merge-guard comment near "silently overwrites
+    source_doc". A page this document once contributed to, but no longer
+    "owns" in that column, is left untouched. That's a real gap in today's
+    schema, not a bug in this function; closing it needs the target
+    architecture's per-document structured tables (Phase 0 backbone), not
+    built yet. Returns a report of exactly what was removed so the caller
+    can say so honestly instead of claiming full removal.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    report = {
+        "pages_deleted": 0, "embeddings_deleted": 0,
+        "clause_map_deleted": 0, "source_positions_deleted": 0,
+        "relations_deleted": 0,
+    }
+
+    with engine.connect() as conn:
+        titles = [r.title for r in conn.execute(
+            text("SELECT title FROM pages WHERE session_id = :sid AND source_doc = :doc"),
+            {"sid": session_id, "doc": source_doc},
+        )]
+
+        if titles:
+            # Every page_embeddings* table across every provider ever used —
+            # switching EMBEDDING_PROVIDER doesn't merge or drop the previous
+            # provider's table (see _emb_table_name), so a stale vector under
+            # a now-inactive provider would otherwise survive this delete.
+            emb_tables = [r[0] for r in conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name LIKE 'page_embeddings%'"
+            ))]
+            for emb_table in emb_tables:
+                result = conn.execute(
+                    text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = ANY(:titles)'),
+                    {"sid": session_id, "titles": titles},
+                )
+                report["embeddings_deleted"] += result.rowcount or 0
+
+            result = conn.execute(
+                text("DELETE FROM pages WHERE session_id = :sid AND source_doc = :doc"),
+                {"sid": session_id, "doc": source_doc},
+            )
+            report["pages_deleted"] = result.rowcount or 0
+
+            # Deleted rather than re-labelled: today's relations.label is a
+            # real semantic field (party<->clause, clause<->clause) — the
+            # target architecture's "mark as references-unresolved instead
+            # of orphaning" treatment is specified for its own future typed
+            # edge set, not a licence to overwrite this column's existing
+            # meaning. An edge pointing at a title that no longer exists is
+            # simply dangling once the page is gone; delete it rather than
+            # leave a graph edge to nothing or invent semantics this schema
+            # doesn't yet have a field for.
+            result = conn.execute(
+                text("""
+                    DELETE FROM relations
+                    WHERE session_id = :sid
+                      AND (from_title = ANY(:titles) OR to_title = ANY(:titles))
+                """),
+                {"sid": session_id, "titles": titles},
+            )
+            report["relations_deleted"] = result.rowcount or 0
+
+        result = conn.execute(
+            text("DELETE FROM clause_map WHERE session_id = :sid AND source_doc = :doc"),
+            {"sid": session_id, "doc": source_doc},
+        )
+        report["clause_map_deleted"] = result.rowcount or 0
+
+        result = conn.execute(
+            text("DELETE FROM source_positions WHERE session_id = :sid AND source_doc = :doc"),
+            {"sid": session_id, "doc": source_doc},
+        )
+        report["source_positions_deleted"] = result.rowcount or 0
+
+        conn.execute(
+            text("DELETE FROM document_status WHERE session_id = :sid AND source_doc = :doc"),
+            {"sid": session_id, "doc": source_doc},
+        )
+
+        conn.commit()
+
+    return report
 
 
 # ---------------------------------------------------------------------------

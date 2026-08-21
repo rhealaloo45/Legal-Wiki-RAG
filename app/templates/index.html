@@ -1187,6 +1187,43 @@
       line-height: 1
     }
 
+    #manage-docs-toggle.active {
+      background: var(--accent-light);
+      color: var(--accent);
+      border-color: var(--accent-border);
+    }
+
+    .ftree-manage-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: inherit;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .1s, color .1s;
+    }
+
+    .ftree-manage-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .ftree-manage-btn.danger {
+      color: var(--red);
+    }
+
+    .ftree-manage-btn.danger:hover {
+      background: var(--red-light);
+      border-color: var(--red-border);
+    }
+
     .ftree-card-icon .ti-file-type-pdf { color: var(--red) }
     .ftree-card-icon .ti-file-text { color: var(--text-muted) }
 
@@ -3299,10 +3336,15 @@
           <div class="files-toolbar">
             <div style="display:flex;align-items:center;gap:8px"><span class="files-title">Document library</span><span
                 class="files-count" id="files-count-badge">0 files</span></div>
+            <button type="button" id="manage-docs-toggle" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px"
+                    title="Archive or delete documents" onclick="toggleManageMode()">
+              <i class="ti ti-settings" style="font-size:14px"></i><span>Manage</span>
+            </button>
           </div>
           <div class="ftree" id="file-tree">
             <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No files ingested yet.</div>
           </div>
+          <div class="ftree" id="document-manage-list" style="display:none"></div>
         </div>
 
         <!-- DOC READER -->
@@ -6488,6 +6530,114 @@
         treeDiv.innerHTML = renderNode(tree, 0);
 
       } catch (e) { console.error('loadFileTree error:', e); }
+    }
+
+    // ============================================================
+    // Admin document lifecycle (target architecture § 01.4)
+    // Archive/restore are reversible and need no confirmation; hard delete
+    // is a separate, deliberate action with its own confirm() per the doc's
+    // "own confirmation" requirement — never triggered by the same click as
+    // archive.
+    // ============================================================
+
+    let manageMode = false;
+
+    function toggleManageMode() {
+      manageMode = !manageMode;
+      const btn = document.getElementById('manage-docs-toggle');
+      const treeDiv = document.getElementById('file-tree');
+      const manageDiv = document.getElementById('document-manage-list');
+      btn.classList.toggle('active', manageMode);
+      treeDiv.style.display = manageMode ? 'none' : '';
+      manageDiv.style.display = manageMode ? '' : 'none';
+      if (manageMode) loadDocumentManageList();
+    }
+
+    async function loadDocumentManageList() {
+      const manageDiv = document.getElementById('document-manage-list');
+      manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/document/list?session_id=${SID}`);
+        const data = await res.json();
+        const docs = data.documents || [];
+        if (!docs.length) {
+          manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No documents ingested yet.</div>';
+          return;
+        }
+        manageDiv.innerHTML = docs.map(doc => {
+          const archived = doc.status === 'archived';
+          const escPath = doc.path.replace(/'/g, "\\'");
+          const escSrc = doc.source_doc.replace(/'/g, "\\'");
+          const statusBadge = archived
+            ? `<span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:var(--amber);background:var(--amber-light);border:1px solid var(--amber-border);border-radius:10px;padding:2px 8px;margin-left:8px">archived</span>`
+            : '';
+          const actionBtns = archived
+            ? `<button type="button" class="ftree-manage-btn" title="Restore to active" onclick="restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate"></i> Restore</button>
+               <button type="button" class="ftree-manage-btn danger" title="Permanently delete" onclick="deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash"></i> Delete</button>`
+            : `<button type="button" class="ftree-manage-btn" title="Archive — hides from search/chat, fully reversible" onclick="archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive"></i> Archive</button>`;
+          return `<div class="ftree-row" style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border)">
+              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted)"></i>
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;color:${archived ? 'var(--text-muted)' : 'var(--text-primary)'};${archived ? 'text-decoration:line-through' : ''}" title="${doc.path.replace(/"/g, '&quot;')}">${doc.path}</span>
+              ${statusBadge}
+              <span style="display:flex;gap:6px;flex-shrink:0">${actionBtns}</span>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        console.error('loadDocumentManageList error:', e);
+        manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load documents.</div>';
+      }
+    }
+
+    async function archiveDocument(sourceDoc, path) {
+      try {
+        const res = await fetch('/document/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Archive failed'); }
+        showToast(`Archived "${path}"`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function restoreDocument(sourceDoc, path) {
+      try {
+        const res = await fetch('/document/unarchive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Restore failed'); }
+        showToast(`Restored "${path}"`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function deleteDocumentConfirm(sourceDoc, path) {
+      const ok = confirm(
+        `Permanently delete "${path}"?\n\nThis removes the file, its clause/citation records, and its embeddings. ` +
+        `This cannot be undone. Content that was merged into pages shared with other documents may not be fully ` +
+        `removable — see the architecture doc's known limitation.\n\nArchive instead if you're not certain.`
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch('/document/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc, confirm: true }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Delete failed'); }
+        const report = await res.json();
+        showToast(`Deleted "${path}" (${report.pages_deleted} page(s), ${report.embeddings_deleted} embedding(s))`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     }
 
     // ============================================================
