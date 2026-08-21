@@ -343,12 +343,43 @@ def _run_schema_statements(conn, text) -> None:
                 content     TEXT NOT NULL,
                 msg_type    TEXT NOT NULL DEFAULT 'text',
                 metadata    JSONB,
+                user_id     BIGINT,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """))
         conn.execute(text("""
             CREATE INDEX IF NOT EXISTS chat_messages_session_idx
             ON chat_messages (session_id, created_at)
+        """))
+
+        # Who wrote this message. Nullable and unread by any query today —
+        # the two-role admin/user split and per-user chat isolation are both
+        # deferred (target architecture § 01.4 / § 00 Scope).
+        #
+        # It exists now anyway because that same section warns per-user chat
+        # isolation "needs a user_id FK on conversation records from the
+        # start ... not retrofitted". The retrofit is only cheap while there
+        # is exactly one account, since every existing row provably belongs
+        # to it. Once a second person writes messages, unattributed history
+        # can't be split apart after the fact.
+        try:
+            conn.execute(text("""
+                ALTER TABLE chat_messages
+                ADD COLUMN IF NOT EXISTS user_id BIGINT
+            """))
+        except Exception as _user_id_err:
+            logger.warning("Could not add chat_messages.user_id column (may already exist): %s", _user_id_err)
+            conn.rollback()
+
+        # Deliberately NOT a foreign key to users(id): chat_messages predates
+        # the users table and holds rows from before auth existed, and this
+        # app also runs with AUTH_ENABLED=false where no users row exists at
+        # all. A hard FK would make message writes fail in exactly the setups
+        # that don't have accounts. Add the constraint alongside the role
+        # split, when every writer is guaranteed to be a real user.
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS chat_messages_user_idx
+            ON chat_messages (user_id, created_at)
         """))
 
         # Source positions table (citation exact-location support)
@@ -1186,21 +1217,27 @@ def insert_message(
     content: str,
     msg_type: str = "text",
     metadata: dict | None = None,
+    user_id: int | None = None,
 ) -> int:
-    """Insert a chat message and return its id."""
+    """Insert a chat message and return its id.
+
+    user_id records the authenticated author. Nothing reads it yet — it's
+    stored so per-user chat isolation stays buildable later; see the column
+    comment in _run_schema_statements for why it can't wait.
+    """
     from sqlalchemy import text
     engine = get_engine()
     meta_json = json.dumps(metadata) if metadata is not None else None
     with engine.connect() as conn:
         row = conn.execute(
             text("""
-                INSERT INTO chat_messages (session_id, role, content, msg_type, metadata)
-                VALUES (:sid, :role, :content, :msg_type, CAST(:metadata AS jsonb))
+                INSERT INTO chat_messages (session_id, role, content, msg_type, metadata, user_id)
+                VALUES (:sid, :role, :content, :msg_type, CAST(:metadata AS jsonb), :user_id)
                 RETURNING id
             """),
             {
                 "sid": session_id, "role": role, "content": content,
-                "msg_type": msg_type, "metadata": meta_json,
+                "msg_type": msg_type, "metadata": meta_json, "user_id": user_id,
             },
         ).fetchone()
         conn.commit()
