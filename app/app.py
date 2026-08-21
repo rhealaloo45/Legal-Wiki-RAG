@@ -27,7 +27,7 @@ import threading
 
 from flask import (
     Flask, render_template, request, jsonify, Response, stream_with_context,
-    session, redirect, url_for, has_request_context,
+    session, redirect, url_for, has_request_context, g,
 )
 
 # Ensure project root is on the path so `import config` works
@@ -338,6 +338,48 @@ def _safe_next(target: str) -> str:
     if not target or not target.startswith("/") or target.startswith("//"):
         return "/"
     return target
+
+
+@app.before_request
+def _bind_wiki_id():
+    """Bind the active wiki once, at request entry (§ 01.6 Concurrency).
+
+    The active-wiki pointer is a mutable global. If an admin switches wikis
+    mid-request, a request that started resolving against wiki A could finish
+    reading from wiki B — a cross-wiki read that no isolation check would
+    catch, because each individual query was correctly scoped to whatever the
+    pointer said at the moment it ran.
+
+    Resolving once into `g` and reading it from there for the rest of the
+    request makes that impossible: the value cannot change underneath a
+    request that already started.
+    """
+    if not config.USE_DATABASE:
+        return None
+    try:
+        from services import wikis as _wikis
+        g.wiki_id = _wikis.active_wiki_id()
+    except Exception as err:
+        logger.warning("Could not bind active wiki for this request: %s", err)
+    return None
+
+
+def current_wiki_id() -> str:
+    """The wiki this request is bound to. Always prefer this over calling
+    wikis.active_wiki_id() inside a request — that re-reads the live pointer
+    and reintroduces the mid-request switch this binding exists to prevent.
+
+    Ingest runs on background threads with no request context, so this must
+    not raise there: `g` is unavailable outside a request, and falling back to
+    reading the pointer is correct in that case — a background job has no
+    request whose start it could be bound to.
+    """
+    from services import wikis as _wikis
+    if has_request_context():
+        bound = getattr(g, "wiki_id", None)
+        if bound:
+            return bound
+    return _wikis.active_wiki_id()
 
 
 @app.before_request
