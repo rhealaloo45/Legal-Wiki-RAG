@@ -34,7 +34,7 @@ from flask import (
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth, upload_validation, cost_estimate
+from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth, upload_validation, cost_estimate, wiki_pages
 import threading
 
 # ---------------------------------------------------------------------------
@@ -1528,6 +1528,96 @@ def wiki_page_detail():
     if content is None:
         return jsonify({"error": "Page not found"}), 404
     return jsonify({"title": title, "content": content})
+
+
+@app.route("/admin/wiki/pages")
+def admin_wiki_pages():
+    """Admin page browser listing — title, source_doc, char_count,
+    contradiction_flagged, last_modified. Richer than /wiki/pages (bare
+    titles, used by the D3 graph), so kept as its own route rather than
+    changing that one's response shape under existing callers."""
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    return jsonify({"pages": _db.get_page_list(session_id)})
+
+
+@app.route("/admin/wiki/page/rename", methods=["POST"])
+def admin_wiki_page_rename():
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    old_title = data.get("old_title", "")
+    new_title = data.get("new_title", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    try:
+        return jsonify(wiki_pages.rename_page(session_id, old_title, new_title))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Page rename failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/wiki/page/merge", methods=["POST"])
+def admin_wiki_page_merge():
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_title = data.get("source_title", "")
+    target_title = data.get("target_title", "")
+    confirm = data.get("confirm", False)
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    if not confirm:
+        return jsonify({"error": "Merge requires confirm: true"}), 400
+    session_id = _get_main_session_id() or session_id
+    try:
+        return jsonify(wiki_pages.merge_pages(session_id, source_title, target_title))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Page merge failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/wiki/page/delete", methods=["POST"])
+def admin_wiki_page_delete():
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    title = data.get("title", "")
+    confirm = data.get("confirm", False)
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    if not confirm:
+        return jsonify({"error": "Delete requires confirm: true"}), 400
+    session_id = _get_main_session_id() or session_id
+    try:
+        return jsonify(wiki_pages.delete_page(session_id, title))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Page delete failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 def _find_upload(session_id, doc_name):

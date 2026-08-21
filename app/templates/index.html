@@ -3373,7 +3373,11 @@
           </div>
 
           <div id="admin-panel-wiki" class="panel d-none" style="display:none;overflow-y:auto">
-            <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Coming next — page browser, knowledge graph, and rename/merge/delete.</div>
+            <div class="files-toolbar" style="padding:0 0 12px">
+              <span class="files-title" style="font-size:13px">Wiki pages</span>
+              <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i><span>Knowledge graph</span></button>
+            </div>
+            <div class="ftree" id="admin-wiki-page-list" style="margin:0"></div>
           </div>
 
           <div id="admin-panel-review" class="panel d-none" style="display:none;overflow-y:auto">
@@ -3788,6 +3792,7 @@
       const name = activeSub ? activeSub.dataset.target : 'ingest';
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
+      else if (name === 'wiki') loadAdminWikiPages();
     }
 
     function switchAdminTab(name, el) {
@@ -3799,6 +3804,7 @@
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
       if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
+      else if (name === 'wiki') loadAdminWikiPages();
     }
 
     async function loadAdminIngestStatus() {
@@ -3851,6 +3857,92 @@
         loadAdminIngestStatus();
       } catch (e) {
         showToast('Resume ingest failed', 'error');
+      }
+    }
+
+    async function loadAdminWikiPages() {
+      const el = document.getElementById('admin-wiki-page-list');
+      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/admin/wiki/pages?session_id=${SID}`);
+        const data = await res.json();
+        const pages = data.pages || [];
+        if (!pages.length) {
+          el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No wiki pages yet.</div>';
+          return;
+        }
+        el.innerHTML = pages.map(p => {
+          const escTitle = p.title.replace(/'/g, "\\'");
+          const flag = p.contradiction_flagged
+            ? `<span style="font-size:10.5px;font-family:var(--font-mono,monospace);color:var(--red);background:var(--red-light,#fee);border:1px solid var(--red-border,#fbb);border-radius:10px;padding:2px 8px;margin-left:8px">contradiction</span>`
+            : '';
+          return `<div class="ftree-row" style="align-items:flex-start">
+              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted);margin-top:2px"></i>
+              <span style="flex:1;min-width:0">
+                <div style="font-size:12.5px;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(p.title)}${flag}</div>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${escapeHtmlRule(p.source_doc || '')} · ${p.char_count || 0} chars</div>
+              </span>
+              <span style="display:flex;gap:6px;flex-shrink:0">
+                <button type="button" class="ftree-manage-btn" title="Rename this page" onclick="adminRenamePage('${escTitle}')"><i class="ti ti-edit"></i> Rename</button>
+                <button type="button" class="ftree-manage-btn" title="Merge this page into another" onclick="adminMergePage('${escTitle}')"><i class="ti ti-git-merge"></i> Merge</button>
+                <button type="button" class="ftree-manage-btn danger" title="Delete this page" onclick="adminDeletePage('${escTitle}')"><i class="ti ti-trash"></i> Delete</button>
+              </span>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        console.error('loadAdminWikiPages error:', e);
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load wiki pages.</div>';
+      }
+    }
+
+    async function adminRenamePage(oldTitle) {
+      const newTitle = window.prompt(`Rename "${oldTitle}" to:`, oldTitle);
+      if (!newTitle || newTitle === oldTitle) return;
+      try {
+        const res = await fetch('/admin/wiki/page/rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, old_title: oldTitle, new_title: newTitle }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Rename failed');
+        showToast(`Renamed to "${newTitle}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function adminMergePage(sourceTitle) {
+      const targetTitle = window.prompt(`Merge "${sourceTitle}" into which page? (content is appended, "${sourceTitle}" is then removed)`, '');
+      if (!targetTitle || targetTitle === sourceTitle) return;
+      if (!window.confirm(`Merge "${sourceTitle}" into "${targetTitle}"?\n\nThis appends its content and removes "${sourceTitle}". Cannot be undone.`)) return;
+      try {
+        const res = await fetch('/admin/wiki/page/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_title: sourceTitle, target_title: targetTitle, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Merge failed');
+        showToast(`Merged into "${targetTitle}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function adminDeletePage(title) {
+      if (!window.confirm(`Permanently delete page "${title}"?\n\nThis removes it from relations, clause map, and embeddings. Cannot be undone.`)) return;
+      try {
+        const res = await fetch('/admin/wiki/page/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, title: title, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Delete failed');
+        showToast(`Deleted "${title}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
       }
     }
 
