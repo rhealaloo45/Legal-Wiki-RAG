@@ -1141,76 +1141,109 @@ _DOC_TYPE_FOLDER_RE = re.compile(
 )
 
 
+def _session_document_paths(session_id: str) -> dict[str, str]:
+    """Return {relative_path: source_doc_key} for every uploaded document in
+    a session — the reconstruction logic shared by /files (tree view) and
+    /document/list (admin lifecycle view), so the two can't drift apart on
+    what counts as "this session's documents."
+
+    Docs with zero indexed pages (OCR/ingest failures) never made it into
+    the corpus — excluded here so neither view implies they're searchable
+    when generate_answer() will never see them.
+    """
+    from services.documents import flatten_doc_key
+
+    sessions = load_sessions()
+    indexed_docs: set[str] = set()
+    if config.USE_DATABASE:
+        try:
+            from services import db as _db
+            from sqlalchemy import text
+            engine = _db.get_engine()
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
+                    {"sid": session_id},
+                )
+                indexed_docs = {r.source_doc for r in rows}
+        except Exception as _idx_err:
+            logger.warning("Could not fetch indexed docs for document listing: %s", _idx_err)
+
+    paths: dict[str, str] = {}  # relative_path -> source_doc key
+
+    # 1. Try to read from session metadata first
+    if session_id in sessions and "file_paths" in sessions[session_id]:
+        for p in sessions[session_id]["file_paths"]:
+            flat_key = flatten_doc_key(session_id, p)
+            if indexed_docs and flat_key not in indexed_docs:
+                continue
+            paths[p.replace("\\", "/")] = flat_key
+    else:
+        # 2. Fallback: Scan config.UPLOAD_PATH and reconstruct original paths
+        prefix = f"{session_id}_"
+        for fname in os.listdir(config.UPLOAD_PATH):
+            if fname.startswith(prefix):
+                if indexed_docs and fname not in indexed_docs:
+                    continue
+                rel_name = fname[len(prefix):]
+
+                # Reconstruct "<top folder>/<doc-type folder>/<filename>"
+                # by locating the doc-type segment wherever it falls —
+                # works for any top-level folder name, not just one
+                # hardcoded string. Underscores are the flattening
+                # separator only at the boundary right around that match;
+                # trimming just there (not a blind split on every "_")
+                # keeps underscores that are part of the filename itself
+                # intact (e.g. "Test_CCD_01.txt").
+                reconstructed = False
+                m = _DOC_TYPE_FOLDER_RE.search(rel_name)
+                if m:
+                    top = rel_name[:m.start()].rstrip('_')
+                    type_folder = m.group(0)
+                    file_part = rel_name[m.end():].lstrip('_')
+                    if top and file_part:
+                        paths[f"{top}/{type_folder}/{file_part}"] = fname
+                        reconstructed = True
+
+                if not reconstructed:
+                    paths[rel_name.replace("\\", "/")] = fname
+
+    return paths
+
+
 @app.route("/files")
 def file_structure():
-    """Return nested file tree of successfully uploaded files."""
+    """Return nested file tree of active (non-archived) uploaded files.
+
+    Archived documents are excluded by default — this is the file-browser /
+    Review-Compare-picker view, and an archived document should not be
+    selectable there any more than it should surface in chat retrieval (see
+    db.get_pages). Use /document/list for the admin view that shows
+    everything, archived included.
+    """
     session_id = request.args.get("session_id", "")
     if not session_id:
         return jsonify({})
     session_id = _get_main_session_id() or session_id
-        
-    try:
-        sessions = load_sessions()
-        paths = set()
 
-        # Docs with zero indexed pages (OCR/ingest failures) never made it
-        # into the corpus — exclude them here so the Files tab doesn't imply
-        # they're searchable when generate_answer() will never see them.
-        indexed_docs: set[str] = set()
+    try:
+        paths = _session_document_paths(session_id)
+
+        archived: set[str] = set()
         if config.USE_DATABASE:
             try:
                 from services import db as _db
-                from sqlalchemy import text
-                engine = _db.get_engine()
-                with engine.connect() as conn:
-                    rows = conn.execute(
-                        text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
-                        {"sid": session_id},
-                    )
-                    indexed_docs = {r.source_doc for r in rows}
-            except Exception as _idx_err:
-                logger.warning("Could not fetch indexed docs for /files filtering: %s", _idx_err)
+                archived = {
+                    doc for doc, info in _db.get_document_statuses(session_id).items()
+                    if info["status"] == "archived"
+                }
+            except Exception as _arch_err:
+                logger.warning("Could not fetch archived docs for /files filtering: %s", _arch_err)
 
-        # 1. Try to read from session metadata first
-        if session_id in sessions and "file_paths" in sessions[session_id]:
-            for p in sessions[session_id]["file_paths"]:
-                # source_doc is stored as session_id + "_" + path with "/" flattened to "_"
-                flat_key = f"{session_id}_" + p.replace("\\", "/").replace("/", "_")
-                if indexed_docs and flat_key not in indexed_docs:
-                    continue
-                paths.add(p.replace("\\", "/"))
-        else:
-            # 2. Fallback: Scan config.UPLOAD_PATH and reconstruct original paths
-            prefix = f"{session_id}_"
-            for fname in os.listdir(config.UPLOAD_PATH):
-                if fname.startswith(prefix):
-                    if indexed_docs and fname not in indexed_docs:
-                        continue
-                    rel_name = fname[len(prefix):]
-
-                    # Reconstruct "<top folder>/<doc-type folder>/<filename>"
-                    # by locating the doc-type segment wherever it falls —
-                    # works for any top-level folder name, not just one
-                    # hardcoded string. Underscores are the flattening
-                    # separator only at the boundary right around that match;
-                    # trimming just there (not a blind split on every "_")
-                    # keeps underscores that are part of the filename itself
-                    # intact (e.g. "Test_CCD_01.txt").
-                    reconstructed = False
-                    m = _DOC_TYPE_FOLDER_RE.search(rel_name)
-                    if m:
-                        top = rel_name[:m.start()].rstrip('_')
-                        type_folder = m.group(0)
-                        file_part = rel_name[m.end():].lstrip('_')
-                        if top and file_part:
-                            paths.add(f"{top}/{type_folder}/{file_part}")
-                            reconstructed = True
-
-                    if not reconstructed:
-                        paths.add(rel_name.replace("\\", "/"))
-                        
         tree = {}
-        for p in paths:
+        for p, source_doc in paths.items():
+            if source_doc in archived:
+                continue
             parts = [x for x in p.split("/") if x]
             curr = tree
             for i, part in enumerate(parts):
@@ -1218,11 +1251,143 @@ def file_structure():
                     curr[part] = "file"
                 else:
                     curr = curr.setdefault(part, {})
-                    
+
         return jsonify(tree)
     except Exception as e:
         logger.error("Failed to fetch file structure: %s", e)
         return jsonify({})
+
+
+@app.route("/document/list")
+def document_list():
+    """Return a flat list of every document in a session, active and
+    archived, for the admin document-lifecycle view (Files panel's manage
+    mode) — unlike /files this includes archived docs so they can be
+    restored or hard-deleted.
+    """
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"documents": []})
+    session_id = _get_main_session_id() or session_id
+
+    try:
+        paths = _session_document_paths(session_id)
+        statuses = {}
+        if config.USE_DATABASE:
+            from services import db as _db
+            statuses = _db.get_document_statuses(session_id)
+
+        documents = [
+            {
+                "path": p,
+                "source_doc": source_doc,
+                "status": statuses.get(source_doc, {}).get("status", "active"),
+                "archived_at": statuses.get(source_doc, {}).get("archived_at"),
+            }
+            for p, source_doc in sorted(paths.items())
+        ]
+        return jsonify({"documents": documents})
+    except Exception as e:
+        logger.error("Failed to list documents: %s", e)
+        return jsonify({"documents": []})
+
+
+@app.route("/document/archive", methods=["POST"])
+def document_archive():
+    """Archive a document — reversible, hides it from search/chat/pickers
+    without deleting anything. See services/documents.py."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured — document lifecycle needs Postgres"}), 400
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_doc = data.get("source_doc", "")
+    if not session_id or not source_doc:
+        return jsonify({"error": "session_id and source_doc are required"}), 400
+    # Same redirect /files and /document/list apply — a caller listing
+    # documents under this session_id and one archiving/deleting from it must
+    # resolve to the SAME underlying session, or a source_doc handed back
+    # from the list call can point at a different session's real document.
+    # services/documents.py._assert_ownership is the hard backstop if this
+    # ever drifts; this redirect is what makes the common case just work.
+    session_id = _get_main_session_id() or session_id
+
+    from services import documents as _documents
+    try:
+        result = _documents.archive_document(session_id, source_doc)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Archive failed for %r: %s", source_doc, e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/document/unarchive", methods=["POST"])
+def document_unarchive():
+    """Restore an archived document to active."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured — document lifecycle needs Postgres"}), 400
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_doc = data.get("source_doc", "")
+    if not session_id or not source_doc:
+        return jsonify({"error": "session_id and source_doc are required"}), 400
+    session_id = _get_main_session_id() or session_id
+
+    from services import documents as _documents
+    try:
+        result = _documents.unarchive_document(session_id, source_doc)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Unarchive failed for %r: %s", source_doc, e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/document/delete", methods=["POST"])
+def document_delete():
+    """Permanently delete a document — separate, deliberate action from
+    Archive, requires an explicit confirm flag. See services/documents.py
+    and db.delete_document_data for exactly what is and isn't covered
+    (shared/merged pages are a disclosed, known gap — not silently claimed
+    as fully removed).
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured — document lifecycle needs Postgres"}), 400
+
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_doc = data.get("source_doc", "")
+    confirm = data.get("confirm", False)
+    if not session_id or not source_doc:
+        return jsonify({"error": "session_id and source_doc are required"}), 400
+    if not confirm:
+        return jsonify({"error": "Hard delete requires confirm: true"}), 400
+    session_id = _get_main_session_id() or session_id
+
+    from services import documents as _documents
+    try:
+        sessions = load_sessions()
+        report = _documents.hard_delete_document(session_id, source_doc, sessions)
+        save_sessions(sessions)
+        return jsonify(report)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Hard delete failed for %r: %s", source_doc, e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.route("/wiki/graph")
