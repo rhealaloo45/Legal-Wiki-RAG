@@ -34,7 +34,7 @@ from flask import (
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth
+from services import wiki, hybrid, advanced_modes, draft, redaction, tracing, auth, upload_validation
 import threading
 
 # ---------------------------------------------------------------------------
@@ -635,8 +635,10 @@ def upload():
     # Filter and save files to disk first (fast, synchronous)
     saved_paths = []
     metadata_list = []
+    rejected = []
     for i, file in enumerate(files):
         if not _allowed_file(file.filename):
+            rejected.append({"filename": file.filename, "reason": "unsupported file type (.txt, .pdf, .docx only)"})
             continue
 
         rel_path = ""
@@ -650,6 +652,21 @@ def upload():
 
         save_path = os.path.join(config.UPLOAD_PATH, f"{session_id}_{safe_name}")
         file.save(save_path)
+
+        # Validation gate — before parsing starts (target architecture §
+        # "File-upload validation"). Rejects malformed/malicious files
+        # (decompression bombs, corrupt structures, mismatched content) so
+        # they never reach the ingest pipeline. See services/upload_validation.py.
+        ok, reason = upload_validation.validate_upload(save_path, file.filename)
+        if not ok:
+            logger.warning("Rejected upload %r: %s", file.filename, reason)
+            rejected.append({"filename": file.filename, "reason": reason})
+            try:
+                os.remove(save_path)
+            except OSError:
+                pass
+            continue
+
         saved_paths.append(save_path)
         metadata_list.append({
             "relative_path": rel_path if rel_path else file.filename,
@@ -658,7 +675,10 @@ def upload():
         logger.info("Saved upload: %s with relative path: %s", save_path, rel_path)
 
     if not saved_paths:
-        return jsonify({"error": "No valid files (.txt, .pdf, .docx) found"}), 400
+        return jsonify({
+            "error": "No valid files (.txt, .pdf, .docx) found",
+            "rejected": rejected,
+        }), 400
 
     # Initialize progress with per-document tracking
     progress = {
@@ -694,6 +714,7 @@ def upload():
         "status": "accepted",
         "files_queued": len(saved_paths),
         "session_id": session_id,
+        "rejected": rejected,
     })
 
 

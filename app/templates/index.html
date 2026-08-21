@@ -5180,7 +5180,23 @@
       try {
         const res = await fetch('/upload', { method: 'POST', body: fd });
         const d = await res.json();
-        if (d.error) { showToast(d.error, 'error'); return; }
+        if (d.error) {
+          showToast(d.error, 'error');
+          if (d.rejected && d.rejected.length) {
+            showToast(`Rejected: ${d.rejected.map(r => `${r.filename} (${r.reason})`).join('; ')}`, 'error');
+          }
+          // Restore the upload UI — nothing was queued, so there's no ingest to show
+          document.getElementById('ingest-dash').classList.add('d-none');
+          document.getElementById('upload-zone').style.display = '';
+          document.getElementById('pick-btns-wrap').classList.remove('d-none');
+          document.getElementById('upl-title-wrap').style.display = '';
+          document.getElementById('upload-btn').disabled = false;
+          return;
+        }
+
+        if (d.rejected && d.rejected.length) {
+          showToast(`${d.rejected.length} file(s) skipped: ${d.rejected.map(r => `${r.filename} (${r.reason})`).join('; ')}`, 'error');
+        }
 
         totalFilesQueued = d.files_queued || 0;
 
