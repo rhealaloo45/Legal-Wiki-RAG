@@ -1187,12 +1187,6 @@
       line-height: 1
     }
 
-    #manage-docs-toggle.active {
-      background: var(--accent-light);
-      color: var(--accent);
-      border-color: var(--accent-border);
-    }
-
     .ftree-manage-btn {
       display: inline-flex;
       align-items: center;
@@ -2810,6 +2804,8 @@
         </div>
         <div class="graph-btn" id="tour-graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
+        <div class="graph-btn" id="tour-admin-btn" onclick="openAdmin()"><i class="ti ti-settings-2"
+            style="font-size:13px"></i>Admin</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
             class="ti ti-file-description"></i></div>
         <div class="icon-btn" id="tour-rules-btn" aria-label="rules" onclick="toggleRules()" title="Instructions"><i
@@ -3336,15 +3332,53 @@
           <div class="files-toolbar">
             <div style="display:flex;align-items:center;gap:8px"><span class="files-title">Document library</span><span
                 class="files-count" id="files-count-badge">0 files</span></div>
-            <button type="button" id="manage-docs-toggle" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px"
-                    title="Archive or delete documents" onclick="toggleManageMode()">
-              <i class="ti ti-settings" style="font-size:14px"></i><span>Manage</span>
+            <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px"
+                    title="Archive, restore, delete, or check ingest status in Admin" onclick="openAdmin()">
+              <i class="ti ti-settings-2" style="font-size:14px"></i><span>Admin</span>
             </button>
           </div>
           <div class="ftree" id="file-tree">
             <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No files ingested yet.</div>
           </div>
-          <div class="ftree" id="document-manage-list" style="display:none"></div>
+        </div>
+
+        <!-- ADMIN -->
+        <div id="panel-admin" class="files-panel d-none" style="display:none">
+          <div class="files-toolbar">
+            <div style="display:flex;align-items:center;gap:8px">
+              <button type="button" class="icon-btn" title="Back to chat" onclick="switchTab('ask', document.querySelector('.tab[data-target=&quot;ask&quot;]'))"><i class="ti ti-arrow-left"></i></button>
+              <span class="files-title">Admin</span>
+            </div>
+          </div>
+          <div class="tabs" id="adminSubTabs" style="padding:0 20px;flex-shrink:0">
+            <div class="tab active" data-target="ingest" onclick="switchAdminTab('ingest',this)"><i class="ti ti-upload" style="font-size:13px"></i>Ingest</div>
+            <div class="tab" data-target="documents" onclick="switchAdminTab('documents',this)"><i class="ti ti-files" style="font-size:13px"></i>Documents</div>
+            <div class="tab" data-target="wiki" onclick="switchAdminTab('wiki',this)"><i class="ti ti-topology-star-ring" style="font-size:13px"></i>Wiki</div>
+            <div class="tab" data-target="review" onclick="switchAdminTab('review',this)"><i class="ti ti-checklist" style="font-size:13px"></i>Review Queue</div>
+          </div>
+
+          <div id="admin-panel-ingest" class="panel" style="overflow-y:auto">
+            <div class="files-toolbar" style="padding:0 0 12px">
+              <span class="files-title" style="font-size:13px">Ingest status — current session</span>
+              <div style="display:flex;gap:8px">
+                <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Re-queue any uploaded docs that never finished ingesting" onclick="adminResumeIngest()"><i class="ti ti-refresh" style="font-size:14px"></i><span>Resume ingest</span></button>
+                <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px" title="Start a new ingest" onclick="newSession()"><i class="ti ti-upload" style="font-size:14px"></i><span>New ingest</span></button>
+              </div>
+            </div>
+            <div class="ftree" id="admin-ingest-status" style="margin:0"></div>
+          </div>
+
+          <div id="admin-panel-documents" class="panel d-none" style="display:none;overflow-y:auto">
+            <div class="ftree" id="document-manage-list" style="margin:0"></div>
+          </div>
+
+          <div id="admin-panel-wiki" class="panel d-none" style="display:none;overflow-y:auto">
+            <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Coming next — page browser, knowledge graph, and rename/merge/delete.</div>
+          </div>
+
+          <div id="admin-panel-review" class="panel d-none" style="display:none;overflow-y:auto">
+            <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Coming next — clause-level Review Queue.</div>
+          </div>
         </div>
 
         <!-- DOC READER -->
@@ -3722,6 +3756,7 @@
       document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-draft').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-admin').style.setProperty('display', 'none', 'important');
       document.getElementById('doc-reader').style.display = 'none';
 
       if (name === 'ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
@@ -3729,6 +3764,94 @@
       else if (name === 'compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
       else if (name === 'draft') document.getElementById('panel-draft').style.setProperty('display', 'flex', 'important');
       else if (name === 'files') { const fp = document.getElementById('panel-files'); fp.style.setProperty('display', 'flex', 'important'); fp.style.flexDirection = 'column'; }
+    }
+
+    // ============================================================
+    // Admin panel — separate from the chat tabs above. Operational
+    // surface (ingest, document lifecycle, wiki management, review
+    // queue) kept apart from Ask/Compare/Draft on purpose.
+    // ============================================================
+    function openAdmin() {
+      document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-draft').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
+      document.getElementById('doc-reader').style.display = 'none';
+      document.querySelectorAll('#modeTabs .tab').forEach(t => t.classList.remove('active'));
+      const ap = document.getElementById('panel-admin');
+      ap.style.setProperty('display', 'flex', 'important');
+      ap.style.flexDirection = 'column';
+      // Refresh whichever sub-tab is currently active
+      const activeSub = document.querySelector('#adminSubTabs .tab.active');
+      const name = activeSub ? activeSub.dataset.target : 'ingest';
+      if (name === 'ingest') loadAdminIngestStatus();
+      else if (name === 'documents') loadDocumentManageList();
+    }
+
+    function switchAdminTab(name, el) {
+      document.querySelectorAll('#adminSubTabs .tab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      ['ingest', 'documents', 'wiki', 'review'].forEach(n => {
+        document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
+      });
+      document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
+      if (name === 'ingest') loadAdminIngestStatus();
+      else if (name === 'documents') loadDocumentManageList();
+    }
+
+    async function loadAdminIngestStatus() {
+      const el = document.getElementById('admin-ingest-status');
+      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/progress?session_id=${SID}`);
+        const data = await res.json();
+        const docs = data.docs_list || [];
+        if (!docs.length) {
+          el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No ingest activity for this session yet.</div>';
+          return;
+        }
+        const statusColor = s => s === 'done' ? 'var(--green,#1a7f37)' : s === 'error' ? 'var(--red)' : s === 'awaiting_confirmation' ? 'var(--amber)' : 'var(--text-muted)';
+        el.innerHTML = `<div class="ftree-row" style="border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)">
+            Phase: <strong style="color:var(--text-primary);margin-left:4px">${escapeHtmlRule(data.phase || 'idle')}</strong>
+            <span style="margin-left:auto">${data.docs?.wiki_done || 0} / ${data.docs?.total || 0} docs done</span>
+          </div>` +
+          docs.map(d => `<div class="ftree-row">
+              <i class="ti ti-file-text ftree-icon" style="color:var(--text-muted)"></i>
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px">${escapeHtmlRule(d.name)}</span>
+              <span style="font-size:11px;color:${statusColor(d.status)};flex-shrink:0">${escapeHtmlRule(d.status)}${d.pages ? ` · ${d.pages} pages` : ''}</span>
+            </div>`).join('');
+      } catch (e) {
+        console.error('loadAdminIngestStatus error:', e);
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load ingest status.</div>';
+      }
+    }
+
+    async function adminResumeIngest() {
+      try {
+        const res = await fetch(`/resume_ingest?session_id=${SID}`);
+        const d = await res.json();
+        if (d.status === 'confirm_required') {
+          const est = d.estimate || {};
+          const cost = (est.estimated_cost_usd ?? 0).toFixed(2);
+          const msg = `${d.pending} pending doc(s), ~${est.estimated_llm_calls ?? '?'} LLM calls, ~$${cost} estimated cost.\n\nProceed?`;
+          if (!window.confirm(msg)) return;
+          const cRes = await fetch(`/resume_ingest?session_id=${SID}&confirm=true`);
+          const cd = await cRes.json();
+          if (cd.error) { showToast(cd.error, 'error'); return; }
+          showToast(`Resuming ${cd.resuming} doc(s)`, 'success');
+        } else if (d.error) {
+          showToast(d.error, 'error');
+        } else if (d.status === 'nothing_to_resume') {
+          showToast('Nothing to resume — every uploaded doc is already indexed', 'success');
+        } else {
+          showToast(`Resuming ${d.resuming} doc(s)`, 'success');
+        }
+        loadAdminIngestStatus();
+      } catch (e) {
+        showToast('Resume ingest failed', 'error');
+      }
     }
 
     function toggleGraph() {
@@ -6581,19 +6704,6 @@
     // "own confirmation" requirement — never triggered by the same click as
     // archive.
     // ============================================================
-
-    let manageMode = false;
-
-    function toggleManageMode() {
-      manageMode = !manageMode;
-      const btn = document.getElementById('manage-docs-toggle');
-      const treeDiv = document.getElementById('file-tree');
-      const manageDiv = document.getElementById('document-manage-list');
-      btn.classList.toggle('active', manageMode);
-      treeDiv.style.display = manageMode ? 'none' : '';
-      manageDiv.style.display = manageMode ? '' : 'none';
-      if (manageMode) loadDocumentManageList();
-    }
 
     async function loadDocumentManageList() {
       const manageDiv = document.getElementById('document-manage-list');
