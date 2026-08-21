@@ -953,6 +953,38 @@ def _init_backbone_schema(conn, text) -> None:
         ON figures (wiki_id, session_id, source_doc)
     """))
 
+    # --- document_relations: document-to-document edges ----------------------
+    # Its own table rather than rows in `relations`, whose from_title/to_title
+    # are *page* titles. Putting document names in that column space would
+    # corrupt the page graph the knowledge-graph view and cross-reference pass
+    # both walk. The vocabulary is the doc's own: amends, superseded-by,
+    # ancillary-to, references, references-unresolved.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS document_relations (
+            id             BIGSERIAL PRIMARY KEY,
+            wiki_id        TEXT NOT NULL,
+            session_id     TEXT NOT NULL,
+            from_doc       TEXT NOT NULL,
+            to_doc         TEXT,
+            to_doc_raw     TEXT NOT NULL,
+            label          TEXT NOT NULL,
+            resolved       BOOLEAN NOT NULL DEFAULT FALSE,
+            match_score    REAL,
+            confidence     REAL,
+            evidence_text  TEXT,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, from_doc, to_doc_raw, label)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS document_relations_from_idx
+        ON document_relations (wiki_id, session_id, from_doc)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS document_relations_label_idx
+        ON document_relations (session_id, label)
+    """))
+
     # --- review_queue: the non-clause flag kinds -----------------------------
     # The shipped clause queue (the `clauses` table) stays exactly as it is —
     # it works, it's tested, and its stakes split is already correct. This

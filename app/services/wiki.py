@@ -899,7 +899,8 @@ def _collect_structured(parsed: dict, bucket: dict) -> None:
     """
     if not isinstance(parsed, dict):
         return
-    for key in ("citations", "structural_anchors", "tables", "figures"):
+    for key in ("citations", "structural_anchors", "tables", "figures",
+                "document_references"):
         rows = parsed.get(key)
         if isinstance(rows, list):
             bucket.setdefault(key, []).extend(r for r in rows if isinstance(r, dict))
@@ -986,6 +987,67 @@ def _embed_hypothetical_questions(session_id: str, doc_name: str,
         # retrieval signal, and losing it must not fail an ingest whose pages
         # and structured rows are already correct.
         logger.error("Stage 06 question embedding failed for %s: %s", doc_name, err)
+
+
+# Amendment lookups happen once per merged page, which is thousands of times
+# per ingest. The edge set for a document changes only when its references are
+# written (once, before the merge), so it is cached for the duration and
+# invalidated explicitly there rather than re-queried per page.
+_AMENDMENT_CACHE: dict[tuple[str, str], set[str]] = {}
+_AMENDMENT_CACHE_LOCK = threading.Lock()
+
+
+def _amendment_pair_cached(session_id: str, doc_a: str, doc_b: str) -> bool:
+    if not doc_a or not doc_b or doc_a == doc_b:
+        return False
+    key = (session_id, doc_a)
+    with _AMENDMENT_CACHE_LOCK:
+        partners = _AMENDMENT_CACHE.get(key)
+    if partners is None:
+        try:
+            from services import doc_references as _refs
+            partners = _refs.amendment_partners(session_id, doc_a)
+        except Exception as err:
+            logger.debug("Amendment lookup failed for %s: %s", doc_a, err)
+            partners = set()
+        with _AMENDMENT_CACHE_LOCK:
+            _AMENDMENT_CACHE[key] = partners
+    return doc_b in partners
+
+
+def _invalidate_amendment_cache(session_id: str, doc_name: str) -> None:
+    with _AMENDMENT_CACHE_LOCK:
+        _AMENDMENT_CACHE.pop((session_id, doc_name), None)
+        # The reverse direction matters too: writing "A amends B" changes what
+        # a later merge of B should conclude about A.
+        for key in [k for k in _AMENDMENT_CACHE if k[0] == session_id]:
+            _AMENDMENT_CACHE.pop(key, None)
+
+
+def _resolve_doc_references(session_id: str, doc_name: str, parsed: dict) -> None:
+    """Stage 03/04 — write this document's outgoing references as edges.
+
+    Called BEFORE the page merge, not after, and that ordering is the whole
+    point (§ 01 stage 04). Contradiction detection compares a new page against
+    the existing one; if this document amends the one that wrote the existing
+    content, their disagreement is a resolved version chain, not a conflict.
+    The merge can only know that if the amendment edge already exists when it
+    runs.
+    """
+    if not config.USE_DATABASE:
+        return
+    refs = parsed.get("document_references") if isinstance(parsed, dict) else None
+    if not refs:
+        return
+    try:
+        from services import doc_references as _refs, wikis as _wikis
+        counts = _refs.persist_references(
+            _wikis.active_wiki_id(), session_id, doc_name, refs)
+        _invalidate_amendment_cache(session_id, doc_name)
+        if counts:
+            logger.info("Document references for %s: %s", doc_name, counts)
+    except Exception as err:
+        logger.error("Document-reference resolution failed for %s: %s", doc_name, err)
 
 
 def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
@@ -1245,6 +1307,9 @@ def ingest(file_path: str, session_id: str) -> dict:
         parsed = _ingest_single_call(text, doc_name, family_key)
         _persist_clauses(session_id, doc_name, parsed)
         _collect_structured(parsed, structured)
+        # Before the merge — amendment edges must exist for contradiction
+        # detection to tell a version chain from a real conflict.
+        _resolve_doc_references(session_id, doc_name, parsed)
         _update_doc_step(session_id, doc_name, "merging")
         _update_wiki_progress(session_id, {"current": 1, "total": 1,
                                             "message": f"Processing {doc_name}..."})
@@ -1292,6 +1357,7 @@ def ingest(file_path: str, session_id: str) -> dict:
                     parsed = future.result()
                     _persist_clauses(session_id, doc_name, parsed)
                     _collect_structured(parsed, structured)
+                    _resolve_doc_references(session_id, doc_name, parsed)
                     p, r, c = _atomic_merge(session_id, parsed, doc_name)
                     total_pages += p
                     total_rels += r
@@ -1607,7 +1673,19 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 # (S3) can detect and surface the contradiction during re-synthesis.
                 # This eliminates hundreds of thousands of LLM calls at scale while
                 # preserving all the raw material the compaction LLM needs.
-                if (len(new_content) > 200 and len(existing_content) > 200
+                # Amendment edges are consulted FIRST (§ 01 stage 04 — "contradiction
+                # detection re-sequenced to run after amendment-chain edges"). If this
+                # document amends the one that wrote the existing content, the two
+                # disagreeing is what a version chain looks like, not a conflict.
+                # Flagging it would put a resolved amendment in front of a reviewer as
+                # an unresolved dispute — worse than noise, because it is wrong about
+                # which text governs.
+                _prior_doc = existing.get("source_doc") or ""
+                _amended = False
+                if _prior_doc and _prior_doc != doc_name:
+                    _amended = _amendment_pair_cached(session_id, doc_name, _prior_doc)
+
+                if (not _amended and len(new_content) > 200 and len(existing_content) > 200
                         and _has_structural_conflict(existing_content, new_content)):
                     contradiction_flagged = True
                     from datetime import datetime
@@ -1620,6 +1698,19 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                         "title": title, "claim": None,
                         "val_a": None, "val_b": None, "doc": doc_name,
                     })
+                elif _amended and _has_structural_conflict(existing_content, new_content):
+                    # Still recorded as a variant so the compaction pass sees both
+                    # versions — the amendment supersedes the earlier text, and
+                    # losing the earlier text would lose the chain itself.
+                    from datetime import datetime
+                    if not variants:
+                        variants = [{"source": "Previous", "value": existing_content,
+                                     "date_ingested": datetime.now().isoformat()}]
+                    variants.append({"source": f"{doc_name} (amendment)",
+                                     "value": new_content,
+                                     "date_ingested": datetime.now().isoformat()})
+                    logger.info("Page '%s': %s amends %s — recorded as a version "
+                                "chain, not a contradiction", title, doc_name, _prior_doc)
 
                 # Strip session-UUID prefix and extension for a readable label.
                 _raw_label = doc_name
