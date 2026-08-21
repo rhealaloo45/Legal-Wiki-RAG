@@ -294,3 +294,18 @@ TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
 # use when Tesseract can't read a scanned page, e.g. skewed/low-quality scans).
 # Only takes effect when LLM_PROVIDER=azure, since it reuses the Azure client.
 OCR_ENGINE = os.getenv("OCR_ENGINE", "tesseract").lower()
+
+# Stage 01 structural pass (target architecture § 01 stage 01, § 01.1).
+# Sends table-bearing and chart/diagram pages to the vision deployment even
+# though they already extracted enough text — the character count says the
+# page read fine while a table's structure has actually been flattened away.
+#
+# OFF by default, deliberately. Every other OCR call in this pipeline is a
+# fallback for a page that produced nothing; this one spends money on pages
+# that already produced text, per page across every document. That is a cost
+# decision to make on purpose, not one to inherit by upgrading. Requires
+# OCR_ENGINE=azure_vision — Tesseract cannot read table structure or describe
+# a figure, so escalating to it would cost time and learn nothing.
+STRUCTURAL_VISION_ENABLED = os.getenv("STRUCTURAL_VISION_ENABLED", "false").lower() == "true"
+# Hard cap on structural vision calls per document, strongest signal first.
+STRUCTURAL_VISION_MAX_PAGES = int(os.getenv("STRUCTURAL_VISION_MAX_PAGES", "5"))
