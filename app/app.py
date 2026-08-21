@@ -1572,6 +1572,125 @@ def wiki_page_detail():
     return jsonify({"title": title, "content": content})
 
 
+@app.route("/admin/wikis")
+def admin_wikis_list():
+    """List every wiki with its page/document counts and which is active."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import wikis as _wikis
+    try:
+        return jsonify({"wikis": _wikis.list_wikis(), "active": _wikis.active_wiki_id()})
+    except Exception as e:
+        logger.error("Wiki list failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/wikis/create", methods=["POST"])
+def admin_wikis_create():
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    from services import wikis as _wikis
+    try:
+        wiki_id = _wikis.create_wiki(data.get("name", ""),
+                                     created_by=session.get("user_id"))
+        return jsonify({"status": "created", "wiki_id": wiki_id})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Wiki create failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/wikis/activate", methods=["POST"])
+def admin_wikis_activate():
+    """Switch the system-level active wiki.
+
+    Every read and write resolves against whichever wiki is active, so this
+    is the one control that changes what the whole application is looking at.
+    Requests already in flight are unaffected — they bound their wiki_id at
+    entry (see _bind_wiki_id).
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    wiki_id = (data.get("wiki_id") or "").strip()
+    if not wiki_id:
+        return jsonify({"error": "wiki_id is required"}), 400
+    from services import wikis as _wikis
+    try:
+        _wikis.set_active_wiki(wiki_id)
+        return jsonify({"status": "activated", "wiki_id": wiki_id})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Wiki activate failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/wikis/archive", methods=["POST"])
+def admin_wikis_archive():
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    if not data.get("confirm"):
+        return jsonify({"error": "confirm:true is required"}), 400
+    from services import wikis as _wikis
+    try:
+        _wikis.archive_wiki((data.get("wiki_id") or "").strip())
+        return jsonify({"status": "archived"})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Wiki archive failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/documents")
+def admin_documents_registry():
+    """The typed `documents` registry for the active wiki — family, doc type,
+    jurisdiction, classification confidence and typed-row counts per document.
+    This is what the backbone actually knows about each document, as distinct
+    from /document/list which is the file-level view."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    from sqlalchemy import text as _sql
+    wiki_id = current_wiki_id()
+    try:
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(_sql("""
+                SELECT source_doc, doc_family, doc_type, jurisdiction, lifecycle,
+                       family_confidence, family_method, schema_version, created_at
+                FROM documents
+                WHERE wiki_id = :w AND session_id = :s
+                ORDER BY created_at DESC
+            """), {"w": wiki_id, "s": session_id}).fetchall()
+        return jsonify({"documents": [
+            {"source_doc": r[0], "doc_family": r[1], "doc_type": r[2],
+             "jurisdiction": r[3], "lifecycle": r[4], "family_confidence": r[5],
+             "family_method": r[6], "schema_version": r[7],
+             "created_at": r[8].isoformat() if r[8] else None}
+            for r in rows
+        ], "wiki_id": wiki_id})
+    except Exception as e:
+        logger.error("Document registry read failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/admin/wiki/pages")
 def admin_wiki_pages():
     """Admin page browser listing — title, source_doc, char_count,
