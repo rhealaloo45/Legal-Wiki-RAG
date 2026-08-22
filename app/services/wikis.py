@@ -16,13 +16,14 @@ meaningful if the gap is named:
     structural_anchors, entities, entity_aliases, tables, figures) are
     keyed by wiki_id and every read in services/backbone.py carries it.
   * The legacy tables (pages, relations, page_metadata, clauses,
-    contradictions, clause_map, document_status, page_embeddings_*) carry
-    wiki_id and it is maintained on write, but their reads are still
-    predicated on session_id, which today is strictly narrower than wiki
-    scope — one session's rows never span two wikis. So isolation is not
-    weakened, but it also isn't yet *enforced by wiki_id* on that half.
-    Converting those predicates is tracked as its own step rather than
-    claimed as done here.
+    contradictions, clause_map, document_status, source_positions,
+    question_embeddings_*, page_embeddings_*) carry wiki_id, it is stamped
+    on every write, and every read/update/delete in db.py now predicates on
+    it too — not just session_id. Switching the active wiki (services/
+    wikis.py's set_active_wiki) now actually changes what every wiki-scoped
+    view sees, including a brand-new empty wiki with no session of its own
+    yet — it no longer falls through to whatever session happened to be
+    loaded before the switch.
 """
 from __future__ import annotations
 
