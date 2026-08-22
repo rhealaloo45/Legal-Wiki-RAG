@@ -1464,7 +1464,7 @@
        the content, and must be opaque — an inherited background resolved to
        transparent and let text scroll through it. */
     .review-doc-list, .review-doc-meta, .review-doc-source {
-      background: var(--bg-card);
+      background: var(--bg-surface);
       border: .5px solid var(--border);
       border-radius: 12px;
       height: 100%;
@@ -1474,7 +1474,7 @@
       overflow: hidden;
     }
     .review-doc-list { overflow-y: auto; display: block; }
-    .review-doc-source { background: var(--bg-secondary); }
+    .review-doc-source { background: var(--bg-input); }
     .review-scroll { flex: 1; min-height: 0; overflow-y: auto; }
     .review-empty {
       padding: 26px 18px; text-align: center;
@@ -1541,13 +1541,13 @@
       border-bottom: .5px solid var(--border);
       font-size: 11.5px; font-weight: 600;
       color: var(--text-primary);
-      background: var(--bg-card);
+      background: var(--bg-surface);
       position: sticky; top: 0; z-index: 3;
       display: flex; align-items: baseline; gap: 8px;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .review-doc-source .review-pane-head {
-      background: var(--bg-secondary);
+      background: var(--bg-input);
       text-transform: uppercase; letter-spacing: .05em;
       font-size: 10.5px; font-weight: 700; color: var(--text-muted);
     }
@@ -1561,7 +1561,7 @@
     }
     .review-sub-head {
       padding: 9px 14px;
-      background: var(--bg-secondary);
+      background: var(--bg-input);
       border-top: .5px solid var(--border);
       border-bottom: .5px solid var(--border);
       font-size: 10.5px; font-weight: 700;
@@ -1577,7 +1577,7 @@
       display: flex; gap: 9px;
       padding: 11px 14px;
       border-top: .5px solid var(--border);
-      background: var(--bg-card);
+      background: var(--bg-surface);
     }
     .review-item-row {
       display: grid; grid-template-columns: minmax(0, 1fr) auto;
@@ -1594,7 +1594,7 @@
       display: flex; align-items: center; gap: 5px; flex: none;
     }
     .rfield-note {
-      font-size: 11px; line-height: 1.45; color: var(--gold); margin-top: 4px;
+      font-size: 11px; line-height: 1.45; color: var(--amber); margin-top: 4px;
     }
     .rfield-raw {
       font-size: 11px; color: var(--text-muted); margin-top: 3px;
@@ -1610,7 +1610,7 @@
       width: 100%; box-sizing: border-box;
       padding: 7px 9px; border-radius: 7px;
       border: .5px solid var(--border-strong, var(--border));
-      background: var(--bg-secondary); color: var(--text-primary);
+      background: var(--bg-input); color: var(--text-primary);
       font-family: inherit; font-size: 12px; line-height: 1.5;
       resize: vertical;
     }
@@ -3890,7 +3890,7 @@
                 <button type="button" class="admin-pill-btn primary" title="Create a new empty wiki" onclick="adminCreateWiki()"><i class="ti ti-plus" style="font-size:14px"></i>New wiki</button>
               </div>
               <div class="admin-card" style="padding:14px 18px;margin-bottom:14px;font-size:12px;line-height:1.6;color:var(--text-muted)">
-                <i class="ti ti-alert-triangle" style="font-size:13px;vertical-align:-1px;margin-right:4px;color:var(--gold)"></i>
+                <i class="ti ti-alert-triangle" style="font-size:13px;vertical-align:-1px;margin-right:4px;color:var(--amber)"></i>
                 Switching the active wiki changes what every feature reads and writes — chat, Review Table, ingest, the Review Queue. Requests already running keep the wiki they started with.
               </div>
               <div class="admin-card" id="admin-wikis-list"></div>
