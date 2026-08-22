@@ -1805,6 +1805,101 @@ def review_queue_list():
     return jsonify({"clauses": _db.get_review_queue(session_id)})
 
 
+@app.route("/review_queue/documents")
+def review_queue_documents():
+    """Review Queue grouped by document — classification plus every extracted
+    field with its own confidence. See db.get_review_documents."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    try:
+        docs = _db.get_review_documents(current_wiki_id(), session_id)
+        return jsonify({"documents": docs})
+    except Exception as e:
+        logger.error("Review document listing failed: %s", e, exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/review_queue/document")
+def review_queue_document_detail():
+    """One document's flagged items plus its extracted text, for the
+    side-by-side verification pane. The text comes from the stored page map
+    rather than re-reading the file, so opening a document in review costs no
+    parsing and no OCR."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    session_id = request.args.get("session_id", "")
+    source_doc = request.args.get("source_doc", "")
+    if not session_id or not source_doc:
+        return jsonify({"error": "session_id and source_doc are required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    from sqlalchemy import text as _sql
+    try:
+        items = _db.get_document_review_items(session_id, source_doc)
+        pages = []
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(_sql("""
+                SELECT title, summary, content FROM pages
+                WHERE session_id = :s AND source_doc = :d
+                ORDER BY title
+            """), {"s": session_id, "d": source_doc}).fetchall()
+            for r in rows:
+                pages.append({"title": r[0], "summary": r[1],
+                              "content": (r[2] or "")[:6000]})
+            anchors = [
+                {"label": a[0], "kind": a[1], "heading": a[2]}
+                for a in conn.execute(_sql("""
+                    SELECT anchor_label, anchor_kind, heading_text
+                    FROM structural_anchors
+                    WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                    ORDER BY ordinal LIMIT 200
+                """), {"w": current_wiki_id(), "s": session_id, "d": source_doc}).fetchall()
+            ]
+        return jsonify({"items": items, "pages": pages, "anchors": anchors})
+    except Exception as e:
+        logger.error("Review document detail failed: %s", e, exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/review_queue/resolve_document", methods=["POST"])
+def review_queue_resolve_document():
+    """Approve or reject every pending item for one document.
+
+    High-stakes clauses below the threshold are still excluded from an
+    approve, server-side — reviewing document-by-document is a workflow
+    convenience, not a way around the stakes rule. The response reports what
+    stayed pending so the caller can tell a finished document from a
+    partly-finished one.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_doc = data.get("source_doc", "")
+    action = data.get("action", "")
+    min_confidence = float(data.get("min_confidence", 0.0) or 0.0)
+    if not session_id or not source_doc:
+        return jsonify({"error": "session_id and source_doc are required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import db as _db
+    try:
+        result = _db.resolve_document(session_id, source_doc, action, min_confidence)
+        return jsonify({"status": "resolved", **result})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Review document resolve failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/review_queue/resolve", methods=["POST"])
 def review_queue_resolve():
     """Resolve one clause: accept, reject, or edit. See
