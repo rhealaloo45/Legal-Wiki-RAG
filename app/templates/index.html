@@ -4431,8 +4431,13 @@
         });
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Switch failed');
-        showToast(`Active wiki is now "${name}"`, 'success');
-        loadAdminWikis();
+        showToast(`Active wiki is now "${name}" — reloading…`, 'success');
+        // A full reload, not just re-fetching this list: chat, the sessions
+        // sidebar, the "Ingest name" chip, and Files/Review/Wiki are all
+        // scoped by session pointers resolved server-side at page load —
+        // an AJAX-only refresh of this screen would leave every other panel
+        // silently still showing the wiki that was active a moment ago.
+        setTimeout(() => location.reload(), 700);
       } catch (e) { showToast(e.message, 'error'); }
     }
 
