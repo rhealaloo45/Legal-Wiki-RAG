@@ -1604,6 +1604,210 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
         return (result.rowcount or 0) > 0
 
 
+def get_review_documents(wiki_id: str, session_id: str) -> list[dict]:
+    """The Review Queue grouped by document, not by flagged item.
+
+    An item-level queue answers "what is doubtful"; it does not answer "is
+    this document right", which is the question a reviewer with the source
+    text in front of them is actually able to settle. This returns one entry
+    per document with pending work: its classification, every extracted
+    metadata field with that field's own confidence, and the counts behind
+    the summary — so the reviewer reads a document once rather than meeting
+    its fields scattered through a list of unrelated cards.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    _c = _crypto()
+
+    with engine.connect() as conn:
+        docs = conn.execute(text("""
+            SELECT source_doc, doc_family, doc_type, jurisdiction,
+                   family_confidence, family_method, folder_hint,
+                   lifecycle, schema_version, created_at
+            FROM documents
+            WHERE wiki_id = :w AND session_id = :s
+            ORDER BY family_confidence ASC NULLS FIRST, created_at DESC
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+
+        clause_counts = dict(conn.execute(text("""
+            SELECT source_doc, COUNT(*) FROM clauses
+            WHERE session_id = :s AND review_status = 'pending'
+            GROUP BY source_doc
+        """), {"s": session_id}).fetchall())
+        high_counts = dict(conn.execute(text("""
+            SELECT source_doc, COUNT(*) FROM clauses
+            WHERE session_id = :s AND review_status = 'pending' AND stakes = 'high'
+            GROUP BY source_doc
+        """), {"s": session_id}).fetchall())
+        item_counts = dict(conn.execute(text("""
+            SELECT source_doc, COUNT(*) FROM review_queue
+            WHERE session_id = :s AND review_status = 'pending'
+            GROUP BY source_doc
+        """), {"s": session_id}).fetchall())
+        page_counts = dict(conn.execute(text("""
+            SELECT source_doc, COUNT(*) FROM pages
+            WHERE session_id = :s GROUP BY source_doc
+        """), {"s": session_id}).fetchall())
+
+        # Family typed rows carry the extracted metadata. Which table holds a
+        # given document depends on its family, so they are read together and
+        # matched by source_doc rather than joined per family.
+        typed: dict[str, tuple] = {}
+        for tbl in ("contracts", "litigation_facts", "authorizations", "opinions"):
+            try:
+                for r in conn.execute(text(
+                    f"SELECT source_doc, typed_value, confidence FROM {tbl} "
+                    f"WHERE wiki_id = :w AND session_id = :s"
+                ), {"w": wiki_id, "s": session_id}).fetchall():
+                    typed[r[0]] = (r[1], r[2])
+            except Exception as err:
+                logger.debug("Could not read %s for review documents: %s", tbl, err)
+
+    out: list[dict] = []
+    for d in docs:
+        source_doc = d[0]
+        raw_typed, row_conf = typed.get(source_doc, (None, None))
+        fields = _review_fields(raw_typed, _c)
+        pending = int(clause_counts.get(source_doc, 0)) + int(item_counts.get(source_doc, 0))
+        out.append({
+            "source_doc": source_doc,
+            "doc_family": d[1],
+            "doc_type": d[2],
+            "jurisdiction": d[3],
+            "family_confidence": d[4],
+            "family_method": d[5],
+            "folder_hint": d[6],
+            "lifecycle": d[7],
+            "schema_version": d[8],
+            "created_at": d[9].isoformat() if d[9] else None,
+            "fields": fields,
+            "metadata_confidence": row_conf,
+            "page_count": int(page_counts.get(source_doc, 0)),
+            "pending_total": pending,
+            "pending_clauses": int(clause_counts.get(source_doc, 0)),
+            "pending_high_stakes": int(high_counts.get(source_doc, 0)),
+            "pending_items": int(item_counts.get(source_doc, 0)),
+            "lowest_confidence": min(
+                [f["confidence"] for f in fields if f["confidence"] is not None]
+                + ([d[4]] if d[4] is not None else []) or [None]
+            ) if (fields or d[4] is not None) else None,
+        })
+    return out
+
+
+def _review_fields(raw_typed, crypto_mod) -> list[dict]:
+    """Normalize a family row's typed_value into display fields.
+
+    Handles both shapes on purpose: rows written before per-field confidence
+    existed carry only values plus a flagged-field list, and those documents
+    should still be reviewable rather than showing an empty panel. Their
+    fields report a null confidence, which the UI renders as unknown — an
+    honest blank rather than a fabricated number.
+    """
+    if raw_typed is None:
+        return []
+    decoded = crypto_mod.decrypt_json(raw_typed)
+    if isinstance(decoded, str):
+        try:
+            decoded = json.loads(decoded)
+        except Exception:
+            return []
+    if not isinstance(decoded, dict):
+        return []
+
+    per_field = decoded.get("fields")
+    if isinstance(per_field, dict) and per_field:
+        rows = []
+        for name, meta in per_field.items():
+            if not isinstance(meta, dict):
+                continue
+            rows.append({
+                "name": name,
+                "value": meta.get("value"),
+                "raw": meta.get("raw"),
+                "confidence": meta.get("confidence"),
+                "flagged": bool(meta.get("flagged")),
+                "coerced": bool(meta.get("coerced")),
+                "reason": meta.get("reason"),
+                "high_stakes": bool(meta.get("high_stakes")),
+            })
+        rows.sort(key=lambda r: (r["confidence"] is None,
+                                 r["confidence"] if r["confidence"] is not None else 1.0))
+        return rows
+
+    # Legacy shape — values only.
+    validated = decoded.get("validated")
+    if not isinstance(validated, dict):
+        return []
+    flagged = set(decoded.get("flagged_fields") or [])
+    return [
+        {"name": name, "value": value, "raw": None, "confidence": None,
+         "flagged": name in flagged, "coerced": False, "reason": None,
+         "high_stakes": False}
+        for name, value in validated.items()
+    ]
+
+
+def get_document_review_items(session_id: str, source_doc: str) -> list[dict]:
+    """Every pending flagged item for one document — clauses and other kinds."""
+    all_items = get_review_queue(session_id)
+    return [i for i in all_items if i["source_doc"] == source_doc]
+
+
+def resolve_document(session_id: str, source_doc: str, action: str,
+                     min_confidence: float = 0.0) -> dict:
+    """Approve or reject every pending item for one document.
+
+    Approve still refuses high-stakes clauses below the threshold: reviewing
+    a document as a whole is a workflow convenience, not a licence to wave
+    through the items the stakes rule exists to protect. Those stay pending
+    and are reported back, so the caller can see the document is not finished
+    rather than assume it is.
+    """
+    from sqlalchemy import text
+    if action not in ("approve", "reject"):
+        raise ValueError(f"Unknown action {action!r} — expected approve or reject")
+    engine = get_engine()
+    status = "approved" if action == "approve" else "rejected"
+    resolution = "document_accepted" if action == "approve" else "document_rejected"
+
+    with engine.connect() as conn:
+        if action == "reject":
+            clause_where = ""
+            item_where = ""
+            params = {"sid": session_id, "doc": source_doc,
+                      "status": status, "res": resolution}
+        else:
+            clause_where = " AND (stakes = 'low' OR confidence >= :minc)"
+            item_where = " AND (stakes = 'low' OR confidence >= :minc)"
+            params = {"sid": session_id, "doc": source_doc, "status": status,
+                      "res": resolution, "minc": min_confidence}
+
+        n_clauses = conn.execute(text(f"""
+            UPDATE clauses SET review_status = :status, resolution = :res,
+                   reviewed_at = now()
+            WHERE session_id = :sid AND source_doc = :doc
+              AND review_status = 'pending'{clause_where}
+        """), params).rowcount or 0
+        n_items = conn.execute(text(f"""
+            UPDATE review_queue SET review_status = :status, resolution = :res,
+                   reviewed_at = now()
+            WHERE session_id = :sid AND source_doc = :doc
+              AND review_status = 'pending'{item_where}
+        """), params).rowcount or 0
+        remaining = (conn.execute(text("""
+            SELECT COUNT(*) FROM clauses WHERE session_id = :sid
+              AND source_doc = :doc AND review_status = 'pending'
+        """), {"sid": session_id, "doc": source_doc}).scalar() or 0) + \
+            (conn.execute(text("""
+            SELECT COUNT(*) FROM review_queue WHERE session_id = :sid
+              AND source_doc = :doc AND review_status = 'pending'
+        """), {"sid": session_id, "doc": source_doc}).scalar() or 0)
+        conn.commit()
+
+    return {"clauses": n_clauses, "items": n_items, "remaining": int(remaining)}
+
+
 def resolve_review_item(session_id: str, item_id: int, action: str,
                         edited_text: str | None = None) -> bool:
     """Resolve one non-clause review item. Mirrors resolve_clause exactly,

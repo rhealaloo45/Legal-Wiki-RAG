@@ -1024,6 +1024,15 @@ def _invalidate_amendment_cache(session_id: str, doc_name: str) -> None:
             _AMENDMENT_CACHE.pop(key, None)
 
 
+def _sr_is_high_stakes(family: str | None, field_name: str) -> bool:
+    """Registry lookup, wrapped so a missing family can't break persistence."""
+    try:
+        from services import schema_registry as _sr
+        return _sr.is_high_stakes_metadata(family, field_name)
+    except Exception:
+        return False
+
+
 def _resolve_doc_references(session_id: str, doc_name: str, parsed: dict) -> None:
     """Stage 03/04 — write this document's outgoing references as edges.
 
@@ -1183,7 +1192,24 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
         )
         family_row = dict(meta_report.values)
         family_row["confidence"] = meta_report.confidence
+        # Per-FIELD provenance, not just a row-level score. A reviewer looking
+        # at a document needs to know which individual value is shaky — a
+        # single number for the whole row tells them the document is doubtful
+        # without telling them where to look, which is most of the work.
         family_row["typed_value"] = {
+            "fields": {
+                name: {
+                    "value": res.value,
+                    "raw": res.raw if res.raw != res.value else None,
+                    "confidence": round(res.confidence, 3),
+                    "flagged": res.flagged,
+                    "coerced": res.coerced,
+                    "reason": res.reason,
+                    "high_stakes": _sr_is_high_stakes(family, name),
+                }
+                for name, res in (meta_report.fields or {}).items()
+                if name != "__payload__"
+            },
             "validated": meta_report.values,
             "flagged_fields": meta_report.flagged,
             "notes": meta_report.notes(),
