@@ -31,6 +31,18 @@ if config.USE_DATABASE:
 
 logger = logging.getLogger(__name__)
 
+
+def _active_wiki_id() -> str:
+    """The wiki_id every legacy-table db.py call in this module scopes to.
+
+    wiki.py runs mostly in background ingest threads (executor.submit), not
+    inside a Flask request, so it reads the live active-wiki pointer directly
+    rather than through app.py's request-bound current_wiki_id() — same
+    reasoning _persist_structured already uses for the backbone tables.
+    """
+    from services import wikis
+    return wikis.active_wiki_id()
+
 # ---------------------------------------------------------------------------
 # Thread safety — per-session locks for wiki index access
 # ---------------------------------------------------------------------------
@@ -117,14 +129,15 @@ def _save_index_file(session_id: str, index: dict) -> None:
 # ---------------------------------------------------------------------------
 def _load_index_db(session_id: str) -> dict:
     """Load wiki index from PostgreSQL. Auto-migrates from index.json on first access."""
+    wiki_id = _active_wiki_id()
     json_path = _index_path(session_id)
-    if os.path.exists(json_path) and _db.count_pages(session_id) == 0:
+    if os.path.exists(json_path) and _db.count_pages(wiki_id, session_id) == 0:
         logger.info("Auto-migrating session %s from index.json to PostgreSQL", session_id)
-        _db.migrate_from_json(session_id, json_path)
+        _db.migrate_from_json(wiki_id, session_id, json_path)
         os.rename(json_path, json_path + ".migrated")
 
-    pages = _db.get_pages(session_id)
-    relations = _db.get_relations(session_id)
+    pages = _db.get_pages(wiki_id, session_id)
+    relations = _db.get_relations(wiki_id, session_id)
     return {"pages": pages, "relations": relations}
 
 
@@ -883,7 +896,7 @@ def _persist_clauses(session_id: str, doc_name: str, parsed: dict) -> None:
     if not clauses:
         return
     try:
-        n = _db.insert_clauses(session_id, doc_name, clauses)
+        n = _db.insert_clauses(_active_wiki_id(), session_id, doc_name, clauses)
         if n:
             logger.info("Persisted %d clause(s) for %s into the Review Queue", n, doc_name)
     except Exception as e:
@@ -949,7 +962,8 @@ def _embed_hypothetical_questions(session_id: str, doc_name: str,
     try:
         from services import embedder
 
-        existing = set(_db.get_page_titles(session_id))
+        wiki_id = _active_wiki_id()
+        existing = set(_db.get_page_titles(wiki_id, session_id))
         pairs: list[tuple[str, str]] = []
         skipped_unknown = 0
         for title, questions in questions_by_page.items():
@@ -979,7 +993,7 @@ def _embed_hypothetical_questions(session_id: str, doc_name: str,
         total = 0
         for title, items in by_page.items():
             total += _db.upsert_question_embeddings(
-                session_id, title, items, doc_family, doc_name)
+                wiki_id, session_id, title, items, doc_family, doc_name)
         logger.info("Stage 06: embedded %d hypothetical question(s) across %d page(s) for %s",
                     total, len(by_page), doc_name)
     except Exception as err:
@@ -1076,7 +1090,7 @@ def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
     # Prior pending items for this document are archived, never deleted — a
     # reviewer's earlier judgement is evidence about how this document reads.
     try:
-        n = _db.supersede_review_items(session_id, doc_name)
+        n = _db.supersede_review_items(wiki_id, session_id, doc_name)
         if n:
             logger.info("Superseded %d prior review item(s) for %s", n, doc_name)
     except Exception as err:
@@ -1293,7 +1307,7 @@ def ingest(file_path: str, session_id: str) -> dict:
     # Store page-level positions for citation location support
     if config.USE_DATABASE and page_map:
         try:
-            _db.store_page_map(session_id, doc_name, page_map)
+            _db.store_page_map(_active_wiki_id(), session_id, doc_name, page_map)
         except Exception as _pm_err:
             logger.warning("Failed to store page map for %s: %s", doc_name, _pm_err)
 
@@ -1632,6 +1646,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
     Keeps the Python lock to serialize the cross-reference pass (Phase 4/S2 will
     replace the O(N²) loop with a single PostgreSQL FTS query and remove it).
     """
+    wiki_id = _active_wiki_id()
     lock = _get_session_lock(session_id)
     # Collect (title, embed_text) pairs here; embed OUTSIDE the lock so HTTP
     # calls don't block other ingest threads waiting on the session lock.
@@ -1668,7 +1683,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             # Auto-prefix unprefixed contract/agreement pages
             title = _auto_prefix_title(title, _doc_id)
 
-            existing = _db.get_page(session_id, title)
+            existing = _db.get_page(wiki_id, session_id, title)
 
             # Guard against title collisions between DIFFERENT source documents.
             # The ingest LLM sometimes invents the same entity-derived identifier
@@ -1685,7 +1700,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 _paren = re.search(r'\(([^)]+)\)\s*$', title)
                 if _paren and _CONTRACT_DOC_TYPES.search(_paren.group(1)):
                     title = f"{title} #{_doc_id}"
-                    existing = _db.get_page(session_id, title)
+                    existing = _db.get_page(wiki_id, session_id, title)
 
             if existing:
                 existing_content = existing["content"]
@@ -1749,12 +1764,12 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                     + new_content
                 )
                 merged_summary = new_summary if new_summary else existing_summary
-                _db.upsert_page(session_id, title, merged_content, merged_summary, doc_name,
+                _db.upsert_page(wiki_id, session_id, title, merged_content, merged_summary, doc_name,
                                 contradiction_flagged, variants)
                 # Use the freshest summary for the embedding
                 embed_text = (new_summary or existing_summary or new_content)[:400]
             else:
-                _db.upsert_page(session_id, title, new_content, new_summary, doc_name, False, None)
+                _db.upsert_page(wiki_id, session_id, title, new_content, new_summary, doc_name, False, None)
                 embed_text = (new_summary or new_content)[:400]
 
             pages_to_embed.append((title, embed_text))
@@ -1778,14 +1793,14 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 doc_family_for_batch = _fam
         if metadata:
             try:
-                _db.upsert_metadata(session_id, doc_name, metadata)
+                _db.upsert_metadata(wiki_id, session_id, doc_name, metadata)
             except Exception as _me:
                 logger.error("Metadata upsert failed for '%s': %s", doc_name, _me)
 
         # -- Merge explicit relations --
         for rel in new_relations:
             _db.upsert_relation(
-                session_id, rel.get("from", ""), rel.get("to", ""), rel.get("label", "")
+                wiki_id, session_id, rel.get("from", ""), rel.get("to", ""), rel.get("label", "")
             )
             new_rels_count += 1
 
@@ -1798,7 +1813,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
         #   Find pages whose content_tsv matches the new title's tokens (GIN index).
         # Direction B — new page content mentions existing titles:
         #   Python substring check against the title list only (no content fetch).
-        existing_titles = _db.get_page_titles(session_id)
+        existing_titles = _db.get_page_titles(wiki_id, session_id)
         existing_title_set = set(existing_titles)
         mention_rels: list[tuple[str, str, str]] = []
         for new_title, new_val in new_pages.items():
@@ -1807,7 +1822,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
             # Direction A: who already mentions this new title?
             try:
-                mentioning = _db.find_pages_mentioning_title(session_id, new_title)
+                mentioning = _db.find_pages_mentioning_title(wiki_id, session_id, new_title)
                 for existing_title in mentioning:
                     mention_rels.append((existing_title, new_title, "mentions"))
             except Exception as _xref_err:
@@ -1817,7 +1832,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 if existing_title != new_title and existing_title in new_content_for_xref:
                     mention_rels.append((new_title, existing_title, "mentions"))
         if mention_rels:
-            _db.bulk_upsert_relations(session_id, mention_rels)
+            _db.bulk_upsert_relations(wiki_id, session_id, mention_rels)
 
         for c in contradictions_found:
             _log_event(
@@ -1827,7 +1842,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
 
     # -- Embed pages OUTSIDE the lock (HTTP calls should not hold the session lock) --
-    _embed_pages_batch(session_id, pages_to_embed, doc_family_for_batch)
+    _embed_pages_batch(wiki_id, session_id, pages_to_embed, doc_family_for_batch)
 
     return pages_updated, new_rels_count, len(contradictions_found)
 
@@ -1835,7 +1850,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
 # ---------------------------------------------------------------------------
 # Embedding helper (Phase 3) — called OUTSIDE the session lock
 # ---------------------------------------------------------------------------
-def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
+def _embed_pages_batch(wiki_id: str, session_id: str, pages_to_embed: list[tuple[str, str]],
                        doc_family: str | None = None) -> None:
     """Embed page summaries and store in page_embeddings table.
 
@@ -1859,7 +1874,7 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
         texts = [text for _, text in pages_to_embed]
         embeddings = _embedder.embed_batch(texts, is_query=False)
         for (title, _), embedding in zip(pages_to_embed, embeddings):
-            _db.upsert_embedding(session_id, title, embedding, doc_family)
+            _db.upsert_embedding(wiki_id, session_id, title, embedding, doc_family)
         logger.info(
             "Embedded %d pages for session %s", len(pages_to_embed), session_id
         )
@@ -1923,11 +1938,12 @@ def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
     if not config.USE_DATABASE:
         return {"ok": False, "reason": "file mode — embeddings are DB-only", "embedded": 0}
 
-    pages = _db.get_pages(session_id)
+    wiki_id = _active_wiki_id()
+    pages = _db.get_pages(wiki_id, session_id)
     if not pages:
         return {"ok": False, "reason": "no pages in session", "embedded": 0}
 
-    existing = _db.count_embeddings(session_id)
+    existing = _db.count_embeddings(wiki_id, session_id)
 
     # Build the list of (title, text) for pages that need embedding.
     pending: list[tuple[str, str]] = []
@@ -1943,10 +1959,10 @@ def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
     embedded = 0
     for i in range(0, len(pending), batch_size):
         chunk = pending[i:i + batch_size]
-        _embed_pages_batch(session_id, chunk)  # logs + swallows failures per batch
+        _embed_pages_batch(wiki_id, session_id, chunk)  # logs + swallows failures per batch
         embedded += len(chunk)
 
-    final = _db.count_embeddings(session_id)
+    final = _db.count_embeddings(wiki_id, session_id)
     logger.info("Backfill complete for session %s: %d embeddings now present (was %d)",
                 session_id, final, existing)
     return {
@@ -2042,13 +2058,14 @@ def _compact_page(session_id: str, title: str, page_data: dict) -> None:
 
     contradiction_flagged = bool(detected_contradictions)
 
-    _db.reset_page_after_compaction(session_id, title, new_content, new_summary, contradiction_flagged)
+    wiki_id = _active_wiki_id()
+    _db.reset_page_after_compaction(wiki_id, session_id, title, new_content, new_summary, contradiction_flagged)
 
     # Store structured contradictions (S4)
     for c in detected_contradictions:
         try:
             _db.upsert_contradiction(
-                session_id, title,
+                wiki_id, session_id, title,
                 c.get("claim"), c.get("value_a"), c.get("source_a"),
                 c.get("value_b"), c.get("source_b"),
             )
@@ -2062,7 +2079,7 @@ def _compact_page(session_id: str, title: str, page_data: dict) -> None:
 
     # Re-embed with fresh summary
     embed_text = (new_summary or new_content[:400])
-    _embed_pages_batch(session_id, [(title, embed_text)])
+    _embed_pages_batch(wiki_id, session_id, [(title, embed_text)])
 
     logger.info("Compacted page '%s' (%d → 1 version, contradictions=%d)",
                 title, n, len(detected_contradictions))
@@ -2079,7 +2096,7 @@ def run_compaction(session_id: str) -> int:
         return 0
 
     due = _db.find_pages_due_for_compaction(
-        session_id,
+        _active_wiki_id(), session_id,
         config.COMPACTION_APPEND_THRESHOLD,
         config.COMPACTION_CHAR_THRESHOLD,
     )
@@ -2105,7 +2122,7 @@ def run_compaction(session_id: str) -> int:
                 # have already compacted this page, in which case the row we
                 # were handed is stale and recompacting would burn a call to
                 # rewrite something already rewritten.
-                fresh = _db.get_page(session_id, title)
+                fresh = _db.get_page(_active_wiki_id(), session_id, title)
                 if fresh and fresh.get("append_count", 0) < config.COMPACTION_APPEND_THRESHOLD \
                         and len(fresh.get("content", "")) < config.COMPACTION_CHAR_THRESHOLD:
                     logger.info("Compaction: '%s' no longer due after lock wait", title)
@@ -2851,7 +2868,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         _meta_lines = []
         for _sd in _meta_docs:
             try:
-                _md = _db.get_metadata(session_id, _sd)
+                _md = _db.get_metadata(_active_wiki_id(), session_id, _sd)
             except Exception as _md_err:
                 logger.warning("metadata lookup failed for %s: %s", _sd, _md_err)
                 continue
@@ -3064,7 +3081,7 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
     if config.USE_DATABASE:
         for doc in source_docs:
             try:
-                meta = _db.get_metadata(session_id, doc)
+                meta = _db.get_metadata(_active_wiki_id(), session_id, doc)
                 if meta:
                     clean_name = re.sub(r'^[a-f0-9-]{36}_', '', doc)
                     parts = [f"Document: {clean_name}"]
@@ -6106,7 +6123,7 @@ def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> 
     matches = [m.group(0) for m in _QUESTION_DATE_RE.finditer(question)]
     for date_str in matches:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, date_str, cap=max_docs + 1) if d]
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, date_str, cap=max_docs + 1) if d]
         except Exception as e:
             logger.error("resolve_scope: date-content lookup failed for %r: %s", date_str, e)
             continue
@@ -6151,7 +6168,7 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     best_n = 1 << 30
     for name in candidates:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=max_docs + 2) if d]
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=max_docs + 2) if d]
         except Exception as e:
             logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
             continue
@@ -6211,7 +6228,7 @@ def _resolve_party_within_family(question: str, session_id: str,
     for name in candidates:
         try:
             docs = _db.find_source_docs_mentioning_phrase(
-                session_id, name, cap=_PARTY_FAMILY_SCAN_CAP + 1)
+                _active_wiki_id(), session_id, name, cap=_PARTY_FAMILY_SCAN_CAP + 1)
         except Exception as e:
             logger.error("resolve_scope: party-in-family lookup failed for %r: %s", name, e)
             continue
@@ -6267,7 +6284,7 @@ def _narrow_by_quoted_subject(question: str, session_id: str,
             continue
         try:
             docs = set(_db.find_source_docs_by_title_tokens(
-                session_id, [collapsed], cap=25))
+                _active_wiki_id(), session_id, [collapsed], cap=25))
         except Exception as e:
             logger.error("resolve_scope: quoted-subject lookup failed for %r: %s",
                          phrase, e)
@@ -6493,7 +6510,7 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
 
     try:
         cluster = {d for d in _db.find_source_docs_by_title_tokens(
-            session_id, tokens, cap=max_docs * 5) if d}
+            _active_wiki_id(), session_id, tokens, cap=max_docs * 5) if d}
     except Exception as e:
         logger.error("resolve_scope: party-pair title lookup failed: %s", e)
         return set()
@@ -6513,7 +6530,7 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
                 continue
             try:
                 pinned = {d for d in _db.find_source_docs_by_title_tokens(
-                    session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+                    _active_wiki_id(), session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
             except Exception:
                 pinned = set()
             pinned &= cluster
@@ -6539,7 +6556,7 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
             continue
         try:
             narrowed = {d for d in _db.find_source_docs_by_title_tokens(
-                session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+                _active_wiki_id(), session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
         except Exception:
             narrowed = set()
         if narrowed and len(narrowed) <= max_docs:
@@ -6550,9 +6567,9 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         break
 
     try:
-        available = set(_db.list_doc_families(session_id))
+        available = set(_db.list_doc_families(_active_wiki_id(), session_id))
         fam = _detect_question_family(question, available)
-        fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+        fam_docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, fam)) if fam else set()
     except Exception as e:
         logger.error("resolve_scope: party-pair family narrowing failed: %s", e)
         fam_docs = set()
@@ -6885,7 +6902,7 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     if not config.USE_DATABASE:
         return None, set()
     try:
-        available = set(_db.list_doc_families(session_id))
+        available = set(_db.list_doc_families(_active_wiki_id(), session_id))
     except Exception as e:
         logger.error("resolve_scope: list_doc_families failed: %s", e)
         return None, set()
@@ -6893,7 +6910,7 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     if not family:
         return None, set()
     try:
-        return family, set(_db.get_documents_by_family(session_id, family))
+        return family, set(_db.get_documents_by_family(_active_wiki_id(), session_id, family))
     except Exception as e:
         logger.error("resolve_scope: get_documents_by_family failed: %s", e)
         return None, set()
@@ -7144,9 +7161,9 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         # document within the resolved family — sharper than answering across
         # all of them when the user asked for one.
         try:
-            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+            available = set(_db.list_doc_families(_active_wiki_id(), session_id)) if config.USE_DATABASE else set()
             fam = _detect_question_family(question, available)
-            fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+            fam_docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, fam)) if fam else set()
         except Exception:
             fam_docs = set()
         narrowed = party_docs & fam_docs
@@ -7426,7 +7443,7 @@ def classify_query(question: str, session_id: str) -> dict:
 
     # Get distinct source documents
     if config.USE_DATABASE:
-        docs = _db.get_source_docs(session_id)
+        docs = _db.get_source_docs(_active_wiki_id(), session_id)
     else:
         docs = list({
             p.get("source_doc", "") for p in pages.values()
@@ -7696,7 +7713,7 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
 
     # Get doc types for context
     if config.USE_DATABASE:
-        docs = _db.get_source_docs(session_id)
+        docs = _db.get_source_docs(_active_wiki_id(), session_id)
     else:
         index = _load_index(session_id)
         pages = index.get("pages", {})
@@ -7941,7 +7958,8 @@ def _select_relevant_pages(
         )
     if config.USE_DATABASE and session_id:
         try:
-            emb_count = _db.count_embeddings(session_id)
+            _wiki_id_hr = _active_wiki_id()
+            emb_count = _db.count_embeddings(_wiki_id_hr, session_id)
             if emb_count == 0:
                 logger.info(
                     "Hybrid retrieval skipped: 0 embeddings in DB for session %s "
@@ -7955,7 +7973,7 @@ def _select_relevant_pages(
                 is_broad = force_broad or bool(_BROAD_SCOPE_RE.search(question))
                 vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family,
+                    _wiki_id_hr, session_id, q_embedding, limit=vector_limit, doc_family=doc_family,
                     exclude_cached=exclude_cached_answers,
                 )
                 # Validate titles against the in-memory pages dict (guards against

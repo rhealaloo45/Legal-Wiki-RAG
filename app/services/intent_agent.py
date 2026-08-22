@@ -820,8 +820,10 @@ def retrieve_context_node(state: QueryState) -> dict:
             _hits, _nums, _cdoc = [], [], _cdocs[0]
             for _cand in _cdocs:
                 try:
-                    _hits = db.lookup_clause(state["session_id"], _cand, _cnum)
-                    _nums = db.doc_clause_numbers(state["session_id"], _cand)
+                    from services import wikis as _wikis
+                    _wid = _wikis.active_wiki_id()
+                    _hits = db.lookup_clause(_wid, state["session_id"], _cand, _cnum)
+                    _nums = db.doc_clause_numbers(_wid, state["session_id"], _cand)
                 except Exception as _cl_err:   # e.g. map not backfilled yet — degrade silently
                     logger.warning("clause_map lookup failed: %s", _cl_err)
                     break
@@ -1961,9 +1963,10 @@ def _corpus_summary(session_id: str, max_families: int = 0) -> str:
     one-line greeting.
     """
     try:
-        from services import db as _db
-        families = sorted(f for f in (_db.list_doc_families(session_id) or []) if f)
-        n_docs = len(_db.get_source_docs(session_id) or [])
+        from services import db as _db, wikis as _wikis
+        _wid = _wikis.active_wiki_id()
+        families = sorted(f for f in (_db.list_doc_families(_wid, session_id) or []) if f)
+        n_docs = len(_db.get_source_docs(_wid, session_id) or [])
     except Exception as e:
         logger.warning("Meta answer: corpus summary unavailable: %s", e)
         return ""

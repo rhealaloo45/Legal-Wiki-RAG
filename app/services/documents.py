@@ -68,7 +68,7 @@ def _assert_ownership(session_id: str, source_doc: str) -> None:
         )
 
 
-def archive_document(session_id: str, source_doc: str) -> dict:
+def archive_document(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Hide a document from search/chat/registers without deleting anything.
 
     Reversible by design (see module docstring on why this is the default
@@ -76,20 +76,20 @@ def archive_document(session_id: str, source_doc: str) -> dict:
     as they were, only a status row is written.
     """
     _assert_ownership(session_id, source_doc)
-    db.archive_document(session_id, source_doc)
+    db.archive_document(wiki_id, session_id, source_doc)
     logger.info("Archived document %r in session %r", source_doc, session_id)
     return {"status": "archived", "source_doc": source_doc}
 
 
-def unarchive_document(session_id: str, source_doc: str) -> dict:
+def unarchive_document(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Restore an archived document to active."""
     _assert_ownership(session_id, source_doc)
-    db.unarchive_document(session_id, source_doc)
+    db.unarchive_document(wiki_id, session_id, source_doc)
     logger.info("Unarchived document %r in session %r", source_doc, session_id)
     return {"status": "active", "source_doc": source_doc}
 
 
-def hard_delete_document(session_id: str, source_doc: str, sessions: dict) -> dict:
+def hard_delete_document(wiki_id: str, session_id: str, source_doc: str, sessions: dict) -> dict:
     """Permanently remove a document: DB rows, the uploaded file, and its
     sessions.json file_paths entry.
 
@@ -102,7 +102,7 @@ def hard_delete_document(session_id: str, source_doc: str, sessions: dict) -> di
     covered and the merged-page limitation that isn't.
     """
     _assert_ownership(session_id, source_doc)
-    report = db.delete_document_data(session_id, source_doc)
+    report = db.delete_document_data(wiki_id, session_id, source_doc)
 
     file_path = os.path.join(config.UPLOAD_PATH, source_doc)
     file_removed = False

@@ -140,12 +140,13 @@ def _refresh_wiki_stats(session_id: str) -> None:
         docs_in_db = 0
         if config.USE_DATABASE:
             from services import db as _db
-            pages = _db.count_pages(session_id)
-            rels = _db.count_relations(session_id)
+            _wid = current_wiki_id()
+            pages = _db.count_pages(_wid, session_id)
+            rels = _db.count_relations(_wid, session_id)
             # Distinct documents actually persisted — used to reconcile the
             # wiki_done counter below.
             try:
-                docs_in_db = len(_db.get_source_docs(session_id))
+                docs_in_db = len(_db.get_source_docs(_wid, session_id))
             except Exception:
                 docs_in_db = 0
         else:
@@ -522,7 +523,8 @@ def reembed_session(session_id: str):
     try:
         from services import db as _db, embedder as _embedder
 
-        pages = _db.get_pages(session_id)
+        _wid = current_wiki_id()
+        pages = _db.get_pages(_wid, session_id)
         if not pages:
             return jsonify({"error": f"No pages found for session {session_id}"}), 404
 
@@ -548,7 +550,7 @@ def reembed_session(session_id: str):
             try:
                 embeddings = _embedder.embed_batch(texts, is_query=False)
                 for (title, _), embedding in zip(batch, embeddings):
-                    _db.upsert_embedding(session_id, title, embedding)
+                    _db.upsert_embedding(_wid, session_id, title, embedding)
                     embedded += 1
                 logger.info("reembed %s: batch %d/%d done (%d pages)", session_id, i // BATCH + 1, (len(pairs) + BATCH - 1) // BATCH, embedded)
             except Exception as exc:
@@ -858,8 +860,8 @@ def resume_ingest():
 
             with engine.connect() as conn:
                 rows = conn.execute(
-                    text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
-                    {"sid": session_id},
+                    text("SELECT DISTINCT source_doc FROM pages WHERE wiki_id = :w AND session_id = :sid"),
+                    {"w": current_wiki_id(), "sid": session_id},
                 )
                 indexed = {r.source_doc for r in rows}
 
@@ -1023,7 +1025,7 @@ def locate_in_document():
     session_id = _get_main_session_id() or session_id
     if config.USE_DATABASE:
         from services import db as _db
-        result = _db.find_quote_position(session_id, doc_name, quote)
+        result = _db.find_quote_position(current_wiki_id(), session_id, doc_name, quote)
         return jsonify(result)
     return jsonify({"found": False, "page_num": 0, "char_offset": 0})
 
@@ -1279,8 +1281,8 @@ def _session_document_paths(session_id: str) -> dict[str, str]:
             engine = _db.get_engine()
             with engine.connect() as conn:
                 rows = conn.execute(
-                    text("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
-                    {"sid": session_id},
+                    text("SELECT DISTINCT source_doc FROM pages WHERE wiki_id = :w AND session_id = :sid"),
+                    {"w": current_wiki_id(), "sid": session_id},
                 )
                 indexed_docs = {r.source_doc for r in rows}
         except Exception as _idx_err:
@@ -1351,7 +1353,7 @@ def file_structure():
             try:
                 from services import db as _db
                 archived = {
-                    doc for doc, info in _db.get_document_statuses(session_id).items()
+                    doc for doc, info in _db.get_document_statuses(current_wiki_id(), session_id).items()
                     if info["status"] == "archived"
                 }
             except Exception as _arch_err:
@@ -1392,7 +1394,7 @@ def document_list():
         statuses = {}
         if config.USE_DATABASE:
             from services import db as _db
-            statuses = _db.get_document_statuses(session_id)
+            statuses = _db.get_document_statuses(current_wiki_id(), session_id)
 
         documents = [
             {
@@ -1434,7 +1436,7 @@ def document_archive():
 
     from services import documents as _documents
     try:
-        result = _documents.archive_document(session_id, source_doc)
+        result = _documents.archive_document(current_wiki_id(), session_id, source_doc)
         return jsonify(result)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1461,7 +1463,7 @@ def document_unarchive():
 
     from services import documents as _documents
     try:
-        result = _documents.unarchive_document(session_id, source_doc)
+        result = _documents.unarchive_document(current_wiki_id(), session_id, source_doc)
         return jsonify(result)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1497,7 +1499,7 @@ def document_delete():
     from services import documents as _documents
     try:
         sessions = load_sessions()
-        report = _documents.hard_delete_document(session_id, source_doc, sessions)
+        report = _documents.hard_delete_document(current_wiki_id(), session_id, source_doc, sessions)
         save_sessions(sessions)
         return jsonify(report)
     except ValueError as e:
@@ -1714,7 +1716,7 @@ def admin_wiki_pages():
     if not config.USE_DATABASE:
         return jsonify({"error": "Database not configured"}), 400
     from services import db as _db
-    return jsonify({"pages": _db.get_page_list(session_id)})
+    return jsonify({"pages": _db.get_page_list(current_wiki_id(), session_id)})
 
 
 @app.route("/admin/wiki/page/rename", methods=["POST"])
@@ -1732,7 +1734,7 @@ def admin_wiki_page_rename():
         return jsonify({"error": "session_id is required"}), 400
     session_id = _get_main_session_id() or session_id
     try:
-        return jsonify(wiki_pages.rename_page(session_id, old_title, new_title))
+        return jsonify(wiki_pages.rename_page(current_wiki_id(), session_id, old_title, new_title))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1758,7 +1760,7 @@ def admin_wiki_page_merge():
         return jsonify({"error": "Merge requires confirm: true"}), 400
     session_id = _get_main_session_id() or session_id
     try:
-        return jsonify(wiki_pages.merge_pages(session_id, source_title, target_title))
+        return jsonify(wiki_pages.merge_pages(current_wiki_id(), session_id, source_title, target_title))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1783,7 +1785,7 @@ def admin_wiki_page_delete():
         return jsonify({"error": "Delete requires confirm: true"}), 400
     session_id = _get_main_session_id() or session_id
     try:
-        return jsonify(wiki_pages.delete_page(session_id, title))
+        return jsonify(wiki_pages.delete_page(current_wiki_id(), session_id, title))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1802,7 +1804,7 @@ def review_queue_list():
     if not config.USE_DATABASE:
         return jsonify({"error": "Database not configured"}), 400
     from services import db as _db
-    return jsonify({"clauses": _db.get_review_queue(session_id)})
+    return jsonify({"clauses": _db.get_review_queue(current_wiki_id(), session_id)})
 
 
 @app.route("/review_queue/documents")
@@ -1840,14 +1842,15 @@ def review_queue_document_detail():
     from services import db as _db
     from sqlalchemy import text as _sql
     try:
-        items = _db.get_document_review_items(session_id, source_doc)
+        _wid = current_wiki_id()
+        items = _db.get_document_review_items(_wid, session_id, source_doc)
         pages = []
         with _db.get_engine().connect() as conn:
             rows = conn.execute(_sql("""
                 SELECT title, summary, content FROM pages
-                WHERE session_id = :s AND source_doc = :d
+                WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
                 ORDER BY title
-            """), {"s": session_id, "d": source_doc}).fetchall()
+            """), {"w": _wid, "s": session_id, "d": source_doc}).fetchall()
             for r in rows:
                 pages.append({"title": r[0], "summary": r[1],
                               "content": (r[2] or "")[:6000]})
@@ -1858,7 +1861,7 @@ def review_queue_document_detail():
                     FROM structural_anchors
                     WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
                     ORDER BY ordinal LIMIT 200
-                """), {"w": current_wiki_id(), "s": session_id, "d": source_doc}).fetchall()
+                """), {"w": _wid, "s": session_id, "d": source_doc}).fetchall()
             ]
         return jsonify({"items": items, "pages": pages, "anchors": anchors})
     except Exception as e:
@@ -1929,7 +1932,7 @@ def review_queue_resolve_document():
     session_id = _get_main_session_id() or session_id
     from services import db as _db
     try:
-        result = _db.resolve_document(session_id, source_doc, action, min_confidence)
+        result = _db.resolve_document(current_wiki_id(), session_id, source_doc, action, min_confidence)
         return jsonify({"status": "resolved", **result})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -1962,10 +1965,11 @@ def review_queue_resolve():
     session_id = _get_main_session_id() or session_id
     from services import db as _db
     try:
+        _wid = current_wiki_id()
         if item_kind == "clause":
-            ok = _db.resolve_clause(session_id, int(clause_id), action, edited_text)
+            ok = _db.resolve_clause(_wid, session_id, int(clause_id), action, edited_text)
         else:
-            ok = _db.resolve_review_item(session_id, int(clause_id), action, edited_text)
+            ok = _db.resolve_review_item(_wid, session_id, int(clause_id), action, edited_text)
         if not ok:
             return jsonify({"error": "Item not found, or already resolved"}), 404
         return jsonify({"status": "resolved", "clause_id": clause_id,
@@ -1995,8 +1999,9 @@ def review_queue_bulk_accept():
     session_id = _get_main_session_id() or session_id
     from services import db as _db
     try:
-        n = _db.bulk_accept_clauses(session_id, float(min_confidence))
-        n += _db.bulk_accept_review_items(session_id, float(min_confidence))
+        _wid = current_wiki_id()
+        n = _db.bulk_accept_clauses(_wid, session_id, float(min_confidence))
+        n += _db.bulk_accept_review_items(_wid, session_id, float(min_confidence))
         return jsonify({"status": "accepted", "accepted": n})
     except Exception as e:
         logger.error("Review Queue bulk accept failed: %s", e)

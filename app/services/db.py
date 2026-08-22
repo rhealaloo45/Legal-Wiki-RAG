@@ -628,6 +628,7 @@ _LEGACY_WIKI_SCOPED_TABLES = (
     "contradictions",
     "clause_map",
     "document_status",
+    "source_positions",
 )
 
 
@@ -1108,7 +1109,7 @@ def _init_backbone_schema(conn, text) -> None:
 # Pages
 # ---------------------------------------------------------------------------
 
-def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict]:
+def get_pages(wiki_id: str, session_id: str, include_archived: bool = False) -> dict[str, dict]:
     """Return all pages for a session as {title: {content, summary, source_doc, ...}}.
 
     include_archived=False (the default, used everywhere retrieval/browsing
@@ -1117,13 +1118,18 @@ def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict
     every caller (wiki index load, hybrid retrieval, /wiki/graph, /wiki/pages)
     funnels through here, so filtering once here covers all of them rather
     than needing the same check re-added at every call site.
+
+    wiki_id is a mandatory predicate, not a display filter (see services/
+    wikis.py) — a page written under a different wiki must never surface
+    here even if it shares a session_id.
     """
     from sqlalchemy import text
     engine = get_engine()
     archived_clause = "" if include_archived else """
                 AND NOT EXISTS (
                     SELECT 1 FROM document_status ds
-                    WHERE ds.session_id = pages.session_id
+                    WHERE ds.wiki_id = pages.wiki_id
+                      AND ds.session_id = pages.session_id
                       AND ds.source_doc = pages.source_doc
                       AND ds.status = 'archived'
                 )"""
@@ -1132,9 +1138,9 @@ def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict
             text(f"""
                 SELECT title, content, summary, source_doc, contradiction_flagged, variants
                 FROM pages
-                WHERE session_id = :sid{archived_clause}
+                WHERE wiki_id = :w AND session_id = :sid{archived_clause}
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         pages: dict[str, dict] = {}
         for row in rows:
@@ -1151,7 +1157,7 @@ def get_pages(session_id: str, include_archived: bool = False) -> dict[str, dict
         return pages
 
 
-def get_page_list(session_id: str, include_archived: bool = False) -> list[dict]:
+def get_page_list(wiki_id: str, session_id: str, include_archived: bool = False) -> list[dict]:
     """Lightweight admin listing: title, source_doc, char_count,
     contradiction_flagged, last_modified — for the Wiki page browser.
 
@@ -1164,7 +1170,8 @@ def get_page_list(session_id: str, include_archived: bool = False) -> list[dict]
     archived_clause = "" if include_archived else """
                 AND NOT EXISTS (
                     SELECT 1 FROM document_status ds
-                    WHERE ds.session_id = pages.session_id
+                    WHERE ds.wiki_id = pages.wiki_id
+                      AND ds.session_id = pages.session_id
                       AND ds.source_doc = pages.source_doc
                       AND ds.status = 'archived'
                 )"""
@@ -1173,10 +1180,10 @@ def get_page_list(session_id: str, include_archived: bool = False) -> list[dict]
             text(f"""
                 SELECT title, source_doc, char_count, contradiction_flagged, last_modified
                 FROM pages
-                WHERE session_id = :sid{archived_clause}
+                WHERE wiki_id = :w AND session_id = :sid{archived_clause}
                 ORDER BY title
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         return [
             {
@@ -1205,7 +1212,7 @@ def _page_embedding_tables(conn) -> list[str]:
     ))]
 
 
-def rename_page(session_id: str, old_title: str, new_title: str) -> bool:
+def rename_page(wiki_id: str, session_id: str, old_title: str, new_title: str) -> bool:
     """Rename a wiki page and every table that references it by title.
 
     Returns False if old_title doesn't exist, or new_title is already taken
@@ -1218,28 +1225,28 @@ def rename_page(session_id: str, old_title: str, new_title: str) -> bool:
     engine = get_engine()
     with engine.connect() as conn:
         exists = conn.execute(
-            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": old_title},
+            text("SELECT 1 FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": old_title},
         ).first()
         if not exists:
             return False
         clash = conn.execute(
-            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": new_title},
+            text("SELECT 1 FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": new_title},
         ).first()
         if clash:
             return False
 
-        params = {"sid": session_id, "new": new_title, "old": old_title}
-        conn.execute(text("UPDATE pages SET title = :new WHERE session_id = :sid AND title = :old"), params)
-        conn.execute(text("UPDATE relations SET from_title = :new WHERE session_id = :sid AND from_title = :old"), params)
-        conn.execute(text("UPDATE relations SET to_title = :new WHERE session_id = :sid AND to_title = :old"), params)
-        conn.execute(text("UPDATE clause_map SET page_title = :new WHERE session_id = :sid AND page_title = :old"), params)
-        conn.execute(text("UPDATE contradictions SET page_title = :new WHERE session_id = :sid AND page_title = :old"), params)
+        params = {"w": wiki_id, "sid": session_id, "new": new_title, "old": old_title}
+        conn.execute(text("UPDATE pages SET title = :new WHERE wiki_id = :w AND session_id = :sid AND title = :old"), params)
+        conn.execute(text("UPDATE relations SET from_title = :new WHERE wiki_id = :w AND session_id = :sid AND from_title = :old"), params)
+        conn.execute(text("UPDATE relations SET to_title = :new WHERE wiki_id = :w AND session_id = :sid AND to_title = :old"), params)
+        conn.execute(text("UPDATE clause_map SET page_title = :new WHERE wiki_id = :w AND session_id = :sid AND page_title = :old"), params)
+        conn.execute(text("UPDATE contradictions SET page_title = :new WHERE wiki_id = :w AND session_id = :sid AND page_title = :old"), params)
 
         for emb_table in _page_embedding_tables(conn):
             conn.execute(
-                text(f'UPDATE "{emb_table}" SET title = :new WHERE session_id = :sid AND title = :old'),
+                text(f'UPDATE "{emb_table}" SET title = :new WHERE wiki_id = :w AND session_id = :sid AND title = :old'),
                 params,
             )
 
@@ -1247,7 +1254,7 @@ def rename_page(session_id: str, old_title: str, new_title: str) -> bool:
     return True
 
 
-def delete_page(session_id: str, title: str) -> bool:
+def delete_page(wiki_id: str, session_id: str, title: str) -> bool:
     """Delete one wiki page and every row across the schema that
     references it by title. Returns False if the page doesn't exist.
 
@@ -1262,21 +1269,21 @@ def delete_page(session_id: str, title: str) -> bool:
     engine = get_engine()
     with engine.connect() as conn:
         exists = conn.execute(
-            text("SELECT 1 FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": title},
+            text("SELECT 1 FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": title},
         ).first()
         if not exists:
             return False
 
-        params = {"sid": session_id, "t": title}
-        conn.execute(text("DELETE FROM pages WHERE session_id = :sid AND title = :t"), params)
-        conn.execute(text("DELETE FROM relations WHERE session_id = :sid AND (from_title = :t OR to_title = :t)"), params)
-        conn.execute(text("DELETE FROM clause_map WHERE session_id = :sid AND page_title = :t"), params)
-        conn.execute(text("DELETE FROM contradictions WHERE session_id = :sid AND page_title = :t"), params)
+        params = {"w": wiki_id, "sid": session_id, "t": title}
+        conn.execute(text("DELETE FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"), params)
+        conn.execute(text("DELETE FROM relations WHERE wiki_id = :w AND session_id = :sid AND (from_title = :t OR to_title = :t)"), params)
+        conn.execute(text("DELETE FROM clause_map WHERE wiki_id = :w AND session_id = :sid AND page_title = :t"), params)
+        conn.execute(text("DELETE FROM contradictions WHERE wiki_id = :w AND session_id = :sid AND page_title = :t"), params)
 
         for emb_table in _page_embedding_tables(conn):
             conn.execute(
-                text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = :t'),
+                text(f'DELETE FROM "{emb_table}" WHERE wiki_id = :w AND session_id = :sid AND title = :t'),
                 params,
             )
 
@@ -1284,7 +1291,7 @@ def delete_page(session_id: str, title: str) -> bool:
     return True
 
 
-def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
+def merge_pages(wiki_id: str, session_id: str, source_title: str, target_title: str) -> bool:
     """Absorb source_title's content into target_title, then remove
     source_title. Returns False if either page doesn't exist.
 
@@ -1300,12 +1307,12 @@ def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
     engine = get_engine()
     with engine.connect() as conn:
         src = conn.execute(
-            text("SELECT content, summary FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": source_title},
+            text("SELECT content, summary FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": source_title},
         ).first()
         tgt = conn.execute(
-            text("SELECT content, summary FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": target_title},
+            text("SELECT content, summary FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": target_title},
         ).first()
         if not src or not tgt:
             return False
@@ -1315,39 +1322,40 @@ def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
 
         conn.execute(
             text("""UPDATE pages SET content = :c, summary = :s, char_count = :cc, last_modified = now()
-                     WHERE session_id = :sid AND title = :t"""),
+                     WHERE wiki_id = :w AND session_id = :sid AND title = :t"""),
             {"c": merged_content, "s": merged_summary, "cc": len(merged_content),
-             "sid": session_id, "t": target_title},
+             "w": wiki_id, "sid": session_id, "t": target_title},
         )
         conn.execute(
-            text("DELETE FROM pages WHERE session_id = :sid AND title = :t"),
-            {"sid": session_id, "t": source_title},
+            text("DELETE FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :t"),
+            {"w": wiki_id, "sid": session_id, "t": source_title},
         )
 
-        repoint = {"sid": session_id, "tgt": target_title, "src": source_title}
-        conn.execute(text("UPDATE relations SET from_title = :tgt WHERE session_id = :sid AND from_title = :src"), repoint)
-        conn.execute(text("UPDATE relations SET to_title = :tgt WHERE session_id = :sid AND to_title = :src"), repoint)
+        repoint = {"w": wiki_id, "sid": session_id, "tgt": target_title, "src": source_title}
+        conn.execute(text("UPDATE relations SET from_title = :tgt WHERE wiki_id = :w AND session_id = :sid AND from_title = :src"), repoint)
+        conn.execute(text("UPDATE relations SET to_title = :tgt WHERE wiki_id = :w AND session_id = :sid AND to_title = :src"), repoint)
         # A re-point can create a self-loop (if source and target were
         # already directly connected) or an exact duplicate of an edge that
         # already existed under target_title — both are noise now, drop them.
         conn.execute(
-            text("DELETE FROM relations WHERE session_id = :sid AND from_title = :tgt AND to_title = :tgt"),
-            {"sid": session_id, "tgt": target_title},
+            text("DELETE FROM relations WHERE wiki_id = :w AND session_id = :sid AND from_title = :tgt AND to_title = :tgt"),
+            {"w": wiki_id, "sid": session_id, "tgt": target_title},
         )
         conn.execute(text("""
             DELETE FROM relations a USING relations b
-            WHERE a.session_id = :sid AND b.session_id = :sid
+            WHERE a.wiki_id = :w AND b.wiki_id = :w
+              AND a.session_id = :sid AND b.session_id = :sid
               AND a.ctid > b.ctid
               AND a.from_title = b.from_title AND a.to_title = b.to_title AND a.label = b.label
-        """), {"sid": session_id})
+        """), {"w": wiki_id, "sid": session_id})
 
-        conn.execute(text("UPDATE clause_map SET page_title = :tgt WHERE session_id = :sid AND page_title = :src"), repoint)
-        conn.execute(text("UPDATE contradictions SET page_title = :tgt WHERE session_id = :sid AND page_title = :src"), repoint)
+        conn.execute(text("UPDATE clause_map SET page_title = :tgt WHERE wiki_id = :w AND session_id = :sid AND page_title = :src"), repoint)
+        conn.execute(text("UPDATE contradictions SET page_title = :tgt WHERE wiki_id = :w AND session_id = :sid AND page_title = :src"), repoint)
 
         for emb_table in _page_embedding_tables(conn):
             conn.execute(
-                text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = ANY(:titles)'),
-                {"sid": session_id, "titles": [source_title, target_title]},
+                text(f'DELETE FROM "{emb_table}" WHERE wiki_id = :w AND session_id = :sid AND title = ANY(:titles)'),
+                {"w": wiki_id, "sid": session_id, "titles": [source_title, target_title]},
             )
 
         conn.commit()
@@ -1358,7 +1366,7 @@ def merge_pages(session_id: str, source_title: str, target_title: str) -> bool:
 # Review Queue — clauses (target architecture § 02, first slice)
 # ---------------------------------------------------------------------------
 
-def insert_clauses(session_id: str, source_doc: str, clauses: list[dict]) -> int:
+def insert_clauses(wiki_id: str, session_id: str, source_doc: str, clauses: list[dict]) -> int:
     """Persist clauses extracted alongside a document's ingest LLM call.
 
     Called independently of _atomic_merge/_merge_wiki — clause rows are
@@ -1382,13 +1390,13 @@ def insert_clauses(session_id: str, source_doc: str, clauses: list[dict]) -> int
             conn.execute(
                 text("""
                     INSERT INTO clauses
-                        (session_id, source_doc, clause_type, verbatim_text,
+                        (wiki_id, session_id, source_doc, clause_type, verbatim_text,
                          typed_value, confidence, page_num, stakes)
                     VALUES
-                        (:sid, :doc, :ctype, :vtext, :tval, :conf, :page, :stakes)
+                        (:w, :sid, :doc, :ctype, :vtext, :tval, :conf, :page, :stakes)
                 """),
                 {
-                    "sid": session_id, "doc": source_doc, "ctype": clause_type,
+                    "w": wiki_id, "sid": session_id, "doc": source_doc, "ctype": clause_type,
                     # Verbatim clause text is the most sensitive thing this
                     # table holds — it is the client's actual contract wording.
                     # Encrypted at rest; no-op when no key is configured.
@@ -1472,7 +1480,7 @@ def insert_review_items(wiki_id: str, session_id: str, source_doc: str,
     return inserted
 
 
-def supersede_review_items(session_id: str, source_doc: str) -> int:
+def supersede_review_items(wiki_id: str, session_id: str, source_doc: str) -> int:
     """On re-ingest, move a document's prior pending items to `superseded`
     rather than deleting them.
 
@@ -1487,14 +1495,14 @@ def supersede_review_items(session_id: str, source_doc: str) -> int:
         res = conn.execute(text("""
             UPDATE review_queue
             SET review_status = 'superseded', superseded_at = now()
-            WHERE session_id = :sid AND source_doc = :doc
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
               AND review_status = 'pending'
-        """), {"sid": session_id, "doc": source_doc})
+        """), {"w": wiki_id, "sid": session_id, "doc": source_doc})
         conn.commit()
         return res.rowcount or 0
 
 
-def get_review_queue(session_id: str) -> list[dict]:
+def get_review_queue(wiki_id: str, session_id: str) -> list[dict]:
     """Pending review items for one session — clauses and every other flagged
     extraction kind in one queue.
 
@@ -1511,18 +1519,18 @@ def get_review_queue(session_id: str) -> list[dict]:
                 SELECT id, source_doc, clause_type, verbatim_text, typed_value,
                        confidence, page_num, stakes, created_at
                 FROM clauses
-                WHERE session_id = :sid AND review_status = 'pending'
+                WHERE wiki_id = :w AND session_id = :sid AND review_status = 'pending'
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         ).fetchall()
         other_rows = conn.execute(
             text("""
                 SELECT id, source_doc, item_kind, item_label, item_value,
                        typed_value, confidence, page_num, stakes, reason, created_at
                 FROM review_queue
-                WHERE session_id = :sid AND review_status = 'pending'
+                WHERE wiki_id = :w AND session_id = :sid AND review_status = 'pending'
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         ).fetchall()
 
     # Decrypt on the way out. decrypt_safe rather than decrypt: one row written
@@ -1560,7 +1568,7 @@ def get_review_queue(session_id: str) -> list[dict]:
     return items
 
 
-def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: str | None = None) -> bool:
+def resolve_clause(wiki_id: str, session_id: str, clause_id: int, action: str, edited_text: str | None = None) -> bool:
     """Resolve one clause: accept, reject, or edit (accept with a corrected
     verbatim_text). Returns False if the clause doesn't exist, isn't in this
     session, or isn't still pending. Provenance-marked via `resolution`,
@@ -1575,7 +1583,7 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
     review_status = "rejected" if action == "reject" else "approved"
     with engine.connect() as conn:
         params = {
-            "sid": session_id, "id": clause_id,
+            "w": wiki_id, "sid": session_id, "id": clause_id,
             "status": review_status, "resolution": resolution_map[action],
         }
         if action == "edit":
@@ -1585,7 +1593,7 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
                 text("""
                     UPDATE clauses SET review_status = :status, resolution = :resolution,
                            verbatim_text = :vtext, reviewed_at = now()
-                    WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                    WHERE wiki_id = :w AND session_id = :sid AND id = :id AND review_status = 'pending'
                 """),
                 # A reviewer's corrected wording is as sensitive as the
                 # extracted original, so it is encrypted on the same terms.
@@ -1596,7 +1604,7 @@ def resolve_clause(session_id: str, clause_id: int, action: str, edited_text: st
                 text("""
                     UPDATE clauses SET review_status = :status, resolution = :resolution,
                            reviewed_at = now()
-                    WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                    WHERE wiki_id = :w AND session_id = :sid AND id = :id AND review_status = 'pending'
                 """),
                 params,
             )
@@ -1631,23 +1639,23 @@ def get_review_documents(wiki_id: str, session_id: str) -> list[dict]:
 
         clause_counts = dict(conn.execute(text("""
             SELECT source_doc, COUNT(*) FROM clauses
-            WHERE session_id = :s AND review_status = 'pending'
+            WHERE wiki_id = :w AND session_id = :s AND review_status = 'pending'
             GROUP BY source_doc
-        """), {"s": session_id}).fetchall())
+        """), {"w": wiki_id, "s": session_id}).fetchall())
         high_counts = dict(conn.execute(text("""
             SELECT source_doc, COUNT(*) FROM clauses
-            WHERE session_id = :s AND review_status = 'pending' AND stakes = 'high'
+            WHERE wiki_id = :w AND session_id = :s AND review_status = 'pending' AND stakes = 'high'
             GROUP BY source_doc
-        """), {"s": session_id}).fetchall())
+        """), {"w": wiki_id, "s": session_id}).fetchall())
         item_counts = dict(conn.execute(text("""
             SELECT source_doc, COUNT(*) FROM review_queue
-            WHERE session_id = :s AND review_status = 'pending'
+            WHERE wiki_id = :w AND session_id = :s AND review_status = 'pending'
             GROUP BY source_doc
-        """), {"s": session_id}).fetchall())
+        """), {"w": wiki_id, "s": session_id}).fetchall())
         page_counts = dict(conn.execute(text("""
             SELECT source_doc, COUNT(*) FROM pages
-            WHERE session_id = :s GROUP BY source_doc
-        """), {"s": session_id}).fetchall())
+            WHERE wiki_id = :w AND session_id = :s GROUP BY source_doc
+        """), {"w": wiki_id, "s": session_id}).fetchall())
 
         # Family typed rows carry the extracted metadata. Which table holds a
         # given document depends on its family, so they are read together and
@@ -1754,13 +1762,13 @@ def _review_fields(raw_typed, crypto_mod) -> list[dict]:
     ]
 
 
-def get_document_review_items(session_id: str, source_doc: str) -> list[dict]:
+def get_document_review_items(wiki_id: str, session_id: str, source_doc: str) -> list[dict]:
     """Every pending flagged item for one document — clauses and other kinds."""
-    all_items = get_review_queue(session_id)
+    all_items = get_review_queue(wiki_id, session_id)
     return [i for i in all_items if i["source_doc"] == source_doc]
 
 
-def resolve_document(session_id: str, source_doc: str, action: str,
+def resolve_document(wiki_id: str, session_id: str, source_doc: str, action: str,
                      min_confidence: float = 0.0) -> dict:
     """Approve or reject every pending item for one document.
 
@@ -1781,40 +1789,40 @@ def resolve_document(session_id: str, source_doc: str, action: str,
         if action == "reject":
             clause_where = ""
             item_where = ""
-            params = {"sid": session_id, "doc": source_doc,
+            params = {"w": wiki_id, "sid": session_id, "doc": source_doc,
                       "status": status, "res": resolution}
         else:
             clause_where = " AND (stakes = 'low' OR confidence >= :minc)"
             item_where = " AND (stakes = 'low' OR confidence >= :minc)"
-            params = {"sid": session_id, "doc": source_doc, "status": status,
+            params = {"w": wiki_id, "sid": session_id, "doc": source_doc, "status": status,
                       "res": resolution, "minc": min_confidence}
 
         n_clauses = conn.execute(text(f"""
             UPDATE clauses SET review_status = :status, resolution = :res,
                    reviewed_at = now()
-            WHERE session_id = :sid AND source_doc = :doc
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
               AND review_status = 'pending'{clause_where}
         """), params).rowcount or 0
         n_items = conn.execute(text(f"""
             UPDATE review_queue SET review_status = :status, resolution = :res,
                    reviewed_at = now()
-            WHERE session_id = :sid AND source_doc = :doc
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
               AND review_status = 'pending'{item_where}
         """), params).rowcount or 0
         remaining = (conn.execute(text("""
-            SELECT COUNT(*) FROM clauses WHERE session_id = :sid
+            SELECT COUNT(*) FROM clauses WHERE wiki_id = :w AND session_id = :sid
               AND source_doc = :doc AND review_status = 'pending'
-        """), {"sid": session_id, "doc": source_doc}).scalar() or 0) + \
+        """), {"w": wiki_id, "sid": session_id, "doc": source_doc}).scalar() or 0) + \
             (conn.execute(text("""
-            SELECT COUNT(*) FROM review_queue WHERE session_id = :sid
+            SELECT COUNT(*) FROM review_queue WHERE wiki_id = :w AND session_id = :sid
               AND source_doc = :doc AND review_status = 'pending'
-        """), {"sid": session_id, "doc": source_doc}).scalar() or 0)
+        """), {"w": wiki_id, "sid": session_id, "doc": source_doc}).scalar() or 0)
         conn.commit()
 
     return {"clauses": n_clauses, "items": n_items, "remaining": int(remaining)}
 
 
-def resolve_review_item(session_id: str, item_id: int, action: str,
+def resolve_review_item(wiki_id: str, session_id: str, item_id: int, action: str,
                         edited_text: str | None = None) -> bool:
     """Resolve one non-clause review item. Mirrors resolve_clause exactly,
     including the still-pending guard, so a double-submit from the UI can't
@@ -1827,7 +1835,7 @@ def resolve_review_item(session_id: str, item_id: int, action: str,
         raise ValueError(f"Unknown action {action!r} — expected accept, reject, or edit")
     review_status = "rejected" if action == "reject" else "approved"
     with engine.connect() as conn:
-        params = {"sid": session_id, "id": item_id, "status": review_status,
+        params = {"w": wiki_id, "sid": session_id, "id": item_id, "status": review_status,
                   "resolution": resolution_map[action]}
         if action == "edit":
             if not edited_text or not edited_text.strip():
@@ -1835,19 +1843,19 @@ def resolve_review_item(session_id: str, item_id: int, action: str,
             result = conn.execute(text("""
                 UPDATE review_queue SET review_status = :status, resolution = :resolution,
                        item_value = :val, reviewed_at = now()
-                WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                WHERE wiki_id = :w AND session_id = :sid AND id = :id AND review_status = 'pending'
             """), {**params, "val": _crypto().encrypt(edited_text.strip())})
         else:
             result = conn.execute(text("""
                 UPDATE review_queue SET review_status = :status, resolution = :resolution,
                        reviewed_at = now()
-                WHERE session_id = :sid AND id = :id AND review_status = 'pending'
+                WHERE wiki_id = :w AND session_id = :sid AND id = :id AND review_status = 'pending'
             """), params)
         conn.commit()
         return (result.rowcount or 0) > 0
 
 
-def bulk_accept_review_items(session_id: str, min_confidence: float) -> int:
+def bulk_accept_review_items(wiki_id: str, session_id: str, min_confidence: float) -> int:
     """Bulk-accept low-stakes non-clause items at or above the threshold.
 
     Same server-side exclusion as clauses: high stakes is filtered in the
@@ -1861,14 +1869,14 @@ def bulk_accept_review_items(session_id: str, min_confidence: float) -> int:
         result = conn.execute(text("""
             UPDATE review_queue
             SET review_status = 'approved', resolution = 'bulk_accepted', reviewed_at = now()
-            WHERE session_id = :sid AND review_status = 'pending'
+            WHERE wiki_id = :w AND session_id = :sid AND review_status = 'pending'
               AND stakes = 'low' AND confidence >= :min_conf
-        """), {"sid": session_id, "min_conf": min_confidence})
+        """), {"w": wiki_id, "sid": session_id, "min_conf": min_confidence})
         conn.commit()
         return result.rowcount or 0
 
 
-def bulk_accept_clauses(session_id: str, min_confidence: float) -> int:
+def bulk_accept_clauses(wiki_id: str, session_id: str, min_confidence: float) -> int:
     """Accept every pending LOW-stakes clause at or above min_confidence.
 
     High-stakes clauses are excluded by the WHERE clause itself, not by
@@ -1883,24 +1891,24 @@ def bulk_accept_clauses(session_id: str, min_confidence: float) -> int:
             text("""
                 UPDATE clauses
                 SET review_status = 'approved', resolution = 'bulk_accepted', reviewed_at = now()
-                WHERE session_id = :sid AND review_status = 'pending'
+                WHERE wiki_id = :w AND session_id = :sid AND review_status = 'pending'
                   AND stakes = 'low' AND confidence >= :min_conf
             """),
-            {"sid": session_id, "min_conf": min_confidence},
+            {"w": wiki_id, "sid": session_id, "min_conf": min_confidence},
         )
         conn.commit()
         return result.rowcount or 0
 
 
-def get_page(session_id: str, title: str) -> dict | None:
+def get_page(wiki_id: str, session_id: str, title: str) -> dict | None:
     """Return a single page dict or None if it does not exist."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(
             text("SELECT content, summary, source_doc, contradiction_flagged, variants "
-                 "FROM pages WHERE session_id = :sid AND title = :title"),
-            {"sid": session_id, "title": title},
+                 "FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :title"),
+            {"w": wiki_id, "sid": session_id, "title": title},
         ).fetchone()
         if row is None:
             return None
@@ -1916,50 +1924,50 @@ def get_page(session_id: str, title: str) -> dict | None:
         return page
 
 
-def get_page_titles(session_id: str) -> list[str]:
+def get_page_titles(wiki_id: str, session_id: str) -> list[str]:
     """Return only page titles for a session (cheaper than get_pages for file-name lookups)."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT title FROM pages WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT title FROM pages WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         )
         return [row.title for row in rows]
 
 
-def get_all_page_titles_and_content(session_id: str) -> dict[str, str]:
+def get_all_page_titles_and_content(wiki_id: str, session_id: str) -> dict[str, str]:
     """Return {title: content} for all pages. Used for the cross-reference pass."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT title, content FROM pages WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT title, content FROM pages WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         )
         return {row.title: row.content for row in rows}
 
 
-def count_pages(session_id: str) -> int:
+def count_pages(wiki_id: str, session_id: str) -> int:
     """Return the number of pages stored for a session."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT COUNT(*) FROM pages WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT COUNT(*) FROM pages WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         ).scalar()
         return result or 0
 
 
-def count_relations(session_id: str) -> int:
+def count_relations(wiki_id: str, session_id: str) -> int:
     """Return the number of relations stored for a session."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         result = conn.execute(
-            text("SELECT COUNT(*) FROM relations WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT COUNT(*) FROM relations WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         ).scalar()
         return result or 0
 
@@ -1974,15 +1982,15 @@ def count_relations(session_id: str) -> int:
 # only the most recent contributing document, not the full set.
 # ---------------------------------------------------------------------------
 
-def get_document_statuses(session_id: str) -> dict[str, dict]:
+def get_document_statuses(wiki_id: str, session_id: str) -> dict[str, dict]:
     """Return {source_doc: {status, archived_at}} for every document that has
     ever been archived. A document with no row here is active."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT source_doc, status, archived_at FROM document_status WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT source_doc, status, archived_at FROM document_status WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         )
         return {
             r.source_doc: {
@@ -1993,24 +2001,24 @@ def get_document_statuses(session_id: str) -> dict[str, dict]:
         }
 
 
-def archive_document(session_id: str, source_doc: str) -> None:
+def archive_document(wiki_id: str, session_id: str, source_doc: str) -> None:
     """Mark a document archived. Idempotent — archiving twice just refreshes archived_at."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         conn.execute(
             text("""
-                INSERT INTO document_status (session_id, source_doc, status, archived_at)
-                VALUES (:sid, :doc, 'archived', now())
+                INSERT INTO document_status (wiki_id, session_id, source_doc, status, archived_at)
+                VALUES (:w, :sid, :doc, 'archived', now())
                 ON CONFLICT (session_id, source_doc)
-                DO UPDATE SET status = 'archived', archived_at = now()
+                DO UPDATE SET status = 'archived', archived_at = now(), wiki_id = :w
             """),
-            {"sid": session_id, "doc": source_doc},
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
         conn.commit()
 
 
-def unarchive_document(session_id: str, source_doc: str) -> None:
+def unarchive_document(wiki_id: str, session_id: str, source_doc: str) -> None:
     """Restore an archived document to active by removing its status row —
     keeps "row exists" == "archived" a valid invariant everywhere else that
     reads this table, rather than also needing to check a status value."""
@@ -2018,27 +2026,27 @@ def unarchive_document(session_id: str, source_doc: str) -> None:
     engine = get_engine()
     with engine.connect() as conn:
         conn.execute(
-            text("DELETE FROM document_status WHERE session_id = :sid AND source_doc = :doc"),
-            {"sid": session_id, "doc": source_doc},
+            text("DELETE FROM document_status WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
         conn.commit()
 
 
-def is_document_archived(session_id: str, source_doc: str) -> bool:
+def is_document_archived(wiki_id: str, session_id: str, source_doc: str) -> bool:
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(
             text("""
                 SELECT 1 FROM document_status
-                WHERE session_id = :sid AND source_doc = :doc AND status = 'archived'
+                WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc AND status = 'archived'
             """),
-            {"sid": session_id, "doc": source_doc},
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         ).first()
         return row is not None
 
 
-def delete_document_data(session_id: str, source_doc: str) -> dict:
+def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Cascade-delete every DB row cleanly attributable to one document.
 
     Does NOT touch the uploaded file on disk or sessions.json — see
@@ -2065,8 +2073,8 @@ def delete_document_data(session_id: str, source_doc: str) -> dict:
 
     with engine.connect() as conn:
         titles = [r.title for r in conn.execute(
-            text("SELECT title FROM pages WHERE session_id = :sid AND source_doc = :doc"),
-            {"sid": session_id, "doc": source_doc},
+            text("SELECT title FROM pages WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )]
 
         if titles:
@@ -2080,14 +2088,14 @@ def delete_document_data(session_id: str, source_doc: str) -> dict:
             ))]
             for emb_table in emb_tables:
                 result = conn.execute(
-                    text(f'DELETE FROM "{emb_table}" WHERE session_id = :sid AND title = ANY(:titles)'),
-                    {"sid": session_id, "titles": titles},
+                    text(f'DELETE FROM "{emb_table}" WHERE wiki_id = :w AND session_id = :sid AND title = ANY(:titles)'),
+                    {"w": wiki_id, "sid": session_id, "titles": titles},
                 )
                 report["embeddings_deleted"] += result.rowcount or 0
 
             result = conn.execute(
-                text("DELETE FROM pages WHERE session_id = :sid AND source_doc = :doc"),
-                {"sid": session_id, "doc": source_doc},
+                text("DELETE FROM pages WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+                {"w": wiki_id, "sid": session_id, "doc": source_doc},
             )
             report["pages_deleted"] = result.rowcount or 0
 
@@ -2103,28 +2111,28 @@ def delete_document_data(session_id: str, source_doc: str) -> dict:
             result = conn.execute(
                 text("""
                     DELETE FROM relations
-                    WHERE session_id = :sid
+                    WHERE wiki_id = :w AND session_id = :sid
                       AND (from_title = ANY(:titles) OR to_title = ANY(:titles))
                 """),
-                {"sid": session_id, "titles": titles},
+                {"w": wiki_id, "sid": session_id, "titles": titles},
             )
             report["relations_deleted"] = result.rowcount or 0
 
         result = conn.execute(
-            text("DELETE FROM clause_map WHERE session_id = :sid AND source_doc = :doc"),
-            {"sid": session_id, "doc": source_doc},
+            text("DELETE FROM clause_map WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
         report["clause_map_deleted"] = result.rowcount or 0
 
         result = conn.execute(
-            text("DELETE FROM source_positions WHERE session_id = :sid AND source_doc = :doc"),
-            {"sid": session_id, "doc": source_doc},
+            text("DELETE FROM source_positions WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
         report["source_positions_deleted"] = result.rowcount or 0
 
         conn.execute(
-            text("DELETE FROM document_status WHERE session_id = :sid AND source_doc = :doc"),
-            {"sid": session_id, "doc": source_doc},
+            text("DELETE FROM document_status WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
 
         conn.commit()
@@ -2136,7 +2144,7 @@ def delete_document_data(session_id: str, source_doc: str) -> dict:
 # Embeddings (Phase 3 — pgvector search)
 # ---------------------------------------------------------------------------
 
-def upsert_question_embeddings(session_id: str, title: str,
+def upsert_question_embeddings(wiki_id: str, session_id: str, title: str,
                                questions: list[tuple[str, list[float]]],
                                doc_family: str | None = None,
                                source_doc: str | None = None) -> int:
@@ -2153,8 +2161,8 @@ def upsert_question_embeddings(session_id: str, title: str,
     engine = get_engine()
     tbl = _question_table_name()
     with engine.connect() as conn:
-        conn.execute(text(f"DELETE FROM {tbl} WHERE session_id = :sid AND title = :title"),
-                     {"sid": session_id, "title": title})
+        conn.execute(text(f"DELETE FROM {tbl} WHERE wiki_id = :w AND session_id = :sid AND title = :title"),
+                     {"w": wiki_id, "sid": session_id, "title": title})
         n = 0
         for question, vector in questions:
             if not question or not vector:
@@ -2162,18 +2170,18 @@ def upsert_question_embeddings(session_id: str, title: str,
             emb_str = "[" + ",".join(f"{x:.8f}" for x in vector) + "]"
             conn.execute(text(f"""
                 INSERT INTO {tbl}
-                    (session_id, title, question, embedding, doc_family, source_doc)
-                VALUES (:sid, :title, :q, CAST(:embedding AS vector), :fam, :doc)
+                    (wiki_id, session_id, title, question, embedding, doc_family, source_doc)
+                VALUES (:w, :sid, :title, :q, CAST(:embedding AS vector), :fam, :doc)
                 ON CONFLICT (session_id, title, question) DO UPDATE SET
-                    embedding = EXCLUDED.embedding
-            """), {"sid": session_id, "title": title, "q": question[:2000],
+                    embedding = EXCLUDED.embedding, wiki_id = :w
+            """), {"w": wiki_id, "sid": session_id, "title": title, "q": question[:2000],
                    "embedding": emb_str, "fam": doc_family, "doc": source_doc})
             n += 1
         conn.commit()
     return n
 
 
-def search_similar_questions(session_id: str, query_embedding: list[float],
+def search_similar_questions(wiki_id: str, session_id: str, query_embedding: list[float],
                              limit: int = 10,
                              doc_family: str | None = None) -> list[dict]:
     """Find pages whose hypothetical questions match the query.
@@ -2187,7 +2195,7 @@ def search_similar_questions(session_id: str, query_embedding: list[float],
     tbl = _question_table_name()
     emb_str = "[" + ",".join(f"{x:.8f}" for x in query_embedding) + "]"
     family_clause = " AND doc_family = :fam" if doc_family else ""
-    params = {"sid": session_id, "embedding": emb_str, "limit": limit}
+    params = {"w": wiki_id, "sid": session_id, "embedding": emb_str, "limit": limit}
     if doc_family:
         params["fam"] = doc_family
     with engine.connect() as conn:
@@ -2196,7 +2204,7 @@ def search_similar_questions(session_id: str, query_embedding: list[float],
                    title, question,
                    1 - (embedding <=> CAST(:embedding AS vector)) AS score
             FROM {tbl}
-            WHERE session_id = :sid{family_clause}
+            WHERE wiki_id = :w AND session_id = :sid{family_clause}
             ORDER BY title, embedding <=> CAST(:embedding AS vector)
             LIMIT :limit
         """), params).fetchall()
@@ -2206,18 +2214,18 @@ def search_similar_questions(session_id: str, query_embedding: list[float],
     return out
 
 
-def count_question_embeddings(session_id: str) -> int:
+def count_question_embeddings(wiki_id: str, session_id: str) -> int:
     from sqlalchemy import text
     try:
         with get_engine().connect() as conn:
             return int(conn.execute(text(
-                f"SELECT COUNT(*) FROM {_question_table_name()} WHERE session_id = :sid"
-            ), {"sid": session_id}).scalar() or 0)
+                f"SELECT COUNT(*) FROM {_question_table_name()} WHERE wiki_id = :w AND session_id = :sid"
+            ), {"w": wiki_id, "sid": session_id}).scalar() or 0)
     except Exception:
         return 0
 
 
-def upsert_embedding(session_id: str, title: str, embedding: list[float],
+def upsert_embedding(wiki_id: str, session_id: str, title: str, embedding: list[float],
                      doc_family: str | None = None) -> None:
     """Store or update a page embedding vector.
 
@@ -2234,19 +2242,20 @@ def upsert_embedding(session_id: str, title: str, embedding: list[float],
     with engine.connect() as conn:
         conn.execute(
             text(f"""
-                INSERT INTO {tbl} (session_id, title, embedding, doc_family)
-                VALUES (:sid, :title, CAST(:embedding AS vector), :fam)
+                INSERT INTO {tbl} (wiki_id, session_id, title, embedding, doc_family)
+                VALUES (:w, :sid, :title, CAST(:embedding AS vector), :fam)
                 ON CONFLICT (session_id, title) DO UPDATE SET
                     embedding  = EXCLUDED.embedding,
-                    doc_family = COALESCE(EXCLUDED.doc_family, {tbl}.doc_family)
+                    doc_family = COALESCE(EXCLUDED.doc_family, {tbl}.doc_family),
+                    wiki_id    = :w
             """),
-            {"sid": session_id, "title": title, "embedding": emb_str, "fam": doc_family},
+            {"w": wiki_id, "sid": session_id, "title": title, "embedding": emb_str, "fam": doc_family},
         )
         conn.commit()
 
 
 def search_similar_pages(
-    session_id: str, query_embedding: list[float], limit: int = 25,
+    wiki_id: str, session_id: str, query_embedding: list[float], limit: int = 25,
     doc_family: "str | list[str] | None" = None,
     exclude_cached: bool = False,
 ) -> list[str]:
@@ -2275,7 +2284,7 @@ def search_similar_pages(
     engine = get_engine()
     tbl = _emb_table_name()
     emb_str = "[" + ",".join(f"{x:.8f}" for x in query_embedding) + "]"
-    params = {"sid": session_id, "embedding": emb_str, "limit": limit}
+    params = {"w": wiki_id, "sid": session_id, "embedding": emb_str, "limit": limit}
     family_clause = ""
     if doc_family:
         families = [doc_family] if isinstance(doc_family, str) else list(doc_family)
@@ -2288,7 +2297,7 @@ def search_similar_pages(
             text(f"""
                 SELECT title
                 FROM {tbl}
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                 {family_clause}
                 {cached_clause}
                 ORDER BY embedding <=> CAST(:embedding AS vector)
@@ -2299,7 +2308,7 @@ def search_similar_pages(
         return [row.title for row in rows]
 
 
-def backfill_embedding_families(session_id: str) -> int:
+def backfill_embedding_families(wiki_id: str, session_id: str) -> int:
     """Populate page_embeddings.doc_family from existing metadata, no re-embed.
 
     Set-based UPDATE joining each embedding row → its page → that page's source
@@ -2321,30 +2330,32 @@ def backfill_embedding_families(session_id: str) -> int:
                   ON pm.session_id = p.session_id AND pm.title = p.source_doc
                 WHERE pe.session_id = p.session_id
                   AND pe.title = p.title
+                  AND pe.wiki_id = :w
                   AND pe.session_id = :sid
                   AND pm.doc_family IS NOT NULL
                   AND pe.doc_family IS DISTINCT FROM pm.doc_family
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         conn.commit()
         return result.rowcount or 0
 
 
-def count_embeddings(session_id: str) -> int:
+def count_embeddings(wiki_id: str, session_id: str) -> int:
     """Return the number of pages with embeddings stored for a session."""
     from sqlalchemy import text
     engine = get_engine()
     tbl = _emb_table_name()
     with engine.connect() as conn:
         result = conn.execute(
-            text(f"SELECT COUNT(*) FROM {tbl} WHERE session_id = :sid"),
-            {"sid": session_id},
+            text(f"SELECT COUNT(*) FROM {tbl} WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         ).scalar()
         return result or 0
 
 
 def upsert_page(
+    wiki_id: str,
     session_id: str,
     title: str,
     content: str,
@@ -2361,10 +2372,10 @@ def upsert_page(
         conn.execute(
             text("""
                 INSERT INTO pages
-                    (session_id, title, content, summary, source_doc,
+                    (wiki_id, session_id, title, content, summary, source_doc,
                      contradiction_flagged, variants, append_count, char_count, last_modified)
                 VALUES
-                    (:sid, :title, :content, :summary, :source_doc,
+                    (:w, :sid, :title, :content, :summary, :source_doc,
                      :cf, CAST(:variants AS jsonb), 1, :char_count, now())
                 ON CONFLICT (session_id, title) DO UPDATE SET
                     content               = EXCLUDED.content,
@@ -2374,9 +2385,11 @@ def upsert_page(
                     variants              = EXCLUDED.variants,
                     append_count          = pages.append_count + 1,
                     char_count            = EXCLUDED.char_count,
-                    last_modified         = now()
+                    last_modified         = now(),
+                    wiki_id               = EXCLUDED.wiki_id
             """),
             {
+                "w": wiki_id,
                 "sid": session_id,
                 "title": title,
                 "content": content,
@@ -2394,35 +2407,35 @@ def upsert_page(
 # Relations
 # ---------------------------------------------------------------------------
 
-def get_relations(session_id: str) -> list[dict]:
+def get_relations(wiki_id: str, session_id: str) -> list[dict]:
     """Return all relations for a session as [{from, to, label}]."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(
-            text("SELECT from_title, to_title, label FROM relations WHERE session_id = :sid"),
-            {"sid": session_id},
+            text("SELECT from_title, to_title, label FROM relations WHERE wiki_id = :w AND session_id = :sid"),
+            {"w": wiki_id, "sid": session_id},
         )
         return [{"from": r.from_title, "to": r.to_title, "label": r.label} for r in rows]
 
 
-def upsert_relation(session_id: str, from_title: str, to_title: str, label: str) -> None:
+def upsert_relation(wiki_id: str, session_id: str, from_title: str, to_title: str, label: str) -> None:
     """Insert a single relation if it doesn't exist."""
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
         conn.execute(
             text("""
-                INSERT INTO relations (session_id, from_title, to_title, label)
-                VALUES (:sid, :from_title, :to_title, :label)
+                INSERT INTO relations (wiki_id, session_id, from_title, to_title, label)
+                VALUES (:w, :sid, :from_title, :to_title, :label)
                 ON CONFLICT (session_id, from_title, to_title, label) DO NOTHING
             """),
-            {"sid": session_id, "from_title": from_title, "to_title": to_title, "label": label},
+            {"w": wiki_id, "sid": session_id, "from_title": from_title, "to_title": to_title, "label": label},
         )
         conn.commit()
 
 
-def bulk_upsert_relations(session_id: str, rels: list[tuple[str, str, str]]) -> None:
+def bulk_upsert_relations(wiki_id: str, session_id: str, rels: list[tuple[str, str, str]]) -> None:
     """Batch-insert (from_title, to_title, label) tuples — skips existing rows."""
     if not rels:
         return
@@ -2431,12 +2444,12 @@ def bulk_upsert_relations(session_id: str, rels: list[tuple[str, str, str]]) -> 
     with engine.connect() as conn:
         conn.execute(
             text("""
-                INSERT INTO relations (session_id, from_title, to_title, label)
-                VALUES (:sid, :from_title, :to_title, :label)
+                INSERT INTO relations (wiki_id, session_id, from_title, to_title, label)
+                VALUES (:w, :sid, :from_title, :to_title, :label)
                 ON CONFLICT (session_id, from_title, to_title, label) DO NOTHING
             """),
             [
-                {"sid": session_id, "from_title": f, "to_title": t, "label": l}
+                {"w": wiki_id, "sid": session_id, "from_title": f, "to_title": t, "label": l}
                 for f, t, l in rels
             ],
         )
@@ -2508,7 +2521,7 @@ def cleanup_old_progress(days: int = 7) -> None:
 # Migration helper
 # ---------------------------------------------------------------------------
 
-def migrate_from_json(session_id: str, json_path: str) -> None:
+def migrate_from_json(wiki_id: str, session_id: str, json_path: str) -> None:
     """Read an index.json and insert all pages/relations into the DB.
 
     Safe to call multiple times — ON CONFLICT DO NOTHING skips existing rows.
@@ -2540,14 +2553,15 @@ def migrate_from_json(session_id: str, json_path: str) -> None:
             conn.execute(
                 text("""
                     INSERT INTO pages
-                        (session_id, title, content, summary, source_doc,
+                        (wiki_id, session_id, title, content, summary, source_doc,
                          contradiction_flagged, variants, char_count)
                     VALUES
-                        (:sid, :title, :content, :summary, :source_doc,
+                        (:w, :sid, :title, :content, :summary, :source_doc,
                          :cf, CAST(:variants AS jsonb), :char_count)
                     ON CONFLICT (session_id, title) DO NOTHING
                 """),
                 {
+                    "w": wiki_id,
                     "sid": session_id,
                     "title": title,
                     "content": content,
@@ -2562,11 +2576,12 @@ def migrate_from_json(session_id: str, json_path: str) -> None:
         for rel in raw_rels:
             conn.execute(
                 text("""
-                    INSERT INTO relations (session_id, from_title, to_title, label)
-                    VALUES (:sid, :from_title, :to_title, :label)
+                    INSERT INTO relations (wiki_id, session_id, from_title, to_title, label)
+                    VALUES (:w, :sid, :from_title, :to_title, :label)
                     ON CONFLICT (session_id, from_title, to_title, label) DO NOTHING
                 """),
                 {
+                    "w": wiki_id,
                     "sid": session_id,
                     "from_title": rel.get("from", ""),
                     "to_title": rel.get("to", ""),
@@ -2586,7 +2601,7 @@ def migrate_from_json(session_id: str, json_path: str) -> None:
 # S2: FTS cross-reference helpers (Phase 4)
 # ---------------------------------------------------------------------------
 
-def find_pages_mentioning_title(session_id: str, title: str) -> list[str]:
+def find_pages_mentioning_title(wiki_id: str, session_id: str, title: str) -> list[str]:
     """Return titles of pages whose content mentions the given title.
 
     Uses the GIN-indexed content_tsv column for O(log N) lookup instead of
@@ -2599,17 +2614,17 @@ def find_pages_mentioning_title(session_id: str, title: str) -> list[str]:
         rows = conn.execute(
             text("""
                 SELECT title FROM pages
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                   AND title      != :title
                   AND content_tsv @@ plainto_tsquery('english', :tokens)
             """),
-            {"sid": session_id, "title": title, "tokens": title},
+            {"w": wiki_id, "sid": session_id, "title": title, "tokens": title},
         )
         return [row.title for row in rows]
 
 
 def find_source_docs_mentioning_phrase(
-    session_id: str, phrase: str, cap: int = 25
+    wiki_id: str, session_id: str, phrase: str, cap: int = 25
 ) -> list[str]:
     """Return the distinct source_docs whose page CONTENT mentions ``phrase``.
 
@@ -2632,19 +2647,19 @@ def find_source_docs_mentioning_phrase(
         rows = conn.execute(
             text("""
                 SELECT DISTINCT source_doc FROM pages
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                   AND title NOT LIKE 'Q:%'
                   AND source_doc IS NOT NULL
                   AND content_tsv @@ phraseto_tsquery('english', :phrase)
                 LIMIT :cap
             """),
-            {"sid": session_id, "phrase": phrase, "cap": cap},
+            {"w": wiki_id, "sid": session_id, "phrase": phrase, "cap": cap},
         )
         return [row.source_doc for row in rows]
 
 
 def find_source_docs_by_title_tokens(
-    session_id: str, tokens: list[str], kind_hint: str | None = None,
+    wiki_id: str, session_id: str, tokens: list[str], kind_hint: str | None = None,
     cap: int = 25,
 ) -> list[str]:
     """Return distinct source_docs whose page TITLES contain EVERY token.
@@ -2680,7 +2695,7 @@ def find_source_docs_by_title_tokens(
     toks = toks[:4]
     conds = " AND ".join(f"title ILIKE :t{i}" for i in range(len(toks)))
     params: dict = {f"t{i}": f"%{tok}%" for i, tok in enumerate(toks)}
-    params.update({"sid": session_id, "cap": cap})
+    params.update({"w": wiki_id, "sid": session_id, "cap": cap})
     if kind_hint and kind_hint.strip():
         conds += " AND title ILIKE :kind"
         params["kind"] = f"%{kind_hint.strip()}%"
@@ -2689,7 +2704,7 @@ def find_source_docs_by_title_tokens(
         rows = conn.execute(
             text(f"""
                 SELECT DISTINCT source_doc FROM pages
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                   AND title NOT LIKE 'Q:%'
                   AND source_doc IS NOT NULL
                   AND {conds}
@@ -2705,7 +2720,7 @@ def find_source_docs_by_title_tokens(
 # ---------------------------------------------------------------------------
 
 def find_pages_due_for_compaction(
-    session_id: str, append_threshold: int, char_threshold: int
+    wiki_id: str, session_id: str, append_threshold: int, char_threshold: int
 ) -> list[dict]:
     """Return pages that exceed the compaction thresholds."""
     from sqlalchemy import text
@@ -2715,19 +2730,20 @@ def find_pages_due_for_compaction(
             text("""
                 SELECT title, content, summary, variants, append_count, char_count, source_doc
                 FROM pages
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                   AND (
                     append_count >= :at
                     OR (append_count >= 2 AND char_count >= :ct)
                   )
                 ORDER BY append_count DESC, char_count DESC
             """),
-            {"sid": session_id, "at": append_threshold, "ct": char_threshold},
+            {"w": wiki_id, "sid": session_id, "at": append_threshold, "ct": char_threshold},
         )
         return [dict(row._mapping) for row in rows]
 
 
 def reset_page_after_compaction(
+    wiki_id: str,
     session_id: str,
     title: str,
     content: str,
@@ -2748,9 +2764,10 @@ def reset_page_after_compaction(
                     char_count            = :char_count,
                     variants              = NULL,
                     last_modified         = now()
-                WHERE session_id = :sid AND title = :title
+                WHERE wiki_id = :w AND session_id = :sid AND title = :title
             """),
             {
+                "w": wiki_id,
                 "sid": session_id,
                 "title": title,
                 "content": content,
@@ -2767,6 +2784,7 @@ def reset_page_after_compaction(
 # ---------------------------------------------------------------------------
 
 def upsert_contradiction(
+    wiki_id: str,
     session_id: str,
     page_title: str,
     claim: str | None,
@@ -2782,11 +2800,11 @@ def upsert_contradiction(
         conn.execute(
             text("""
                 INSERT INTO contradictions
-                    (session_id, page_title, claim, value_a, source_a, value_b, source_b)
-                VALUES (:sid, :title, :claim, :va, :sa, :vb, :sb)
+                    (wiki_id, session_id, page_title, claim, value_a, source_a, value_b, source_b)
+                VALUES (:w, :sid, :title, :claim, :va, :sa, :vb, :sb)
             """),
             {
-                "sid": session_id, "title": page_title,
+                "w": wiki_id, "sid": session_id, "title": page_title,
                 "claim": claim, "va": value_a, "sa": source_a,
                 "vb": value_b, "sb": source_b,
             },
@@ -2810,7 +2828,7 @@ _METADATA_COLUMNS = (
 )
 
 
-def upsert_metadata(session_id: str, doc_name: str, metadata: dict) -> None:
+def upsert_metadata(wiki_id: str, session_id: str, doc_name: str, metadata: dict) -> None:
     """Store document-level metadata extracted at ingest time.
 
     `doc_name` is used as the `title` key — Review mode looks up by doc_name.
@@ -2826,12 +2844,13 @@ def upsert_metadata(session_id: str, doc_name: str, metadata: dict) -> None:
     if not updates:
         return
     set_clause = ", ".join(f"{k} = COALESCE(:{k}, page_metadata.{k})" for k in updates)
-    params = {"sid": session_id, "title": doc_name, **updates}
+    set_clause += ", wiki_id = :w"
+    params = {"w": wiki_id, "sid": session_id, "title": doc_name, **updates}
     with engine.connect() as conn:
         conn.execute(
             text(f"""
-                INSERT INTO page_metadata (session_id, title, {', '.join(updates)})
-                VALUES (:sid, :title, {', '.join(':' + k for k in updates)})
+                INSERT INTO page_metadata (wiki_id, session_id, title, {', '.join(updates)})
+                VALUES (:w, :sid, :title, {', '.join(':' + k for k in updates)})
                 ON CONFLICT (session_id, title) DO UPDATE SET {set_clause}
             """),
             params,
@@ -3081,7 +3100,7 @@ def delete_messages(session_id: str) -> None:
 # Source document helpers
 # ---------------------------------------------------------------------------
 
-def get_source_docs(session_id: str) -> list[str]:
+def get_source_docs(wiki_id: str, session_id: str) -> list[str]:
     """Return distinct source_doc values for a session."""
     from sqlalchemy import text
     engine = get_engine()
@@ -3089,9 +3108,9 @@ def get_source_docs(session_id: str) -> list[str]:
         rows = conn.execute(
             text("""
                 SELECT DISTINCT source_doc FROM pages
-                WHERE session_id = :sid AND source_doc != ''
+                WHERE wiki_id = :w AND session_id = :sid AND source_doc != ''
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         return [r.source_doc for r in rows]
 
@@ -3100,7 +3119,7 @@ def get_source_docs(session_id: str) -> list[str]:
 # Source positions (citation exact-location support)
 # ---------------------------------------------------------------------------
 
-def store_page_map(session_id: str, source_doc: str, page_map: list[dict]) -> None:
+def store_page_map(wiki_id: str, session_id: str, source_doc: str, page_map: list[dict]) -> None:
     """Store page-level character positions for a source document."""
     if not page_map:
         return
@@ -3110,21 +3129,22 @@ def store_page_map(session_id: str, source_doc: str, page_map: list[dict]) -> No
         for entry in page_map:
             conn.execute(
                 text("""
-                    INSERT INTO source_positions (session_id, source_doc, page_num, char_start, char_end)
-                    VALUES (:sid, :doc, :pn, :cs, :ce)
+                    INSERT INTO source_positions (wiki_id, session_id, source_doc, page_num, char_start, char_end)
+                    VALUES (:w, :sid, :doc, :pn, :cs, :ce)
                     ON CONFLICT (session_id, source_doc, page_num) DO UPDATE SET
                         char_start = EXCLUDED.char_start,
-                        char_end   = EXCLUDED.char_end
+                        char_end   = EXCLUDED.char_end,
+                        wiki_id    = EXCLUDED.wiki_id
                 """),
                 {
-                    "sid": session_id, "doc": source_doc,
+                    "w": wiki_id, "sid": session_id, "doc": source_doc,
                     "pn": entry["page_num"], "cs": entry["char_start"], "ce": entry["char_end"],
                 },
             )
         conn.commit()
 
 
-def get_page_map(session_id: str, source_doc: str) -> list[dict]:
+def get_page_map(wiki_id: str, session_id: str, source_doc: str) -> list[dict]:
     """Return page positions for a source document."""
     from sqlalchemy import text
     engine = get_engine()
@@ -3133,15 +3153,15 @@ def get_page_map(session_id: str, source_doc: str) -> list[dict]:
             text("""
                 SELECT page_num, char_start, char_end
                 FROM source_positions
-                WHERE session_id = :sid AND source_doc = :doc
+                WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
                 ORDER BY page_num
             """),
-            {"sid": session_id, "doc": source_doc},
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
         return [{"page_num": r.page_num, "char_start": r.char_start, "char_end": r.char_end} for r in rows]
 
 
-def find_quote_position(session_id: str, source_doc: str, quote_text: str) -> dict:
+def find_quote_position(wiki_id: str, session_id: str, source_doc: str, quote_text: str) -> dict:
     """Find the page number and character offset of a quote in a source document.
 
     Loads the document text from the upload path, does a fuzzy match, then maps
@@ -3149,7 +3169,7 @@ def find_quote_position(session_id: str, source_doc: str, quote_text: str) -> di
     """
     import re as _re
 
-    page_map = get_page_map(session_id, source_doc)
+    page_map = get_page_map(wiki_id, session_id, source_doc)
     if not page_map:
         return {"found": False, "page_num": 0, "char_offset": 0}
 
@@ -3205,7 +3225,7 @@ def find_quote_position(session_id: str, source_doc: str, quote_text: str) -> di
     return {"found": True, "page_num": matched_page, "char_offset": idx}
 
 
-def get_metadata(session_id: str, doc_name: str) -> dict:
+def get_metadata(wiki_id: str, session_id: str, doc_name: str) -> dict:
     """Return the metadata dict for a document, or {} if none stored."""
     from sqlalchemy import text
     engine = get_engine()
@@ -3214,16 +3234,16 @@ def get_metadata(session_id: str, doc_name: str) -> dict:
             text(f"""
                 SELECT {', '.join(_METADATA_COLUMNS)}
                 FROM page_metadata
-                WHERE session_id = :sid AND title = :title
+                WHERE wiki_id = :w AND session_id = :sid AND title = :title
             """),
-            {"sid": session_id, "title": doc_name},
+            {"w": wiki_id, "sid": session_id, "title": doc_name},
         ).fetchone()
         if row is None:
             return {}
         return {k: v for k, v in zip(_METADATA_COLUMNS, row) if v is not None}
 
 
-def get_documents_by_family(session_id: str, doc_family: str) -> list[str]:
+def get_documents_by_family(wiki_id: str, session_id: str, doc_family: str) -> list[str]:
     """Return the doc_name (title) of every document in a given family.
 
     Used by scope resolution (Phase 2) to answer family-scoped questions
@@ -3236,14 +3256,14 @@ def get_documents_by_family(session_id: str, doc_family: str) -> list[str]:
             text("""
                 SELECT title
                 FROM page_metadata
-                WHERE session_id = :sid AND doc_family = :fam
+                WHERE wiki_id = :w AND session_id = :sid AND doc_family = :fam
             """),
-            {"sid": session_id, "fam": doc_family},
+            {"w": wiki_id, "sid": session_id, "fam": doc_family},
         )
         return [row.title for row in rows]
 
 
-def list_doc_families(session_id: str) -> list[str]:
+def list_doc_families(wiki_id: str, session_id: str) -> list[str]:
     """Return the distinct non-null doc_family values present in a session.
 
     Lets scope resolution know which families actually exist before trying to
@@ -3256,14 +3276,14 @@ def list_doc_families(session_id: str) -> list[str]:
             text("""
                 SELECT DISTINCT doc_family
                 FROM page_metadata
-                WHERE session_id = :sid AND doc_family IS NOT NULL
+                WHERE wiki_id = :w AND session_id = :sid AND doc_family IS NOT NULL
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         return [row.doc_family for row in rows]
 
 
-def lookup_clause(session_id: str, doc_hint: str, clause_num: str) -> list[dict]:
+def lookup_clause(wiki_id: str, session_id: str, doc_hint: str, clause_num: str) -> list[dict]:
     """Resolve a clause number to its heading and wiki page(s) for one document.
 
     doc_hint is whatever name the scope resolver produced — it may be the full
@@ -3278,16 +3298,16 @@ def lookup_clause(session_id: str, doc_hint: str, clause_num: str) -> list[dict]
             text("""
                 SELECT DISTINCT heading, page_title
                 FROM clause_map
-                WHERE session_id = :sid AND clause_num = :num
+                WHERE wiki_id = :w AND session_id = :sid AND clause_num = :num
                   AND (source_doc ILIKE '%' || :doc || '%'
                        OR :doc ILIKE '%' || source_doc || '%')
             """),
-            {"sid": session_id, "num": clause_num, "doc": doc_hint},
+            {"w": wiki_id, "sid": session_id, "num": clause_num, "doc": doc_hint},
         )
         return [{"heading": r.heading, "page_title": r.page_title} for r in rows]
 
 
-def doc_clause_numbers(session_id: str, doc_hint: str) -> list[str]:
+def doc_clause_numbers(wiki_id: str, session_id: str, doc_hint: str) -> list[str]:
     """Every clause number the map knows for a document ([] = unnumbered source)."""
     from sqlalchemy import text
     engine = get_engine()
@@ -3296,11 +3316,11 @@ def doc_clause_numbers(session_id: str, doc_hint: str) -> list[str]:
             text("""
                 SELECT DISTINCT clause_num
                 FROM clause_map
-                WHERE session_id = :sid
+                WHERE wiki_id = :w AND session_id = :sid
                   AND (source_doc ILIKE '%' || :doc || '%'
                        OR :doc ILIKE '%' || source_doc || '%')
             """),
-            {"sid": session_id, "doc": doc_hint},
+            {"w": wiki_id, "sid": session_id, "doc": doc_hint},
         )
         nums = [r.clause_num for r in rows]
         # "1" < "10" < "2" under string sort; sort numerically by dotted parts.

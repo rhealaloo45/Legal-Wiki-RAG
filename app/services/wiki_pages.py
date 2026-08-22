@@ -22,14 +22,14 @@ from services import db
 logger = logging.getLogger(__name__)
 
 
-def rename_page(session_id: str, old_title: str, new_title: str) -> dict:
+def rename_page(wiki_id: str, session_id: str, old_title: str, new_title: str) -> dict:
     old_title = (old_title or "").strip()
     new_title = (new_title or "").strip()
     if not old_title or not new_title:
         raise ValueError("old_title and new_title are both required")
     if old_title == new_title:
         raise ValueError("new_title is the same as old_title")
-    ok = db.rename_page(session_id, old_title, new_title)
+    ok = db.rename_page(wiki_id, session_id, old_title, new_title)
     if not ok:
         raise ValueError(
             f"Rename failed — either {old_title!r} doesn't exist, "
@@ -39,25 +39,25 @@ def rename_page(session_id: str, old_title: str, new_title: str) -> dict:
     return {"status": "renamed", "old_title": old_title, "new_title": new_title}
 
 
-def delete_page(session_id: str, title: str) -> dict:
+def delete_page(wiki_id: str, session_id: str, title: str) -> dict:
     title = (title or "").strip()
     if not title:
         raise ValueError("title is required")
-    ok = db.delete_page(session_id, title)
+    ok = db.delete_page(wiki_id, session_id, title)
     if not ok:
         raise ValueError(f"Page {title!r} does not exist in this session")
     logger.info("Deleted page %r in session %r", title, session_id)
     return {"status": "deleted", "title": title}
 
 
-def merge_pages(session_id: str, source_title: str, target_title: str) -> dict:
+def merge_pages(wiki_id: str, session_id: str, source_title: str, target_title: str) -> dict:
     source_title = (source_title or "").strip()
     target_title = (target_title or "").strip()
     if not source_title or not target_title:
         raise ValueError("source_title and target_title are both required")
     if source_title == target_title:
         raise ValueError("source_title and target_title must be different pages")
-    ok = db.merge_pages(session_id, source_title, target_title)
+    ok = db.merge_pages(wiki_id, session_id, source_title, target_title)
     if not ok:
         raise ValueError(
             f"Merge failed — one of {source_title!r} / {target_title!r} "
