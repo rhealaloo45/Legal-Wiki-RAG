@@ -168,9 +168,13 @@ def metadata_spec(family_key: str | None) -> dict[str, str]:
             spec[name] = "currency"
         elif name in ("notice_period", "term_length"):
             spec[name] = "duration"
-        elif name in ("parties", "plaintiffs", "defendants", "matters_opined",
-                      "assumptions", "qualifications", "statutes_cited",
-                      "conditions_precedent", "key_terms"):
+        elif name in ("parties", "plaintiffs", "defendants"):
+            # Party fields get the redaction-aware list coercer — a
+            # description-only entry is reduced to the document's own defined
+            # term rather than shown as an unreadable clause fragment.
+            spec[name] = "party_list"
+        elif name in ("matters_opined", "assumptions", "qualifications",
+                      "statutes_cited", "conditions_precedent", "key_terms"):
             spec[name] = "list"
         elif name == "binding_status":
             spec[name] = "text"

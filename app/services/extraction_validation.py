@@ -406,6 +406,60 @@ def _negation_tokens(s: str) -> frozenset[str]:
     return frozenset(_enum_key(s).split()) & _NEGATIONS
 
 
+# A party entry that is only a description of a company, with the name
+# redacted out of the source. Extremely common in this corpus.
+_PARTY_DESCRIPTOR = re.compile(
+    r"^\s*(a|an|the)\s+.*\b(company|corporation|partnership|limited liability|"
+    r"incorporated|organized|organised|registered|existing|duly)\b",
+    re.IGNORECASE,
+)
+# The defined term a contract assigns such a party: (hereinafter "Participant"),
+# (the "Buyer"), referred to as 'Tata'.
+_DEFINED_TERM = re.compile(
+    r"""(?:hereinafter\s+(?:referred\s+to\s+as\s+)?|referred\s+to\s+as\s+|the\s+)?
+        [“"']([A-Z][A-Za-z .&-]{1,40})[”"']""",
+    re.VERBOSE,
+)
+
+
+def coerce_party_list(value: Any) -> tuple[Any, bool, str | None]:
+    """A party list, with redacted parties rendered by their defined term.
+
+    Legal drafting names a party then describes it: `Tata Sons Private
+    Limited, a company incorporated under the laws of India`. When the name
+    is redacted only the description survives, and showing a reviewer
+    "a limited liability company duly incorporated under the laws of  having
+    its registered address at" is technically faithful and practically
+    useless — they cannot tell which party it is.
+
+    So a description-only entry is reduced to the defined term the document
+    itself assigns it ("Participant"), marked as redacted. The original text
+    is kept as the raw value, so nothing is lost — the reviewer sees a usable
+    label and can still check what it came from.
+    """
+    items, coerced, err = coerce_list(value)
+    if err:
+        return items, coerced, err
+
+    out: list[str] = []
+    changed = coerced
+    for item in items:
+        text = str(item).strip()
+        if not _PARTY_DESCRIPTOR.match(text):
+            out.append(text)
+            continue
+        m = _DEFINED_TERM.search(text)
+        if m:
+            out.append(f"{m.group(1)} (name redacted)")
+            changed = True
+        else:
+            # No defined term either — keep it, but say plainly that this is a
+            # description rather than letting it masquerade as a party name.
+            out.append(f"[unnamed party — {text[:70].rstrip()}…]")
+            changed = True
+    return out, changed, None
+
+
 def coerce_enum(value: Any, allowed: tuple[str, ...]) -> tuple[Any, bool, str | None]:
     """Map free text onto an allowed value, or flag it.
 
@@ -458,6 +512,7 @@ def coerce_confidence(value: Any) -> float:
 
 
 _COERCERS = {
+    "party_list": coerce_party_list,
     "text": coerce_text,
     "string": coerce_text,
     "date": coerce_date,
