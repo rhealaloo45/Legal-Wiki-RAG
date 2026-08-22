@@ -119,6 +119,14 @@ def is_probable_entity_name(name: str) -> bool:
     s = (name or "").strip()
     if len(s) < 2 or len(s) > 200:
         return False
+    # A party whose name was redacted out of the source is rendered by the
+    # document's own defined term ("Participant (name redacted)"). That label
+    # identifies a role within ONE agreement — two documents' "Participant"
+    # are different companies — so canonicalizing on it would merge unrelated
+    # parties into a single entity. The value is still shown on the document;
+    # it just does not become a corpus-wide identity.
+    if "(name redacted)" in s.lower() or s.startswith("[unnamed party"):
+        return False
     if _ENTITY_DESCRIPTOR.match(s):
         return False
     if s.lower().strip(" .") in _ENTITY_ROLE_WORDS:
