@@ -1730,6 +1730,12 @@ def _review_fields(raw_typed, crypto_mod) -> list[dict]:
                 "coerced": bool(meta.get("coerced")),
                 "reason": meta.get("reason"),
                 "high_stakes": bool(meta.get("high_stakes")),
+                # Edit provenance — a human-corrected value and a
+                # model-extracted one that happen to match are not the same
+                # fact, so the UI shows which is which.
+                "edited": bool(meta.get("edited")),
+                "edited_at": meta.get("edited_at"),
+                "previous_value": meta.get("previous_value"),
             })
         rows.sort(key=lambda r: (r["confidence"] is None,
                                  r["confidence"] if r["confidence"] is not None else 1.0))

@@ -1866,6 +1866,44 @@ def review_queue_document_detail():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/review_queue/field", methods=["POST"])
+def review_queue_edit_field():
+    """Correct one extracted metadata field.
+
+    The extraction is preserved as previous_value and the field is stamped as
+    human-edited — a corrected value and a model-extracted one that happen to
+    match are not the same fact.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("session_id", "")
+    source_doc = data.get("source_doc", "")
+    field_name = (data.get("field") or "").strip()
+    family = (data.get("family") or "").strip() or None
+    if not session_id or not source_doc or not field_name:
+        return jsonify({"error": "session_id, source_doc and field are required"}), 400
+    session_id = _get_main_session_id() or session_id
+
+    value = data.get("value")
+    if isinstance(value, str) and not value.strip():
+        value = None  # cleared field means "not stated", not an empty string
+
+    from services import backbone as _backbone
+    try:
+        result = _backbone.update_metadata_field(
+            current_wiki_id(), session_id, source_doc, field_name, value, family)
+        return jsonify({"status": "updated", **result})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Metadata field edit failed: %s", e, exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 @app.route("/review_queue/resolve_document", methods=["POST"])
 def review_queue_resolve_document():
     """Approve or reject every pending item for one document.

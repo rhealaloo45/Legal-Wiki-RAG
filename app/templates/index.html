@@ -1459,14 +1459,23 @@
       height: calc(100vh - 230px);
       min-height: 420px;
     }
+    /* Each pane is its own flex column: a fixed header, a scrolling body and
+       (for the metadata pane) a fixed footer. The header must not scroll with
+       the content, and must be opaque — an inherited background resolved to
+       transparent and let text scroll through it. */
     .review-doc-list, .review-doc-meta, .review-doc-source {
       background: var(--bg-card);
       border: .5px solid var(--border);
       border-radius: 12px;
       height: 100%;
-      overflow-y: auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
     }
+    .review-doc-list { overflow-y: auto; display: block; }
     .review-doc-source { background: var(--bg-secondary); }
+    .review-scroll { flex: 1; min-height: 0; overflow-y: auto; }
     .review-empty {
       padding: 26px 18px; text-align: center;
       font-size: 12px; color: var(--text-muted);
@@ -1519,13 +1528,92 @@
       padding: 2px 7px; border-radius: 5px; white-space: nowrap;
     }
     .review-pane-head {
-      padding: 11px 14px;
+      flex: none;
+      padding: 10px 14px;
       border-bottom: .5px solid var(--border);
-      font-size: 11px; font-weight: 700;
+      font-size: 11.5px; font-weight: 600;
+      color: var(--text-primary);
+      background: var(--bg-card);
+      position: sticky; top: 0; z-index: 3;
+      display: flex; align-items: baseline; gap: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .review-doc-source .review-pane-head {
+      background: var(--bg-secondary);
+      text-transform: uppercase; letter-spacing: .05em;
+      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+    }
+    .review-doc-list .review-pane-head {
+      text-transform: uppercase; letter-spacing: .05em;
+      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+    }
+    .review-head-sub {
+      font-size: 11px; font-weight: 400; color: var(--text-muted);
+      margin-left: auto; flex: none;
+    }
+    .review-sub-head {
+      padding: 9px 14px;
+      background: var(--bg-secondary);
+      border-top: .5px solid var(--border);
+      border-bottom: .5px solid var(--border);
+      font-size: 10.5px; font-weight: 700;
       letter-spacing: .05em; text-transform: uppercase;
       color: var(--text-muted);
-      position: sticky; top: 0; background: inherit; z-index: 2;
     }
+    .review-doc-typeline {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px; font-size: 12px; color: var(--text-secondary);
+    }
+    .review-doc-footer {
+      flex: none;
+      display: flex; gap: 9px;
+      padding: 11px 14px;
+      border-top: .5px solid var(--border);
+      background: var(--bg-card);
+    }
+    .review-item-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px; align-items: start;
+      padding: 10px 14px;
+      border-bottom: .5px solid var(--border);
+    }
+    .review-item-row:last-child { border-bottom: none; }
+    .review-item-text {
+      display: block; font-size: 11.5px; line-height: 1.5;
+      color: var(--text-secondary); word-break: break-word;
+    }
+    .rfield-actions {
+      display: flex; align-items: center; gap: 5px; flex: none;
+    }
+    .rfield-note {
+      font-size: 11px; line-height: 1.45; color: var(--gold); margin-top: 4px;
+    }
+    .rfield-raw {
+      font-size: 11px; color: var(--text-muted); margin-top: 3px;
+      word-break: break-word;
+    }
+    .rfield-edited {
+      display: inline-flex; align-items: center; gap: 3px;
+      margin-left: 7px; padding: 1px 6px; border-radius: 5px;
+      background: var(--bg-hover); color: var(--green-text);
+      font-size: 10.5px; font-weight: 600; white-space: nowrap;
+    }
+    .rfield-editor input, .rfield-editor textarea {
+      width: 100%; box-sizing: border-box;
+      padding: 7px 9px; border-radius: 7px;
+      border: .5px solid var(--border-strong, var(--border));
+      background: var(--bg-secondary); color: var(--text-primary);
+      font-family: inherit; font-size: 12px; line-height: 1.5;
+      resize: vertical;
+    }
+    .rfield-editor input:focus, .rfield-editor textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .rfield-editor-actions {
+      display: flex; align-items: center; gap: 7px;
+      margin-top: 7px; flex-wrap: wrap;
+    }
+    .rfield-hint { font-size: 10.5px; color: var(--text-muted); }
     .review-source-page {
       padding: 12px 14px;
       border-bottom: .5px solid var(--border);
@@ -4616,53 +4704,156 @@
       else loadAdminReviewQueue();
     }
 
+    // Stored names are "<uuid>_<folder>_<folder>_<file>.pdf". Showing that in
+    // a heading is unreadable, so display uses the last meaningful segment —
+    // "Shareholder Agreement 1" rather than the whole path in capitals.
+    function _docDisplayName(sourceDoc) {
+      let s = _shortSourceDoc(sourceDoc || '');
+      s = s.replace(/\.(pdf|docx|txt)$/i, '');
+      const parts = s.split('_').map(p => p.trim()).filter(Boolean);
+      const meaningful = parts.filter(p => !/^(redacted|copy|final|v\d+)\s*(\(\d+\))?$/i.test(p));
+      return (meaningful.length ? meaningful[meaningful.length - 1] : (parts[parts.length - 1] || s)) || s;
+    }
+
+    // Confidence colours are CSS variables, so they cannot be concatenated
+    // with an alpha suffix — doing so produced invalid CSS and a chip with no
+    // background at all. Tint comes from a separate token instead.
+    function _confTone(conf) {
+      if (conf === null || conf === undefined) return { fg: 'var(--text-muted)', bg: 'var(--bg-hover)' };
+      if (conf >= 0.8) return { fg: 'var(--green-text)', bg: 'var(--bg-hover)' };
+      if (conf >= 0.5) return { fg: 'var(--amber)', bg: 'var(--bg-hover)' };
+      return { fg: 'var(--red)', bg: 'var(--bg-hover)' };
+    }
+
     function _confChip(conf) {
-      // A null confidence is rendered as unknown rather than as a number.
-      // Documents ingested before per-field confidence existed genuinely have
-      // no score, and inventing one would be the exact failure the Review
-      // Queue exists to catch.
-      if (conf === null || conf === undefined) {
-        return `<span class="review-conf-chip" style="background:var(--bg-hover);color:var(--text-muted)">n/a</span>`;
-      }
-      const pct = Math.round(conf * 100);
-      const c = _confidenceColor(conf);
-      return `<span class="review-conf-chip" style="background:${c}1f;color:${c}">${(conf).toFixed(2)}</span>`;
+      // A null confidence renders as unknown, never as a number. Documents
+      // ingested before per-field confidence existed genuinely have no score,
+      // and inventing one is the exact failure this queue exists to catch.
+      const t = _confTone(conf);
+      const label = (conf === null || conf === undefined) ? 'n/a' : Number(conf).toFixed(2);
+      return '<span class="review-conf-chip" style="background:' + t.bg + ';color:' + t.fg + '">' + label + '</span>';
     }
 
     async function loadReviewDocuments() {
       const list = document.getElementById('review-doc-list');
-      list.innerHTML = '<div class="review-empty">Loading…</div>';
+      list.innerHTML = '<div class="review-empty">Loading&hellip;</div>';
       try {
-        const res = await fetch(`/review_queue/documents?session_id=${SID}`);
+        const res = await fetch('/review_queue/documents?session_id=' + SID);
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Failed to load');
         reviewDocs = d.documents || [];
         const pending = reviewDocs.filter(x => x.pending_total > 0).length;
         document.getElementById('admin-review-sub').textContent =
-          `${reviewDocs.length} document${reviewDocs.length === 1 ? '' : 's'} · ${pending} with items awaiting review`;
+          reviewDocs.length + ' document' + (reviewDocs.length === 1 ? '' : 's') +
+          ' · ' + pending + ' with items awaiting review';
         if (!reviewDocs.length) {
           list.innerHTML = '<div class="review-empty">No ingested documents yet.</div>';
           return;
         }
-        list.innerHTML = `<div class="review-pane-head">Documents</div>` + reviewDocs.map((doc, i) => {
-          const name = _shortSourceDoc(doc.source_doc);
+        const rows = reviewDocs.map((doc, i) => {
           const badge = doc.pending_total > 0
-            ? `<span class="admin-badge ${doc.pending_high_stakes ? 'red' : 'amber'}">${doc.pending_total} waiting</span>`
-            : `<span class="admin-badge green">clear</span>`;
-          return `<div class="review-doc-item${i === reviewDocSelected ? ' active' : ''}" onclick="selectReviewDoc(${i})">
-              <div class="review-doc-name">${escapeHtmlRule(name)}</div>
-              <div class="review-doc-sub">
-                ${_confChip(doc.family_confidence)}
-                <span>${escapeHtmlRule(doc.doc_family || 'unclassified')}</span>
-                <span>· ${doc.page_count}p</span>
-              </div>
-              <div style="margin-top:6px">${badge}</div>
-            </div>`;
+            ? '<span class="admin-badge ' + (doc.pending_high_stakes ? 'red' : 'amber') + '">' + doc.pending_total + ' waiting</span>'
+            : '<span class="admin-badge green">clear</span>';
+          return '<div class="review-doc-item' + (i === reviewDocSelected ? ' active' : '') + '" onclick="selectReviewDoc(' + i + ')">' +
+              '<div class="review-doc-name">' + escapeHtmlRule(_docDisplayName(doc.source_doc)) + '</div>' +
+              '<div class="review-doc-sub">' + _confChip(doc.family_confidence) +
+                '<span>' + escapeHtmlRule(doc.doc_family || 'unclassified') + '</span>' +
+                '<span>· ' + doc.page_count + 'p</span>' +
+              '</div>' +
+              '<div style="margin-top:6px">' + badge + '</div>' +
+            '</div>';
         }).join('');
-        if (reviewDocSelected === null && reviewDocs.length) selectReviewDoc(0);
+        list.innerHTML = '<div class="review-pane-head">Documents</div>' + rows;
+        selectReviewDoc(reviewDocSelected === null ? 0 : Math.min(reviewDocSelected, reviewDocs.length - 1));
       } catch (e) {
-        list.innerHTML = `<div class="review-empty" style="color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+        list.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
       }
+    }
+
+    function _fieldValueText(value) {
+      if (value === null || value === undefined || value === '') return '';
+      if (Array.isArray(value)) return value.join('; ');
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    }
+
+    function _isListField(f) {
+      return Array.isArray(f.value) ||
+        /parties|plaintiffs|defendants|assumptions|qualifications|matters_opined|statutes_cited/.test(f.name || '');
+    }
+
+    function _renderFieldRow(f, idx) {
+      const shown = _fieldValueText(f.value);
+      const isNull = shown === '';
+      const edited = !!f.edited;
+      return '<div class="review-field-row" id="rfield-' + idx + '">' +
+          '<span class="review-field-name">' + escapeHtmlRule(f.name) +
+            (f.high_stakes ? ' <i class="ti ti-alert-triangle" style="font-size:11px;color:var(--red)" title="High stakes — individual sign-off"></i>' : '') +
+          '</span>' +
+          '<span class="review-field-value">' +
+            '<span class="rfield-display">' +
+              (isNull ? '<span class="review-field-null">not stated</span>' : escapeHtmlRule(shown)) +
+              (edited ? '<span class="rfield-edited" title="Corrected by a reviewer"><i class="ti ti-user-check" style="font-size:11px"></i> edited</span>' : '') +
+            '</span>' +
+            (f.reason ? '<div class="rfield-note"><i class="ti ti-alert-triangle" style="font-size:11px"></i> ' + escapeHtmlRule(f.reason) + '</div>' : '') +
+            (f.raw && _fieldValueText(f.raw) !== shown ? '<div class="rfield-raw">extracted: ' + escapeHtmlRule(_fieldValueText(f.raw)) + '</div>' : '') +
+            (edited && f.previous_value ? '<div class="rfield-raw">was: ' + escapeHtmlRule(_fieldValueText(f.previous_value)) + '</div>' : '') +
+          '</span>' +
+          '<span class="rfield-actions">' + _confChip(f.confidence) +
+            '<button type="button" class="admin-icon-btn" title="Edit this value" onclick="startFieldEdit(' + idx + ')"><i class="ti ti-pencil" style="font-size:13px"></i></button>' +
+          '</span>' +
+        '</div>';
+    }
+
+    function startFieldEdit(idx) {
+      const doc = reviewDocs[reviewDocSelected];
+      if (!doc) return;
+      const f = doc.fields[idx];
+      const row = document.getElementById('rfield-' + idx);
+      if (!row || !f) return;
+      const current = _fieldValueText(f.value);
+      const multi = current.length > 60 || _isListField(f);
+      const hint = _isListField(f)
+        ? 'Separate multiple entries with a semicolon'
+        : 'Leave blank to record this as not stated';
+      row.querySelector('.review-field-value').innerHTML =
+        '<div class="rfield-editor">' +
+          (multi
+            ? '<textarea id="rfield-input-' + idx + '" rows="3">' + escapeHtmlRule(current) + '</textarea>'
+            : '<input id="rfield-input-' + idx + '" type="text" value="' + escapeHtmlRule(current) + '">') +
+          '<div class="rfield-editor-actions">' +
+            '<button type="button" class="admin-pill-btn primary" onclick="saveFieldEdit(' + idx + ')"><i class="ti ti-check" style="font-size:13px"></i>Save</button>' +
+            '<button type="button" class="admin-pill-btn" onclick="selectReviewDoc(reviewDocSelected)">Cancel</button>' +
+            '<span class="rfield-hint">' + hint + '</span>' +
+          '</div>' +
+        '</div>';
+      const input = document.getElementById('rfield-input-' + idx);
+      if (input) { input.focus(); }
+    }
+
+    async function saveFieldEdit(idx) {
+      const doc = reviewDocs[reviewDocSelected];
+      const f = doc && doc.fields[idx];
+      const input = document.getElementById('rfield-input-' + idx);
+      if (!doc || !f || !input) return;
+      const value = input.value.trim();
+      // A list-shaped field goes back as a list, so a corrected party list
+      // stays a list rather than collapsing into one long string.
+      const payloadValue = value === ''
+        ? null
+        : (_isListField(f) ? value.split(';').map(x => x.trim()).filter(Boolean) : value);
+      try {
+        const res = await fetch('/review_queue/field', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: doc.source_doc,
+                                 field: f.name, value: payloadValue,
+                                 family: doc.doc_family }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Save failed');
+        showToast(f.name + ' updated', 'success');
+        await loadReviewDocuments();
+      } catch (e) { showToast(e.message, 'error'); }
     }
 
     async function selectReviewDoc(idx) {
@@ -4674,103 +4865,104 @@
 
       const meta = document.getElementById('review-doc-meta');
       const src = document.getElementById('review-doc-source');
-      meta.innerHTML = '<div class="review-empty">Loading…</div>';
-      src.innerHTML = '<div class="review-empty">Loading…</div>';
+      const fieldsHtml = doc.fields.length
+        ? doc.fields.map((f, i) => _renderFieldRow(f, i)).join('')
+        : '<div class="review-empty">No typed metadata extracted for this family.</div>';
 
-      const fieldsHtml = doc.fields.length ? doc.fields.map(f => {
-        const isNull = f.value === null || f.value === undefined || f.value === '' ||
-                       (Array.isArray(f.value) && !f.value.length);
-        const shown = Array.isArray(f.value) ? f.value.join('; ') : String(f.value);
-        return `<div class="review-field-row">
-            <span class="review-field-name">${escapeHtmlRule(f.name)}${f.high_stakes ? ' <i class="ti ti-alert-triangle" style="font-size:11px;color:var(--red)" title="High stakes — individual sign-off"></i>' : ''}</span>
-            <span class="review-field-value">
-              ${isNull ? '<span class="review-field-null">not stated</span>' : escapeHtmlRule(shown)}
-              ${f.reason ? `<div style="font-size:11px;color:var(--gold);margin-top:3px"><i class="ti ti-alert-triangle" style="font-size:11px"></i> ${escapeHtmlRule(f.reason)}</div>` : ''}
-              ${f.raw && f.raw !== f.value ? `<div style="font-size:11px;color:var(--text-muted);margin-top:2px">raw: ${escapeHtmlRule(String(f.raw))}</div>` : ''}
-            </span>
-            ${_confChip(f.confidence)}
-          </div>`;
-      }).join('') : '<div class="review-empty">No typed metadata extracted for this family.</div>';
-
-      meta.innerHTML = `
-        <div class="review-pane-head">${escapeHtmlRule(_shortSourceDoc(doc.source_doc))}</div>
-        <div style="padding:12px 14px;border-bottom:.5px solid var(--border);display:flex;flex-wrap:wrap;gap:7px;align-items:center">
-          <span class="admin-badge">${escapeHtmlRule(doc.doc_family || 'unclassified')}</span>
-          ${doc.doc_type ? `<span style="font-size:11.5px;color:var(--text-secondary)">${escapeHtmlRule(doc.doc_type)}</span>` : ''}
-          ${doc.jurisdiction ? `<span style="font-size:11.5px;color:var(--text-muted)">· ${escapeHtmlRule(doc.jurisdiction)}</span>` : ''}
-          <span style="margin-left:auto;display:flex;align-items:center;gap:6px">
-            <span style="font-size:11px;color:var(--text-muted)">classification</span>${_confChip(doc.family_confidence)}
-          </span>
-        </div>
-        <div class="review-pane-head" style="position:static">Extracted metadata</div>
-        ${fieldsHtml}
-        <div class="review-pane-head" style="position:static">Flagged items</div>
-        <div id="review-doc-items"><div class="review-empty">Loading…</div></div>
-        <div style="padding:14px;display:flex;gap:9px;border-top:.5px solid var(--border);position:sticky;bottom:0;background:var(--bg-card)">
-          <button type="button" class="admin-pill-btn primary" style="flex:1;justify-content:center" onclick="resolveReviewDoc('approve')"><i class="ti ti-check" style="font-size:14px"></i>Approve</button>
-          <button type="button" class="admin-pill-btn" style="flex:1;justify-content:center;color:var(--red)" onclick="resolveReviewDoc('reject')"><i class="ti ti-x" style="font-size:14px"></i>Reject</button>
-        </div>`;
+      meta.innerHTML =
+        '<div class="review-pane-head">' +
+          '<span>' + escapeHtmlRule(_docDisplayName(doc.source_doc)) + '</span>' +
+          '<span class="review-head-sub">' + escapeHtmlRule(doc.doc_family || 'unclassified') +
+            (doc.jurisdiction ? ' · ' + escapeHtmlRule(doc.jurisdiction) : '') +
+            ' · ' + doc.page_count + 'p</span>' +
+        '</div>' +
+        '<div class="review-scroll">' +
+          '<div class="review-doc-typeline">' +
+            (doc.doc_type ? '<span>' + escapeHtmlRule(doc.doc_type) + '</span>'
+                          : '<span style="color:var(--text-muted)">type not stated</span>') +
+            '<span style="margin-left:auto;display:flex;align-items:center;gap:6px">' +
+              '<span style="font-size:11px;color:var(--text-muted)">classification</span>' +
+              _confChip(doc.family_confidence) +
+            '</span>' +
+          '</div>' +
+          '<div class="review-sub-head">Extracted metadata</div>' +
+          fieldsHtml +
+          '<div class="review-sub-head">Flagged items <span id="review-item-count"></span></div>' +
+          '<div id="review-doc-items"><div class="review-empty">Loading&hellip;</div></div>' +
+        '</div>' +
+        '<div class="review-doc-footer">' +
+          '<button type="button" class="admin-pill-btn primary" style="flex:1;justify-content:center" onclick="resolveReviewDoc(\'approve\')"><i class="ti ti-check" style="font-size:14px"></i>Approve</button>' +
+          '<button type="button" class="admin-pill-btn" style="flex:1;justify-content:center;color:var(--red)" onclick="resolveReviewDoc(\'reject\')"><i class="ti ti-x" style="font-size:14px"></i>Reject</button>' +
+        '</div>';
+      src.innerHTML = '<div class="review-pane-head">Source — what was extracted from</div>' +
+                      '<div class="review-empty">Loading&hellip;</div>';
 
       try {
-        const res = await fetch(`/review_queue/document?session_id=${SID}&source_doc=${encodeURIComponent(doc.source_doc)}`);
+        const res = await fetch('/review_queue/document?session_id=' + SID +
+                                '&source_doc=' + encodeURIComponent(doc.source_doc));
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Failed to load');
 
+        const cnt = document.getElementById('review-item-count');
+        if (cnt) cnt.textContent = (d.items && d.items.length) ? '· ' + d.items.length : '';
         const itemsEl = document.getElementById('review-doc-items');
-        itemsEl.innerHTML = (d.items && d.items.length) ? d.items.map(it => `
-            <div class="review-field-row" style="grid-template-columns:minmax(0,1fr) auto">
-              <span>
-                <span style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
-                  ${it.stakes === 'high' ? '<span class="admin-badge red">high</span>' : ''}
-                  <span style="font-size:11.5px;font-weight:600">${escapeHtmlRule(it.clause_type)}</span>
-                </span>
-                <span style="font-size:11.5px;color:var(--text-secondary);line-height:1.5">${escapeHtmlRule((it.verbatim_text || '').slice(0, 200))}</span>
-                ${it.reason ? `<div style="font-size:11px;color:var(--gold);margin-top:3px">${escapeHtmlRule(it.reason)}</div>` : ''}
-              </span>
-              <span style="display:flex;align-items:center;gap:5px">
-                ${_confChip(it.confidence)}
-                <button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept" onclick="adminResolveClause(${it.id},'accept','${it.item_kind}')"><i class="ti ti-check" style="font-size:13px"></i></button>
-                <button type="button" class="admin-icon-btn danger" title="Reject" onclick="adminResolveClause(${it.id},'reject','${it.item_kind}')"><i class="ti ti-x" style="font-size:13px"></i></button>
-              </span>
-            </div>`).join('')
+        if (itemsEl) {
+          itemsEl.innerHTML = (d.items && d.items.length) ? d.items.map(it =>
+            '<div class="review-item-row">' +
+              '<span style="min-width:0">' +
+                '<span style="display:flex;align-items:center;gap:6px;margin-bottom:3px;flex-wrap:wrap">' +
+                  (it.stakes === 'high' ? '<span class="admin-badge red">high</span>' : '') +
+                  '<span style="font-size:11.5px;font-weight:600">' + escapeHtmlRule(it.clause_type) + '</span>' +
+                '</span>' +
+                '<span class="review-item-text">' + escapeHtmlRule((it.verbatim_text || '').slice(0, 260)) + '</span>' +
+                (it.reason ? '<div class="rfield-note">' + escapeHtmlRule(it.reason) + '</div>' : '') +
+              '</span>' +
+              '<span class="rfield-actions">' + _confChip(it.confidence) +
+                '<button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept" onclick="adminResolveClause(' + it.id + ',\'accept\',\'' + it.item_kind + '\')"><i class="ti ti-check" style="font-size:13px"></i></button>' +
+                '<button type="button" class="admin-icon-btn" title="Edit and accept" onclick="adminEditClause(' + it.id + ',\'' + it.item_kind + '\')"><i class="ti ti-pencil" style="font-size:13px"></i></button>' +
+                '<button type="button" class="admin-icon-btn danger" title="Reject" onclick="adminResolveClause(' + it.id + ',\'reject\',\'' + it.item_kind + '\')"><i class="ti ti-x" style="font-size:13px"></i></button>' +
+              '</span>' +
+            '</div>').join('')
           : '<div class="review-empty">Nothing flagged for this document.</div>';
+        }
 
-        src.innerHTML = `<div class="review-pane-head">Source — what was extracted from</div>` +
-          ((d.pages && d.pages.length) ? d.pages.map(p => `
-              <div class="review-source-page">
-                <div class="review-source-title">${escapeHtmlRule(p.title)}</div>
-                <div class="review-source-body">${escapeHtmlRule(p.content || p.summary || '')}</div>
-              </div>`).join('')
-            : '<div class="review-empty">No extracted pages for this document.</div>');
+        src.innerHTML = '<div class="review-pane-head">Source — what was extracted from</div>' +
+          '<div class="review-scroll">' +
+          ((d.pages && d.pages.length) ? d.pages.map(p =>
+              '<div class="review-source-page">' +
+                '<div class="review-source-title">' + escapeHtmlRule(p.title) + '</div>' +
+                '<div class="review-source-body">' + escapeHtmlRule(p.content || p.summary || '') + '</div>' +
+              '</div>').join('')
+            : '<div class="review-empty">No extracted pages for this document.</div>') +
+          '</div>';
       } catch (e) {
-        document.getElementById('review-doc-items').innerHTML =
-          `<div class="review-empty" style="color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
-        src.innerHTML = `<div class="review-empty" style="color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+        const itemsEl = document.getElementById('review-doc-items');
+        if (itemsEl) itemsEl.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
+        src.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
       }
     }
 
     async function resolveReviewDoc(action) {
       const doc = reviewDocs[reviewDocSelected];
       if (!doc) return;
-      const name = _shortSourceDoc(doc.source_doc);
+      const name = _docDisplayName(doc.source_doc);
       const msg = action === 'approve'
-        ? `Approve every pending item for "${name}"?\n\nHigh-stakes clauses below 60% confidence stay pending — reviewing by document does not bypass individual sign-off.`
-        : `Reject every pending item for "${name}"?`;
+        ? 'Approve every pending item for "' + name + '"?\n\nHigh-stakes clauses below 60% confidence stay pending — reviewing by document does not bypass individual sign-off.'
+        : 'Reject every pending item for "' + name + '"?';
       if (!window.confirm(msg)) return;
       try {
         const res = await fetch('/review_queue/resolve_document', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ session_id: SID, source_doc: doc.source_doc,
-                                 action, min_confidence: 0.6 }),
+                                 action: action, min_confidence: 0.6 }),
         });
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Failed');
         const done = (d.clauses || 0) + (d.items || 0);
         showToast(d.remaining
-          ? `${done} resolved · ${d.remaining} still need individual sign-off`
-          : `${done} resolved — document clear`, 'success');
+          ? done + ' resolved · ' + d.remaining + ' still need individual sign-off'
+          : done + ' resolved — document clear', 'success');
         await loadReviewDocuments();
-        if (reviewDocSelected !== null) selectReviewDoc(reviewDocSelected);
         refreshAdminReviewBadge();
       } catch (e) { showToast(e.message, 'error'); }
     }
@@ -4791,12 +4983,8 @@
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Resolve failed');
         showToast(action === 'reject' ? 'Rejected' : 'Accepted', 'success');
-        if (reviewMode === 'documents') {
-          await loadReviewDocuments();
-          if (reviewDocSelected !== null) selectReviewDoc(reviewDocSelected);
-        } else {
-          loadAdminReviewQueue();
-        }
+        if (reviewMode === 'documents') await loadReviewDocuments();
+        else loadAdminReviewQueue();
         refreshAdminReviewBadge();
       } catch (e) {
         showToast(e.message, 'error');
@@ -4824,12 +5012,8 @@
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Bulk accept failed');
         showToast(`Accepted ${d.accepted} item(s)`, 'success');
-        if (reviewMode === 'documents') {
-          await loadReviewDocuments();
-          if (reviewDocSelected !== null) selectReviewDoc(reviewDocSelected);
-        } else {
-          loadAdminReviewQueue();
-        }
+        if (reviewMode === 'documents') await loadReviewDocuments();
+        else loadAdminReviewQueue();
         refreshAdminReviewBadge();
       } catch (e) {
         showToast(e.message, 'error');

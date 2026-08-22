@@ -526,6 +526,89 @@ def reconcile_rows(rows: list[dict], key_fields: tuple[str, ...],
     return list(best.values())
 
 
+def update_metadata_field(wiki_id: str, session_id: str, source_doc: str,
+                          field_name: str, new_value, family_key: str | None = None) -> dict:
+    """Record a reviewer's correction to one extracted metadata field.
+
+    Provenance is the point. The corrected value replaces the extracted one,
+    but the extraction is kept as `previous_value` and the field is stamped
+    `edited: true` — a human-corrected field and a model-extracted field that
+    happen to hold the same string are not the same fact, and a reviewer
+    coming back later needs to see which is which.
+
+    Confidence goes to 1.0 because a person read the document and decided.
+    That is the one place in this pipeline where a confidence of 1.0 is
+    earned rather than self-reported.
+    """
+    if not _enabled():
+        return {}
+    from datetime import datetime, timezone
+    from services import crypto
+
+    spec = _FAMILY_TABLES.get(family_key or "")
+    if not spec:
+        raise ValueError(f"No typed table for family {family_key!r}")
+    table, columns = spec
+    text = _text()
+
+    with db.get_engine().connect() as c:
+        row = c.execute(text(
+            f"SELECT typed_value FROM {table} WHERE wiki_id = :w "
+            f"AND session_id = :s AND source_doc = :d"
+        ), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+        if not row:
+            raise ValueError("No extracted metadata row for this document")
+
+        decoded = crypto.decrypt_json(row[0])
+        if isinstance(decoded, str):
+            decoded = json.loads(decoded)
+        if not isinstance(decoded, dict):
+            decoded = {}
+        fields = decoded.get("fields")
+        if not isinstance(fields, dict):
+            fields = {}
+        prior = fields.get(field_name) if isinstance(fields.get(field_name), dict) else {}
+
+        fields[field_name] = {
+            **prior,
+            "value": new_value,
+            "confidence": 1.0,
+            "flagged": False,
+            "reason": None,
+            "edited": True,
+            "edited_at": datetime.now(timezone.utc).isoformat(),
+            # Only capture the original extraction once — a second edit must
+            # not overwrite the model's output with the first correction, or
+            # the audit trail silently becomes "a human said this twice".
+            "previous_value": prior.get("previous_value",
+                                        prior.get("value")) if prior else None,
+        }
+        decoded["fields"] = fields
+        validated = decoded.get("validated")
+        if isinstance(validated, dict):
+            validated[field_name] = new_value
+            decoded["validated"] = validated
+        decoded["flagged_fields"] = [
+            f for f in (decoded.get("flagged_fields") or []) if f != field_name
+        ]
+
+        params = {"w": wiki_id, "s": session_id, "d": source_doc,
+                  "tv": json.dumps(crypto.encrypt_json(decoded),
+                                   ensure_ascii=False, default=str)}
+        set_col = ""
+        if field_name in columns:
+            set_col = f", {field_name} = :col"
+            params["col"] = _coerce_param(field_name, new_value)
+        c.execute(text(
+            f"UPDATE {table} SET typed_value = :tv{set_col} "
+            f"WHERE wiki_id = :w AND session_id = :s AND source_doc = :d"
+        ), params)
+        c.commit()
+
+    logger.info("Reviewer corrected %s.%s on %s", table, field_name, source_doc)
+    return {"field": field_name, "value": new_value, "edited": True}
+
+
 def document_summary(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Row counts per typed table for one document — used by the ingest
     evaluation gate and the admin panel."""
