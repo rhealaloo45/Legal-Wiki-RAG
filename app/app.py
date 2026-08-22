@@ -268,30 +268,62 @@ def save_sessions(sessions):
         logger.error("Failed to save sessions: %s", e)
 
 
-def _get_main_session_id() -> str:
-    """The session every chat currently answers from — a mutable pointer.
+def _default_wiki_id() -> str:
+    from services.wikis import DEFAULT_WIKI_ID
+    return DEFAULT_WIKI_ID
 
-    Starts at config.PRODUCTION_WIKI_SESSION_ID (the .env default) and is
-    updated by _set_main_session_id() whenever a local ingest completes, so
-    "New chat" always targets whatever was most recently ingested. On the
-    deployed Azure app DISABLE_INGEST=true means this file is never written,
-    so it always falls back to the fixed .env value.
+
+def _get_main_session_id(wiki_id: str | None = None) -> str:
+    """The session THIS WIKI's chats currently answer from — a mutable,
+    per-wiki pointer.
+
+    One pointer used to serve the whole app, back when there was only ever
+    one wiki. Now that switching wikis is real, a global pointer would mean
+    activating a brand-new wiki still answered chat from whatever wiki was
+    ingested into last — exactly the bug this per-wiki keying closes.
+    Updated by _set_main_session_id() whenever a local ingest completes, so
+    "New chat" under a given wiki always targets whatever was most recently
+    ingested into THAT wiki. The config.PRODUCTION_WIKI_SESSION_ID .env
+    fallback only applies to the default wiki — it predates multi-wiki and
+    named the one wiki that existed; a fresh wiki has no chat pointer until
+    something is actually ingested into it, which is correct, not a bug.
     """
+    wiki_id = wiki_id or current_wiki_id()
     try:
         with open(config.MAIN_SESSION_PATH, "r", encoding="utf-8") as f:
-            sid = json.load(f).get("session_id", "")
-            if sid:
-                return sid
+            data = json.load(f)
+        by_wiki = data.get("by_wiki")
+        if by_wiki is None and data.get("session_id"):
+            # Pre-multi-wiki file — that single pointer belonged to the one
+            # wiki that existed at the time, i.e. the default wiki.
+            by_wiki = {_default_wiki_id(): data["session_id"]}
+        sid = (by_wiki or {}).get(wiki_id, "")
+        if sid:
+            return sid
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         pass
-    return config.PRODUCTION_WIKI_SESSION_ID
+    if wiki_id == _default_wiki_id():
+        return config.PRODUCTION_WIKI_SESSION_ID
+    return ""
 
 
-def _set_main_session_id(session_id: str) -> None:
+def _set_main_session_id(session_id: str, wiki_id: str | None = None) -> None:
+    wiki_id = wiki_id or current_wiki_id()
     try:
+        try:
+            with open(config.MAIN_SESSION_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            data = {}
+        by_wiki = data.get("by_wiki")
+        if by_wiki is None:
+            by_wiki = {}
+            if data.get("session_id"):
+                by_wiki[_default_wiki_id()] = data["session_id"]
+        by_wiki[wiki_id] = session_id
         with open(config.MAIN_SESSION_PATH, "w", encoding="utf-8") as f:
-            json.dump({"session_id": session_id}, f)
-        logger.info("Main session pointer updated to %s", session_id)
+            json.dump({"by_wiki": by_wiki}, f)
+        logger.info("Main session pointer for wiki %s updated to %s", wiki_id, session_id)
     except OSError as e:
         logger.error("Failed to update main session pointer: %s", e)
 
@@ -768,6 +800,10 @@ def upload():
 
     # Save session metadata
     sessions = load_sessions()
+    # Preserve the wiki a session was originally stamped with — a second
+    # upload into the same session_id must not silently re-file it under
+    # whatever wiki happens to be active now.
+    _existing_wiki_id = sessions.get(session_id, {}).get("wiki_id")
     sessions[session_id] = {
         "id": session_id,
         "name": f"Session {datetime.now().strftime('%Y-%m-%d %H:%M')}",
@@ -775,7 +811,8 @@ def upload():
         "updated_at": time.time(),
         "files": len(saved_paths),
         "file_paths": [meta["relative_path"] for meta in metadata_list],
-        "history": []
+        "history": [],
+        "wiki_id": _existing_wiki_id or current_wiki_id(),
     }
     save_sessions(sessions)
 
@@ -983,7 +1020,14 @@ def _check_completion(session_id: str):
             progress["phase"] = "complete"
             _set_progress(session_id, progress)
             if not already_complete and not config.DISABLE_INGEST:
-                _set_main_session_id(session_id)
+                # Use the wiki this SESSION was actually stamped with at
+                # upload time (see /upload), not whatever wiki happens to be
+                # active right now on this background thread — an admin
+                # switching wikis mid-ingest must not misfile the pointer
+                # under the wiki they switched TO instead of the one this
+                # batch was uploaded into.
+                _session_wiki = load_sessions().get(session_id, {}).get("wiki_id")
+                _set_main_session_id(session_id, wiki_id=_session_wiki)
 
 
 @app.route("/messages")
@@ -1077,6 +1121,7 @@ def _update_session_history(session_id: str, question: str) -> None:
             "files": 0,
             "file_paths": [],
             "history": [],
+            "wiki_id": current_wiki_id(),
         }
     if session_id in sessions:
         if not sessions[session_id].get("history") or sessions[session_id]["history"][0] != question:
@@ -2107,9 +2152,22 @@ def progress():
 
 @app.route("/sessions", methods=["GET"])
 def get_sessions():
-    """Return all saved sessions sorted by recently updated."""
+    """Return saved sessions for the active wiki, sorted by recently updated.
+
+    Scoped to current_wiki_id() — activating a different wiki must change
+    what shows in the sidebar, not just what chat answers from. A session
+    with no wiki_id (created before this field existed) is treated as
+    belonging to the default wiki, matching how the DB rows themselves were
+    backfilled — not silently dropped, not shown under every wiki.
+    """
     sessions = load_sessions()
-    session_list = sorted(sessions.values(), key=lambda x: x.get("updated_at", 0), reverse=True)
+    wiki_id = current_wiki_id()
+    default_wiki_id = _default_wiki_id()
+    session_list = [
+        s for s in sessions.values()
+        if s.get("wiki_id", default_wiki_id) == wiki_id
+    ]
+    session_list.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
     return jsonify({"sessions": session_list})
 
 
