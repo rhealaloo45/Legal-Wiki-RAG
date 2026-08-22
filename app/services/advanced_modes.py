@@ -64,8 +64,8 @@ def _lookup_cached_metadata(session_id: str, doc_name: str, col_name: str) -> Op
     if not (field_key and config.USE_DATABASE):
         return None
     try:
-        from services import db as _db
-        cached = _db.get_metadata(session_id, doc_name)
+        from services import db as _db, wikis as _wikis
+        cached = _db.get_metadata(_wikis.active_wiki_id(), session_id, doc_name)
         if cached.get(field_key) is not None:
             return {"value": cached[field_key], "confidence": 0.95, "quote": None}
     except Exception as _e:

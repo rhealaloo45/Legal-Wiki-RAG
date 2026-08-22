@@ -113,6 +113,7 @@ def backfill(target_session: str | None = None) -> None:
 
     from services import db as _db
     from services import llm as _llm
+    from sqlalchemy import text as _sql_text
 
     engine = _db.get_engine()
 
@@ -132,6 +133,11 @@ def backfill(target_session: str | None = None) -> None:
     for session_id, source_doc in docs:
         with engine.connect() as conn:
             sample = _get_sample_text(conn, session_id, source_doc)
+            wiki_row = conn.execute(
+                _sql_text("SELECT wiki_id FROM pages WHERE session_id = :sid LIMIT 1"),
+                {"sid": session_id},
+            ).first()
+            wiki_id = wiki_row[0] if wiki_row and wiki_row[0] else _db.DEFAULT_WIKI_ID
 
         if not sample.strip():
             logger.warning("  [%s] no page content found — skipping", source_doc)
@@ -155,7 +161,7 @@ def backfill(target_session: str | None = None) -> None:
             continue
 
         try:
-            _db.upsert_metadata(session_id, source_doc, {"matter_reference": value})
+            _db.upsert_metadata(wiki_id, session_id, source_doc, {"matter_reference": value})
             total_found += 1
             logger.info("  [%s] matter_reference = %r", source_doc, value)
         except Exception as e:
