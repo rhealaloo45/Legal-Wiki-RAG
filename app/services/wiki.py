@@ -6071,6 +6071,22 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
 })
 _BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
 
+# A run of 2-5 whitespace-separated Title-Case words with no corporate suffix
+# ("Apex Lumendra Digital") — this corpus's dominant bare-name pattern, one
+# level up from the single-word case above. _bare_proper_noun_candidates
+# offers each word of a name like this SEPARATELY, which is fatal for a
+# 3-word name built from common short words: "Apex" and "Digital" alone each
+# hit dozens of unrelated documents (every "Apex *" company, every "* Digital"
+# company), so both get discarded by _resolve_docs_by_party's max_docs cap and
+# the name never resolves at all — confirmed live on "the Guarantee agreement,
+# Apex Lumendra Digital, Jan 2021", which fell all the way through to
+# unscoped corpus search and answered from an unrelated document. Trying the
+# full 3-word phrase as ONE candidate first is what a real full-text search
+# for the name would do, and resolves to exactly the one document.
+_BARE_PROPER_NOUN_PHRASE_RE = re.compile(
+    r'\b(?:[A-Z][a-z]{3,}\s+){1,4}[A-Z][a-z]{3,}\b'
+)
+
 
 def _bare_proper_noun_candidates(question: str) -> list[str]:
     """Single Title-Case words in ``question`` that aren't common English/legal
@@ -6084,6 +6100,96 @@ def _bare_proper_noun_candidates(question: str) -> list[str]:
         if tok not in seen:
             seen.append(tok)
     return seen
+
+
+def _bare_proper_noun_phrase_candidates(question: str) -> list[str]:
+    """Multi-word runs of bare Title-Case words — the phrase-level sibling of
+    _bare_proper_noun_candidates (see that function and _BARE_PROPER_NOUN_PHRASE_RE
+    above). A run containing ANY stopword token is dropped whole rather than
+    trimmed — e.g. "Guarantee Agreement Apex" never occurs in practice since
+    "agreement" is lowercase mid-sentence, but if a stopword ever lands inside
+    a matched run, guessing which end to trim risks cutting a real name in
+    half, so the safer failure is no candidate at all.
+    """
+    seen: list[str] = []
+    for m in _BARE_PROPER_NOUN_PHRASE_RE.finditer(question):
+        phrase = m.group(0)
+        words = phrase.split()
+        if any(w.lower() in _BARE_PROPER_NOUN_STOPWORDS for w in words):
+            continue
+        if phrase not in seen:
+            seen.append(phrase)
+    return seen
+
+
+# Any alphanumeric token worth checking against a filename during narrowing —
+# deliberately loose (letters, digits, internal hyphens), since the whole
+# point is to catch things _PARTY_NAME_RE/_bare_proper_noun_* never would:
+# document codes like "IMG-4137", instrument words like "Guarantee" or "SOW".
+_NARROW_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-]{2,}')
+
+
+def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
+                               exclude: str | None = None) -> set[str]:
+    """Narrow a multi-document match using whatever ELSE the question names.
+
+    A party name or matter reference that resolves to several documents isn't
+    a dead end if the question also names something document-specific — an
+    instrument type ("the Guarantee agreement"), a document code embedded in
+    the filename ("IMG-4137"), a short form ("PPA"). Those live in the
+    FILENAME, not the page content a phrase search already matched against,
+    so this checks candidate filenames directly rather than repeating a
+    content search.
+
+    Confirmed live: "MAT-2021-7750 (IMG-4137 PPA)" resolves the matter number
+    to several sibling documents (a whole deal's worth of instruments sharing
+    one matter reference is normal, not ambiguous data) — "IMG-4137" and
+    "PPA" both appear only in one sibling's filename, narrowing to exactly
+    it. Same mechanism narrows "Guarantee agreement, Apex Lumendra Digital"
+    — the party name alone resolves to several real, unrelated deals this
+    company is party to, but only one of those filenames contains
+    "Guarantee".
+
+    Two collisions this guards against, both confirmed live:
+    - A bare year ("Jan 2021" → token "2021") coincidentally matching an
+      UNRELATED matter number embedded in a sibling's filename ("MAT-2021-
+      6375"). Purely-numeric tokens are excluded — a year alone is never
+      distinctive enough to trust here, unlike an alphanumeric code.
+    - The resolved name/reference itself, when it's also literally embedded
+      in every sibling's filename (a matter number folded into each of its
+      own instrument's filenames), matching all of them and cancelling out
+      the narrowing entirely. ``exclude`` is the resolved phrase/reference
+      that produced candidate_docs — stripped from the token set so it can
+      only narrow using signals OTHER than the one already used to find
+      this candidate set.
+
+    Returns candidate_docs unchanged (never widens, never guesses) unless a
+    token narrows it to a strictly smaller, non-empty set.
+    """
+    if len(candidate_docs) <= 1:
+        return candidate_docs
+    exclude_norm = re.sub(r'[^a-z0-9]', '', exclude.lower()) if exclude else None
+    tokens: list[str] = []
+    for m in _NARROW_TOKEN_RE.finditer(question):
+        raw = m.group(0)
+        norm = re.sub(r'[^a-z0-9]', '', raw.lower())
+        if len(norm) < 3 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS:
+            continue
+        if norm.isdigit():
+            continue
+        if exclude_norm and norm in exclude_norm:
+            continue
+        tokens.append(norm)
+    if not tokens:
+        return candidate_docs
+    hits: set[str] = set()
+    for d in candidate_docs:
+        haystack = re.sub(r'[^a-z0-9]', '', d.lower())
+        if any(t in haystack for t in tokens):
+            hits.add(d)
+    if hits and len(hits) < len(candidate_docs):
+        return hits
+    return candidate_docs
 
 
 # An explicit calendar date typed in the question ("the SA dated 15 January
@@ -6134,6 +6240,58 @@ def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> 
     return set()
 
 
+# A matter/reference number recited in the question ("MAT-2021-7750"). Looks
+# unique but frequently ISN'T in this corpus — the same matter number is
+# reused across several unrelated instruments for the same deal (a Loan
+# Agreement, an IP Assignment, an Escrow Agreement, all filed under
+# "MAT-2021-7750" with different parties on each). Deliberately max_docs=1:
+# on a multi-hit it returns nothing rather than guessing among siblings, same
+# fail-safe the date resolver above uses. Confirmed live: "the termination
+# notice period in MAT-2021-7750 (IMG-4137 PPA)" resolved to NOTHING under the
+# old resolvers (no filename match, no party name in the question at all) and
+# fell through to unscoped corpus search, which answered from a different
+# MAT-2021-7750 sibling with different parties and a different notice period.
+_QUESTION_MATTER_REF_RE = re.compile(r'\bMAT-\d{4}-\d{3,6}\b', re.IGNORECASE)
+
+
+def _resolve_docs_by_matter_reference(question: str, session_id: str) -> set[str]:
+    """Resolve the document a question names by a matter/reference number it
+    recites. Mirrors _resolve_docs_by_date's content-FTS mechanism, but a
+    matter number routinely hits several sibling instruments of the same deal
+    (see _QUESTION_MATTER_REF_RE above), so a multi-hit isn't a dead end —
+    _narrow_by_question_tokens gets a chance to pin it down using whatever
+    else the question names (a filename code, an instrument type) before
+    this gives up and returns nothing.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    refs = [m.group(0) for m in _QUESTION_MATTER_REF_RE.finditer(question)]
+    if not refs:
+        return set()
+    # A matter can legitimately span a handful of instruments; capped well
+    # above that so narrowing has the full sibling set to work with, not a
+    # query-truncated slice of it.
+    _MATTER_SCAN_CAP = 20
+    for ref in refs:
+        try:
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, ref, cap=_MATTER_SCAN_CAP) if d]
+        except Exception as e:
+            logger.error("resolve_scope: matter-reference lookup failed for %r: %s", ref, e)
+            continue
+        if not docs:
+            continue
+        if len(docs) == 1:
+            logger.info("Matter-reference content match → 1 document: %s (%r)",
+                        _norm_doc_name(docs[0]), ref)
+            return set(docs)
+        narrowed = _narrow_by_question_tokens(question, set(docs), exclude=ref)
+        if len(narrowed) == 1:
+            logger.info("Matter-reference content match, narrowed by question tokens → 1 document: %s (%r, %d siblings)",
+                        _norm_doc_name(next(iter(narrowed))), ref, len(docs))
+            return narrowed
+    return set()
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -6146,38 +6304,60 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     CONTENT search on the distinctive party phrase.
 
     Returns the doc set of the MOST distinctive party named — the one hitting the
-    fewest documents — provided that set is small (<= max_docs). An umbrella name
-    like "Tata Steel Limited" hits many documents and is correctly ignored; the
-    specific counterparty resolves to one document ("SteelLoop Resource Recovery"
-    → JVA 3) or, when the same two parties share several instruments, to that
-    small cluster ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration
-    notice + Section 9 petition). The caller decides, from how many instruments
-    the question names, whether to pin the whole cluster or narrow to one. Returns
-    an empty set on ambiguity (no hit, or the smallest set exceeds max_docs), so
-    it only ever ADDS precise matches the filename/entity detectors miss.
+    fewest documents — provided that set is small (<= max_docs), OR narrows to
+    exactly one via _narrow_by_question_tokens when it isn't. An umbrella name
+    like "Tata Steel Limited" hits many documents; the specific counterparty
+    resolves to one document ("SteelLoop Resource Recovery" → JVA 3) or, when
+    the same two parties share several instruments, to that small cluster
+    ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration notice +
+    Section 9 petition) — or, when the question ALSO names an instrument type
+    or document code an umbrella name alone can't narrow ("Guarantee
+    agreement, Apex Lumendra Digital" — the party sits on 6 unrelated real
+    deals, but only one filename says "Guarantee"), to that single document.
+    The caller decides, from how many instruments the question names, whether
+    to pin the whole cluster or narrow to one. Returns an empty set on
+    genuine ambiguity (no hit, or nothing narrows a large set down), so it
+    only ever ADDS precise matches the filename/entity detectors miss.
     """
     if not config.USE_DATABASE:
         return set()
     candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
     candidates = [c for c in candidates if len(c) >= 4]
     if not candidates:
-        candidates = _bare_proper_noun_candidates(question)
+        # Phrase candidates first: a bare multi-word name ("Apex Lumendra
+        # Digital") searched whole is far more distinctive than any one of
+        # its words searched alone, so it gets first crack at the smallest-set
+        # selection below — but every candidate is still tried, so a genuine
+        # single bare word ("Brackenpyre") is never crowded out.
+        candidates = _bare_proper_noun_phrase_candidates(question) + _bare_proper_noun_candidates(question)
     if not candidates:
         return set()
+    # Scanned well above max_docs so a multi-doc match has its FULL sibling
+    # set available to narrow against below, not a query-truncated slice that
+    # happens to omit the one sibling a filename token would have pinned.
+    _PARTY_SCAN_CAP = 20
     best_docs: set[str] | None = None
     best_n = 1 << 30
+    best_name = ""
     for name in candidates:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=max_docs + 2) if d]
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d]
         except Exception as e:
             logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
             continue
         if docs and len(docs) < best_n:
-            best_n, best_docs = len(docs), set(docs)
-    if best_docs is not None and best_n <= max_docs:
+            best_n, best_docs, best_name = len(docs), set(docs), name
+    if best_docs is None:
+        return set()
+    if best_n <= max_docs:
         logger.info("Party-name content match → %d document(s): %s",
                     best_n, {_norm_doc_name(d) for d in best_docs})
         return best_docs
+    narrowed = _narrow_by_question_tokens(question, best_docs, exclude=best_name)
+    if len(narrowed) == 1:
+        logger.info("Party-name content match, narrowed by question tokens → 1 document: %s (%d siblings)",
+                    _norm_doc_name(next(iter(narrowed))), best_n)
+        return narrowed
     return set()
 
 
@@ -7211,6 +7391,20 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
              "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
              "method": "party-pair"},
             _fam_name, _fam_docs)
+
+    # A matter/reference number the question recites ("MAT-2021-7750")
+    # resolving to exactly one document. Runs after every party-name signal,
+    # before the date check below — see _resolve_docs_by_matter_reference for
+    # why a matter number only counts on a genuinely unique hit.
+    try:
+        matter_docs = _resolve_docs_by_matter_reference(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: matter-reference resolution failed: %s", e)
+        matter_docs = set()
+    if matter_docs:
+        return {"scope": "single_doc", "target_docs": sorted(matter_docs),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.85, "method": "matter-reference"}
 
     # An explicit date the question recites ("the SA dated 15 January 2026")
     # resolving to exactly one document. Runs after every party-name signal
