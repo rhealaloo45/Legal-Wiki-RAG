@@ -23,15 +23,24 @@ page — the reason "what is the effective date of the Statement of Work between
 Apex Novantis EPC Limited and Greystone Data Centers PLC" could not be answered
 from a document that states it on page 1.
 
+Recovers defined terms the same way ('"Applicable Law" means ...'), which
+matters for a document ingest read as a scan: with no text layer there was
+nothing for the earlier Definitions backfill to read.
+
 Deterministic and idempotent: verbatim text only, nothing inferred, and a
 section already represented by a page title or clause type is skipped, so a
-second run inserts nothing. No LLM calls, no cost.
+second run inserts nothing. No LLM calls and no cost unless --ocr is passed.
+
+--ocr reads scanned pages through the configured OCR engine. With
+OCR_ENGINE=azure_vision that is a model call per scanned page, which is why it
+is opt-in and why --only exists to scope it to named documents.
 
 Usage:
     cd app
     python3 backfill_sections.py                       # all sessions
     python3 backfill_sections.py <session_id>          # single session
     python3 backfill_sections.py <session_id> --dry-run
+    python3 backfill_sections.py <session_id> --only "LoanAgt - 30-06-2023" --ocr
 """
 
 from __future__ import annotations
@@ -58,6 +67,17 @@ _UUID_PREFIX_RE = re.compile(
 _HEADER_RE = re.compile(
     r"(Effective\s+Date:\s*[^|\n]{3,60}(?:\|[^|\n]{3,80}){0,4})", re.IGNORECASE
 )
+
+# A defined term as this corpus writes it: '"Applicable Law" means, in relation
+# to ...'. The optional comma matters — several of the boilerplate definitions
+# read "means," rather than "means ", and requiring whitespace silently dropped
+# them.
+_DEFINITION_RE = re.compile(r'"([A-Z][A-Za-z /\-]{2,40})"\s+means,?\s+')
+
+# The same numbered heading as _HEADING_RE, but seen mid-line — once a page's
+# line breaks are collapsed into one string, a section heading is all that
+# marks where the definitions block ends.
+_INLINE_HEADING_RE = re.compile(r"\s\d{1,2}\.\s+[A-Z][A-Za-z]")
 
 # A section body shorter than this is a stray heading match, not a clause.
 _MIN_BODY_CHARS = 40
@@ -102,7 +122,38 @@ def _find_file(index: dict[str, str], source_doc: str) -> str | None:
     return index.get(m.group(1) if m else source_doc)
 
 
-def _extract_sections(path: str) -> list[dict]:
+# Below this, a page has no usable text layer — it is a scan.
+_SCANNED_PAGE_CHARS = 50
+
+
+# Keyed by (file path, page number). The three extraction passes each reopen the
+# document, and with OCR_ENGINE=azure_vision a page re-read is a model call — so
+# a page is OCR'd once per run, not once per pass.
+_OCR_CACHE: dict[tuple[str, int], str] = {}
+
+
+def _page_text(page, ocr: bool, path: str = "", page_num: int = 0) -> str:
+    """A page's text, falling back to OCR for a scanned page when allowed.
+
+    OCR is opt-in (--ocr) and never the default: with OCR_ENGINE=azure_vision
+    it is a model call per page, and this script otherwise costs nothing at all.
+    """
+    text = page.get_text()
+    if len(text.strip()) >= _SCANNED_PAGE_CHARS or not ocr:
+        return text
+    key = (path, page_num)
+    if key in _OCR_CACHE:
+        return _OCR_CACHE[key]
+    try:
+        from services import reader
+        text = reader._ocr_page(page)
+    except Exception as e:
+        logger.warning("  OCR failed on page %d: %s", page_num, e)
+    _OCR_CACHE[key] = text
+    return text
+
+
+def _extract_sections(path: str, ocr: bool = False) -> list[dict]:
     """Every numbered section's heading and first paragraph, verbatim."""
     import fitz
 
@@ -110,7 +161,7 @@ def _extract_sections(path: str) -> list[dict]:
     doc = fitz.open(path)
     try:
         for page_num, page in enumerate(doc, 1):
-            lines = page.get_text().splitlines()
+            lines = _page_text(page, ocr, path, page_num).splitlines()
             for i, line in enumerate(lines):
                 m = _HEADING_RE.match(line)
                 if not m:
@@ -136,7 +187,53 @@ def _extract_sections(path: str) -> list[dict]:
     return out
 
 
-def _extract_header(path: str) -> str | None:
+def _extract_definitions(path: str, ocr: bool = False) -> list[dict]:
+    """Every '"Term" means ...' definition in the document, verbatim.
+
+    A scanned document has no text layer, so the earlier Definitions backfill
+    skipped it entirely — which is why "how is the term Applicable Law defined
+    in the Facility Agreement between Apex Devashri InfoSystems Limited and
+    Amberline Commodities Limited" had nothing to answer from. With --ocr the
+    same extraction runs on the OCR'd text.
+    """
+    import fitz
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    doc = fitz.open(path)
+    try:
+        for page_num, page in enumerate(doc, 1):
+            text = " ".join(_page_text(page, ocr, path, page_num).split())
+            for m in _DEFINITION_RE.finditer(text):
+                term = m.group(1).strip()
+                if term.lower() in seen:
+                    continue
+                # Run to the end of the sentence, or to the next defined term
+                # if the sentence's own full stop is missing (common in OCR).
+                tail = text[m.start():m.start() + 1400]
+                nxt = _DEFINITION_RE.search(tail, m.end() - m.start())
+                if nxt:
+                    tail = tail[:nxt.start()]
+                # The last definition in a block runs into the section that
+                # follows it, because nothing separates them once the page's
+                # line breaks are collapsed. A numbered heading is that
+                # boundary: without it, '"Term" means ...' swallowed the
+                # Governing Law section that came next.
+                head = _INLINE_HEADING_RE.search(tail, m.end() - m.start())
+                if head:
+                    tail = tail[:head.start()]
+                end = tail.rfind(". ")
+                verbatim = (tail[:end + 1] if end > 40 else tail).strip()
+                if len(verbatim) < _MIN_BODY_CHARS:
+                    continue
+                seen.add(term.lower())
+                out.append({"term": term, "text": verbatim, "page": page_num})
+    finally:
+        doc.close()
+    return out
+
+
+def _extract_header(path: str, ocr: bool = False) -> str | None:
     """The document's page-1 "Effective Date: ... | Governing Law: ..." line."""
     import fitz
 
@@ -144,17 +241,27 @@ def _extract_header(path: str) -> str | None:
     try:
         if not len(doc):
             return None
-        m = _HEADER_RE.search(doc[0].get_text())
+        m = _HEADER_RE.search(_page_text(doc[0], ocr, path, 1))
         return m.group(1).strip() if m else None
     finally:
         doc.close()
 
 
-def _existing_coverage(conn, session_id: str) -> dict[str, list[set[str]]]:
-    """Per document, the token sets of every page title and clause type it has."""
+def _existing_coverage(conn, session_id: str) -> tuple[dict[str, list[set[str]]],
+                                                       dict[str, set[str]]]:
+    """Per document: the token sets of its labels, and its exact clause types.
+
+    Two views because the two kinds of row need different tests. A section
+    heading is matched loosely (a page titled "Termination Rights (Convenience
+    and for Cause)" already covers a section headed "Termination For Cause"),
+    but a defined term must be matched EXACTLY — "Definition - Governing Law"
+    and "Definition - Applicable Law" share two meaningful words and the loose
+    test would treat one as covering the other.
+    """
     from sqlalchemy import text
 
     coverage: dict[str, list[set[str]]] = {}
+    exact: dict[str, set[str]] = {}
     for source_doc, label in conn.execute(
         text("SELECT source_doc, title FROM pages WHERE session_id = :sid"),
         {"sid": session_id},
@@ -165,7 +272,8 @@ def _existing_coverage(conn, session_id: str) -> dict[str, list[set[str]]]:
         {"sid": session_id},
     ):
         coverage.setdefault(source_doc, []).append(_coverage_tokens(label))
-    return coverage
+        exact.setdefault(source_doc, set()).add((label or "").strip().lower())
+    return coverage, exact
 
 
 def _is_covered(heading: str, known: list[set[str]]) -> bool:
@@ -188,7 +296,8 @@ def _sessions(conn, target_session: str | None) -> list[str]:
     )]
 
 
-def backfill(target_session: str | None = None, dry_run: bool = False) -> None:
+def backfill(target_session: str | None = None, dry_run: bool = False,
+             ocr: bool = False, only: str | None = None) -> None:
     import config
 
     if not config.USE_DATABASE:
@@ -209,13 +318,18 @@ def backfill(target_session: str | None = None, dry_run: bool = False) -> None:
     with engine.connect() as conn:
         sessions = _sessions(conn, target_session)
 
+    if ocr:
+        logger.warning("--ocr is ON: scanned pages will be read with OCR_ENGINE=%s. "
+                       "With azure_vision that is a model call per scanned page.",
+                       config.OCR_ENGINE)
+
     for session_id in sessions:
         with engine.connect() as conn:
-            coverage = _existing_coverage(conn, session_id)
+            coverage, exact_types = _existing_coverage(conn, session_id)
             docs = [r[0] for r in conn.execute(
                 _sql("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
                 {"sid": session_id},
-            ) if r[0]]
+            ) if r[0] and (not only or only.lower() in r[0].lower())]
             wiki_row = conn.execute(
                 _sql("SELECT wiki_id FROM pages WHERE session_id = :sid LIMIT 1"),
                 {"sid": session_id},
@@ -228,9 +342,11 @@ def backfill(target_session: str | None = None, dry_run: bool = False) -> None:
                 total_missing_file += 1
                 continue
             known = coverage.get(source_doc, [])
+            known_exact = exact_types.get(source_doc, set())
             try:
-                sections = _extract_sections(path)
-                header = _extract_header(path)
+                sections = _extract_sections(path, ocr)
+                definitions = _extract_definitions(path, ocr)
+                header = _extract_header(path, ocr)
             except Exception as e:
                 logger.error("  [%s] could not read file: %s", source_doc, e)
                 continue
@@ -240,6 +356,12 @@ def backfill(target_session: str | None = None, dry_run: bool = False) -> None:
                 for s in sections
                 if not _is_covered(s["heading"], known)
             ]
+            clauses.extend(
+                {"type": f"Definition - {d['term']}", "text": d["text"],
+                 "confidence": 1.0, "page": d["page"]}
+                for d in definitions
+                if f"definition - {d['term'].lower()}" not in known_exact
+            )
             # The header carries the effective date, governing law and matter
             # reference. Only worth adding when the document has no overview
             # page holding the same thing.
@@ -273,6 +395,13 @@ def backfill(target_session: str | None = None, dry_run: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if a != "--dry-run"]
-    backfill(target_session=args[0] if args else None,
-             dry_run="--dry-run" in sys.argv[1:])
+    argv = sys.argv[1:]
+    only = None
+    for i, a in enumerate(argv):
+        if a == "--only" and i + 1 < len(argv):
+            only = argv[i + 1]
+    positional = [a for a in argv if not a.startswith("--") and a != only]
+    backfill(target_session=positional[0] if positional else None,
+             dry_run="--dry-run" in argv,
+             ocr="--ocr" in argv,
+             only=only)
