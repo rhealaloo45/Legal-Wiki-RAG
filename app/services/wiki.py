@@ -6128,6 +6128,32 @@ def _bare_proper_noun_phrase_candidates(question: str) -> list[str]:
 # document codes like "IMG-4137", instrument words like "Guarantee" or "SOW".
 _NARROW_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-]{2,}')
 
+# Basic English function words that _NARROW_TOKEN_RE happily matches (it has
+# no case requirement, unlike _BARE_PROPER_NOUN_STOPWORDS which was built for
+# a Title-Case-only regex and never needed to exclude them). Confirmed live:
+# "and" — from "... between Tata Projects Limited and Bhumika Motors Ltd
+# ..." — matched the filename "Separation AND Release Agreement", an
+# entirely unrelated document, and (being the single smallest-matching
+# token) won the fallback below and was returned as the answer.
+_NARROW_TOKEN_STOPWORDS = frozenset({
+    "and", "for", "with", "from", "into", "provide", "provides", "dated",
+    "between", "the", "that", "this", "was", "were", "has", "have", "had",
+    "not", "but", "nor", "are", "will", "shall", "may", "can", "does", "did",
+    "states", "state", "stated", "under", "about", "any", "all", "each",
+    # Filing/drafting-status words this corpus's own filenames use as
+    # boilerplate suffixes on a huge, unrelated cross-section of documents
+    # ("... FINAL_FINAL.pdf", "... signed copy.pdf", "... - filed_ocr.pdf")
+    # — near-universal, so they carry ~zero document-identifying signal, but
+    # matched few enough documents to look "discriminating" by the bare
+    # subset test. Confirmed live: "final" (from "Tax Deed FINAL_FINAL
+    # agreement") uniquely matched a single unrelated Lease Deed document
+    # whose filename happened to end "... FINAL_FINAL.pdf", won the
+    # empty-intersection fallback, and was confidently returned as the
+    # answer instead of the real Tax Deed.
+    "final", "signed", "draft", "copy", "filed", "executed", "scanned",
+    "redacted", "countersigned", "clean", "fully", "true",
+})
+
 
 def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
                                exclude: str | None = None) -> set[str]:
@@ -6150,7 +6176,29 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
     company is party to, but only one of those filenames contains
     "Guarantee".
 
-    Two collisions this guards against, both confirmed live:
+    Tokens that DISCRIMINATE (match a proper, non-empty subset of
+    candidate_docs — not none of them, not all of them) are AND-ed together,
+    not OR-ed: a token matching most of the candidates says nothing about
+    which one is right, and OR-combining loose tokens accumulates false
+    positives. Confirmed live: on a 20-document candidate set, OR-matching
+    let generic filename words ("final", "signed", "draft") pull in two
+    completely unrelated documents alongside the real one.
+
+    If the AND intersection of every discriminating token comes back empty,
+    that means the tokens DISAGREE — each is individually plausible but they
+    don't point at the same document, which is a sign of noise, not a
+    tie-breaker to resolve. This deliberately returns candidate_docs
+    UNCHANGED in that case rather than trusting whichever token happened to
+    match the fewest documents — confirmed live that "trust the smallest"
+    is actively dangerous: "final" (a boilerplate drafting-status suffix on
+    a huge, unrelated slice of this corpus's filenames) matched only one
+    document by chance, disagreed with every other token, and would have
+    been confidently returned as the answer instead of the real one. Every
+    caller already only accepts a narrowing result at exactly length 1, so
+    returning the unnarrowed set here correctly reads as "couldn't narrow,"
+    not as a wrong answer.
+
+    Two further collisions this guards against, both confirmed live:
     - A bare year ("Jan 2021" → token "2021") coincidentally matching an
       UNRELATED matter number embedded in a sibling's filename ("MAT-2021-
       6375"). Purely-numeric tokens are excluded — a year alone is never
@@ -6173,22 +6221,31 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
     for m in _NARROW_TOKEN_RE.finditer(question):
         raw = m.group(0)
         norm = re.sub(r'[^a-z0-9]', '', raw.lower())
-        if len(norm) < 3 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS:
+        if len(norm) < 3 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS or raw.lower() in _NARROW_TOKEN_STOPWORDS:
             continue
         if norm.isdigit():
             continue
         if exclude_norm and norm in exclude_norm:
             continue
-        tokens.append(norm)
+        if norm not in tokens:
+            tokens.append(norm)
     if not tokens:
         return candidate_docs
-    hits: set[str] = set()
-    for d in candidate_docs:
-        haystack = re.sub(r'[^a-z0-9]', '', d.lower())
-        if any(t in haystack for t in tokens):
-            hits.add(d)
-    if hits and len(hits) < len(candidate_docs):
-        return hits
+    haystacks = {d: re.sub(r'[^a-z0-9]', '', d.lower()) for d in candidate_docs}
+    discriminating: list[tuple[str, set[str]]] = []
+    for t in tokens:
+        matched = {d for d, h in haystacks.items() if t in h}
+        if matched and len(matched) < len(candidate_docs):
+            discriminating.append((t, matched))
+    if not discriminating:
+        return candidate_docs
+    intersection: set[str] | None = None
+    for _, matched in discriminating:
+        intersection = matched if intersection is None else (intersection & matched)
+    if not intersection:
+        return candidate_docs
+    if len(intersection) < len(candidate_docs):
+        return intersection
     return candidate_docs
 
 
@@ -6632,6 +6689,96 @@ def _bare_party_tokens(question: str) -> list[str]:
     return tokens
 
 
+def _content_pair_supplement(session_id: str, tokens: list[str], full_names: list[str],
+                             cluster: set[str], question: str, max_docs: int) -> set[str]:
+    """Find a sibling instrument title search missed because ingest titled it
+    under an arbitrary code name instead of either party's name.
+
+    Confirmed live: a real Term Sheet and a real Share Purchase Agreement are
+    both between "Tata Projects" and "Bhumika Motors". The SPA's every page
+    title reads "... – Tata Projects/Bhumika (Share Purchase Agreement)" — a
+    party-derived short name, so title search finds it. The Term Sheet's
+    pages read "... – Matter Blue (Term Sheet)" — an arbitrary code name
+    containing neither party — so title search cannot find it no matter what
+    tokens it tries; the document is real and correctly indexed, it just
+    isn't titled by party name. Full-text content confirms "Bhumika Motors"
+    is genuinely discussed throughout it.
+
+    _resolve_docs_by_party_pair's own docstring explains why it uses titles
+    instead of raw content-intersection in the first place: on the whole
+    corpus, intersecting two party names by content is too noisy (76 of ~115
+    documents on the adversarial-litigation case that motivated it). This
+    avoids that by anchoring on the RARER of the two party tokens alone (one
+    content search, not an intersection), subtracting what title search
+    already found, narrowing what's left by filename
+    (_narrow_by_question_tokens — instrument type, document code), and only
+    THEN, on that already-small remainder, verifying each survivor's own
+    CONTENT for the other party token too. Content-intersecting a handful of
+    pre-narrowed candidates is a different cost/noise profile than
+    content-intersecting the whole corpus.
+
+    Returns an empty set unless the anchor token resolves to something
+    genuinely outside `cluster`, and that remainder narrows (by filename,
+    then by content-confirming the other party) to no more than max_docs.
+
+    ``full_names`` are the fuller party phrases the single-word ``tokens``
+    were each reduced from ("Tata Projects", not just "Tata") — the final
+    content-verification step needs that fuller phrase, not the bare word;
+    "Tata" alone appears in most of this corpus and confirms nothing.
+    """
+    if not config.USE_DATABASE or len(tokens) < 2:
+        return set()
+    anchor_tok, other_tok, anchor_docs = None, None, None
+    for i, t in enumerate(tokens[:2]):
+        try:
+            docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, t, cap=100) or [])
+        except Exception:
+            docs = set()
+        if docs and (anchor_docs is None or len(docs) < len(anchor_docs)):
+            anchor_docs, anchor_tok = docs, t
+            other_tok = (full_names[1 - i] if len(full_names) > 1 else None) or (tokens[1 - i] if len(tokens) > 1 else None)
+    if not anchor_docs:
+        return set()
+    remainder = anchor_docs - cluster
+    if not remainder:
+        return set()
+
+    # Content-verify against the OTHER party first, before any filename
+    # narrowing — cheap here (remainder is already small, unlike the whole
+    # corpus) and it must come first: both party names' own words are
+    # legitimately present in EVERY sibling instrument's filename too (a
+    # deal's Escrow, SPA, and Term Sheet filenames all say "Tata Projects"),
+    # so if filename-narrowing runs first and includes party-name tokens,
+    # those tokens discriminate toward whichever sibling happens to spell
+    # the party out in ITS OWN filename — a real document, but not
+    # necessarily the one the question's instrument type names. Confirmed
+    # live: "tata"/"projects" alone pointed at the Escrow sibling (whose
+    # filename literally reads "Tata Projects - Escrow - Agreement"), which
+    # disagreed with "term"/"sheet" pointing at the real Term Sheet, and the
+    # two cancelled out.
+    if other_tok:
+        try:
+            other_docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, other_tok, cap=200) or [])
+        except Exception:
+            other_docs = set()
+        content_verified = remainder & other_docs
+    else:
+        content_verified = remainder
+    if not content_verified:
+        return set()
+
+    # NOW narrow by filename — but the instrument type is the only signal
+    # left to ask for; both party phrases already did their job above and
+    # would just recreate the same cancel-out if left in the token set.
+    spent = " ".join(n for n in (anchor_tok, other_tok) if n)
+    narrowed = _narrow_by_question_tokens(question, content_verified, exclude=spent)
+    if narrowed and len(narrowed) <= max_docs:
+        return narrowed
+    if len(content_verified) <= max_docs:
+        return content_verified
+    return set()
+
+
 def _resolve_docs_by_party_pair(question: str, session_id: str,
                                 max_docs: int = 6) -> set[str]:
     """Resolve the documents of a matter named by BOTH of its parties.
@@ -6668,10 +6815,16 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         return set()
     names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
     tokens: list[str] = []
+    # Parallel to tokens — the fuller phrase each single-word token was
+    # reduced from ("Tata Projects" for token "Tata"). _content_pair_supplement
+    # needs the fuller phrase for content-verification; the bare word alone
+    # is too common in this corpus to confirm anything.
+    token_full: dict[str, str] = {}
     for n in names:
         tok = _distinctive_party_token(n)
         if tok and tok.lower() not in {t.lower() for t in tokens}:
             tokens.append(tok)
+            token_full[tok] = n
     if len(tokens) < 2:
         # Only one side carried a corporate suffix (or neither did). Fall back
         # to bare capitalised short-names, which is how a matter gets referred
@@ -6681,12 +6834,14 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         for tok in _bare_party_tokens(question):
             if tok.lower() not in {t.lower() for t in tokens}:
                 tokens.append(tok)
+                token_full[tok] = tok
     if len(tokens) < 2:
         return set()
     # More than a handful of capitalised words means this is prose, not a
     # two-party reference — requiring ALL of them in one title would either
     # match nothing or match by accident.
     tokens = tokens[:3]
+    full_names = [token_full.get(t, t) for t in tokens]
 
     try:
         cluster = {d for d in _db.find_source_docs_by_title_tokens(
@@ -6694,6 +6849,22 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
     except Exception as e:
         logger.error("resolve_scope: party-pair title lookup failed: %s", e)
         return set()
+
+    # Title search under-recalls when ingest gave a sibling instrument an
+    # arbitrary code name instead of a party-derived one — see
+    # _content_pair_supplement's docstring for the confirmed live case. Runs
+    # even when cluster already found something: the missing sibling doesn't
+    # announce itself, so there's no signal to condition this on.
+    try:
+        supplement = _content_pair_supplement(session_id, tokens, full_names, cluster, question, max_docs)
+    except Exception as e:
+        logger.error("resolve_scope: party-pair content supplement failed: %s", e)
+        supplement = set()
+    if supplement:
+        logger.info("Party-pair title match %s supplemented by content-verified match: %s",
+                    tokens, {_norm_doc_name(d) for d in supplement})
+        cluster |= supplement
+
     if not cluster:
         return set()
     # A cluster small enough to pin outright can still hold SEVERAL instruments
