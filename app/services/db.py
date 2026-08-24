@@ -3263,6 +3263,35 @@ def get_documents_by_family(wiki_id: str, session_id: str, doc_family: str) -> l
         return [row.title for row in rows]
 
 
+def get_documents_by_folder_hint(wiki_id: str, session_id: str, keywords: list[str]) -> list[str]:
+    """Documents whose upload-folder name matches one of a family's keywords.
+
+    Fallback for get_documents_by_family: page_metadata.doc_family comes from
+    ingest-time CONTENT classification, which can disagree with where the file
+    was actually filed (documents.family_method='content_folder_mismatch' when
+    it does) and leave doc_family NULL — invisible to family-scoped questions
+    even though the corpus (and the user asking about "the Legal Opinions")
+    still considers it part of that family. folder_hint is the raw signal
+    behind that mismatch and costs nothing extra to read — it was already
+    stored at ingest.
+    """
+    if not keywords:
+        return []
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT source_doc FROM documents
+                WHERE wiki_id = :w AND session_id = :sid
+                  AND folder_hint ILIKE ANY(:kws)
+            """),
+            {"w": wiki_id, "sid": session_id,
+             "kws": [f"%{kw}%" for kw in keywords]},
+        )
+        return [row.source_doc for row in rows]
+
+
 def list_doc_families(wiki_id: str, session_id: str) -> list[str]:
     """Return the distinct non-null doc_family values present in a session.
 
