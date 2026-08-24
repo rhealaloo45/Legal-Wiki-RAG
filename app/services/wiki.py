@@ -6399,7 +6399,8 @@ def _precise_filename_tokens(question: str, allow_initialism: bool = True) -> li
 def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
                                exclude: str | None = None,
                                allow_precise: bool = True,
-                               allow_initialism: bool = True) -> set[str]:
+                               allow_initialism: bool = True,
+                               precise_only: bool = False) -> set[str]:
     """Narrow a multi-document match using whatever ELSE the question names.
 
     A party name or matter reference that resolves to several documents isn't
@@ -6501,7 +6502,10 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
         hit = {d for d, h in haystacks.items() if precise in h}
         if len(hit) == 1:
             return hit
-    if not tokens:
+    # precise_only: the caller wants the high-precision tokens ONLY, and treats
+    # "no precise match" as "could not narrow" rather than falling back to
+    # ordinary words.
+    if precise_only or not tokens:
         return candidate_docs
     discriminating: list[tuple[str, set[str]]] = []
     for t in tokens:
@@ -6729,10 +6733,32 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         return set()
     best_name, best_docs = min(resolved, key=lambda pair: len(pair[1]))
     best_n = len(best_docs)
+    pinned_precisely = False
     if best_n <= max_docs:
         primary = best_docs
-        logger.info("Party-name content match → %d document(s): %s",
-                    best_n, {_norm_doc_name(d) for d in primary})
+        # A small cluster used to be returned as-is, skipping narrowing
+        # entirely — but a question stating a date or a case number has
+        # already named ONE of these documents. Confirmed live: "the Facility
+        # Agreement between Apex Devashri InfoSystems Limited and Amberline
+        # Commodities Limited dated 30 June 2023" returned the loan agreement
+        # plus two amendments, and the answer reported the amendments'
+        # governing law because it could not tell which document was meant,
+        # although "30062023" appears in exactly one of the three filenames.
+        # Only precise tokens are allowed to narrow here: ordinary words are
+        # what the else-branch below uses as a last resort on a cluster too
+        # big to return, and are not strong enough to discard siblings from a
+        # cluster already small enough to be a legitimate answer.
+        if len(primary) > 1:
+            pinpoint = _narrow_by_question_tokens(question, primary, exclude=best_name,
+                                                  precise_only=True)
+            if len(pinpoint) == 1 and pinpoint < primary:
+                primary, pinned_precisely = pinpoint, True
+                logger.info("Party-name content match pinned to 1 document by an "
+                            "identifier the question states: %s (%d siblings)",
+                            _norm_doc_name(next(iter(primary))), best_n)
+        if not pinned_precisely:
+            logger.info("Party-name content match → %d document(s): %s",
+                        best_n, {_norm_doc_name(d) for d in primary})
     else:
         narrowed = _narrow_by_question_tokens(question, best_docs, exclude=best_name)
         if len(narrowed) == 1:
@@ -6743,6 +6769,11 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
             primary = set()
     if not primary:
         return set()
+    if pinned_precisely:
+        # The question named one document by an identifier only that document
+        # carries. There is no second document to look for, and looking anyway
+        # found an unrelated Tax Deed to sit alongside the Facility Agreement.
+        return primary
 
     # A question can name TWO separate documents by two separate parties
     # ("the judgment between X and Y ... as stated in the SSA between A and
