@@ -2897,6 +2897,79 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 "reporting the fact as unavailable:]\n" + "\n".join(_meta_lines) + "\n"
             )
 
+        # Clauses and tables extracted at ingest live in their own typed
+        # stores (clauses, tables) — real structured data, but retrieval only
+        # ever searches page CONTENT, so a clause or table row that never made
+        # it into a page's prose summary is invisible to the answer, the same
+        # blind spot the metadata block above closes for document-level
+        # facts. Measured: a Framework Supply Agreement's full 8-vendor
+        # pricing table sits correctly in `tables`, but the wiki page's prose
+        # only mentioned one vendor's row — the answer LLM confidently said
+        # it couldn't determine the highest-value vendor. A Term Sheet's real
+        # Survival clause sits correctly in `clauses`, but no page for that
+        # document mentions "survival" at all.
+        from sqlalchemy import text as _struct_sql
+        _struct_lines = []
+        for _sd in _meta_docs:
+            try:
+                with _db.get_engine().connect() as _sconn:
+                    _clause_rows = _sconn.execute(_struct_sql("""
+                        SELECT clause_type, verbatim_text FROM clauses
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+                    _table_rows = _sconn.execute(_struct_sql("""
+                        SELECT caption, columns, rows FROM tables
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+            except Exception as _struct_err:
+                logger.warning("structured-data lookup failed for %s: %s", _sd, _struct_err)
+                continue
+            _doc_lines = []
+            # Tables first: a full table is much harder to reconstruct from
+            # prose than a clause (which the prose page for that topic
+            # usually paraphrases reasonably well anyway), and a table's rows
+            # only ever get MORE valuable to preserve intact as they get
+            # bigger — so if the length cap below has to cut something, it
+            # should cut clause text, not a table's later rows. Confirmed
+            # live: with clauses first, an 8-vendor Table 1 was fully
+            # preserved but a second table (Schedule 3, the one containing
+            # the actual highest-value vendor) got truncated away entirely.
+            for _cap_title, _cols, _rows in _table_rows:
+                _doc_lines.append(f"  - Table: {_cap_title or '(untitled)'}")
+                if _cols:
+                    _doc_lines.append(f"    Columns: {', '.join(str(c) for c in _cols)}")
+                for _r in (_rows or [])[:30]:
+                    _parsed_row = _r
+                    # A row is stored as a stringified list rather than a
+                    # nested JSON array — decode it for a readable line
+                    # rather than dumping the raw repr into the prompt.
+                    if isinstance(_r, str):
+                        try:
+                            import ast as _ast
+                            _parsed_row = _ast.literal_eval(_r)
+                        except Exception:
+                            _parsed_row = _r
+                    _doc_lines.append(f"    Row: {_parsed_row}")
+            for _ct, _vt in _clause_rows:
+                if _vt:
+                    _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
+            if _doc_lines:
+                _struct_lines.append(f"{_norm_doc_name(_sd)}:\n" + "\n".join(_doc_lines))
+        if _struct_lines:
+            _struct_block = "\n\n".join(_struct_lines)
+            _struct_cap_chars = 20000
+            if len(_struct_block) > _struct_cap_chars:
+                _struct_block = _struct_block[:_struct_cap_chars] + "\n[...truncated]"
+            wiki_parts.append(
+                "[Structured extraction recorded at ingest — full clause text and "
+                "complete table data, independent of the prose page summaries below. "
+                "These are drawn from the documents themselves and may be cited as "
+                "such, naming the document. A table's full rows live here even when a "
+                "page's prose summary only mentions a sample of them:]\n" + _struct_block + "\n"
+            )
+
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
     total_chars = sum(len(p) for p in wiki_parts)
     pages_omitted = 0
@@ -6018,7 +6091,7 @@ def _detect_question_family(question: str, available_families: set[str]) -> str 
 # phrases ("Reserved Matters", "Joint Venture Agreement") from ever qualifying.
 _CORP_SUFFIX_RE_STR = (
     r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
-    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
+    r'LLP|LLC|FZE|FZC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
 )
 _PARTY_NAME_RE = re.compile(
     r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
@@ -6349,6 +6422,52 @@ def _resolve_docs_by_matter_reference(question: str, session_id: str) -> set[str
     return set()
 
 
+def _narrow_by_title_hint(session_id: str, candidate_docs: set[str], question: str,
+                          exclude: str | None = None) -> set[str]:
+    """Like _narrow_by_question_tokens, but checks page TITLES instead of
+    filenames — catches the instrument-type label ingest assigns even when
+    the filename itself is an opaque code the label never made it into.
+
+    Confirmed live: a party-name resolver correctly finds a 7-document
+    cluster for "Redgate Mobility" but the question's other document
+    reference — "the Detailed Judgment and Final Order ... C.S. No.
+    248/2026" — names an instrument type that never appears in the real
+    judgment's filename ("...DJAFOCN - filed_ocr.pdf"), so filename-based
+    narrowing finds nothing. Its page TITLES do carry the type
+    ("Overview – C.S. No. 248/2026 (Court Judgment)") because ingest writes
+    it there regardless of what the filename says. "judgment" alone narrows
+    the 7-document cluster to 2 via title search.
+
+    Tries each token independently (not AND-combined — one real hit is
+    enough) and returns on the first that narrows to a smaller, non-empty
+    subset. Returns candidate_docs unchanged otherwise.
+    """
+    if len(candidate_docs) <= 1:
+        return candidate_docs
+    exclude_norm = re.sub(r'[^a-z0-9]', '', exclude.lower()) if exclude else None
+    tokens: list[str] = []
+    for m in _NARROW_TOKEN_RE.finditer(question):
+        raw = m.group(0)
+        norm = re.sub(r'[^a-z0-9]', '', raw.lower())
+        if len(norm) < 4 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS or raw.lower() in _NARROW_TOKEN_STOPWORDS:
+            continue
+        if norm.isdigit():
+            continue
+        if exclude_norm and norm in exclude_norm:
+            continue
+        if norm not in tokens:
+            tokens.append(norm)
+    for t in tokens:
+        try:
+            title_hits = set(_db.find_source_docs_by_title_tokens(_active_wiki_id(), session_id, [t], cap=200) or [])
+        except Exception:
+            continue
+        narrowed = candidate_docs & title_hits
+        if narrowed and len(narrowed) < len(candidate_docs):
+            return narrowed
+    return candidate_docs
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -6378,8 +6497,14 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     """
     if not config.USE_DATABASE:
         return set()
-    candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
-    candidates = [c for c in candidates if len(c) >= 4]
+    # Suffix-derived names ("Charitra Metals LLC") are real, distinct legal
+    # entities — safe to treat two of them as two different documents (see
+    # the secondary-match scan below). Bare-word fallback candidates
+    # ("Guarantee", "Apex", "Digital") are not: they're single common words,
+    # not party identities, so the secondary scan is restricted to this set.
+    suffix_candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    suffix_candidates = [c for c in suffix_candidates if len(c) >= 4]
+    candidates = suffix_candidates
     if not candidates:
         # Phrase candidates first: a bare multi-word name ("Apex Lumendra
         # Digital") searched whole is far more distinctive than any one of
@@ -6393,29 +6518,69 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
     _PARTY_SCAN_CAP = 20
-    best_docs: set[str] | None = None
-    best_n = 1 << 30
-    best_name = ""
+    resolved: list[tuple[str, set[str]]] = []
     for name in candidates:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d]
+            docs = {d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d}
         except Exception as e:
             logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
             continue
-        if docs and len(docs) < best_n:
-            best_n, best_docs, best_name = len(docs), set(docs), name
-    if best_docs is None:
+        if docs:
+            resolved.append((name, docs))
+    if not resolved:
         return set()
+    best_name, best_docs = min(resolved, key=lambda pair: len(pair[1]))
+    best_n = len(best_docs)
     if best_n <= max_docs:
+        primary = best_docs
         logger.info("Party-name content match → %d document(s): %s",
-                    best_n, {_norm_doc_name(d) for d in best_docs})
-        return best_docs
-    narrowed = _narrow_by_question_tokens(question, best_docs, exclude=best_name)
-    if len(narrowed) == 1:
-        logger.info("Party-name content match, narrowed by question tokens → 1 document: %s (%d siblings)",
-                    _norm_doc_name(next(iter(narrowed))), best_n)
-        return narrowed
-    return set()
+                    best_n, {_norm_doc_name(d) for d in primary})
+    else:
+        narrowed = _narrow_by_question_tokens(question, best_docs, exclude=best_name)
+        if len(narrowed) == 1:
+            primary = narrowed
+            logger.info("Party-name content match, narrowed by question tokens → 1 document: %s (%d siblings)",
+                        _norm_doc_name(next(iter(primary))), best_n)
+        else:
+            primary = set()
+    if not primary:
+        return set()
+
+    # A question can name TWO separate documents by two separate parties
+    # ("the judgment between X and Y ... as stated in the SSA between A and
+    # B") — every other candidate above was discarded once the smallest
+    # (most distinctive) one won, but a discarded candidate whose OWN
+    # documents are disjoint from the primary pick is real evidence of a
+    # second document being named, not noise. Confirmed live: "Tata Power"/
+    # "Charitra Metals" (the SSA) won as smallest and returned alone, while
+    # "Redgate Mobility"/"Apex Zephyra Trading" (the judgment) were silently
+    # dropped — the judgment genuinely exists, fully indexed, and the answer
+    # falsely reported it as absent. Tries filename narrowing first, then
+    # title-hint narrowing (catches an instrument type that never made it
+    # into the filename) — accepts a candidate only if it narrows to
+    # max_docs or fewer AND doesn't overlap the primary pick.
+    #
+    # Restricted to suffix_candidates ONLY — confirmed live this cannot run
+    # over the bare-word fallback too: on "Guarantee agreement, Apex Lumendra
+    # Digital", the bare candidate "Guarantee" (a document TYPE, not a party)
+    # narrowed its own huge candidate pool down to two unrelated "Apex
+    # Lumendra Digital" amendment documents and got merged in as a false
+    # "second document" — three single common words standing in for a party
+    # identity is not the same guarantee a real corporate-suffixed name is.
+    for name, docs in resolved:
+        if name == best_name or name not in suffix_candidates:
+            continue
+        remainder = docs - primary
+        if not remainder:
+            continue
+        secondary = _narrow_by_question_tokens(question, remainder, exclude=name)
+        if not secondary or len(secondary) > max_docs:
+            secondary = _narrow_by_title_hint(session_id, remainder, question, exclude=name)
+        if secondary and len(secondary) <= max_docs and secondary.isdisjoint(primary):
+            logger.info("Party-name content match also found a second document reference "
+                        "(%r) → %s", name, {_norm_doc_name(d) for d in secondary})
+            return primary | secondary
+    return primary
 
 
 # Ceiling on how many documents an umbrella party may hit before its doc set is
