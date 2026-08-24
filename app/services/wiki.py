@@ -693,7 +693,11 @@ one used elsewhere in this system: 1.0 = exact verbatim match with no ambiguity,
 stated but the exact wording required light interpretation, 0.5 = the clause is implied rather \
 than explicitly stated, 0.0 = you are not actually confident this is a real clause in the text. \
 Extract every clause you can identify — do not filter by confidence, low-confidence entries are \
-exactly what the Review Queue is for.
+exactly what the Review Queue is for. COVER EVERY NUMBERED SECTION: if the document numbers its \
+sections, each numbered heading must appear as a "clauses" entry, including the back-half \
+boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
+Severability, Counterparts, Further Assurance). Those carry no negotiated value, which is exactly \
+why they get skipped — and exactly what a question naming "Section 12" asks for.
 
 Extract 10-40 relations. Cover the document thoroughly.
 {family_block}
@@ -829,7 +833,11 @@ never paraphrase. "typed_value" is an optional small object holding the clause's
 when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact verbatim match with \
 no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
 clause is implied rather than explicitly stated, 0.0 = you are not actually confident this is a \
-real clause. Extract every clause you can identify — do not filter by confidence.
+real clause. Extract every clause you can identify — do not filter by confidence. COVER EVERY \
+NUMBERED SECTION in this segment: each numbered heading must appear as a "clauses" entry, including \
+back-half boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
+Severability, Counterparts, Further Assurance) — those get skipped precisely because they carry no \
+negotiated value, and they are exactly what a question naming "Section 12" asks for.
 {family_block}
 
 DOCUMENT SEGMENT:
@@ -3412,15 +3420,31 @@ def _block_verification_text(title: str, body: str) -> str:
     return '\n'.join(sq_matches) if sq_matches else ""
 
 
+# The structured-extraction block get_context prepends (clauses and tables from
+# their typed stores). Its contents carry the SAME provenance guarantee as a
+# Supporting Quotes block — a clause row's text is stored verbatim, either
+# because the ingest prompt requires an exact quote or because
+# backfill_sections.py lifted it out of the PDF by regex — so it belongs in the
+# strict corpus. Left out, every answer sourced from a clause row picked up a
+# spurious "read as paraphrase rather than exact wording" note over text that is
+# verbatim source. Confirmed live on the Section 12 (Relationship Of Parties)
+# answer, whose quote is character-for-character the document's own.
+_STRUCTURED_BLOCK_RE = re.compile(
+    r'\[Structured extraction recorded at ingest[^\]]*\]\n(.*?)(?=\n## |\Z)', re.S)
+
+
 def _strict_verification_corpus(context: str) -> str:
     """Build the citation-verification text corpus, restricted to Supporting
-    Quotes blocks per page (see _block_verification_text). Falls back to the
-    raw context unchanged if no '## Title' page blocks are found at all.
+    Quotes blocks per page (see _block_verification_text) plus the verbatim
+    structured-extraction block. Falls back to the raw context unchanged if no
+    '## Title' page blocks are found at all.
     """
     blocks = _PAGE_BLOCK_RE.findall(context)
     if not blocks:
         return context
-    return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
+    parts = [_block_verification_text(title, body) for title, body in blocks]
+    parts.extend(_STRUCTURED_BLOCK_RE.findall(context))
+    return '\n'.join(parts)
 
 
 # A reference/citation line ending in a placeholder standing in for a real
