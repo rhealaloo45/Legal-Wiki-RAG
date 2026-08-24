@@ -3263,6 +3263,31 @@ def get_documents_by_family(wiki_id: str, session_id: str, doc_family: str) -> l
         return [row.title for row in rows]
 
 
+def get_families_of_documents(wiki_id: str, session_id: str,
+                              documents: list[str]) -> dict[str, str]:
+    """Map each named document to its doc_family (documents with none are omitted).
+
+    The inverse of get_documents_by_family, for the case where the documents are
+    already known and what's needed is whether two of them are the same KIND of
+    instrument.
+    """
+    if not documents:
+        return {}
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT title, doc_family
+                FROM page_metadata
+                WHERE wiki_id = :w AND session_id = :sid
+                  AND title = ANY(:docs) AND doc_family IS NOT NULL
+            """),
+            {"w": wiki_id, "sid": session_id, "docs": list(documents)},
+        )
+        return {row.title: row.doc_family for row in rows}
+
+
 def get_documents_by_folder_hint(wiki_id: str, session_id: str, keywords: list[str]) -> list[str]:
     """Documents whose upload-folder name matches one of a family's keywords.
 

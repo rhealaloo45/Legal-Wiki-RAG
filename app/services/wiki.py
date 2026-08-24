@@ -6314,8 +6314,91 @@ def _instrument_initialisms(question: str) -> list[str]:
     return out
 
 
+def _shares_family(session_id: str, docs_a: set[str], docs_b: set[str]) -> bool:
+    """Do the two document sets contain the same KIND of instrument?
+
+    Used to reject a "second document reference" that is really a sibling of the
+    one already resolved. Unknown families never block: a document the family
+    classifier never labelled says nothing either way, and refusing on missing
+    data would silently disable the branch this guards.
+    """
+    if not config.USE_DATABASE or not docs_a or not docs_b:
+        return False
+    try:
+        families = _db.get_families_of_documents(
+            _active_wiki_id(), session_id, sorted(docs_a | docs_b))
+    except Exception as e:
+        logger.warning("family comparison failed: %s", e)
+        return False
+    fam_a = {families[d] for d in docs_a if d in families}
+    fam_b = {families[d] for d in docs_b if d in families}
+    return bool(fam_a & fam_b)
+
+
+# A matter or case number written the way a question writes it — "Appeal No.
+# 113/2024", "C.S. No. 248/2026", "C.P. No. 499/2023". The filename writes the
+# same number with the separator dropped ("... Appeal No. 1132024-20240619 signed
+# copy.pdf"), and narrowing normalises punctuation away, so the two forms would
+# match — except the question's own tokenizer splits on the slash into "113" and
+# "2024", both purely numeric and therefore discarded as too weak to trust
+# alone. Joined back up, the number is one of the most specific identifiers a
+# question can carry.
+_CASE_NUMBER_RE = re.compile(r'\b(\d{1,5})\s*[/\\]\s*(\d{2,4})\b')
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], start=1)}
+
+
+def _precise_filename_tokens(question: str, allow_initialism: bool = True) -> list[str]:
+    """Tokens specific enough that a single filename match settles the question.
+
+    Ordered most-specific first. Each is something the corpus writes into a
+    filename verbatim but that ordinary word tokenizing cannot reconstruct: a
+    case number split by its slash, a date written out in words, or an
+    instrument type the filename abbreviates to its initialism.
+    """
+    out: list[str] = []
+
+    def add(tok: str) -> None:
+        if tok and tok not in out:
+            out.append(tok)
+
+    for m in _CASE_NUMBER_RE.finditer(question):
+        add(f"{m.group(1)}{m.group(2)}")
+
+    for m in _QUESTION_DATE_RE.finditer(question):
+        parts = re.findall(r"[A-Za-z]+|\d+", m.group(0))
+        month = day = year = None
+        for p in parts:
+            low = p.lower()
+            if low in _MONTHS:
+                month = _MONTHS[low]
+            elif len(p) == 4 and p.isdigit():
+                year = int(p)
+            elif p.isdigit():
+                day = int(p)
+        if not (month and day and year):
+            continue
+        # The three orderings this corpus actually files under, plus the
+        # written-month form ("19Dec2022"). Punctuation is normalised away
+        # by the caller, so "2024-06-19" and "20240619" are the same token.
+        add(f"{year:04d}{month:02d}{day:02d}")
+        add(f"{day:02d}{month:02d}{year:04d}")
+        add(f"{month:02d}{day:02d}{year:04d}")
+        month_name = [k for k, v in _MONTHS.items() if v == month][0]
+        add(f"{day:02d}{month_name[:3]}{year:04d}")
+        add(f"{day:02d}{month_name}{year:04d}")
+
+    if allow_initialism:
+        for acronym in _instrument_initialisms(question):
+            add(acronym)
+    return out
+
+
 def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
                                exclude: str | None = None,
+                               allow_precise: bool = True,
                                allow_initialism: bool = True) -> set[str]:
     """Narrow a multi-document match using whatever ELSE the question names.
 
@@ -6401,16 +6484,21 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
         if norm not in tokens:
             tokens.append(norm)
     haystacks = {d: re.sub(r'[^a-z0-9]', '', d.lower()) for d in candidate_docs}
-    # An instrument initialism is a far higher-precision signal than any single
-    # ordinary word: it is the corpus's own filing code for exactly the
-    # instrument type the question spelled out. When one picks out a single
-    # candidate, take it outright rather than AND-ing it with generic words
-    # that would only cancel it out — "kera" and "agreement" intersect to
-    # nothing, and the empty-intersection guard below would then discard both.
-    for acronym in (_instrument_initialisms(question) if allow_initialism else []):
-        if exclude_norm and acronym in exclude_norm:
+    # A case number, a written-out date or an instrument initialism is a far
+    # higher-precision signal than any single ordinary word: each is the
+    # corpus's own way of writing something the question states exactly. When
+    # one picks out a single candidate, take it outright rather than AND-ing it
+    # with generic words that would only cancel it out — "kera" and "agreement"
+    # intersect to nothing, and the empty-intersection guard below would then
+    # discard both. Confirmed live: "the Affidavit in Support of the Plaint -
+    # Appeal No. 113/2024 ... dated 19 June 2024" carried both the case number
+    # and the date that its filename spells out ("... Appeal No.
+    # 1132024-20240619 signed copy.pdf") and still fell back to answering
+    # across all 28 Pleadings.
+    for precise in (_precise_filename_tokens(question, allow_initialism) if allow_precise else []):
+        if exclude_norm and precise in exclude_norm:
             continue
-        hit = {d for d, h in haystacks.items() if acronym in h}
+        hit = {d for d, h in haystacks.items() if precise in h}
         if len(hit) == 1:
             return hit
     if not tokens:
@@ -6683,28 +6771,37 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         remainder = docs - primary
         if not remainder:
             continue
-        # allow_initialism=False: the instrument type the question names has
-        # already been spent identifying the PRIMARY document. Letting its
-        # initialism pin a second one finds a same-type sibling of the primary
-        # rather than the different instrument this branch exists to recover,
-        # and hands the answer LLM two documents of one type to confuse.
-        # Confirmed live: "Section 5 of the Share Subscription Agreement
-        # between Tata Elxsi Limited and Vantara Vehicles LLC" correctly pinned
-        # the Vantara SSA, then pulled in an unrelated Tata Elxsi/Tata Elxsi
-        # SSA on the strength of "SSA" alone.
+        # allow_precise=False: the instrument type, case number and date the
+        # question states have already been spent identifying the PRIMARY
+        # document. Letting any of them pin a second one finds a sibling of the
+        # primary rather than the different instrument this branch exists to
+        # recover, and hands the answer LLM two documents to confuse. Confirmed
+        # live: "Section 5 of the Share Subscription Agreement between Tata
+        # Elxsi Limited and Vantara Vehicles LLC" correctly pinned the Vantara
+        # SSA, then pulled in an unrelated Tata Elxsi/Tata Elxsi SSA on the
+        # strength of "SSA" alone.
         secondary = _narrow_by_question_tokens(question, remainder, exclude=name,
-                                               allow_initialism=False)
+                                               allow_precise=False)
         if not secondary or len(secondary) > max_docs:
             secondary = _narrow_by_title_hint(session_id, remainder, question, exclude=name)
-        # Exactly one: "a second document is named here" is a claim about ONE
-        # document. A narrowing that lands on several is the other party's own
-        # portfolio, not the instrument the question cross-referenced.
-        # Confirmed live: "Section 9 (Severability) of the Key Employee
-        # Retention Agreement between Apex Sagar Mobility Limited and Ashoka
-        # Travel Limited" pinned the right KERA, then merged in four unrelated
-        # Ashoka Travel instruments (an Escrow, a TSA, an SPA and a
+        # Exactly one, and a DIFFERENT kind of instrument than the primary.
+        # "A second document is named here" is a claim about one document, and
+        # this branch exists for a question naming two different instruments
+        # ("the judgment ... as stated in the SSA"); a same-family match is a
+        # sibling of the primary, which only gives the answer LLM two documents
+        # of one type to confuse. Confirmed live: "Section 2 (Issues) of the
+        # Detailed Judgment and Final Order - Appeal No. 113/2024 between
+        # Pacific Rim Capital Bank Ltd and Vantara InfoSystems LLC" pinned the
+        # right judgment and then merged in a Detailed Judgment and Final Order
+        # from an entirely different matter. And a narrowing that lands on
+        # SEVERAL documents is the other party's own portfolio rather than a
+        # named cross-reference at all: "Section 9 (Severability) of the Key
+        # Employee Retention Agreement between Apex Sagar Mobility Limited and
+        # Ashoka Travel Limited" pinned the right KERA, then merged in four
+        # unrelated Ashoka Travel instruments (an Escrow, a TSA, an SPA and a
         # Shareholder Agreement) alongside it.
-        if len(secondary) == 1 and secondary.isdisjoint(primary):
+        if len(secondary) == 1 and secondary.isdisjoint(primary) \
+                and not _shares_family(session_id, primary, secondary):
             logger.info("Party-name content match also found a second document reference "
                         "(%r) → %s", name, {_norm_doc_name(d) for d in secondary})
             return primary | secondary
