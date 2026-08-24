@@ -6227,9 +6227,40 @@ _NARROW_TOKEN_STOPWORDS = frozenset({
     "redacted", "countersigned", "clean", "fully", "true",
 })
 
+# The corpus files a multi-word instrument type under its INITIALISM — "KERA",
+# "SSA", "TSA", "SPA" — while questions spell the type out in full ("the Key
+# Employee Retention Agreement"). Neither shares a token with the other, so
+# filename narrowing sees the type words match nothing, discards them, and
+# narrows on whatever generic word is left — usually "agreement", which then
+# selects FOR the siblings whose filenames spell the type out and AGAINST the
+# one document that uses the acronym. Confirmed live: "the Key Employee
+# Retention Agreement between Apex Sagar Mobility Limited and Ashoka Travel
+# Limited" narrowed an 8-document cluster to the 5 filenames containing
+# "Agreement", dropping "MAT-2021-6077_Apex Sagar Mobility_KERA_2019-12-25.pdf"
+# — the one document the question was actually about.
+#
+# Deriving the initialism from the spelled-out name closes that gap with the
+# corpus's own naming convention. Only Title-Case runs ending in an instrument
+# head noun qualify, so ordinary capitalised prose never manufactures a token.
+_INSTRUMENT_INITIALISM_RE = re.compile(
+    r'\b((?:[A-Z][a-z]+\s+){2,5}'
+    r'(?:Agreement|Deed|Contract|Undertaking|Opinion|Memorandum|Notice|Policy))\b'
+)
+
+
+def _instrument_initialisms(question: str) -> list[str]:
+    """Lower-case initialisms of any spelled-out instrument type the question names."""
+    out: list[str] = []
+    for m in _INSTRUMENT_INITIALISM_RE.finditer(question):
+        acronym = "".join(w[0] for w in m.group(1).split()).lower()
+        if 3 <= len(acronym) <= 6 and acronym not in out:
+            out.append(acronym)
+    return out
+
 
 def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
-                               exclude: str | None = None) -> set[str]:
+                               exclude: str | None = None,
+                               allow_initialism: bool = True) -> set[str]:
     """Narrow a multi-document match using whatever ELSE the question names.
 
     A party name or matter reference that resolves to several documents isn't
@@ -6313,9 +6344,21 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
             continue
         if norm not in tokens:
             tokens.append(norm)
+    haystacks = {d: re.sub(r'[^a-z0-9]', '', d.lower()) for d in candidate_docs}
+    # An instrument initialism is a far higher-precision signal than any single
+    # ordinary word: it is the corpus's own filing code for exactly the
+    # instrument type the question spelled out. When one picks out a single
+    # candidate, take it outright rather than AND-ing it with generic words
+    # that would only cancel it out — "kera" and "agreement" intersect to
+    # nothing, and the empty-intersection guard below would then discard both.
+    for acronym in (_instrument_initialisms(question) if allow_initialism else []):
+        if exclude_norm and acronym in exclude_norm:
+            continue
+        hit = {d for d, h in haystacks.items() if acronym in h}
+        if len(hit) == 1:
+            return hit
     if not tokens:
         return candidate_docs
-    haystacks = {d: re.sub(r'[^a-z0-9]', '', d.lower()) for d in candidate_docs}
     discriminating: list[tuple[str, set[str]]] = []
     for t in tokens:
         matched = {d for d, h in haystacks.items() if t in h}
@@ -6584,10 +6627,28 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         remainder = docs - primary
         if not remainder:
             continue
-        secondary = _narrow_by_question_tokens(question, remainder, exclude=name)
+        # allow_initialism=False: the instrument type the question names has
+        # already been spent identifying the PRIMARY document. Letting its
+        # initialism pin a second one finds a same-type sibling of the primary
+        # rather than the different instrument this branch exists to recover,
+        # and hands the answer LLM two documents of one type to confuse.
+        # Confirmed live: "Section 5 of the Share Subscription Agreement
+        # between Tata Elxsi Limited and Vantara Vehicles LLC" correctly pinned
+        # the Vantara SSA, then pulled in an unrelated Tata Elxsi/Tata Elxsi
+        # SSA on the strength of "SSA" alone.
+        secondary = _narrow_by_question_tokens(question, remainder, exclude=name,
+                                               allow_initialism=False)
         if not secondary or len(secondary) > max_docs:
             secondary = _narrow_by_title_hint(session_id, remainder, question, exclude=name)
-        if secondary and len(secondary) <= max_docs and secondary.isdisjoint(primary):
+        # Exactly one: "a second document is named here" is a claim about ONE
+        # document. A narrowing that lands on several is the other party's own
+        # portfolio, not the instrument the question cross-referenced.
+        # Confirmed live: "Section 9 (Severability) of the Key Employee
+        # Retention Agreement between Apex Sagar Mobility Limited and Ashoka
+        # Travel Limited" pinned the right KERA, then merged in four unrelated
+        # Ashoka Travel instruments (an Escrow, a TSA, an SPA and a
+        # Shareholder Agreement) alongside it.
+        if len(secondary) == 1 and secondary.isdisjoint(primary):
             logger.info("Party-name content match also found a second document reference "
                         "(%r) → %s", name, {_norm_doc_name(d) for d in secondary})
             return primary | secondary
@@ -6978,8 +7039,109 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
     return set()
 
 
+_BETWEEN_RE = re.compile(r'\bbetween\b', re.I)
+
+# What joins one named instrument to the NEXT one in a question that names
+# several ("... dated 25 December 2019 AND THE Key Employee Retention Agreement
+# between ...", "... dated 05 July 2024 AS STATED IN THE Share Subscription
+# Agreement between ..."). Everything after this marker introduces the next
+# instrument, so it belongs to the next pair's sub-question, not this one.
+# Requiring "the" after the connector is what keeps it from splitting on the
+# "and" that joins the two parties of a single pair ("... Limited and Ashoka
+# Travel Limited").
+_PAIR_CONNECTOR_RE = re.compile(
+    r'\b(?:and|or|as\s+(?:stated|set\s+out|provided|described|defined)\s+in|'
+    r'versus|vs\.?|compared\s+(?:to|with))\s+the\b',
+    re.I,
+)
+
+
+def _question_pair_segments(question: str) -> list[str]:
+    """Split a question naming SEVERAL party-pairs into one sub-question per pair.
+
+    A comparison question names two whole matters at once — "compare the
+    governing law of the KERA between Apex Sagar Mobility Limited and Ashoka
+    Travel Limited dated 25 December 2019 and the KERA between Apex Prisha
+    Motors Limited and Northfield Mobility Private Limited dated 28 April
+    2021". Every party-name detector in this module reads the question as one
+    flat list of names, so the pair resolver below sees FOUR parties, truncates
+    to three, and requires all three in a single document title. Nothing has
+    all three, so it either matches nothing or — confirmed live on that exact
+    question — matches two unrelated Apex Sagar/Ashoka Travel instruments (an
+    Escrow Agreement and an SPA) while retrieving neither KERA the question
+    actually asked about.
+
+    Each returned segment is the question's head (which carries the instrument
+    type and the task verb) plus one "between …" span, so the pair's own date
+    and its own instrument words narrow it without the other pair's date
+    cancelling them out.
+
+    Returns [] unless there are 2+ "between" spans AND each one names two
+    parties — one pair, or prose that merely uses the word, stays on the
+    ordinary single-pair path.
+    """
+    starts = [m.start() for m in _BETWEEN_RE.finditer(question)]
+    if len(starts) < 2:
+        return []
+    segments: list[str] = []
+    # The instrument type sits BEFORE its "between", so each span's own head is
+    # whatever preceded it: the question's opening for the first pair, and for
+    # every later pair the tail the previous span handed over at its connector.
+    head = question[:starts[0]]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(question)
+        span = question[start:end]
+        body, tail = span, ""
+        if i + 1 < len(starts):
+            cuts = list(_PAIR_CONNECTOR_RE.finditer(span))
+            if cuts:
+                body, tail = span[:cuts[-1].start()], span[cuts[-1].start():]
+        if len(_PARTY_NAME_RE.findall(body)) < 2:
+            return []
+        segments.append(head + body)
+        head = tail
+    return segments
+
+
 def _resolve_docs_by_party_pair(question: str, session_id: str,
                                 max_docs: int = 6) -> set[str]:
+    """Resolve documents named by their parties, one pair or several.
+
+    Compound questions are resolved pair-by-pair and unioned; everything else
+    goes straight to the single-pair resolver below.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    segments = _question_pair_segments(question)
+    if not segments:
+        return _resolve_one_party_pair(question, session_id, max_docs)
+
+    union: set[str] = set()
+    resolved = 0
+    for segment in segments:
+        try:
+            got = _resolve_one_party_pair(segment, session_id, max_docs)
+        except Exception as e:
+            logger.error("resolve_scope: compound party-pair leg failed: %s", e)
+            got = set()
+        if got:
+            union |= got
+            resolved += 1
+    if resolved == len(segments) and union:
+        logger.info("Compound party-pair question: all %d pairs resolved → %d document(s): %s",
+                    len(segments), len(union), {_norm_doc_name(d) for d in union})
+        return union
+    # Deliberately NOT falling back to the flat single-pair path: with four
+    # party names in one question that path ANDs three of them together and
+    # returns whatever coincidence survives. Returning nothing lets the weaker
+    # but honest family/broad signals downstream handle it instead.
+    logger.info("Compound party-pair question: only %d of %d pairs resolved — "
+                "declining to scope on a partial pair set", resolved, len(segments))
+    return set()
+
+
+def _resolve_one_party_pair(question: str, session_id: str,
+                            max_docs: int = 6) -> set[str]:
     """Resolve the documents of a matter named by BOTH of its parties.
 
     ``_resolve_docs_by_party`` above scores each party name INDEPENDENTLY and
@@ -7290,6 +7452,7 @@ _DEMONSTRATIVE_BACKREF_RE = re.compile(
 # is included for the same reason: a comparison thread that established its set
 # should keep it for subsequent follow-ups, not only the turn that resolved it.
 _CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "party-pair",
+                                     "party-pair-compound",
                                      "entity", "date", "carryover", "carryover-set"})
 
 # How many answers back to look for the turn whose scope should be inherited.
@@ -7715,6 +7878,29 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     # by it.
     _fam_name, _fam_docs = _question_family_scope(question, session_id)
 
+    # A question naming SEVERAL party-pairs ("compare X between A and B with Y
+    # between C and D") has to be resolved pair by pair — every branch below
+    # reads the question as one flat list of names and would answer from
+    # whichever pair its scoring happened to favour, silently dropping the
+    # other side of the comparison. Runs ahead of the single-party branch
+    # precisely because that branch DOES resolve such questions: confirmed live,
+    # a two-SSA comparison resolved "party" to the Tata Steel agreement alone
+    # and the answer compared it against nothing. Only fires when every pair
+    # resolves, so it never trades a real single-document match for a partial one.
+    _pair_segments = _question_pair_segments(question)
+    if _pair_segments:
+        try:
+            compound_docs = _resolve_docs_by_party_pair(question, session_id)
+        except Exception as e:
+            logger.error("resolve_scope: compound party-pair resolution failed: %s", e)
+            compound_docs = set()
+        if compound_docs:
+            return _enforce_question_family(
+                {"scope": "single_doc", "target_docs": sorted(compound_docs),
+                 "target_family": None, "is_broad": False,
+                 "confidence": 0.8, "method": "party-pair-compound"},
+                _fam_name, _fam_docs)
+
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
     # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
@@ -7801,7 +7987,9 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         # resolved correctly via the date resolver below — party-pair
         # returning early on ANY non-empty result, even a wrong-ish
         # ambiguous one, silently took that away.
-        if len(pair_docs) > 1:
+        # Never on a compound question: it recites one date PER pair, so pinning
+        # the whole result to a single date would drop the other pair's document.
+        if len(pair_docs) > 1 and not _pair_segments:
             try:
                 date_docs = _resolve_docs_by_date(question, session_id)
             except Exception as e:
