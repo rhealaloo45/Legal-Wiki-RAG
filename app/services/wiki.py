@@ -6751,6 +6751,17 @@ _PARTY_GENERIC_WORDS = frozenset({
     'corporation', 'plc', 'gmbh', 'company', 'co', 'group', 'holdings',
     'technologies', 'technology', 'systems', 'solutions', 'services',
     'energy', 'industries', 'international', 'global', 'partners', 'ventures',
+    # This corpus's own conglomerate prefixes ("Apex Sagar Mobility", "Tata
+    # Projects", "Apex Zephyra Trading Company") — real-world-style umbrella
+    # names that head dozens of unrelated subsidiary parties, not a single
+    # party's identity. Confirmed live, twice: "Apex Zephyra Trading Company"
+    # reduced to token "Apex" — the single most common word in the whole
+    # corpus — and party-pair resolution over- or under-matched on it in both
+    # directions (a real Tax Deed excluded from its title-search cluster
+    # entirely; a real Transition Services Agreement never found at all).
+    # Ingest's own short-titling already drops these ("Sagar-Ashoka", "TPL"),
+    # this just catches the token extractor up to match.
+    'apex', 'tata',
 })
 
 
@@ -6904,7 +6915,7 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
     """
     if not config.USE_DATABASE or len(tokens) < 2:
         return set()
-    anchor_tok, other_tok, anchor_docs = None, None, None
+    anchor_tok, anchor_full, other_tok, anchor_docs = None, None, None, None
     for i, t in enumerate(tokens[:2]):
         try:
             docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, t, cap=100) or [])
@@ -6912,6 +6923,9 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
             docs = set()
         if docs and (anchor_docs is None or len(docs) < len(anchor_docs)):
             anchor_docs, anchor_tok = docs, t
+            # The anchor's own FULL name, not just its bare distinctive token —
+            # see the `spent` fix below for why this matters.
+            anchor_full = (full_names[i] if i < len(full_names) else t)
             other_tok = (full_names[1 - i] if len(full_names) > 1 else None) or (tokens[1 - i] if len(tokens) > 1 else None)
     if not anchor_docs:
         return set()
@@ -6946,7 +6960,16 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
     # NOW narrow by filename — but the instrument type is the only signal
     # left to ask for; both party phrases already did their job above and
     # would just recreate the same cancel-out if left in the token set.
-    spent = " ".join(n for n in (anchor_tok, other_tok) if n)
+    #
+    # Excludes each party's FULL name, not just the bare anchor token it was
+    # reduced to for the content search above. Confirmed live: anchor_tok
+    # "Nimbus" alone left "Capital" (from "Nimbus Capital") in the narrowing
+    # pool as a live token — it matched 5 unrelated sibling documents, which
+    # disagreed with "tax"/"deed" (which correctly, uniquely matched the real
+    # Tax Deed) and cancelled the narrowing out via the empty-intersection
+    # guard, silently returning the whole unnarrowed set instead of the one
+    # real answer.
+    spent = " ".join(n for n in (anchor_full, other_tok) if n)
     narrowed = _narrow_by_question_tokens(question, content_verified, exclude=spent)
     if narrowed and len(narrowed) <= max_docs:
         return narrowed
@@ -7052,6 +7075,7 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
     # question names ONE instrument — a question spanning several ("across the
     # NDA, the notice, and the petition") must keep the whole cluster.
     if len(cluster) > 1 and _count_instrument_mentions(question) <= 1:
+        pinned = set()
         for rx, hint in _TITLE_KIND_HINTS:
             if not rx.search(question):
                 continue
@@ -7068,6 +7092,25 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
                             {_norm_doc_name(d) for d in pinned})
                 return pinned
             break
+        if not pinned:
+            # The question names an instrument type this curated list doesn't
+            # cover ("Key Employee Retention Agreement", "Tax Deed") — try
+            # filename-narrowing the same general mechanism uses everywhere
+            # else, excluding the resolved party names so their own words
+            # can't cancel out a real instrument-type token the way "Capital"
+            # once did (see _content_pair_supplement). Confirmed live: a KERA
+            # question's title cluster + content supplement correctly totalled
+            # 11 real candidate documents, including the right one — too many
+            # to return outright, and no curated kind-hint matched, so it fell
+            # all the way through to an empty result instead of narrowing.
+            spent = " ".join(full_names)
+            filename_narrowed = _narrow_by_question_tokens(question, cluster, exclude=spent)
+            if filename_narrowed and len(filename_narrowed) < len(cluster):
+                logger.info("Party-pair title match %s narrowed by filename tokens "
+                            "→ %d document(s): %s",
+                            tokens, len(filename_narrowed),
+                            {_norm_doc_name(d) for d in filename_narrowed})
+                return filename_narrowed
     if len(cluster) <= max_docs:
         logger.info("Party-pair title match %s → %d document(s): %s",
                     tokens, len(cluster), {_norm_doc_name(d) for d in cluster})
@@ -7746,6 +7789,53 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         logger.error("resolve_scope: party-pair resolution failed: %s", e)
         pair_docs = set()
     if pair_docs:
+        # An ambiguous multi-doc pair result can still be pinned by an
+        # explicit date the question recites — a stronger, cheaper signal
+        # than leaving several documents for the answer LLM to sort out.
+        # Confirmed live: a Board Resolution naming only ONE of its two
+        # parties (common in this corpus — a board resolves in its own name,
+        # never the counterparty's) can never appear in a two-party title or
+        # content match at all, so the party-pair cluster this question
+        # produces is real siblings that don't include the actual right
+        # answer. Before the date check existed here, this exact case
+        # resolved correctly via the date resolver below — party-pair
+        # returning early on ANY non-empty result, even a wrong-ish
+        # ambiguous one, silently took that away.
+        if len(pair_docs) > 1:
+            try:
+                date_docs = _resolve_docs_by_date(question, session_id)
+            except Exception as e:
+                logger.error("resolve_scope: date check on party-pair result failed: %s", e)
+                date_docs = set()
+            if date_docs and len(date_docs) == 1:
+                # A unique date match is a strong signal ONLY when the matched
+                # document is actually about one of the two named parties —
+                # otherwise it may just be a coincidence (a Board Resolution
+                # for an entirely different deal that happens to recite the
+                # same calendar date somewhere in its own text). Confirmed
+                # live: "24 March 2024" uniquely matched an unrelated Board
+                # Resolution with no connection to either party the question
+                # named, silently replacing a correct 5-document Tata Elxsi
+                # cluster (containing the real answer) with the wrong single
+                # document.
+                date_doc = next(iter(date_docs))
+                names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+                relevant = False
+                for n in names:
+                    try:
+                        if date_doc in set(_db.find_source_docs_mentioning_phrase(
+                                _active_wiki_id(), session_id, n, cap=500) or []):
+                            relevant = True
+                            break
+                    except Exception:
+                        continue
+                if relevant:
+                    logger.info("Party-pair match %d document(s) pinned to 1 by recited date: %s",
+                                len(pair_docs), {_norm_doc_name(d) for d in date_docs})
+                    pair_docs = date_docs
+                else:
+                    logger.info("Date match %s discarded — mentions neither party named "
+                                "in the question", _norm_doc_name(date_doc))
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(pair_docs),
              "target_family": None, "is_broad": False,
