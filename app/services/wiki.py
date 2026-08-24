@@ -2981,8 +2981,12 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 if not _fdesc:
                     continue
                 _where = f"page {_pnum}" if _pnum else "page unknown"
+                # Longer than a clause's 500 because a described diagram has no
+                # prose page to fall back on: its node labels, room names and
+                # legend entries exist ONLY here, and cutting them off mid-list
+                # leaves the answer reporting the diagram as unreadable.
                 _doc_lines.append(
-                    f"  - Figure ({_fkind or 'figure'}, {_where}): {_fdesc.strip()[:800]}")
+                    f"  - Figure ({_fkind or 'figure'}, {_where}): {_fdesc.strip()[:2000]}")
             for _ct, _vt in _clause_rows:
                 if _vt:
                     _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
