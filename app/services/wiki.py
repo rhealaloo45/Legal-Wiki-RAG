@@ -6294,7 +6294,18 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
     for m in _NARROW_TOKEN_RE.finditer(question):
         raw = m.group(0)
         norm = re.sub(r'[^a-z0-9]', '', raw.lower())
-        if len(norm) < 3 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS or raw.lower() in _NARROW_TOKEN_STOPWORDS:
+        # Deliberately NOT filtering against _BARE_PROPER_NOUN_STOPWORDS here —
+        # that set exists to keep instrument-type words ("agreement", "data",
+        # "processing", "service", "master") OUT of party-name candidates, but
+        # this function's whole purpose is narrowing BY instrument-type words
+        # ("the Guarantee agreement" — see docstring). Reusing it silently
+        # stripped exactly the tokens meant to discriminate. Confirmed live:
+        # "the Data Processing Agreement between Tata Capital Limited and
+        # Vishesh Motors Limited" lost "data"/"processing"/"agreement" to that
+        # filter, leaving ordinary-English "term" (from "how is the term
+        # 'Affiliate' defined") as the only surviving token — which then
+        # collided with an unrelated sibling's "Term Sheet" filename and won.
+        if len(norm) < 3 or raw.lower() in _NARROW_TOKEN_STOPWORDS:
             continue
         if norm.isdigit():
             continue
@@ -7426,10 +7437,24 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     if not family:
         return None, set()
     try:
-        return family, set(_db.get_documents_by_family(_active_wiki_id(), session_id, family))
+        docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, family))
     except Exception as e:
         logger.error("resolve_scope: get_documents_by_family failed: %s", e)
         return None, set()
+    # A document whose ingest-time CONTENT classification came out generic
+    # ("Agreement") is invisible to the doc_family lookup above even when it
+    # was filed under this family's folder — confirmed on the real corpus: a
+    # Legal Opinion whose actual text reads like a bare bilateral contract
+    # (National Council for Consumer Protection / Apex Sagar Financial
+    # Services) got doc_family=None and dropped out of every "Legal Opinion"
+    # family question. folder_hint already carries this signal from ingest at
+    # no extra cost, so union it in rather than leave the gap.
+    try:
+        keywords = [kw for kw, fam in _DOC_FAMILY_RULES if fam == family]
+        docs |= set(_db.get_documents_by_folder_hint(_active_wiki_id(), session_id, keywords))
+    except Exception as e:
+        logger.warning("resolve_scope: folder_hint fallback failed for family %s: %s", family, e)
+    return family, docs
 
 
 def _enforce_question_family(scoped: dict, family: str | None,
