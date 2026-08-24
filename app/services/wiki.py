@@ -2931,6 +2931,19 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                         WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
                         ORDER BY id
                     """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+                    # A figure's stored description is the ONLY record of what a
+                    # diagram shows — unlike a clause, no prose page paraphrases
+                    # it, because a floor plan or an org chart has no text for
+                    # the page-writing pass to summarise. Confirmed live: both
+                    # "what does the floor plan diagram ... show" and "what does
+                    # the org chart diagram ... show" answered "not covered"
+                    # while the figure row sat in the typed store, correctly
+                    # extracted at ingest, simply never read back.
+                    _figure_rows = _sconn.execute(_struct_sql("""
+                        SELECT page_num, figure_kind, description FROM figures
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY page_num, id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
             except Exception as _struct_err:
                 logger.warning("structured-data lookup failed for %s: %s", _sd, _struct_err)
                 continue
@@ -2960,6 +2973,16 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                         except Exception:
                             _parsed_row = _r
                     _doc_lines.append(f"    Row: {_parsed_row}")
+            # Figures before clauses for the same reason tables come first: if
+            # the cap has to cut something, it should cut clause text, which the
+            # prose pages largely restate anyway, not the one description of a
+            # diagram that exists nowhere else.
+            for _pnum, _fkind, _fdesc in _figure_rows:
+                if not _fdesc:
+                    continue
+                _where = f"page {_pnum}" if _pnum else "page unknown"
+                _doc_lines.append(
+                    f"  - Figure ({_fkind or 'figure'}, {_where}): {_fdesc.strip()[:800]}")
             for _ct, _vt in _clause_rows:
                 if _vt:
                     _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
@@ -2971,11 +2994,14 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             if len(_struct_block) > _struct_cap_chars:
                 _struct_block = _struct_block[:_struct_cap_chars] + "\n[...truncated]"
             wiki_parts.append(
-                "[Structured extraction recorded at ingest — full clause text and "
-                "complete table data, independent of the prose page summaries below. "
-                "These are drawn from the documents themselves and may be cited as "
-                "such, naming the document. A table's full rows live here even when a "
-                "page's prose summary only mentions a sample of them:]\n" + _struct_block + "\n"
+                "[Structured extraction recorded at ingest — full clause text, complete "
+                "table data, and descriptions of figures/diagrams, independent of the "
+                "prose page summaries below. These are drawn from the documents "
+                "themselves and may be cited as such, naming the document. A table's "
+                "full rows live here even when a page's prose summary only mentions a "
+                "sample of them. A Figure line is a DESCRIPTION of a diagram, not text "
+                "printed in the document — report what it says the diagram shows, but "
+                "never present it as a verbatim quote:]\n" + _struct_block + "\n"
             )
 
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
@@ -3443,7 +3469,13 @@ def _strict_verification_corpus(context: str) -> str:
     if not blocks:
         return context
     parts = [_block_verification_text(title, body) for title, body in blocks]
-    parts.extend(_STRUCTURED_BLOCK_RE.findall(context))
+    for struct in _STRUCTURED_BLOCK_RE.findall(context):
+        # Figure lines are excluded on purpose: a figure's description is
+        # GENERATED (a vision pass describing a diagram), not text printed in
+        # the document, so letting it verify quotes would do exactly what
+        # _block_verification_text refuses to do for synthesized page prose.
+        parts.append('\n'.join(
+            ln for ln in struct.splitlines() if not ln.lstrip().startswith("- Figure (")))
     return '\n'.join(parts)
 
 
