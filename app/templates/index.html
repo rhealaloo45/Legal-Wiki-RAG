@@ -4801,19 +4801,27 @@
         const res = await fetch('/review_queue/documents?session_id=' + SID);
         const d = await res.json();
         if (!res.ok) throw new Error(d.error || 'Failed to load');
-        reviewDocs = d.documents || [];
-        const pending = reviewDocs.filter(x => x.pending_total > 0).length;
+        const allDocs = d.documents || [];
+        // The queue is a to-do list, not a corpus browser — a document with
+        // nothing pending has nothing to act on here, so it doesn't belong in
+        // the list at all (it was previously kept in with a "clear" badge,
+        // which read as still-in-the-queue even though there was no longer
+        // anything to review).
+        reviewDocs = allDocs.filter(x => x.pending_total > 0);
         document.getElementById('admin-review-sub').textContent =
-          reviewDocs.length + ' document' + (reviewDocs.length === 1 ? '' : 's') +
-          ' · ' + pending + ' with items awaiting review';
+          allDocs.length + ' document' + (allDocs.length === 1 ? '' : 's') +
+          ' · ' + reviewDocs.length + ' with items awaiting review';
         if (!reviewDocs.length) {
-          list.innerHTML = '<div class="review-empty">No ingested documents yet.</div>';
+          list.innerHTML = '<div class="review-empty">Queue is empty — nothing awaiting review.</div>';
+          reviewDocSelected = null;
+          const meta = document.getElementById('review-doc-meta');
+          const src = document.getElementById('review-doc-source');
+          if (meta) meta.innerHTML = '<div class="review-empty">Queue is empty — nothing awaiting review.</div>';
+          if (src) src.innerHTML = '';
           return;
         }
         const rows = reviewDocs.map((doc, i) => {
-          const badge = doc.pending_total > 0
-            ? '<span class="admin-badge ' + (doc.pending_high_stakes ? 'red' : 'amber') + '">' + doc.pending_total + ' waiting</span>'
-            : '<span class="admin-badge green">clear</span>';
+          const badge = '<span class="admin-badge ' + (doc.pending_high_stakes ? 'red' : 'amber') + '">' + doc.pending_total + ' waiting</span>';
           return '<div class="review-doc-item' + (i === reviewDocSelected ? ' active' : '') + '" onclick="selectReviewDoc(' + i + ')">' +
               '<div class="review-doc-name">' + escapeHtmlRule(_docDisplayName(doc.source_doc)) + '</div>' +
               '<div class="review-doc-sub">' + _confChip(doc.family_confidence) +
