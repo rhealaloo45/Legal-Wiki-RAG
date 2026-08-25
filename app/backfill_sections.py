@@ -187,6 +187,153 @@ def _extract_sections(path: str, ocr: bool = False) -> list[dict]:
     return out
 
 
+# An UNNUMBERED section heading — how every non-contract instrument in this
+# corpus divides itself up ("Scope and Instructions", "Summary of Advice",
+# "Statement of Facts", "Preliminary Objections", "Prayer", "Findings"). These
+# documents never number their sections, so _HEADING_RE matches nothing in them
+# and 104 documents — every Board Resolution, Legal Opinion, Plaint, Affidavit,
+# Judgment and Written Statement — ended up with no structural extraction at all.
+_BARE_HEADING_RE = re.compile(r"^([A-Z][A-Za-z][A-Za-z ,/&'()\-]{1,42})$")
+
+# A heading is a noun phrase. A wrapped sentence that happens to be short and
+# to break before its full stop is not, and these are how it announces itself:
+# "The present suit has been filed seeking permanent injunction", "An order for
+# permanent injunction restraining the", "This Court also notes the submission".
+_PROSE_OPENERS = frozenset({
+    "the", "this", "that", "these", "those", "an", "a", "it", "in", "we", "our",
+    "such", "any", "each", "where", "if", "no", "on", "at", "by", "for", "as",
+    "there", "he", "she", "they", "his", "her", "its", "all", "both", "upon",
+})
+
+# A board resolution's operative content: one paragraph per resolution.
+_RESOLVED_RE = re.compile(r"^RESOLVED THAT\s+(.{20,})$", re.IGNORECASE)
+
+# Board resolutions carry no "Effective Date:" line — they date themselves by
+# the meeting. Confirmed live: "what is the effective date of the Board
+# Resolution Approving Transaction between Apex Prisha Motors ..." found
+# nothing, while page 1 reads "Meeting held on 11 April 2019 at the registered
+# office of Apex Prisha Motors Limited".
+_MEETING_RE = re.compile(r"(Meeting\s+held\s+on\s+[^\n]{4,80})", re.IGNORECASE)
+
+
+# Attribution labels in a signature block or court footer. They pass every
+# shape test a heading does — short, capitalised, no full stop — but what
+# follows them is a name, not a provision.
+_HEADING_STOPLIST = frozenset({
+    "authorised signatory", "authorized signatory", "drawn and settled by",
+    "advocate-on-record / counsel", "advocate on record / counsel",
+    "prepared by", "reviewed by", "approved by", "hon'ble judge / court master",
+    "name", "title", "designation", "signature", "witness", "date", "place",
+    "for and on behalf of", "counsel for the applicant", "counsel for the respondent",
+})
+
+# A letterhead line naming the firm or party, not a section ("Kirkland Mercer
+# LLP", "Deshmukh & Associates", "Tata Sons Private Limited").
+_ENTITY_TAIL = frozenset({
+    "llp", "associates", "limited", "ltd", "ltd.", "inc", "inc.", "corp", "corp.",
+    "plc", "bank", "co", "co.", "llc", "pte", "pty", "fze", "gmbh", "company",
+    "partners", "&",
+})
+
+# A heading is a complete noun phrase. Ending on a conjunction or preposition
+# means the line is a wrapped sentence that broke mid-clause.
+_DANGLING_TAIL = frozenset({
+    "and", "or", "of", "to", "the", "in", "for", "with", "by", "at", "from",
+    "on", "as", "that", "which", "a", "an", "its", "their",
+})
+
+
+def _is_heading_line(line: str) -> bool:
+    s = line.strip()
+    if not _BARE_HEADING_RE.match(s):
+        return False
+    if s.lower().rstrip(":") in _HEADING_STOPLIST:
+        return False
+    words = s.split()
+    if words[0].lower() in _PROSE_OPENERS:
+        return False
+    if words[-1].lower() in _ENTITY_TAIL or words[-1].lower() in _DANGLING_TAIL:
+        return False
+    return True
+
+
+def _extract_bare_sections(path: str, ocr: bool = False) -> list[dict]:
+    """Unnumbered section headings and their body, verbatim.
+
+    Same shape as _extract_sections, for the documents that head their sections
+    with a bare noun phrase instead of a number.
+    """
+    import fitz
+
+    out: list[dict] = []
+    doc = fitz.open(path)
+    try:
+        for page_num, page in enumerate(doc, 1):
+            lines = _page_text(page, ocr, path, page_num).splitlines()
+            for i, line in enumerate(lines):
+                if not _is_heading_line(line):
+                    continue
+                body: list[str] = []
+                for nxt in lines[i + 1:]:
+                    stripped = nxt.strip()
+                    if (not stripped or _PAGE_MARKER_RE.match(nxt)
+                            or _HEADING_RE.match(nxt) or _is_heading_line(nxt)):
+                        break
+                    body.append(stripped)
+                    if len(" ".join(body)) > _MAX_BODY_CHARS:
+                        break
+                text = " ".join(body).strip()
+                if len(text) < _MIN_BODY_CHARS:
+                    continue
+                out.append({"heading": line.strip(), "text": text, "page": page_num})
+    finally:
+        doc.close()
+    return out
+
+
+def _extract_resolutions(path: str, ocr: bool = False) -> list[dict]:
+    """Each "RESOLVED THAT ..." paragraph of a board resolution, verbatim.
+
+    Labelled with the resolution's own opening words rather than a guessed
+    clause type: what a board resolves is ordinary clause substance (severability,
+    counterparts, anti-bribery), but assigning it one of those names would be
+    inference, and the text says what it says.
+    """
+    import fitz
+
+    out: list[dict] = []
+    doc = fitz.open(path)
+    try:
+        for page_num, page in enumerate(doc, 1):
+            lines = _page_text(page, ocr, path, page_num).splitlines()
+            i = 0
+            while i < len(lines):
+                m = _RESOLVED_RE.match(lines[i].strip())
+                if not m:
+                    i += 1
+                    continue
+                body = [m.group(1).strip()]
+                j = i + 1
+                while j < len(lines):
+                    stripped = lines[j].strip()
+                    if (not stripped or _PAGE_MARKER_RE.match(lines[j])
+                            or _RESOLVED_RE.match(stripped) or _is_heading_line(lines[j])):
+                        break
+                    body.append(stripped)
+                    if len(" ".join(body)) > _MAX_BODY_CHARS:
+                        break
+                    j += 1
+                text = " ".join(body).strip()
+                if len(text) >= _MIN_BODY_CHARS:
+                    label = " ".join(text.split()[:7])
+                    out.append({"heading": f"Resolved That — {label}",
+                                "text": text, "page": page_num})
+                i = max(j, i + 1)
+    finally:
+        doc.close()
+    return out
+
+
 def _extract_definitions(path: str, ocr: bool = False) -> list[dict]:
     """Every '"Term" means ...' definition in the document, verbatim.
 
@@ -241,7 +388,13 @@ def _extract_header(path: str, ocr: bool = False) -> str | None:
     try:
         if not len(doc):
             return None
-        m = _HEADER_RE.search(_page_text(doc[0], ocr, path, 1))
+        first = _page_text(doc[0], ocr, path, 1)
+        m = _HEADER_RE.search(first)
+        if m:
+            return m.group(1).strip()
+        # A board resolution dates itself by the meeting rather than an
+        # "Effective Date:" line — see _MEETING_RE.
+        m = _MEETING_RE.search(first)
         return m.group(1).strip() if m else None
     finally:
         doc.close()
@@ -436,6 +589,13 @@ def backfill(target_session: str | None = None, dry_run: bool = False,
             has_table = source_doc in docs_with_tables
             try:
                 sections = _extract_sections(path, ocr)
+                # The bare-heading pass runs ONLY where the numbered pass found
+                # nothing. A contract's prose holds plenty of short capitalised
+                # lines, and letting both passes run over one would file those
+                # as clauses alongside its real numbered sections.
+                if not sections:
+                    sections = _extract_bare_sections(path, ocr)
+                sections.extend(_extract_resolutions(path, ocr))
                 definitions = _extract_definitions(path, ocr)
                 header = _extract_header(path, ocr)
                 schedules = _extract_labelled_tables(path, ocr) if not has_table else []
