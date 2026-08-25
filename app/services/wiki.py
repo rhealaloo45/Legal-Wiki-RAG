@@ -2605,6 +2605,58 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
+# "... of the SOW ... AS STATED IN the Power of Attorney between ...". The
+# marker splits a question into the provision being asked for and the document
+# the question claims states it.
+_CROSS_REF_RE = re.compile(
+    r'\bas\s+(?:stated|set\s+out|recorded|described|provided|specified)\s+in\s+the\s+',
+    re.IGNORECASE,
+)
+
+
+def _failed_cross_reference(question: str, pages: dict,
+                            selected_titles: list) -> str | None:
+    """Report a cross-reference the retrieved context does not bear out.
+
+    Returns a sentence naming the failure, or None when the question makes no
+    cross-reference claim or the claim is satisfiable. Deliberately conservative:
+    it only reports when the CITING document — the one after "as stated in" — is
+    absent from the retrieved pages entirely. A document that WAS retrieved may
+    genuinely quote the other's clause, and deciding that is the answer model's
+    job, not a regex's.
+    """
+    m = _CROSS_REF_RE.search(question or "")
+    if not m:
+        return None
+    citing = question[m.end():]
+    cited_names = [n.group(1).strip() for n in _PARTY_NAME_RE.finditer(citing)]
+    if not cited_names:
+        return None
+    # The instrument the question says does the citing, for a readable message.
+    citing_type = re.match(r'([A-Za-z][A-Za-z /\-]{2,60}?)\s+between\b', citing)
+    citing_label = citing_type.group(1).strip() if citing_type else "second document"
+
+    retrieved_docs = {
+        (pages.get(t) or {}).get("source_doc", "")
+        for t in (selected_titles or []) if isinstance(pages.get(t), dict)
+    }
+    haystack = " ".join(_norm_doc_name(d).lower() for d in retrieved_docs if d)
+    # Present if the retrieved filenames carry a distinctive word of either
+    # party named as the citing document's parties.
+    for name in cited_names:
+        token = _distinctive_party_token(name)
+        if token and token.lower() in haystack:
+            return None
+    parties = " and ".join(cited_names[:2])
+    return (f"the question asks for a provision \"as stated in\" the {citing_label} "
+            f"between {parties}, and that document is NOT among the retrieved pages. "
+            f"Its cross-reference therefore cannot be confirmed. Say plainly that the "
+            f"two documents are unrelated and that it does not contain the provision "
+            f"asked about. Do NOT answer with the FIRST document's own equivalent "
+            f"clause — that is not what was asked and presenting it implies the "
+            f"cross-reference held.")
+
+
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
                  exclude_cached_answers: bool = False,
                  doc_family: "str | list[str] | None" = None, force_broad: bool = False,
@@ -2844,6 +2896,19 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     _PAGE_CAP  = config.MAX_PAGE_CONTEXT_CHARS
 
     wiki_parts = []
+    # A question can assert that one document states another's provision ("the
+    # governing law of the SOW ... AS STATED IN the Power of Attorney"). That is
+    # a claim, and when it is false the answer has to say so. A prompt rule
+    # alone did not hold: competing against thirty other rules, the model kept
+    # noting the second document's absence and then quoting the FIRST
+    # document's own clause as the answer — which reads to the user as though
+    # the cross-reference checked out. Stating the finding as retrieved
+    # evidence, at the top of the context, is what the model actually acts on.
+    _xref = _failed_cross_reference(question, pages, selected_titles)
+    if _xref:
+        logger.info("Cross-reference check: %s", _xref)
+        wiki_parts.append(f"[CROSS-REFERENCE CHECK — read before answering: {_xref}]\n")
+
     # When retrieval is file-focused, prepend a header so the LLM knows which
     # document the pages come from (handles "Services Agreement" vs "Service Agreement").
     if file_pages and mentioned_files:
@@ -3012,7 +3077,16 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             # clause the question NAMES goes first, so a per-document cut can
             # never be what removes it. A question that names no clause leaves
             # every overlap at zero and the original ingest order intact.
-            for _ct, _vt in sorted(_clause_rows, key=lambda r: -_q_overlap(r[0])):
+            #
+            # Ranked on the clause TEXT as well as its label, because not every
+            # clause has a label that describes it. A board resolution's rows are
+            # headed by their own opening words ("Resolved That — Nothing in this
+            # Agreement shall be construed"), since what a board resolves is
+            # ordinary clause substance that naming would have to guess at — so
+            # for those the words a question shares are in the body, not the head.
+            for _ct, _vt in sorted(
+                    _clause_rows,
+                    key=lambda r: -(_q_overlap(r[0]) * 2 + _q_overlap((r[1] or "")[:400]))):
                 if _vt:
                     _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
             if _doc_lines:
@@ -6349,9 +6423,16 @@ _NARROW_TOKEN_STOPWORDS = frozenset({
 # Deriving the initialism from the spelled-out name closes that gap with the
 # corpus's own naming convention. Only Title-Case runs ending in an instrument
 # head noun qualify, so ordinary capitalised prose never manufactures a token.
+# The head noun list covers what this corpus's instruments are actually called.
+# It started at Agreement/Deed/Contract and missed "Board Resolution Approving
+# Transaction" — whose document is filed as "..._BRAT_11Apr2019.pdf" — so a
+# question naming it had no initialism to narrow 24 board resolutions with, and
+# the scope stayed on five unrelated documents of the same parties.
 _INSTRUMENT_INITIALISM_RE = re.compile(
     r'\b((?:[A-Z][a-z]+\s+){2,5}'
-    r'(?:Agreement|Deed|Contract|Undertaking|Opinion|Memorandum|Notice|Policy))\b'
+    r'(?:Agreement|Deed|Contract|Undertaking|Opinion|Memorandum|Notice|Policy|'
+    r'Transaction|Resolutions?|Certificate|Letter|Statement|Sheet|Guarantee|'
+    r'Consent|Plaint|Petition|Order|Work|Intent|Minutes|Schedule|Charter))\b'
 )
 
 
