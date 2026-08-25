@@ -276,6 +276,91 @@ def _existing_coverage(conn, session_id: str) -> tuple[dict[str, list[set[str]]]
     return coverage, exact
 
 
+# "The following table sets out the financial covenants table applicable under
+# this Agreement." — how this corpus introduces every schedule it prints.
+_TABLE_INTRO_RE = re.compile(
+    r"The following table sets out the ([^.\n]{3,60})\.", re.IGNORECASE)
+
+# A schedule runs to a few dozen short cells; past this a mis-detected end has
+# swallowed the body text that follows it.
+_MAX_TABLE_CHARS = 1500
+
+
+def _extract_labelled_tables(path: str, ocr: bool = False) -> list[dict]:
+    """Schedules a document prints that ingest's table extraction missed.
+
+    Deliberately captures the table's CELLS VERBATIM as one block rather than
+    reconstructing rows and columns. A flat PDF text layer gives no column
+    count — the cells arrive as a bare sequence — and guessing one wrong would
+    file confident, wrongly-aligned values into the typed `tables` store, which
+    is a worse failure than the prose-only status quo. The block goes to
+    `clauses` under the schedule's own caption, where the answer model reads the
+    layout for itself.
+
+    Ingest captures 168 of the 176 documents that print such a table; this is
+    for the remaining 8. Measured cost of the gap: the Facility Agreement
+    between Everbright Capital Bank Ltd and Apex Meridian Mobility states a
+    Debt Service Coverage Ratio of ">= 1.4x" in its covenants table and "not
+    less than 1.21" in the padded prose repeated five times around it. Only the
+    prose reached retrieval, so 1.21 is what the answer reported.
+    """
+    import fitz
+
+    out: list[dict] = []
+    doc = fitz.open(path)
+    try:
+        for page_num, page in enumerate(doc, 1):
+            lines = _page_text(page, ocr, path, page_num).splitlines()
+            for i, line in enumerate(lines):
+                m = _TABLE_INTRO_RE.search(line)
+                if not m:
+                    continue
+                cells: list[str] = []
+                for nxt in lines[i + 1:]:
+                    stripped = nxt.strip()
+                    if (not stripped or _PAGE_MARKER_RE.match(nxt)
+                            or _HEADING_RE.match(nxt) or _TABLE_INTRO_RE.search(nxt)):
+                        break
+                    cells.append(stripped)
+                    if len(" | ".join(cells)) > _MAX_TABLE_CHARS:
+                        break
+                if len(cells) < 4:
+                    continue
+                out.append({"caption": m.group(1).strip().title(),
+                            "text": " | ".join(cells), "page": page_num})
+    finally:
+        doc.close()
+    return out
+
+
+def _covers_header(text: str) -> bool:
+    """Whether a document's stored text already states its header facts."""
+    return "effective date:" in (text or "").lower()
+
+
+def _header_text(conn, session_id: str) -> dict[str, str]:
+    """Per document, all stored page and clause text — the corpus of _covers_header.
+
+    An Overview PAGE is not evidence the header's facts were captured: ingest
+    writes one for most documents and it summarises the agreement's substance
+    without necessarily restating the effective date printed above it.
+    """
+    from sqlalchemy import text
+
+    blob: dict[str, list[str]] = {}
+    for source_doc, body in conn.execute(
+        text("SELECT source_doc, content FROM pages WHERE session_id = :sid"),
+        {"sid": session_id},
+    ):
+        blob.setdefault(source_doc, []).append(body or "")
+    for source_doc, body in conn.execute(
+        text("SELECT source_doc, verbatim_text FROM clauses WHERE session_id = :sid"),
+        {"sid": session_id},
+    ):
+        blob.setdefault(source_doc, []).append(body or "")
+    return {k: "\n".join(v) for k, v in blob.items()}
+
+
 def _is_covered(heading: str, known: list[set[str]]) -> bool:
     tokens = _coverage_tokens(heading)
     if not tokens:
@@ -326,6 +411,10 @@ def backfill(target_session: str | None = None, dry_run: bool = False,
     for session_id in sessions:
         with engine.connect() as conn:
             coverage, exact_types = _existing_coverage(conn, session_id)
+            header_blobs = _header_text(conn, session_id)
+            docs_with_tables = {r[0] for r in conn.execute(
+                _sql("SELECT DISTINCT source_doc FROM tables WHERE session_id = :sid"),
+                {"sid": session_id})}
             docs = [r[0] for r in conn.execute(
                 _sql("SELECT DISTINCT source_doc FROM pages WHERE session_id = :sid"),
                 {"sid": session_id},
@@ -343,10 +432,13 @@ def backfill(target_session: str | None = None, dry_run: bool = False,
                 continue
             known = coverage.get(source_doc, [])
             known_exact = exact_types.get(source_doc, set())
+            known_text = header_blobs.get(source_doc, "")
+            has_table = source_doc in docs_with_tables
             try:
                 sections = _extract_sections(path, ocr)
                 definitions = _extract_definitions(path, ocr)
                 header = _extract_header(path, ocr)
+                schedules = _extract_labelled_tables(path, ocr) if not has_table else []
             except Exception as e:
                 logger.error("  [%s] could not read file: %s", source_doc, e)
                 continue
@@ -362,12 +454,24 @@ def backfill(target_session: str | None = None, dry_run: bool = False,
                 for d in definitions
                 if f"definition - {d['term'].lower()}" not in known_exact
             )
-            # The header carries the effective date, governing law and matter
-            # reference. Only worth adding when the document has no overview
-            # page holding the same thing.
-            if (header
-                    and not any("overview" in " ".join(k) for k in known)
-                    and not _is_covered("Document Header", known)):
+            # An Overview page is NOT evidence the header's facts were captured:
+            # ingest writes one for most documents, and it summarises the
+            # agreement's substance without necessarily restating the effective
+            # date, governing law or matter reference printed above it. Measured
+            # after the first run of this script: 44 documents had an Overview
+            # page and still stated their effective date nowhere the pipeline
+            # could reach, which is why "what is the effective date of the
+            # Facility Agreement between National Trust Financial Corporation
+            # and Apex Junoon Alloys PLC" answered that no date was given while
+            # page 1 of that PDF reads "Effective Date: 21 November 2024".
+            # What counts as coverage is the header TEXT, wherever it lives.
+            clauses.extend(
+                {"type": sch["caption"], "text": sch["text"],
+                 "confidence": 1.0, "page": sch["page"]}
+                for sch in schedules
+                if not _is_covered(sch["caption"], known)
+            )
+            if header and not _covers_header(known_text) and not _is_covered("Document Header", known):
                 clauses.append({"type": "Document Header", "text": header,
                                 "confidence": 1.0, "page": 1})
             if not clauses:
