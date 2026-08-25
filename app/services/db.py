@@ -3243,6 +3243,32 @@ def get_metadata(wiki_id: str, session_id: str, doc_name: str) -> dict:
         return {k: v for k, v in zip(_METADATA_COLUMNS, row) if v is not None}
 
 
+def get_document_types(wiki_id: str, session_id: str) -> dict[str, str]:
+    """Every document's ingest-extracted instrument type, keyed by source_doc.
+
+    `documents.doc_type` records the instrument's own name ("Rejoinder in the
+    Petition", "Disclosure Letter", "Statement of Work") in the same wording a
+    question uses to ask about it — a far more direct signal than the filename,
+    which encodes the same thing as an abbreviation the corpus never explains
+    ("RITPAN", "DiscLtr", "SOW"). Returned whole (one small query, ~570 rows
+    here) so callers can do token-level matching in Python rather than pushing
+    normalisation guesswork into SQL.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT source_doc, doc_type
+                FROM documents
+                WHERE wiki_id = :w AND session_id = :sid
+                  AND doc_type IS NOT NULL AND doc_type <> ''
+            """),
+            {"w": wiki_id, "sid": session_id},
+        )
+        return {row.source_doc: row.doc_type for row in rows if row.source_doc}
+
+
 def get_documents_by_family(wiki_id: str, session_id: str, doc_family: str) -> list[str]:
     """Return the doc_name (title) of every document in a given family.
 
