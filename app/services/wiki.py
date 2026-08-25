@@ -2917,6 +2917,27 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # Survival clause sits correctly in `clauses`, but no page for that
         # document mentions "survival" at all.
         from sqlalchemy import text as _struct_sql
+        # Which of the scoped documents the question is actually ABOUT, and which
+        # clause of it. A multi-document scope (party-multi, comparison) is mostly
+        # siblings pulled in for context, and the structured block is emitted in
+        # page-selection order and truncated from the end — so the one document
+        # the question names could be cut away entirely while its siblings'
+        # boilerplate survived. Confirmed live on the 500-question evaluation:
+        # "Section 4 (Relationship Of Parties) of the Term Sheet between Tata
+        # AutoComp Systems Limited and Castellane EPC Pte. Ltd." resolved a
+        # 5-document scope whose clause text totals ~32k characters against a 20k
+        # cap; the Term Sheet sorted last, its clauses were truncated away, and
+        # the answer reported the section as absent while the exact clause sat in
+        # the `clauses` table. Ordering by overlap with the question's own words
+        # costs nothing and puts the named document — and its named clause —
+        # first, where no cap can reach them.
+        _q_tokens = {w for w in re.findall(r'[a-z0-9]{3,}', (question or "").lower())
+                     if w not in _NARROW_TOKEN_STOPWORDS}
+
+        def _q_overlap(text: str) -> int:
+            return len(_q_tokens & set(re.findall(r'[a-z0-9]{3,}', (text or "").lower())))
+
+        _meta_docs = sorted(_meta_docs, key=lambda d: -_q_overlap(_norm_doc_name(d)))
         _struct_lines = []
         for _sd in _meta_docs:
             try:
@@ -2987,16 +3008,42 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 # leaves the answer reporting the diagram as unreadable.
                 _doc_lines.append(
                     f"  - Figure ({_fkind or 'figure'}, {_where}): {_fdesc.strip()[:2000]}")
-            for _ct, _vt in _clause_rows:
+            # Same reasoning as the document ordering above, one level down: the
+            # clause the question NAMES goes first, so a per-document cut can
+            # never be what removes it. A question that names no clause leaves
+            # every overlap at zero and the original ingest order intact.
+            for _ct, _vt in sorted(_clause_rows, key=lambda r: -_q_overlap(r[0])):
                 if _vt:
                     _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
             if _doc_lines:
-                _struct_lines.append(f"{_norm_doc_name(_sd)}:\n" + "\n".join(_doc_lines))
+                _struct_lines.append((_sd, f"{_norm_doc_name(_sd)}:\n" + "\n".join(_doc_lines)))
         if _struct_lines:
-            _struct_block = "\n\n".join(_struct_lines)
+            # Budget the cap ACROSS documents rather than truncating one joined
+            # string from the end. A single joined block spends itself on
+            # whichever documents happen to sort first and leaves later ones with
+            # nothing — the failure described above. Each document takes an even
+            # share of what is left when its turn comes, and a document that
+            # needs less than its share hands the remainder to the next one, so
+            # the common case (one big document, several small siblings) still
+            # gets the big one through intact.
             _struct_cap_chars = 20000
-            if len(_struct_block) > _struct_cap_chars:
-                _struct_block = _struct_block[:_struct_cap_chars] + "\n[...truncated]"
+            _remaining = _struct_cap_chars
+            _kept_blocks = []
+            for _i, (_sd, _block) in enumerate(_struct_lines):
+                _docs_left = len(_struct_lines) - _i
+                _share = max(_remaining // _docs_left, 1200)
+                if len(_block) > _share:
+                    _block = _block[:_share] + "\n  [...this document's remaining clauses truncated]"
+                    logger.info("Structured block for %s truncated to its %d-char share "
+                                "(%d document(s) in scope)",
+                                _norm_doc_name(_sd), _share, len(_struct_lines))
+                _kept_blocks.append(_block)
+                _remaining = max(_remaining - len(_block), 0)
+                if _remaining <= 0 and _i + 1 < len(_struct_lines):
+                    logger.info("Structured-extraction budget exhausted after %d of %d document(s)",
+                                _i + 1, len(_struct_lines))
+                    break
+            _struct_block = "\n\n".join(_kept_blocks)
             wiki_parts.append(
                 "[Structured extraction recorded at ingest — full clause text, complete "
                 "table data, and descriptions of figures/diagrams, independent of the "
@@ -7895,6 +7942,199 @@ def _enforce_question_family(scoped: dict, family: str | None,
             "method": f"{method}-family-corrected"}
 
 
+# The instrument a question names, as a phrase: the words between "of the" /
+# "governs the" / "to the" and whatever ends the noun phrase — a case
+# designation, the parties, the date, or the end of the sentence.
+_INSTRUMENT_PHRASE_RE = re.compile(
+    r'\b(?:of|governs|in|to|under|about|from)\s+the\s+(.{3,80}?)'
+    r'(?=\s+-\s|\s+between\b|\s+involving\b|\s+dated\b|\s*\?|,)',
+    re.IGNORECASE,
+)
+
+# Cap on how many same-type documents may be returned before the type is judged
+# too broad to scope on by itself.
+_DOC_TYPE_MAX_DOCS = 6
+
+
+# Words shared by so many instrument names that matching on them says nothing
+# about which instrument is meant.
+_TYPE_GENERIC_WORDS = frozenset({
+    'agreement', 'agreements', 'the', 'of', 'and', 'in', 'to', 'for', 'a', 'an',
+    'or', 'on', 'by', 'with', 'document', 'draft', 'privileged', 'confidential',
+})
+
+
+def _norm_type_words(text: str) -> list[str]:
+    """Type words, lower-cased and singularised.
+
+    Singularising matters: the corpus records what a question calls a "Board
+    Resolution" as "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS".
+    """
+    words = re.sub(r'[^a-z0-9 ]', ' ', (text or "").lower()).split()
+    return [w[:-1] if len(w) > 3 and w.endswith('s') else w for w in words]
+
+
+def _type_core(text: str) -> set[str]:
+    """The words of an instrument name that actually identify it."""
+    return {w for w in _norm_type_words(text) if w not in _TYPE_GENERIC_WORDS}
+
+
+def _resolve_docs_by_doc_type(question: str, session_id: str) -> set[str]:
+    """Documents whose ingest-recorded instrument type is the one the question names.
+
+    Every name-based resolver in this module matches PARTIES, and a party with
+    several instruments resolves to whichever one its content match ranked
+    highest. `_enforce_question_family` already corrects the coarsest version of
+    that error, but a family is a bucket ("Pleading") holding many distinct
+    instruments — a Rejoinder, an Affidavit in Support, an Interim Application
+    and a Reply all live in it, and the question names exactly one.
+
+    `documents.doc_type` records that name verbatim, in the same words the
+    question uses. Measured over the 500-question evaluation: of 27 failures
+    where the right document was never retrieved at all, 21 are reachable this
+    way — questions like "the Rejoinder in the Petition - Appeal No. 511/2026"
+    whose document is filed under the corpus's own unexplained abbreviation
+    ("MAT-2011-8187 RITPAN FINAL v2.pdf"), which no party or filename signal
+    could ever connect to the words the question actually used.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    phrases = [m.group(1).strip() for m in _INSTRUMENT_PHRASE_RE.finditer(question or "")]
+    if not phrases:
+        return set()
+    try:
+        types = _db.get_document_types(_active_wiki_id(), session_id)
+    except Exception as e:
+        logger.error("resolve_scope: doc_type lookup failed: %s", e)
+        return set()
+    by_type: dict[str, set[str]] = {}
+    for _sd, _dt in types.items():
+        core = frozenset(_type_core(_dt))
+        if core:
+            by_type.setdefault(core, set()).add(_sd)
+    for phrase in phrases:
+        wordset = _type_core(phrase)
+        if not wordset:
+            continue
+        # Deliberately NOT short-circuiting on an exact type match. The recorded
+        # types vary in granularity for one instrument — "Legal Opinion" and
+        # "Privileged & Confidential Legal Opinion", "Board Resolution Approving
+        # Transaction" and "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS" —
+        # so returning only the exact spelling drops most of the instrument's
+        # own documents. Measured: exact-first matching found the golden source
+        # in 89.3% of questions; unioning every compatible spelling is what
+        # makes the result trustworthy enough to correct a scope with.
+        hits: set[str] = set()
+        for core, docs in by_type.items():
+            shared = core & wordset
+            if not shared:
+                continue
+            # A short name must match ENTIRELY. Half of a two-word name is one
+            # word, and in this corpus's pleadings that one word is the family
+            # noun, not the instrument: "Rejoinder in the Petition" would match
+            # "Petition in the matter of" on "petition" alone and pull in all 18
+            # pleadings, which is both wrong and too broad to correct with.
+            # Longer names may match on half, which is what links a record of one
+            # instrument written two ways ("Board Resolution Approving
+            # Transaction" / "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS").
+            shorter = min(len(core), len(wordset))
+            if shared == core or shared == wordset:
+                hits |= docs
+            elif shorter > 2 and len(shared) * 2 >= shorter:
+                hits |= docs
+        if hits:
+            return hits
+    return set()
+
+
+def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> dict:
+    """Reconcile a resolved scope with the INSTRUMENT TYPE the question names.
+
+    Same contract as _enforce_question_family, one level finer: partial overlap
+    narrows, no overlap means the resolution contradicts the question. The
+    no-overlap case only replaces the scope when the named type resolves to a
+    workably small set — correcting one wrong document into twenty right-typed
+    ones would trade a precise wrong answer for an unfocused one.
+    """
+    targets = scoped.get("target_docs") or []
+    if not targets:
+        return scoped
+    try:
+        type_docs = _resolve_docs_by_doc_type(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: doc-type enforcement failed: %s", e)
+        return scoped
+    if not type_docs:
+        return scoped
+    method = scoped.get("method", "")
+    kept = [d for d in targets if d in type_docs]
+    if kept:
+        if len(kept) == len(targets):
+            return scoped
+        logger.info("Scope %s narrowed to the %d document(s) of the instrument type "
+                    "the question names", method, len(kept))
+        return {**scoped, "target_docs": sorted(kept), "method": f"{method}-doctype"}
+    # No overlap has two very different causes, and only one of them is a wrong
+    # answer. If a scoped document's OWN recorded type shares an identifying
+    # word with what the question asked for, this is the corpus wording one
+    # instrument two ways — the resolution is probably right and the matcher
+    # merely failed to connect the spellings. Correcting there is what turned 35
+    # already-correct scopes into wrong ones on the first attempt at this.
+    # A genuine contradiction shares nothing: the question says "Rejoinder in
+    # the Petition" and the resolution produced a Master Services Agreement.
+    try:
+        scoped_types = _db.get_document_types(_active_wiki_id(), session_id)
+    except Exception:
+        scoped_types = {}
+    question_core: set[str] = set()
+    initialisms: set[str] = set()
+    for m in _INSTRUMENT_PHRASE_RE.finditer(question or ""):
+        question_core |= _type_core(m.group(1))
+        words = [w for w in re.split(r'[\s/]+', m.group(1)) if w and w[0].isalpha()]
+        acronym = "".join(w[0] for w in words).lower()
+        if 4 <= len(acronym) <= 12:
+            initialisms.add(acronym)
+    for d in targets:
+        recorded = scoped_types.get(d, "")
+        if not recorded.strip():
+            # Two of this corpus's documents carry no recorded type at all.
+            # Absence of evidence is not contradiction — never correct one away.
+            logger.info("Scope %s kept: %s has no recorded instrument type to contradict "
+                        "the question", method, _norm_doc_name(d))
+            return scoped
+        if _type_core(recorded) & question_core:
+            logger.info("Scope %s sits outside the matched type set, but %s is recorded "
+                        "as a compatible instrument — leaving the scope alone",
+                        method, _norm_doc_name(d))
+            return scoped
+        # The filename is a second, independent record of the type: this corpus
+        # files an instrument under the initialism of its full name ("WCILOM"
+        # for a Written Consent in Lieu of Meeting). When that agrees with the
+        # question, ingest's classification is what is wrong — confirmed live on
+        # exactly that document, recorded as "EXTRACT OF MINUTES / CERTIFIED
+        # BOARD RESOLUTIONS" and correctly resolved by the party branch.
+        haystack = re.sub(r'[^a-z0-9]', '', _norm_doc_name(d).lower())
+        if any(a in haystack for a in initialisms):
+            logger.info("Scope %s kept: %s is filed under the initialism of the "
+                        "instrument the question names", method, _norm_doc_name(d))
+            return scoped
+
+    narrowed = set(type_docs)
+    if len(narrowed) > _DOC_TYPE_MAX_DOCS:
+        narrowed = _narrow_by_question_tokens(question, set(type_docs)) or set(type_docs)
+    if len(narrowed) > _DOC_TYPE_MAX_DOCS:
+        logger.info("Scope %s sits outside the instrument type the question names, but "
+                    "that type spans %d documents — leaving the scope alone",
+                    method, len(narrowed))
+        return scoped
+    logger.info("Scope %s resolved entirely outside the instrument type the question "
+                "names — scoping to that type's %d document(s) instead",
+                method, len(narrowed))
+    return {**scoped, "scope": "single_doc", "target_docs": sorted(narrowed),
+            "is_broad": False, "confidence": 0.7,
+            "method": f"{method}-doctype-corrected"}
+
+
 # ---------------------------------------------------------------------------
 # Content-descriptive ambiguity — one description, several documents
 # ---------------------------------------------------------------------------
@@ -8010,6 +8250,28 @@ def _extract_descriptive_identifier(question: str) -> str:
 
 def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                   chat_session_id: str | None = None) -> dict:
+    """Resolve a question's retrieval scope, then hold it to the instrument named.
+
+    The resolution itself is _resolve_scope_uncorrected below; this wrapper
+    applies the one check that has to see the FINAL answer rather than any
+    single branch's — that the documents resolved are actually of the
+    instrument type the question asked about (see _enforce_question_doc_type).
+
+    Two exemptions. A question naming a FILE outright has said something
+    stronger than a type and must never be overridden by one. A carried-over
+    scope names no instrument at all — the type words belong to the earlier
+    turn, not this one, so applying them here would silently re-scope a
+    follow-up onto a different document.
+    """
+    scoped = _resolve_scope_uncorrected(question, session_id, pages, chat_session_id)
+    method = (scoped or {}).get("method", "")
+    if not scoped or method == "file" or "carryover" in method:
+        return scoped
+    return _enforce_question_doc_type(scoped, question, session_id)
+
+
+def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | None = None,
+                               chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
 
     Consolidates the three previously-scattered scope signals — named-document
