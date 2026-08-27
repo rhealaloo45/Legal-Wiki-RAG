@@ -702,6 +702,24 @@ def _init_backbone_schema(conn, text) -> None:
             UNIQUE (wiki_id, session_id, source_doc)
         )
     """))
+    # content_hash — added after the table existed, same migration guard as
+    # every other late column here. Not part of the UNIQUE constraint: a
+    # constraint would reject a legitimate re-ingest at the DB layer with an
+    # opaque error, where the application-level check in wiki.ingest() can
+    # instead skip cleanly and say which existing document it matched.
+    try:
+        conn.execute(text("""
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS content_hash TEXT
+        """))
+    except Exception as _hash_err:
+        logger.warning("Could not add content_hash column (may already exist): %s", _hash_err)
+        conn.rollback()
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS documents_wiki_hash_idx
+        ON documents (wiki_id, content_hash)
+        WHERE content_hash IS NOT NULL
+    """))
     conn.execute(text("""
         CREATE INDEX IF NOT EXISTS documents_wiki_family_idx
         ON documents (wiki_id, doc_family)

@@ -13,6 +13,7 @@ Architecture:
     then answer from only those pages' full content.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -1234,6 +1235,10 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
             family_confidence=classification.get("family_confidence"),
             family_method=classification.get("family_method"),
             folder_hint=classification.get("folder_hint"),
+            # Stamped here so future ingests can find this document by
+            # content before spending a single LLM call on it — see
+            # _content_hash / the duplicate check near the top of ingest().
+            content_hash=classification.get("content_hash"),
         )
 
         raw_meta = bucket.get("family_metadata") or {}
@@ -1356,6 +1361,30 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
                      doc_name, err, exc_info=True)
 
 
+# Below this, extracted text is not a meaningful dedup signal — a near-empty
+# OCR failure and an unrelated near-empty OCR failure on a different document
+# would otherwise hash identically and collide as a false "duplicate".
+_MIN_HASH_CHARS = 200
+
+
+def _content_hash(text: str) -> str | None:
+    """SHA-256 of the extracted text, whitespace-normalized. None if the
+    text is too short to be a trustworthy signal (see _MIN_HASH_CHARS).
+
+    Exact-content matching only, by design — this never attempts fuzzy or
+    near-duplicate detection (simhash, embedding similarity). Two genuinely
+    different contracts that happen to read similarly must never be merged
+    as "the same document" in a legal corpus; that false positive costs far
+    more than missing a near-duplicate does. Whitespace normalization is as
+    far as this goes, to survive incidental re-extraction/line-ending
+    differences without drifting into similarity matching.
+    """
+    normalized = " ".join((text or "").split())
+    if len(normalized) < _MIN_HASH_CHARS:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def ingest(file_path: str, session_id: str) -> dict:
     """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
 
@@ -1369,6 +1398,34 @@ def ingest(file_path: str, session_id: str) -> dict:
     text = result["text"]
     page_map = result["page_map"]
     doc_name = os.path.basename(file_path)
+
+    # --- Duplicate check: identical content already in this wiki -----------
+    # Runs before classification — the first LLM call in this pipeline — so a
+    # re-uploaded document costs nothing beyond the OCR/text-extraction that
+    # already happened above. Scoped to the active wiki, not the session: the
+    # whole point is catching a document re-uploaded under a fresh
+    # session_id, which is what a repeated folder upload actually does.
+    content_hash = _content_hash(text)
+    if config.USE_DATABASE and content_hash:
+        try:
+            from services import backbone as _backbone
+            dup = _backbone.find_by_content_hash(_active_wiki_id(), content_hash)
+        except Exception as _dup_err:
+            logger.warning("Duplicate check failed for %s, ingesting normally: %s",
+                           doc_name, _dup_err)
+            dup = None
+        if dup and dup["source_doc"] != doc_name:
+            logger.info("Skipping %s — identical content already ingested as %s",
+                       doc_name, dup["source_doc"])
+            _log_event(session_id, "DUPLICATE",
+                      f"{doc_name} skipped — identical content already ingested "
+                      f"as {dup['source_doc']}")
+            return {
+                "pages_updated": 0,
+                "relations": 0,
+                "duplicate_of": dup["source_doc"],
+                "duplicate_family": dup.get("doc_family"),
+            }
 
     # Store page-level positions for citation location support
     if config.USE_DATABASE and page_map:
