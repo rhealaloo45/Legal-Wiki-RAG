@@ -2081,6 +2081,37 @@ def contract_register():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/obligations")
+def obligation_tracker():
+    """The Obligation tracker — target architecture § 06, Phase 1.
+
+    Also a pure read. The response carries a coverage block alongside the
+    rows because an empty `obligations` table means the corpus predates
+    obligation extraction, not that the documents impose no duties, and the
+    UI has to be able to tell those apart.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    session_id = request.args.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "session_id is required"}), 400
+    session_id = _get_main_session_id() or session_id
+    from services import register as _register
+    try:
+        return jsonify(_register.obligation_rows(
+            current_wiki_id(), session_id,
+            party=(request.args.get("party") or "").strip() or None,
+            source_doc=(request.args.get("source_doc") or "").strip() or None,
+            search=request.args.get("search"),
+            with_deadline=request.args.get("with_deadline") == "true",
+            limit=min(int(request.args.get("limit", 1000)), 5000),
+            offset=max(int(request.args.get("offset", 0)), 0),
+        ))
+    except Exception as e:
+        logger.error("Obligation tracker read failed: %s", e, exc_info=True)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
 def _find_upload(session_id, doc_name):
     """Find an uploaded file by session ID and document name."""
     # Strip the compare mode upload marker if present
