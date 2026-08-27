@@ -8217,6 +8217,93 @@ def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> 
 
 
 # ---------------------------------------------------------------------------
+# Amendment families — the question names two documents, the second answers it
+# ---------------------------------------------------------------------------
+# "What is the CURRENT value of notice days under the agreement family comprising
+# the Cloud Services Agreement between A and B dated 24 July 2021 AND THE
+# AMENDMENT RECORDED IN the Amendment Agreement between A and B dated 24 May
+# 2021, after giving effect to this amendment?"
+#
+# Two documents are named, by the same party pair, distinguished only by date.
+# The one that answers the question is the SECOND: the amendment states the value
+# that now governs, and the original states the one it replaced. Every compound
+# resolver in front of this narrows a multi-document match down to one and keeps
+# the first — so the amendment was dropped before retrieval ever saw it and the
+# answer confidently reported the superseded figure.
+#
+# Measured over both evaluation sets: 6 of the 9 questions in this shape
+# retrieved only the original. The mirror-image shape ("in the original
+# agreement, BEFORE it was amended by ...") already resolves correctly 7 times
+# out of 7 — it wants the first document, which is what the existing resolvers
+# already return, so it is deliberately left alone here.
+_AMENDMENT_TAIL_RE = re.compile(
+    r'\band\s+the\s+amendments?\s+recorded\s+in\s+',
+    re.IGNORECASE,
+)
+
+# An amendment family is two documents, occasionally three. Past that the tail
+# resolved to a party's whole book of business rather than the one instrument it
+# names, and adding all of it would bury the original the question also asked
+# about.
+_AMENDMENT_FAMILY_MAX_DOCS = 4
+
+
+def _expand_amendment_family(scoped: dict, question: str, session_id: str) -> dict:
+    """Put the amendment a "family comprising ..." question names back in scope.
+
+    Resolves the text AFTER "and the amendment recorded in" as a scope question
+    in its own right — it is a complete document reference (instrument type,
+    party pair, date), and resolving it separately is what stops the compound
+    resolvers from having to choose between the two documents named.
+    """
+    m = _AMENDMENT_TAIL_RE.search(question or "")
+    if not m:
+        return scoped
+    targets = list(scoped.get("target_docs") or [])
+    if not targets:
+        return scoped
+    tail = question[m.end():]
+    try:
+        # Uncorrected: the tail names an Amendment Agreement, so doc-type
+        # enforcement over it would be measuring the tail's own instrument
+        # against itself — and the correction it can make (replacing the scope
+        # wholesale) is not one this caller wants applied to a sub-clause.
+        amended = _resolve_scope_uncorrected(tail, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: amendment-family expansion failed: %s", e)
+        return scoped
+    amend_docs = list((amended or {}).get("target_docs") or [])
+    if not amend_docs:
+        return scoped
+    # The tail names ONE amendment, by party pair AND date. A party-only match
+    # returns every amendment those two parties ever signed, and a sibling
+    # amendment answers this question with a real but wrong figure — so narrow
+    # on the date the tail states before adding anything.
+    if len(amend_docs) > 1:
+        try:
+            pinned = _narrow_by_question_tokens(tail, set(amend_docs),
+                                                precise_only=True)
+        except Exception:
+            pinned = set()
+        if pinned:
+            amend_docs = sorted(pinned)
+    added = [d for d in amend_docs if d not in targets]
+    if not added:
+        return scoped
+    if len(targets) + len(added) > _AMENDMENT_FAMILY_MAX_DOCS:
+        logger.info("Amendment-family expansion skipped: the tail resolved to "
+                    "%d document(s), too many to be the one amendment named",
+                    len(added))
+        return scoped
+    logger.info("Amendment family: added %d amending document(s) to scope — %s",
+                len(added), [_norm_doc_name(d) for d in added])
+    return {**scoped,
+            "target_docs": targets + added,
+            "amendment_docs": added,
+            "method": f"{scoped.get('method', '')}-amendment-family"}
+
+
+# ---------------------------------------------------------------------------
 # Content-descriptive ambiguity — one description, several documents
 # ---------------------------------------------------------------------------
 # Every resolver above pins a document by its NAME (a filename, a number, a title
@@ -8348,7 +8435,11 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     method = (scoped or {}).get("method", "")
     if not scoped or method == "file" or "carryover" in method:
         return scoped
-    return _enforce_question_doc_type(scoped, question, session_id)
+    scoped = _enforce_question_doc_type(scoped, question, session_id)
+    # Last, so it adds the amendment back whatever narrowing ran above: the two
+    # documents in an amendment family are different instrument types, and
+    # doc-type enforcement is entitled to drop one of them.
+    return _expand_amendment_family(scoped, question, session_id)
 
 
 def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | None = None,
