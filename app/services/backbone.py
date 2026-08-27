@@ -295,6 +295,7 @@ def upsert_document(wiki_id: str, session_id: str, source_doc: str,
         "doc_family", "doc_type", "jurisdiction", "parties", "effective_date",
         "expiry_date", "status", "lifecycle", "role", "binding_status",
         "family_confidence", "family_method", "folder_hint", "content_hash",
+        "file_hash",
     )
     cols = {k: _coerce_param(k, v) for k, v in fields.items()
             if k in allowed and v is not None}
@@ -403,6 +404,66 @@ def backfill_content_hash(wiki_id: str, session_id: str, source_doc: str,
             WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
               AND content_hash IS NULL
         """), {"h": content_hash, "w": wiki_id, "s": session_id, "d": source_doc})
+        c.commit()
+    return res.rowcount > 0
+
+
+def find_by_file_hash(wiki_id: str, file_hash: str) -> dict | None:
+    """The existing document this raw-file hash already belongs to, if any.
+
+    This is the upload-time check: file_hash is SHA-256 of the raw uploaded
+    bytes, computed before any text extraction or OCR runs, so this lookup
+    is the one that actually saves the extraction cost — find_by_content_hash
+    only fires after extraction has already happened. Same scoping/tie-break
+    rules as find_by_content_hash: wiki_id only, oldest row wins.
+    """
+    if not _enabled() or not file_hash:
+        return None
+    text = _text()
+    with db.get_engine().connect() as c:
+        row = c.execute(text("""
+            SELECT session_id, source_doc, doc_family, created_at
+            FROM documents
+            WHERE wiki_id = :w AND file_hash = :h
+            ORDER BY created_at ASC
+            LIMIT 1
+        """), {"w": wiki_id, "h": file_hash}).fetchone()
+    if not row:
+        return None
+    return {"session_id": row[0], "source_doc": row[1], "doc_family": row[2],
+            "created_at": row[3].isoformat() if row[3] else None}
+
+
+def documents_missing_file_hash(wiki_id: str) -> list[dict]:
+    """Documents ingested before file_hash existed — the backfill target for
+    the cheap, no-OCR upload-time dedup signal. Unlike documents_missing_hash
+    (content_hash), backfilling this needs only the raw file bytes, never
+    text extraction — safe to run on scanned/image documents at zero cost."""
+    if not _enabled():
+        return []
+    text = _text()
+    with db.get_engine().connect() as c:
+        rows = c.execute(text("""
+            SELECT session_id, source_doc FROM documents
+            WHERE wiki_id = :w AND file_hash IS NULL
+        """), {"w": wiki_id}).fetchall()
+    return [{"session_id": r[0], "source_doc": r[1]} for r in rows]
+
+
+def backfill_file_hash(wiki_id: str, session_id: str, source_doc: str,
+                       file_hash: str) -> bool:
+    """Set file_hash on an existing row, and nothing else. Same rationale as
+    backfill_content_hash: not routed through upsert_document, so this never
+    bumps schema_version. No-op if the row already has a hash."""
+    if not _enabled() or not file_hash:
+        return False
+    text = _text()
+    with db.get_engine().connect() as c:
+        res = c.execute(text("""
+            UPDATE documents SET file_hash = :h
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND file_hash IS NULL
+        """), {"h": file_hash, "w": wiki_id, "s": session_id, "d": source_doc})
         c.commit()
     return res.rowcount > 0
 

@@ -720,6 +720,23 @@ def _init_backbone_schema(conn, text) -> None:
         ON documents (wiki_id, content_hash)
         WHERE content_hash IS NOT NULL
     """))
+    # file_hash — SHA-256 of raw upload bytes, computed before any text
+    # extraction/OCR runs. This is the upload-time dedup signal: cheap enough
+    # to check on every file before it costs anything. content_hash (above)
+    # is a secondary, post-extraction check for same-text-different-bytes.
+    try:
+        conn.execute(text("""
+            ALTER TABLE documents
+            ADD COLUMN IF NOT EXISTS file_hash TEXT
+        """))
+    except Exception as _fhash_err:
+        logger.warning("Could not add file_hash column (may already exist): %s", _fhash_err)
+        conn.rollback()
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS documents_wiki_file_hash_idx
+        ON documents (wiki_id, file_hash)
+        WHERE file_hash IS NOT NULL
+    """))
     conn.execute(text("""
         CREATE INDEX IF NOT EXISTS documents_wiki_family_idx
         ON documents (wiki_id, doc_family)
