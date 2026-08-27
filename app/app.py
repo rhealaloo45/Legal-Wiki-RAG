@@ -1221,6 +1221,12 @@ def query_route():
                     last_msg_id = _store_chat_msg(session_id, "assistant", wiki_result.get("answer", ""),
                                     "answer", {
                                         "confidence_score": wiki_result.get("confidence_score", 0),
+                                        # Counts, not a self-reported score —
+                                        # persisted for the same reason as the
+                                        # render flags below: a reloaded thread
+                                        # that drops them shows an answer whose
+                                        # claims look unchecked.
+                                        "citation_check": wiki_result.get("citation_check", {}),
                                         "files_used": wiki_result.get("files_used", []),
                                         "token_total": wiki_result.get("token_total", {}),
                                         "validation": wiki_result.get("validation", {}),
