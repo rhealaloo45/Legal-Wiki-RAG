@@ -6,7 +6,7 @@ The synthesis call keeps its existing shape: one call, structured output
 alongside the wiki prose, no extra round trips. What changes is that the
 schema it asks for is pulled from the schema registry by family rather than
 being a fixed contract schema, and that it now also returns citations,
-structural anchors, hypothetical questions, tables and figures.
+structural anchors, hypothetical questions, tables, figures and obligations.
 
 This module builds only the *supplement* — the family-specific block that
 gets appended to the existing prompt templates. It is deliberately additive:
@@ -69,12 +69,42 @@ kind of document — a null is a correct answer and an inferred value is not:
         parts.append("""
 CLAUSES: keep returning the "clauses" array described above — this family is \
 clause-bearing.""")
+        parts.append("""
+OBLIGATIONS — return an "obligations" array for every duty this text places on \
+a named party. An obligation is something a party must DO or must NOT do; a \
+definition, a recital, a representation about the past, or a grant of a right \
+is not one:
+[
+  {
+    "obligated_party": "The party who bears the duty, named as the document names them",
+    "duty": "What that party must do or refrain from doing, in one sentence",
+    "trigger": "The event or condition that makes the duty arise, or null if it is unconditional",
+    "deadline": "The time limit as the text states it, e.g. 'within 30 days of the Effective Date', or null",
+    "notice_period": "Any notice the text requires before or after, e.g. '60 days', or null",
+    "consequence": "What the text says follows a failure to perform, or null",
+    "verbatim_text": "The sentence imposing the duty, quoted exactly from the text",
+    "page": 3,
+    "confidence": 1.0
+  }
+]
+Attribute the duty to the party who actually bears it — reversing obligor and \
+obligee is the single most damaging error here, and a reciprocal duty ("each \
+party shall...") is two rows, one per party. Use null rather than a plausible \
+guess for trigger, deadline, notice_period and consequence; a missing deadline \
+read as "within 30 days" is worse than no deadline at all. Return an empty \
+array if the text imposes no duties.""")
     else:
         parts.append("""
 CLAUSES: return "clauses": [] for this document. This family is NOT \
 clause-bearing — it does not contain contractual clauses, and labelling its \
 provisions as clauses would misrepresent what they are. Do not populate this \
 array even if some passage superficially resembles a clause.""")
+        parts.append("""
+OBLIGATIONS: return "obligations": [] for this document. This family does not \
+create contractual obligations — a direction in a judgment, an authority \
+granted by a power of attorney and an assumption in an opinion are each a \
+different thing, and recording them as obligations would assert a duty the \
+document never imposed.""")
 
     parts.append("""
 CITATIONS — return a "citations" array of every statute, rule, regulation or \
@@ -148,7 +178,7 @@ def family_output_keys() -> tuple[str, ...]:
     ignores unknown keys, but is easier to reason about when they're gone)."""
     return ("family_metadata", "citations", "structural_anchors",
             "hypothetical_questions", "tables", "figures",
-            "document_references")
+            "document_references", "obligations")
 
 
 def metadata_spec(family_key: str | None) -> dict[str, str]:
