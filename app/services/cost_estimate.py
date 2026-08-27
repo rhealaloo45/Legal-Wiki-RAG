@@ -37,16 +37,43 @@ CHARS_PER_TOKEN = 4  # standard rough heuristic for English legal text
 COST_PREFLIGHT_MIN_FILES = int(os.getenv("COST_PREFLIGHT_MIN_FILES", "3"))
 COST_PREFLIGHT_THRESHOLD_USD = float(os.getenv("COST_PREFLIGHT_THRESHOLD_USD", "0.25"))
 
-# Public list USD price per 1M tokens, by deployment name. Falls back to the
-# pricier gpt-4o tier for anything unrecognized — a spend gate should
-# overestimate an unknown model's cost, not underestimate it.
+# Public list USD price per 1M tokens, by deployment name. An Azure
+# deployment name is chosen by whoever set it up, not by the model family —
+# this corpus is actually served by a deployment named "gpt-5-mini-1", which
+# matched none of these keys and fell through to the gpt-4o-class fallback
+# below: roughly 10x the real gpt-5-mini price on input, 5x on output. A
+# spend gate that overestimates by an order of magnitude on any custom
+# deployment name is not a rough estimate, it is a wrong one, so lookup now
+# tries an exact match first and then the longest recognized family name
+# that appears in the deployment string (see _price_for) rather than falling
+# straight to the expensive fallback.
 _CHAT_PRICE_PER_1M = {
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
     "gpt-4o": {"input": 2.50, "output": 10.00},
     "gpt-5.4-mini": {"input": 0.15, "output": 0.60},
     "gpt-5.4": {"input": 2.50, "output": 10.00},
+    "gpt-5-nano": {"input": 0.05, "output": 0.40},
+    "gpt-5-mini": {"input": 0.25, "output": 2.00},
+    "gpt-5": {"input": 1.25, "output": 10.00},
 }
 _CHAT_PRICE_FALLBACK = {"input": 2.50, "output": 10.00}
+
+
+def _price_for(deployment: str, table: dict, fallback: dict) -> dict:
+    """Exact match first, then the longest known family name that appears
+    anywhere in the deployment string — "gpt-5-mini-1" and
+    "prod-gpt-5-mini-eastus" both resolve to "gpt-5-mini" this way. Falls
+    back only when nothing recognizable appears in the name at all, which is
+    the case this estimate should genuinely warn loudly about, not the
+    common case of an Azure admin appending a suffix to a real model name.
+    """
+    if deployment in table:
+        return table[deployment]
+    norm = (deployment or "").lower()
+    for name in sorted(table, key=len, reverse=True):
+        if name.lower() in norm:
+            return table[name]
+    return fallback
 
 _EMBED_PRICE_PER_1M = {
     "text-embedding-3-large": {"input": 0.13, "output": 0.0},
@@ -107,9 +134,9 @@ def estimate_ingest_cost(file_paths: list[str]) -> dict:
     upload or resume_ingest queues real ingest work.
     """
     chat_deployment = config.AZURE_OPENAI_DEPLOYMENT
-    chat_price = _CHAT_PRICE_PER_1M.get(chat_deployment, _CHAT_PRICE_FALLBACK)
+    chat_price = _price_for(chat_deployment, _CHAT_PRICE_PER_1M, _CHAT_PRICE_FALLBACK)
     embed_deployment = config.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
-    embed_price = _EMBED_PRICE_PER_1M.get(embed_deployment, _EMBED_PRICE_FALLBACK)
+    embed_price = _price_for(embed_deployment, _EMBED_PRICE_PER_1M, _EMBED_PRICE_FALLBACK)
 
     docs = []
     total_calls = 0
@@ -151,6 +178,13 @@ def estimate_ingest_cost(file_paths: list[str]) -> dict:
         "estimated_cost_usd": round(chat_cost + embed_cost, 4),
         "chat_deployment": chat_deployment,
         "embed_deployment": embed_deployment,
+        # The price actually used, spelled out — so a wrong or unrecognized
+        # deployment name shows up as a visibly wrong number in this field
+        # instead of a silently wrong total. This is exactly what would have
+        # caught the gpt-5-mini-1 mismatch before it ever produced a bad
+        # estimate.
+        "chat_price_per_1m": chat_price,
+        "embed_price_per_1m": embed_price,
         "note": (
             "Rough order-of-magnitude estimate from locally-extracted text length "
             "and each call's configured max-token ceiling, not actual model usage. "
