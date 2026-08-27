@@ -921,7 +921,7 @@ def _collect_structured(parsed: dict, bucket: dict) -> None:
     if not isinstance(parsed, dict):
         return
     for key in ("citations", "structural_anchors", "tables", "figures",
-                "document_references"):
+                "document_references", "obligations"):
         rows = parsed.get(key)
         if isinstance(rows, list):
             bucket.setdefault(key, []).extend(r for r in rows if isinstance(r, dict))
@@ -1250,6 +1250,25 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
             c["page_num"] = c.pop("page", None)
             c["confidence"] = c.get("confidence") or c.get("_confidence")
 
+        # Obligations are deduped on the sentence that imposes the duty, not
+        # on the duty text: two segments describing the same clause paraphrase
+        # the duty differently but quote the same sentence, so the paraphrase
+        # is the field that fails to match when it matters most.
+        obligations, _ = _ev.sanitize_rows(
+            bucket.get("obligations"),
+            {"obligated_party": "text", "duty": "text", "trigger": "text",
+             "deadline": "text", "notice_period": "duration",
+             "consequence": "text", "verbatim_text": "text",
+             "page": "number", "confidence": "number"},
+            required=("obligated_party", "duty"),
+        )
+        obligations = backbone.reconcile_rows(obligations, ("verbatim_text",)) \
+            if all(o.get("verbatim_text") for o in obligations) \
+            else backbone.reconcile_rows(obligations, ("obligated_party", "duty"))
+        for o in obligations:
+            o["page_num"] = o.pop("page", None)
+            o["confidence"] = o.get("confidence") or o.get("_confidence")
+
         tables, _ = _ev.sanitize_rows(
             bucket.get("tables"),
             {"caption": "text", "columns": "list", "rows": "list",
@@ -1281,6 +1300,7 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
         written = backbone.replace_document_rows(
             wiki_id, session_id, doc_name, document_id,
             family_row=family_row, family_key=family,
+            obligations=obligations,
             citations=citations, anchors=anchor_rows,
             tables=tables, figures=figures,
         )
