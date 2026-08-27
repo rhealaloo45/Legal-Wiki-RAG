@@ -12,9 +12,10 @@ The register is **family-aware rather than contract-shaped**, even though it
 is called the Contract Register. A litigation document has no liability cap
 and a power of attorney has no governing law, and giving every document the
 same twelve contract columns is the exact mistake § 06 calls out. The column
-set therefore comes from the schema registry's `metadata_fields` for whatever
-family is being listed, and the all-families view falls back to the fields
-every family shares.
+set therefore comes from the schema registry, per family — see
+`family_columns` for which of the registry's two field lists it reads and
+why — and the all-families view falls back to one party column resolved
+across families.
 
 `document_fields` exists here rather than in `db.py` because Review Table
 needs the same per-document typed values the register shows, keyed by field
@@ -389,3 +390,229 @@ def obligation_rows(wiki_id: str, session_id: str, *,
             "with_deadline": sum(1 for o in out if o["deadline"]),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Review Table — standard columns served from the backbone, not the model
+# ---------------------------------------------------------------------------
+#
+# § 06: "The existing page_metadata cache is fixed to 12 hardcoded,
+# contract-shaped fields. A litigation doc doesn't have a liability cap, it
+# has a case number, court, and disposition. The standard-field list becomes
+# per-family, pulled from the schema registry."
+#
+# So this resolves a Review Table column in two steps, both free:
+#   1. the document's own family metadata, matched by registry field name;
+#   2. its extracted clauses, matched on clause_type.
+# Only a column neither step can answer reaches the LLM.
+
+import re as _re
+
+
+def _norm(name: str) -> str:
+    """Collapse a column or field name to letters and digits.
+
+    "Governing Law", "governing_law" and "governing-law" are one column; a
+    reviewer typing a header should not have to guess the registry's spelling.
+    """
+    return _re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+# Words that carry no distinguishing weight in a column or clause name.
+_STOPWORDS = frozenset({"a", "an", "the", "of", "and", "or", "for", "to",
+                        "in", "on", "by", "with", "clause", "provision"})
+
+
+def _tokens(name: str) -> frozenset[str]:
+    """Significant whole words in a column or clause name."""
+    return frozenset(
+        w for w in _re.split(r"[^a-z0-9]+", (name or "").lower())
+        if w and w not in _STOPWORDS
+    )
+
+
+# Column wordings a lawyer types that do not match the registry field name.
+# Deliberately narrow: each entry is a synonym for the *same* fact, never a
+# near-neighbour. "Termination notice" and "termination" are not synonyms —
+# one is a period and the other is a right — so they are not listed together.
+_COLUMN_SYNONYMS = {
+    "law": "governing_law",
+    "choiceoflaw": "governing_law",
+    "applicablelaw": "governing_law",
+    "cap": "liability_cap",
+    "limitationofliability": "liability_cap",
+    "liabilitycapamount": "liability_cap",
+    "term": "term_length",
+    "duration": "term_length",
+    "renewal": "renewal_terms",
+    "autorenewal": "renewal_terms",
+    "autorenew": "renewal_terms",
+    "terminationrights": "termination",
+    "terminationprovision": "termination",
+    "ip": "ip_ownership",
+    "intellectualproperty": "ip_ownership",
+    "intellectualpropertyownership": "ip_ownership",
+    "confidentialityobligation": "confidentiality",
+    "nda": "confidentiality",
+    "commencement": "effective_date",
+    "startdate": "effective_date",
+    "expiry": "expiry_date",
+    "enddate": "expiry_date",
+    "caseno": "case_number",
+    "suitnumber": "case_number",
+    "forum": "court",
+    "outcome": "disposition",
+    "result": "disposition",
+    "judgmentdate": "decided_date",
+    "dateofjudgment": "decided_date",
+    "posture": "procedural_posture",
+    "reliefsought": "relief_sought",
+    "reliefgranted": "relief_granted",
+    "scope": "scope_of_authority",
+    "authority": "scope_of_authority",
+    "poagrantor": "grantor",
+    "poagrantee": "grantee",
+    "attorney": "grantee",
+    "opinionaddressee": "addressee",
+    "dateofopinion": "opinion_date",
+    "binding": "binding_status",
+}
+
+# A clause hit is a weaker answer than a typed field: it says the document
+# has a clause of that name and quotes it, not that a validated value was
+# extracted. Reported below the typed-field confidence so a reviewer sorting
+# by doubt meets these first.
+_CLAUSE_HIT_CEILING = 0.85
+_CLAUSE_VALUE_MAX = 400
+
+
+def _flatten_typed_value(raw, column: str = "") -> str | None:
+    """Render a clause's typed_value as one cell.
+
+    The key name is kept unless the column already says it. An Insurance
+    clause storing {"coverage_minimum": "Rs. 84,976,789"} rendered as the bare
+    figure reads as though the column asked for a number; "coverage minimum:
+    Rs. 84,976,789" says what the number is.
+    """
+    if raw is None:
+        return None
+    value = raw
+    if isinstance(value, str):
+        try:
+            import json
+            value = json.loads(value)
+        except Exception:
+            return value.strip() or None
+    if isinstance(value, dict):
+        want = _tokens(column)
+        parts = []
+        for k, v in value.items():
+            shown = display_value(v)
+            if shown is None:
+                continue
+            parts.append(shown if _tokens(k) <= want and want
+                         else f"{k.replace('_', ' ')}: {shown}")
+        return "; ".join(parts) or None
+    return display_value(value)
+
+
+def resolve_source_doc(wiki_id: str, session_id: str, doc_name: str) -> str | None:
+    """Map a Review Table document name onto a `documents.source_doc`.
+
+    Review Table keys rows by the on-disk name, which may or may not still
+    carry the session prefix depending on which session uploaded the file.
+    Rather than reconstructing the prefix, this matches on the normalized
+    tail — the filename is what both spellings agree on.
+    """
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        rows = [r[0] for r in conn.execute(text(
+            "SELECT source_doc FROM documents WHERE wiki_id = :w AND session_id = :s"
+        ), {"w": wiki_id, "s": session_id}).fetchall()]
+    if doc_name in rows:
+        return doc_name
+    flat = _norm(doc_name.replace("/", "_").replace("\\", "_"))
+    if not flat:
+        return None
+    for candidate in rows:
+        norm = _norm(candidate)
+        if norm == flat or norm.endswith(flat):
+            return candidate
+    return None
+
+
+def _clause_cell(wiki_id: str, session_id: str, source_doc: str,
+                 column: str) -> dict | None:
+    from sqlalchemy import text
+    want = _norm(column)
+    if not want:
+        return None
+    with db.get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT clause_type, verbatim_text, typed_value, confidence
+            FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND review_status <> 'rejected'
+        """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchall()
+
+    want_tokens = _tokens(column)
+    exact, partial = [], []
+    for r in rows:
+        norm = _norm(r[0])
+        if not norm:
+            continue
+        if norm == want:
+            exact.append(r)
+        elif want_tokens and want_tokens <= _tokens(r[0]):
+            partial.append(r)
+    # An exact clause_type match is the answer; a partial one is the weaker
+    # claim that a "Termination" column is answered by a "Termination for
+    # Convenience" clause, so it is only used when nothing matched outright.
+    #
+    # Containment runs one way only, and on whole words. Raw substring
+    # matching in the other direction let a "Compliance" clause answer a
+    # "Zorblatt compliance rating" column — a wrong answer costs far more
+    # than the LLM call it saved, and falling through to the model is the
+    # safe direction to fail in.
+    pool = exact or partial
+    if not pool:
+        return None
+    best = max(pool, key=lambda r: (r[3] if r[3] is not None else 0, len(r[1] or "")))
+    value = _flatten_typed_value(best[2], column) or (best[1] or "").strip()
+    if not value:
+        return None
+    if len(value) > _CLAUSE_VALUE_MAX:
+        value = value[:_CLAUSE_VALUE_MAX].rstrip() + "…"
+    conf = best[3] if best[3] is not None else 0.7
+    return {"value": value,
+            "confidence": round(min(float(conf), _CLAUSE_HIT_CEILING)
+                                * (1.0 if exact else 0.85), 3),
+            "quote": best[1],
+            "source": f"clause: {best[0]}"}
+
+
+def standard_cell(wiki_id: str, session_id: str, doc_name: str,
+                  column: str) -> dict | None:
+    """Answer one Review Table cell from the backbone, or return None.
+
+    None means "spend the LLM call" — it is never a claim that the document
+    is silent on the column, only that nothing typed was extracted for it.
+    """
+    source_doc = resolve_source_doc(wiki_id, session_id, doc_name)
+    if not source_doc:
+        return None
+
+    want = _norm(column)
+    target = _COLUMN_SYNONYMS.get(want, want)
+    fields = document_fields(wiki_id, session_id, source_doc)
+    for name, field in fields.items():
+        if _norm(name) not in (want, target):
+            continue
+        value = display_value(field.get("value"))
+        if value:
+            return {"value": value,
+                    "confidence": field.get("confidence"),
+                    "quote": None,
+                    "source": f"registry field: {name}"}
+
+    return _clause_cell(wiki_id, session_id, source_doc, column)
