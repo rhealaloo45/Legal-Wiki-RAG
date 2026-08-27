@@ -2657,6 +2657,57 @@ def _failed_cross_reference(question: str, pages: dict,
             f"cross-reference held.")
 
 
+# The "current value under the agreement family" shape asks for the value AFTER
+# amendment; its mirror ("in the original agreement, before it was amended by
+# ...") asks for the one that was replaced. Only the first is redirected here.
+_AS_AMENDED_RE = re.compile(
+    r'\b(?:current|currently|after\s+giving\s+effect|as\s+amended|'
+    r'now\s+in\s+force|presently)\b',
+    re.IGNORECASE,
+)
+
+# Both documents recite a date, and the date is the only thing that tells them
+# apart — same instrument family, same two parties.
+_DATED_RE = re.compile(
+    r'\bdated\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|'
+    r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+    re.IGNORECASE,
+)
+
+
+def _amendment_family_directive(question: str) -> str | None:
+    """Say which of an amendment family's two documents states the value asked for.
+
+    Scope resolution now retrieves both (see _expand_amendment_family), which
+    leaves the model holding two documents that answer the same question with
+    two different figures and no stated rule for choosing. The question itself
+    carries the rule — "after giving effect to this amendment" — but it is one
+    clause at the end of a long sentence, and the original is the document named
+    first and quoted at greater length.
+
+    Returns None for the mirror shape, which wants the superseded value and must
+    not be pointed at the amendment.
+    """
+    m = _AMENDMENT_TAIL_RE.search(question or "")
+    if not m or not _AS_AMENDED_RE.search(question or ""):
+        return None
+    before, after = question[:m.start()], question[m.end():]
+    original_date = (_DATED_RE.findall(before) or [""])[-1]
+    amend_date = (_DATED_RE.findall(after) or [""])[0]
+    if not amend_date or amend_date == original_date:
+        return None
+    orig_label = (f"the original dated {original_date}" if original_date
+                  else "the original agreement")
+    return (f"this question names TWO documents and asks for the value that governs "
+            f"AFTER amendment. The answer is the value stated in the AMENDMENT dated "
+            f"{amend_date}, not the one in {orig_label} — the original states the "
+            f"figure the amendment replaced. Note that the amendment's date may be "
+            f"EARLIER than the original's; the question says which document amends "
+            f"which, and that is what decides it, not which date is later. Quote the "
+            f"amendment as the source. If the amendment is not among the retrieved "
+            f"pages, say that plainly rather than answering from the original.")
+
+
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
                  exclude_cached_answers: bool = False,
                  doc_family: "str | list[str] | None" = None, force_broad: bool = False,
@@ -2908,6 +2959,15 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     if _xref:
         logger.info("Cross-reference check: %s", _xref)
         wiki_parts.append(f"[CROSS-REFERENCE CHECK — read before answering: {_xref}]\n")
+
+    # Same mechanism, for the same reason: an amendment family puts two
+    # documents in front of the model that answer the question with two
+    # different figures, and the rule for choosing is one clause at the end of a
+    # long question ("after giving effect to this amendment").
+    _amend = _amendment_family_directive(question)
+    if _amend:
+        logger.info("Amendment-family directive: %s", _amend)
+        wiki_parts.append(f"[AMENDMENT FAMILY — read before answering: {_amend}]\n")
 
     # When retrieval is file-focused, prepend a header so the LLM knows which
     # document the pages come from (handles "Services Agreement" vs "Service Agreement").
