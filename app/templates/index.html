@@ -4704,7 +4704,13 @@
     }
 
     function exportObligationsCsv() {
-      if (!obligationData || !(obligationData.rows || []).length) return;
+      // Say why nothing downloaded. This table is empty for any corpus
+      // ingested before obligation extraction was wired, so a silent no-op
+      // here is the common case, not the rare one.
+      if (!obligationData || !(obligationData.rows || []).length) {
+        showToast('No obligations to export', 'info');
+        return;
+      }
       const d = obligationData, cols = d.columns || [];
       const header = ['Document'].concat(cols.map(c => OBLIGATION_LABELS[c] || c))
         .concat(['Page', 'Verbatim text', 'Confidence']);
@@ -4721,7 +4727,10 @@
     }
 
     function exportRegisterCsv() {
-      if (!registerData || !(registerData.rows || []).length) return;
+      if (!registerData || !(registerData.rows || []).length) {
+        showToast('No documents to export', 'info');
+        return;
+      }
       const d = registerData, cols = d.columns || [];
       const header = ['Document', 'Family', 'Type', 'Jurisdiction']
         .concat(cols.map(registerLabel)).concat(['Pages', 'Clauses', 'Duties']);
