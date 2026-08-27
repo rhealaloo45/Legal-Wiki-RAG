@@ -9503,15 +9503,51 @@ def _select_relevant_pages(
                     if t in pages
                 ]
 
+                # Hypothetical-question vectors as a THIRD ranking. Ingest writes
+                # a set of questions each page can answer and embeds them (stage
+                # 06); this corpus holds 16,042 of them, and until now nothing
+                # read them back — the search function existed with no caller.
+                # They match a different thing from the page embedding: the page
+                # vector encodes what a page SAYS, the question vector what it can
+                # be ASKED, so a query phrased as a question lands closer to them.
+                # Costs no extra embedding call — q_embedding is already made.
+                #
+                # OFF by default (config.USE_QUESTION_EMBEDDINGS). The questions
+                # this corpus's ingest produced discriminate TOPIC, not document:
+                # "How does the Agreement define 'Confidential Information'?" is
+                # the stored question for 124 separate pages, all scoring
+                # identically. RRF promotes whatever any channel ranks highly, so
+                # feeding it a ranking that orders documents arbitrarily is a
+                # route to an unrelated agreement's page in the context — the
+                # exact failure the scope work has been closing. Turning it on
+                # needs a live retrieval comparison, not a reading of the code.
+                question_ranking = []
+                if config.USE_QUESTION_EMBEDDINGS:
+                    try:
+                        question_ranking = [
+                            r["title"] for r in _db.search_similar_questions(
+                                _wiki_id_hr, session_id, q_embedding,
+                                limit=vector_limit, doc_family=doc_family,
+                                max_pages_sharing=config.QUESTION_MAX_PAGES_SHARING)
+                            if r["title"] in pages
+                        ]
+                    except Exception as _qe:
+                        # Never fatal: this is a third opinion on top of two
+                        # rankings that already work on their own.
+                        logger.warning("question-embedding search failed: %s", _qe)
+
                 # Phase 3: Reciprocal Rank Fusion of the vector and BM25 rankings,
                 # replacing the previous "all vector, then BM25 appended" order —
                 # a strong keyword-only match now ranks on its own merit instead of
                 # sitting below every semantic hit. Zero LLM calls.
+                _rankings = [valid_vector, bm25_ranking]
+                if question_ranking:
+                    _rankings.append(question_ranking)
                 if is_broad:
                     # Fuse first, THEN diversify: the per-document cap + Parties-page
                     # force-include operate on a better-ordered base list, but the
                     # breadth guarantee for "across all X" questions is unchanged.
-                    fused = _rrf_fuse([valid_vector, bm25_ranking], k=config.RRF_K)
+                    fused = _rrf_fuse(_rankings, k=config.RRF_K)
                     hybrid = _diversify_by_document(
                         fused, pages,
                         config.BROAD_QUESTION_PER_DOC_CAP, config.BROAD_QUESTION_TOTAL_CAP,
@@ -9523,7 +9559,7 @@ def _select_relevant_pages(
                     )
                 else:
                     hybrid = _rrf_fuse(
-                        [valid_vector, bm25_ranking],
+                        _rankings,
                         k=config.RRF_K, limit=config.HYBRID_FUSION_TOP_K,
                     )
 
@@ -9539,13 +9575,16 @@ def _select_relevant_pages(
                 if hybrid:
                     logger.info(
                         "Page selection: %d pages via hybrid RRF fusion "
-                        "(vector=%d, bm25=%d, embeddings_in_db=%d, broad=%s)",
-                        len(hybrid), len(valid_vector), len(bm25_ranking), emb_count, is_broad,
+                        "(vector=%d, bm25=%d, questions=%d, embeddings_in_db=%d, broad=%s)",
+                        len(hybrid), len(valid_vector), len(bm25_ranking),
+                        len(question_ranking), emb_count, is_broad,
                     )
                     _trace = tracing.get_trace()
                     if _trace:
                         _trace.log_page_selection(
-                            "vector+bm25 RRF fusion", vector=valid_vector, bm25=bm25_ranking,
+                            "vector+bm25+questions RRF fusion",
+                            vector=valid_vector, bm25=bm25_ranking,
+                            questions=question_ranking,
                             selected=hybrid, embeddings_in_db=emb_count, is_broad=is_broad,
                         )
                     return hybrid, {}
