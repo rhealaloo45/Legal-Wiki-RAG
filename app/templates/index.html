@@ -1349,6 +1349,90 @@
     }
     .admin-pill-btn.accent:hover { background: #E3E9FE; }
 
+    .admin-search-input {
+      font-size: 12px;
+      border-radius: var(--radius-md);
+      padding: 7px 11px;
+      min-width: 240px;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      outline: none;
+    }
+    .admin-search-input:focus { border-color: var(--accent-border); }
+
+    .admin-filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .admin-filter-pill {
+      font-size: 11.5px;
+      font-weight: 500;
+      border-radius: 20px;
+      padding: 5px 12px;
+      cursor: pointer;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .admin-filter-pill:hover { background: var(--bg-hover); }
+    .admin-filter-pill.active {
+      background: var(--accent-light);
+      color: var(--accent);
+      border-color: var(--accent-border);
+    }
+    .admin-filter-pill .cnt {
+      font-family: var(--font-mono, monospace);
+      opacity: .65;
+      margin-left: 5px;
+    }
+
+    /* The register is genuinely wide — a family can define a dozen columns.
+       It scrolls inside its own card rather than pushing the page sideways. */
+    .admin-table-wrap { overflow: auto; max-height: calc(100vh - 260px); }
+
+    .admin-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    .admin-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--bg-surface);
+      text-align: left;
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--text-muted);
+      padding: 11px 12px;
+      border-bottom: .5px solid var(--border);
+      white-space: nowrap;
+    }
+    .admin-table td {
+      padding: 10px 12px;
+      border-bottom: .5px solid var(--border);
+      color: var(--text-secondary);
+      vertical-align: top;
+      max-width: 260px;
+    }
+    .admin-table tr:last-child td { border-bottom: none; }
+    .admin-table tr:hover td { background: var(--bg-hover); }
+    .admin-table td.num {
+      font-family: var(--font-mono, monospace);
+      font-size: 11.5px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .admin-table .cell-doc { color: var(--text-primary); font-weight: 500; }
+    /* A value the extraction flagged is marked in the cell itself — a
+       reviewer scanning the register should see doubt without opening the
+       Review Queue to find it. */
+    .admin-table .cell-flagged { color: var(--amber); }
+    .admin-table .cell-empty { color: var(--text-muted); }
+
     .admin-badge {
       font-size: 10.5px;
       font-family: var(--font-mono, monospace);
@@ -3835,6 +3919,9 @@
               <span class="admin-nav-badge d-none" id="admin-review-badge">0</span>
             </div>
             <div class="admin-rail-label" style="margin-top:16px">Corpus</div>
+            <div class="admin-nav-item" id="adminNav-register" data-target="register" onclick="switchAdminTab('register',this)">
+              <span class="admin-nav-left"><i class="ti ti-table" style="font-size:16px"></i>Register</span>
+            </div>
             <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
               <span class="admin-nav-left"><i class="ti ti-database" style="font-size:16px"></i>Wikis</span>
             </div>
@@ -3879,6 +3966,21 @@
                 <button type="button" class="admin-pill-btn accent" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i>Knowledge graph</button>
               </div>
               <div class="admin-card" id="admin-wiki-page-list"></div>
+            </div>
+
+            <div id="admin-panel-register" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Register</div>
+                  <div class="admin-section-sub" id="admin-register-sub">&nbsp;</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-register-search" class="admin-search-input" type="search" placeholder="Search documents and values…" oninput="scheduleRegisterSearch()">
+                  <button type="button" class="admin-pill-btn" title="Download this view as CSV" onclick="exportRegisterCsv()"><i class="ti ti-download" style="font-size:14px"></i>CSV</button>
+                </div>
+              </div>
+              <div class="admin-filter-row" id="admin-register-families"></div>
+              <div class="admin-card admin-table-wrap"><div id="admin-register-table"></div></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4349,6 +4451,7 @@
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'wikis') loadAdminWikis();
+      else if (name === 'register') loadAdminRegister();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
       // Badge the Review Queue nav item even when it isn't the active section
       refreshAdminReviewBadge();
@@ -4357,7 +4460,7 @@
     function switchAdminTab(name, el) {
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      ['ingest', 'documents', 'wiki', 'review', 'wikis'].forEach(n => {
+      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
@@ -4365,7 +4468,127 @@
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'wikis') loadAdminWikis();
+      else if (name === 'register') loadAdminRegister();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
+    }
+
+    // ---- Contract Register -------------------------------------------------
+    // A pure read over the backbone: every ingested document is already a row.
+    // The column set comes from the server, per family — a litigation document
+    // has no liability cap, so it is not given an empty column for one.
+    let registerFamily = null;
+    let registerData = null;
+    let registerSearchTimer = null;
+
+    const REGISTER_LABELS = {
+      parties: 'Parties', governing_law: 'Governing law', effective_date: 'Effective date',
+      expiry_date: 'Expiry date', liability_cap: 'Liability cap', ip_ownership: 'IP ownership',
+      notice_period: 'Notice period', payment_terms: 'Payment terms', term_length: 'Term',
+      renewal_terms: 'Renewal', termination: 'Termination', confidentiality: 'Confidentiality',
+      binding_status: 'Binding status', exclusivity: 'Exclusivity', proposed_terms: 'Proposed terms',
+      conditions_precedent: 'Conditions precedent', expiry_of_offer: 'Offer expiry',
+      court: 'Court', case_number: 'Case number', disposition: 'Disposition',
+      decided_date: 'Decided', procedural_posture: 'Posture', plaintiffs: 'Plaintiffs',
+      defendants: 'Defendants', holding: 'Holding', relief_granted: 'Relief granted',
+      relief_sought: 'Relief sought', statutes_cited: 'Statutes cited',
+      grantor: 'Grantor', grantee: 'Grantee', scope_of_authority: 'Scope', limitations: 'Limitations',
+      resolving_body: 'Resolving body', addressee: 'Addressee', opinion_date: 'Opinion date',
+      matters_opined: 'Matters opined', conclusion: 'Conclusion', assumptions: 'Assumptions',
+      qualifications: 'Qualifications', reliance_limitation: 'Reliance limitation',
+      subject_matter: 'Subject matter', key_terms: 'Key terms', matter_reference: 'Matter reference'
+    };
+    const registerLabel = n => REGISTER_LABELS[n] || n.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+
+    function scheduleRegisterSearch() {
+      clearTimeout(registerSearchTimer);
+      registerSearchTimer = setTimeout(loadAdminRegister, 250);
+    }
+
+    function setRegisterFamily(key) {
+      registerFamily = key;
+      loadAdminRegister();
+    }
+
+    async function loadAdminRegister() {
+      const el = document.getElementById('admin-register-table');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      const search = (document.getElementById('admin-register-search').value || '').trim();
+      const params = new URLSearchParams({ session_id: SID, limit: '2000' });
+      if (registerFamily) params.set('family', registerFamily);
+      if (search) params.set('search', search);
+      try {
+        const res = await fetch('/register?' + params.toString());
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load the register');
+        registerData = d;
+        renderRegisterFamilies(d);
+        renderRegisterTable(d);
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    function renderRegisterFamilies(d) {
+      const total = (d.families || []).reduce((a, f) => a + f.count, 0);
+      const pill = (key, label, count) =>
+        `<button type="button" class="admin-filter-pill${(registerFamily || null) === key ? ' active' : ''}" onclick="setRegisterFamily(${key === null ? 'null' : "'" + key + "'"})">${escapeHtmlRule(label)}<span class="cnt">${count}</span></button>`;
+      document.getElementById('admin-register-families').innerHTML =
+        pill(null, 'All families', total) +
+        (d.families || []).filter(f => f.count > 0).map(f => pill(f.key, f.label, f.count)).join('');
+    }
+
+    function renderRegisterTable(d) {
+      const el = document.getElementById('admin-register-table');
+      const rows = d.rows || [];
+      document.getElementById('admin-register-sub').textContent =
+        `${d.total.toLocaleString()} document${d.total === 1 ? '' : 's'}` +
+        (d.family ? ` in ${d.family.replace(/_/g, ' ')}` : ' across every family') +
+        ' — read straight from the backbone, no extraction';
+      if (!rows.length) {
+        el.innerHTML = '<div style="padding:26px;text-align:center;font-size:12px;color:var(--text-muted)">No documents match.</div>';
+        return;
+      }
+      const cols = d.columns || [];
+      const head = ['<th>Document</th>', d.family ? '' : '<th>Family</th>', '<th>Type</th>', '<th>Jurisdiction</th>']
+        .concat(cols.map(c => `<th>${escapeHtmlRule(registerLabel(c))}</th>`))
+        .concat(['<th style="text-align:right">Pages</th>',
+                 '<th style="text-align:right">Clauses</th>',
+                 '<th style="text-align:right">Duties</th>']).join('');
+      const cell = v => {
+        if (!v || v.value === null || v.value === undefined || v.value === '')
+          return '<td class="cell-empty">—</td>';
+        const cls = v.flagged ? 'cell-flagged' : '';
+        const title = v.confidence === null || v.confidence === undefined
+          ? 'confidence unknown' : `confidence ${Math.round(v.confidence * 100)}%`;
+        return `<td class="${cls}" title="${title}">${escapeHtmlRule(String(v.value))}</td>`;
+      };
+      el.innerHTML = '<table class="admin-table"><thead><tr>' + head + '</tr></thead><tbody>' +
+        rows.map(r => '<tr>' +
+          `<td class="cell-doc" title="${escapeHtmlRule(r.source_doc)}">${escapeHtmlRule(_shortSourceDoc(r.source_doc))}</td>` +
+          (d.family ? '' : `<td>${escapeHtmlRule((r.doc_family || 'unclassified').replace(/_/g, ' '))}</td>`) +
+          `<td>${escapeHtmlRule(r.doc_type || '—')}</td>` +
+          `<td>${escapeHtmlRule(r.jurisdiction || '—')}</td>` +
+          cols.map(c => cell(r.values[c])).join('') +
+          `<td class="num">${r.page_count}</td><td class="num">${r.clause_count}</td><td class="num">${r.obligation_count}</td>` +
+          '</tr>').join('') + '</tbody></table>';
+    }
+
+    function exportRegisterCsv() {
+      if (!registerData || !(registerData.rows || []).length) return;
+      const d = registerData, cols = d.columns || [];
+      const header = ['Document', 'Family', 'Type', 'Jurisdiction']
+        .concat(cols.map(registerLabel)).concat(['Pages', 'Clauses', 'Duties']);
+      const q = s => '"' + String(s === null || s === undefined ? '' : s).replace(/"/g, '""') + '"';
+      const lines = [header.map(q).join(',')].concat(d.rows.map(r => [
+        r.source_doc, r.doc_family || '', r.doc_type || '', r.jurisdiction || ''
+      ].concat(cols.map(c => (r.values[c] || {}).value || ''))
+       .concat([r.page_count, r.clause_count, r.obligation_count]).map(q).join(',')));
+      const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `register-${d.family || 'all'}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
     }
 
     async function loadAdminWikis() {
