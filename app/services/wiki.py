@@ -1294,6 +1294,14 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
         obligations = backbone.reconcile_rows(obligations, ("verbatim_text",)) \
             if all(o.get("verbatim_text") for o in obligations) \
             else backbone.reconcile_rows(obligations, ("obligated_party", "duty"))
+        # Logged rather than dropped silently: whether the model stopped
+        # emitting rights as duties, or is still emitting them and this guard
+        # is what keeps them out, is the difference between the prompt working
+        # and the guard carrying it — and only a log line tells them apart.
+        _rights = [o for o in obligations if _is_permissive_duty(o.get("duty"))]
+        if _rights:
+            logger.info("Dropped %d permissive clause(s) miscast as obligations in %s: %s",
+                        len(_rights), doc_name, [o.get("duty") for o in _rights][:3])
         obligations = [o for o in obligations if not _is_permissive_duty(o.get("duty"))]
         for o in obligations:
             o["page_num"] = o.pop("page", None)
