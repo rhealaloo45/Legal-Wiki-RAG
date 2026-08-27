@@ -1235,10 +1235,11 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
             family_confidence=classification.get("family_confidence"),
             family_method=classification.get("family_method"),
             folder_hint=classification.get("folder_hint"),
-            # Stamped here so future ingests can find this document by
-            # content before spending a single LLM call on it — see
-            # _content_hash / the duplicate check near the top of ingest().
+            # Stamped here so future ingests can find this document before
+            # spending anything on it — see _file_hash/_content_hash and the
+            # two duplicate checks near the top of ingest().
             content_hash=classification.get("content_hash"),
+            file_hash=classification.get("file_hash"),
         )
 
         raw_meta = bucket.get("family_metadata") or {}
@@ -1367,6 +1368,22 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
 _MIN_HASH_CHARS = 200
 
 
+def _file_hash(path: str) -> str | None:
+    """SHA-256 of the raw uploaded file's bytes. Computed straight off disk,
+    before any text extraction or OCR runs — this is the actual upload-time
+    dedup signal. Unlike _content_hash, this costs nothing: no LLM, no OCR,
+    not even the CPU work of parsing the file format.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
 def _content_hash(text: str) -> str | None:
     """SHA-256 of the extracted text, whitespace-normalized. None if the
     text is too short to be a trustworthy signal (see _MIN_HASH_CHARS).
@@ -1393,18 +1410,47 @@ def ingest(file_path: str, session_id: str) -> dict:
     with the overview's topic list as context to reduce redundancy.
     Segments are processed concurrently to improve speed.
     """
+    doc_name = os.path.basename(file_path)
+
+    # --- Duplicate check #1: identical raw file, checked at upload time -----
+    # Runs BEFORE text extraction/OCR — the whole point. A re-uploaded file
+    # is caught from its raw bytes alone, so it never touches the reader, let
+    # alone the vision-OCR fallback (a real, billed LLM call per scanned page
+    # in this deployment). Scoped to the active wiki, not the session: the
+    # goal is catching a document re-uploaded under a fresh session_id, which
+    # is what a repeated folder upload actually does.
+    file_hash = _file_hash(file_path)
+    if config.USE_DATABASE and file_hash:
+        try:
+            from services import backbone as _backbone
+            file_dup = _backbone.find_by_file_hash(_active_wiki_id(), file_hash)
+        except Exception as _dup_err:
+            logger.warning("File-hash duplicate check failed for %s, ingesting normally: %s",
+                           doc_name, _dup_err)
+            file_dup = None
+        if file_dup and file_dup["source_doc"] != doc_name:
+            logger.info("Skipping %s — identical file already ingested as %s (no extraction run)",
+                       doc_name, file_dup["source_doc"])
+            _log_event(session_id, "DUPLICATE",
+                      f"{doc_name} skipped — identical file already ingested "
+                      f"as {file_dup['source_doc']}")
+            return {
+                "pages_updated": 0,
+                "relations": 0,
+                "duplicate_of": file_dup["source_doc"],
+                "duplicate_family": file_dup.get("doc_family"),
+            }
+
     from services.reader import read_file_with_positions as _read_with_pos
     result = _read_with_pos(file_path)
     text = result["text"]
     page_map = result["page_map"]
-    doc_name = os.path.basename(file_path)
 
-    # --- Duplicate check: identical content already in this wiki -----------
-    # Runs before classification — the first LLM call in this pipeline — so a
-    # re-uploaded document costs nothing beyond the OCR/text-extraction that
-    # already happened above. Scoped to the active wiki, not the session: the
-    # whole point is catching a document re-uploaded under a fresh
-    # session_id, which is what a repeated folder upload actually does.
+    # --- Duplicate check #2: identical extracted text, different bytes -----
+    # Secondary safety net for the case file_hash can't catch — same content
+    # re-saved/re-scanned into a byte-different file. Only reachable once
+    # extraction already ran for a document that passed check #1, so it adds
+    # no extra OCR/LLM cost of its own.
     content_hash = _content_hash(text)
     if config.USE_DATABASE and content_hash:
         try:
@@ -1448,6 +1494,10 @@ def ingest(file_path: str, session_id: str) -> dict:
         logger.error("Classification failed for %s, using generic: %s", doc_name, _cls_err)
         classification = {"doc_family": "generic", "family_confidence": 0.0,
                           "flagged": True, "flag_reason": str(_cls_err)}
+    # Stamped here so both duplicate checks above have something to find on
+    # the *next* ingest of this document.
+    classification["content_hash"] = content_hash
+    classification["file_hash"] = file_hash
     family_key = classification.get("doc_family")
 
     # --- Structural anchors: one deterministic parse, two consumers ---------
