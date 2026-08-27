@@ -2190,6 +2190,17 @@ def search_similar_questions(wiki_id: str, session_id: str, query_embedding: lis
     Returns page titles, not questions — the question is a retrieval handle,
     and what the caller ultimately needs is the page that can answer it. Each
     page appears once, at its best-matching question's score.
+
+    The ranking has to happen in two steps. DISTINCT ON requires its own key to
+    lead the ORDER BY, so a single-level query is sorted by TITLE, and a LIMIT
+    on it returns the alphabetically-first N pages rather than the best-matching
+    ones — sorting the result afterwards only reorders that alphabetical slice.
+    Confirmed against the live table: querying with a page's OWN embedding, a
+    perfect 1.0 match, did not return that page at all; it returned ten pages
+    beginning "Absence..." and "Acceptance...", scoring around 0.5.
+
+    So the inner query picks each page's best-matching question with no limit,
+    and the outer one ranks pages by that score and takes the top N.
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -2201,18 +2212,19 @@ def search_similar_questions(wiki_id: str, session_id: str, query_embedding: lis
         params["fam"] = doc_family
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
-            SELECT DISTINCT ON (title)
-                   title, question,
-                   1 - (embedding <=> CAST(:embedding AS vector)) AS score
-            FROM {tbl}
-            WHERE wiki_id = :w AND session_id = :sid{family_clause}
-            ORDER BY title, embedding <=> CAST(:embedding AS vector)
+            SELECT title, question, score FROM (
+                SELECT DISTINCT ON (title)
+                       title, question,
+                       1 - (embedding <=> CAST(:embedding AS vector)) AS score
+                FROM {tbl}
+                WHERE wiki_id = :w AND session_id = :sid{family_clause}
+                ORDER BY title, embedding <=> CAST(:embedding AS vector)
+            ) best
+            ORDER BY score DESC
             LIMIT :limit
         """), params).fetchall()
-    out = [{"title": r.title, "question": r.question, "score": float(r.score)}
-           for r in rows]
-    out.sort(key=lambda x: x["score"], reverse=True)
-    return out
+    return [{"title": r.title, "question": r.question, "score": float(r.score)}
+            for r in rows]
 
 
 def count_question_embeddings(wiki_id: str, session_id: str) -> int:
