@@ -4277,6 +4277,7 @@
     const METRIC_INFO = {
       confidence: { title: 'Confidence', desc: 'How well a model judges the retrieved context supports this answer.' },
       grounding:  { title: 'Grounding', desc: '% of the answer\'s checkable claims verified against the source text.' },
+      claims:     { title: 'Claims', desc: 'Quoted spans found verbatim in the exact text the model was given, and attributed to the right document. A count, not a score — nothing predicts it.' },
     };
 
     function metricInfo(label, score, key) {
@@ -7641,6 +7642,24 @@
         groundingBadge = `<span class="conf"><span class="conf-dot" style="background:${gColor}"></span>${metricInfo('Grounding', gScore, 'grounding')}</span>`;
       }
 
+      // Claim tally — target architecture § 02's "11 of 12 claims verified".
+      // Deliberately a count rather than a percentage: these are substring
+      // checks against the exact context the model was given, so they are true
+      // by construction, and rendering them as a percentage next to two
+      // self-reported ones would hide that difference. Hidden when the answer
+      // quotes nothing, since "0 of 0" says nothing about it.
+      const cc = wikiResult.citation_check || {};
+      let claimsBadge = '';
+      if (cc.total) {
+        const verified = cc.verified != null
+          ? cc.verified : Math.max(0, cc.total - (cc.unverified || 0) - (cc.misattributed || 0));
+        const cColor = verified === cc.total ? 'var(--green)'
+          : (verified >= cc.total * 0.7 ? 'var(--amber)' : 'var(--red)');
+        claimsBadge = `<span class="conf"><span class="conf-dot" style="background:${cColor}"></span>` +
+          `<span class="metric-info" data-metric="claims" onmouseenter="showMetricInfo(event,'claims')" onmouseleave="hideMetricInfo()">` +
+          `${verified} of ${cc.total} claim${cc.total === 1 ? '' : 's'} verified</span></span>`;
+      }
+
       // The backend flags an answer that LEADS with "the documents don't cover
       // this". Both percentages are literally correct on such an answer — the
       // model is confident in its REFUSAL, and the refusal accurately describes
@@ -7652,7 +7671,8 @@
         ? '<span class="tag-synth tag-notcovered">NOT COVERED</span>'
         : `<span class="tag-synth">SYNTHESIZED</span>
               <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
-              ${groundingBadge}`;
+              ${groundingBadge}
+              ${claimsBadge}`;
 
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
@@ -8001,6 +8021,7 @@
               message_id: msg.id,
               answer: msg.content,
               confidence_score: meta.confidence_score || 0,
+              citation_check: meta.citation_check || {},
               files_used: meta.files_used || [],
               token_total: meta.token_total || {},
               validation: meta.validation || {},
