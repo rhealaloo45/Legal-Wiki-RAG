@@ -986,6 +986,14 @@ def _ingest_single_doc_wiki(file_path: str, session_id: str):
     doc_name = os.path.basename(file_path)
     try:
         result = wiki.ingest(file_path, session_id)
+        dup_of = (result or {}).get("duplicate_of")
+        if dup_of:
+            # No pages were written and no LLM call was made — surfaced as
+            # its own status rather than "done" so the ingest dashboard
+            # doesn't imply this document was actually processed.
+            _update_doc_status(session_id, doc_name, "duplicate",
+                              f"matches {dup_of}", 0)
+            return
         pages = (result or {}).get("pages_updated", 0)
         _refresh_wiki_stats(session_id)
         _update_doc_status(session_id, doc_name, "done", "", pages)
@@ -1716,6 +1724,72 @@ def admin_wikis_archive():
     except Exception as e:
         logger.error("Wiki archive failed: %s", e)
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/documents/backfill_hashes", methods=["POST"])
+def admin_backfill_content_hashes():
+    """Compute content_hash for every document that predates duplicate
+    detection, so the NEXT upload can actually recognize one of them.
+
+    Without this, a fresh corpus re-upload finds nothing to match against —
+    every existing row's content_hash is NULL until this has run once.
+    Queued per-document on the same executor ingest uses: a few hundred
+    documents needing OCR can take a long time, and this must not block the
+    request or hold a gunicorn worker hostage. Idempotent by construction —
+    the UPDATE only ever touches a row that still has no hash — so it is
+    always safe to call again: after an interrupted run, after new files
+    appear on disk for previously file-less rows, on a schedule, whatever.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import backbone as _backbone
+    wiki_id = current_wiki_id()
+    pending = _backbone.documents_missing_hash(wiki_id)
+    queued, no_file = [], []
+    for row in pending:
+        path = os.path.join(config.UPLOAD_PATH, row["source_doc"])
+        if os.path.exists(path):
+            queued.append(row["source_doc"])
+            executor.submit(_backfill_one_hash, wiki_id, row["session_id"],
+                           row["source_doc"], path)
+        else:
+            no_file.append(row["source_doc"])
+    return jsonify({
+        "status": "queued",
+        "total_missing": len(pending),
+        "queued": len(queued),
+        # These can never be hash-backfilled — the file that would need
+        # re-reading is gone. Named explicitly rather than silently dropped,
+        # since it means duplicate detection has a permanent blind spot for
+        # exactly these documents until they're re-uploaded.
+        "no_file_on_disk": len(no_file),
+        "no_file_examples": no_file[:10],
+    })
+
+
+def _backfill_one_hash(wiki_id: str, session_id: str, source_doc: str, path: str):
+    try:
+        from services.reader import read_file_with_positions as _read
+        from services import backbone as _backbone
+        text = _read(path)["text"]
+        h = wiki._content_hash(text)
+        if h:
+            _backbone.backfill_content_hash(wiki_id, session_id, source_doc, h)
+    except Exception as e:
+        logger.warning("Hash backfill failed for %s: %s", source_doc, e)
+
+
+@app.route("/admin/documents/backfill_hashes/status")
+def admin_backfill_hashes_status():
+    """How much of the backfill above is left — poll this after queuing it."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import backbone as _backbone
+    pending = _backbone.documents_missing_hash(current_wiki_id())
+    return jsonify({"still_missing": len(pending)})
 
 
 @app.route("/admin/documents")

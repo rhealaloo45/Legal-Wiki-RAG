@@ -294,7 +294,7 @@ def upsert_document(wiki_id: str, session_id: str, source_doc: str,
     allowed = (
         "doc_family", "doc_type", "jurisdiction", "parties", "effective_date",
         "expiry_date", "status", "lifecycle", "role", "binding_status",
-        "family_confidence", "family_method", "folder_hint",
+        "family_confidence", "family_method", "folder_hint", "content_hash",
     )
     cols = {k: _coerce_param(k, v) for k, v in fields.items()
             if k in allowed and v is not None}
@@ -335,6 +335,76 @@ def get_document(wiki_id: str, session_id: str, source_doc: str) -> dict | None:
             "binding_status", "family_confidence", "family_method",
             "folder_hint", "schema_version")
     return dict(zip(keys, row))
+
+
+def find_by_content_hash(wiki_id: str, content_hash: str) -> dict | None:
+    """The existing document this content hash already belongs to, if any.
+
+    Scoped to `wiki_id` only, deliberately not `session_id` — the whole
+    point is catching a document re-uploaded under a *different* session
+    (a fresh folder upload gets a fresh session_id for every file in it).
+    Two separate wikis are deliberately isolated corpora, so the same file
+    uploaded into both is not a duplicate of anything; it belongs in both.
+
+    Ties are broken by taking the oldest row (`ORDER BY created_at`), so a
+    duplicate always resolves to the original rather than to whichever
+    re-upload happened to run last.
+    """
+    if not _enabled() or not content_hash:
+        return None
+    text = _text()
+    with db.get_engine().connect() as c:
+        row = c.execute(text("""
+            SELECT session_id, source_doc, doc_family, created_at
+            FROM documents
+            WHERE wiki_id = :w AND content_hash = :h
+            ORDER BY created_at ASC
+            LIMIT 1
+        """), {"w": wiki_id, "h": content_hash}).fetchone()
+    if not row:
+        return None
+    return {"session_id": row[0], "source_doc": row[1], "doc_family": row[2],
+            "created_at": row[3].isoformat() if row[3] else None}
+
+
+def documents_missing_hash(wiki_id: str) -> list[dict]:
+    """Documents ingested before content_hash existed, or whose extracted
+    text was too short to hash (see wiki._MIN_HASH_CHARS) — the backfill
+    target. A row here is not necessarily fixable: it may have no file left
+    on disk, which the caller has to check separately."""
+    if not _enabled():
+        return []
+    text = _text()
+    with db.get_engine().connect() as c:
+        rows = c.execute(text("""
+            SELECT session_id, source_doc FROM documents
+            WHERE wiki_id = :w AND content_hash IS NULL
+        """), {"w": wiki_id}).fetchall()
+    return [{"session_id": r[0], "source_doc": r[1]} for r in rows]
+
+
+def backfill_content_hash(wiki_id: str, session_id: str, source_doc: str,
+                          content_hash: str) -> bool:
+    """Set content_hash on an existing row, and nothing else.
+
+    Deliberately not routed through upsert_document, which bumps
+    schema_version on every write — that stamp is what gates single-document
+    re-ingest elsewhere in this doc, and a pure hash backfill making a
+    document look freshly re-ingested would be a real, if quiet, correctness
+    bug for that feature. Only ever touches a row that still has no hash, so
+    calling this twice on the same document is always a no-op the second time.
+    """
+    if not _enabled() or not content_hash:
+        return False
+    text = _text()
+    with db.get_engine().connect() as c:
+        res = c.execute(text("""
+            UPDATE documents SET content_hash = :h
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND content_hash IS NULL
+        """), {"h": content_hash, "w": wiki_id, "s": session_id, "d": source_doc})
+        c.commit()
+    return res.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
