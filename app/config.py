@@ -194,6 +194,15 @@ HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector
 BROAD_QUESTION_VECTOR_TOP_K  = 80    # Wider candidate pool for "across all X" questions, before per-document diversification
 BROAD_QUESTION_PER_DOC_CAP   = 4     # Max pages any single document can contribute to a broad-question candidate list
 BROAD_QUESTION_TOTAL_CAP     = 60    # Final page budget for a broad question after diversification (vs. 15 for a normal question) — raised to fit a Parties page + clause page per document without starving document breadth
+# Fuse hypothetical-question vectors (written at ingest stage 06) into the retrieval
+# pool as a third RRF ranking. Reuses the query embedding page search already made, so
+# it costs no extra embedding call. OFF pending live verification: the questions this
+# corpus's ingest generated rank by TOPIC rather than by document — measured, one
+# question text is shared by 124 pages at identical scores — and RRF promotes whatever
+# any channel ranks highly, so switching it on risks pulling an unrelated agreement's
+# page into context. See search_similar_questions for the measurement and the filter.
+USE_QUESTION_EMBEDDINGS      = os.getenv("USE_QUESTION_EMBEDDINGS", "false").lower() == "true"
+QUESTION_MAX_PAGES_SHARING   = 1     # Drop question texts shared by more than N pages before ranking (0 = keep all). 1 keeps the 75% of rows unique to a single page.
 
 # Reranking (Phase 3)
 RRF_K                        = 60    # Reciprocal Rank Fusion constant — standard default; larger = flatter weighting of rank position
