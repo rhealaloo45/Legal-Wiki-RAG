@@ -2184,7 +2184,8 @@ def upsert_question_embeddings(wiki_id: str, session_id: str, title: str,
 
 def search_similar_questions(wiki_id: str, session_id: str, query_embedding: list[float],
                              limit: int = 10,
-                             doc_family: str | None = None) -> list[dict]:
+                             doc_family: str | None = None,
+                             max_pages_sharing: int = 1) -> list[dict]:
     """Find pages whose hypothetical questions match the query.
 
     Returns page titles, not questions — the question is a retrieval handle,
@@ -2201,6 +2202,16 @@ def search_similar_questions(wiki_id: str, session_id: str, query_embedding: lis
 
     So the inner query picks each page's best-matching question with no limit,
     and the outer one ranks pages by that score and takes the top N.
+
+    max_pages_sharing drops question texts that too many pages share. Ingest
+    generates a lot of boilerplate — "How does the Agreement define
+    'Confidential Information'?" is the stored question for 124 different pages
+    in this corpus, and every one of them scores identically against a query
+    close to it. Such a question ranks documents at random, and feeding that into
+    a fusion that rewards any highly-ranked candidate is how a page from an
+    unrelated agreement gets into the context. 1 keeps only questions unique to
+    one page (75% of this corpus's rows); a higher value trades precision for
+    recall, and 0 disables the filter.
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -2210,14 +2221,29 @@ def search_similar_questions(wiki_id: str, session_id: str, query_embedding: lis
     params = {"w": wiki_id, "sid": session_id, "embedding": emb_str, "limit": limit}
     if doc_family:
         params["fam"] = doc_family
+    if max_pages_sharing and max_pages_sharing > 0:
+        params["maxshare"] = max_pages_sharing
+        pool = """
+            SELECT s.title, s.question, s.embedding
+            FROM scoped s
+            JOIN (SELECT question FROM scoped
+                  GROUP BY question HAVING count(DISTINCT title) <= :maxshare) d
+              ON d.question = s.question
+        """
+    else:
+        pool = "SELECT title, question, embedding FROM scoped"
     with engine.connect() as conn:
         rows = conn.execute(text(f"""
+            WITH scoped AS (
+                SELECT title, question, embedding
+                FROM {tbl}
+                WHERE wiki_id = :w AND session_id = :sid{family_clause}
+            ), pool AS ({pool})
             SELECT title, question, score FROM (
                 SELECT DISTINCT ON (title)
                        title, question,
                        1 - (embedding <=> CAST(:embedding AS vector)) AS score
-                FROM {tbl}
-                WHERE wiki_id = :w AND session_id = :sid{family_clause}
+                FROM pool
                 ORDER BY title, embedding <=> CAST(:embedding AS vector)
             ) best
             ORDER BY score DESC
