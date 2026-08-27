@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -3363,6 +3364,64 @@ def list_doc_families(wiki_id: str, session_id: str) -> list[str]:
         return [row.doc_family for row in rows]
 
 
+# Structural anchors are recorded at ingest for every document whose text prints
+# numbered sections — 470 of the live corpus's 568. clause_map is a separate
+# table filled by a backfill script that was never run against this corpus, and
+# holds zero rows for it, so every clause-number question fell straight through
+# the lookup below and was answered as though its document were unnumbered.
+# Anchors carry the same two facts clause_map does (a number, its heading) plus
+# the character offset, so they serve as the fallback source here rather than
+# needing their own path through the caller.
+_ANCHOR_CLAUSE_KINDS = ("section", "clause", "schedule")
+
+
+def _plausible_heading(text: str) -> bool:
+    """Whether an anchor's heading_text is a section NAME rather than its body.
+
+    The anchor parser records a numbered line whatever follows the number, so
+    heading_text is sometimes a table row ("HY 10 39,402,795 70,235,481") or the
+    opening of a wrapped body sentence ("NimbusForge shall maintain, test at
+    least annually, ..."). Both matter: the heading is put into the retrieval
+    query, where a body sentence or a row of figures drags BM25 off the section
+    it was meant to find, and it is also shown to the user as the section's name.
+    """
+    t = (text or "").strip()
+    if not (2 <= len(t) <= 70):
+        return False
+    words = t.split()
+    if not 1 <= len(words) <= 8:
+        return False
+    letters = sum(c.isalpha() for c in t)
+    if letters < len(t) / 2:
+        return False
+    return not t.endswith((",", ";", "-"))
+
+
+def _anchor_clauses(wiki_id: str, session_id: str, doc_hint: str,
+                    clause_num: str | None = None) -> list[dict]:
+    """Numbered sections for a document, read from structural_anchors."""
+    from sqlalchemy import text
+    sql = """
+        SELECT DISTINCT anchor_label, heading_text, page_title, char_start
+        FROM structural_anchors
+        WHERE wiki_id = :w AND session_id = :sid
+          AND anchor_kind = ANY(:kinds)
+          AND (source_doc ILIKE '%' || :doc || '%'
+               OR :doc ILIKE '%' || source_doc || '%')
+    """
+    params = {"w": wiki_id, "sid": session_id, "doc": doc_hint,
+              "kinds": list(_ANCHOR_CLAUSE_KINDS)}
+    if clause_num is not None:
+        sql += " AND anchor_label = :num"
+        params["num"] = clause_num
+    sql += " ORDER BY char_start"
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [{"num": r.anchor_label, "heading": (r.heading_text or "").strip(),
+             "page_title": r.page_title or "", "char_start": r.char_start}
+            for r in rows]
+
+
 def lookup_clause(wiki_id: str, session_id: str, doc_hint: str, clause_num: str) -> list[dict]:
     """Resolve a clause number to its heading and wiki page(s) for one document.
 
@@ -3370,6 +3429,9 @@ def lookup_clause(wiki_id: str, session_id: str, doc_hint: str, clause_num: str)
     source_doc or a fragment of it, so match by containment either way. Returns
     [] when the document is unnumbered or the number does not exist, and the
     caller distinguishes those two cases via doc_clause_numbers().
+
+    Falls back to structural_anchors when clause_map has nothing, which for this
+    corpus is always (see _ANCHOR_CLAUSE_KINDS above).
     """
     from sqlalchemy import text
     engine = get_engine()
@@ -3384,11 +3446,37 @@ def lookup_clause(wiki_id: str, session_id: str, doc_hint: str, clause_num: str)
             """),
             {"w": wiki_id, "sid": session_id, "num": clause_num, "doc": doc_hint},
         )
-        return [{"heading": r.heading, "page_title": r.page_title} for r in rows]
+        hits = [{"heading": r.heading, "page_title": r.page_title} for r in rows]
+    if hits:
+        return hits
+    # Only headings that read as section NAMES: this value is put into the
+    # retrieval query and shown to the user, and an unusable one is worse than
+    # none — the caller treats [] as "number not found", which doc_clause_numbers
+    # below then qualifies correctly.
+    return [{"heading": a["heading"], "page_title": a["page_title"]}
+            for a in _anchor_clauses(wiki_id, session_id, doc_hint, clause_num)
+            if _plausible_heading(a["heading"])]
 
 
 def doc_clause_numbers(wiki_id: str, session_id: str, doc_hint: str) -> list[str]:
-    """Every clause number the map knows for a document ([] = unnumbered source)."""
+    """Every clause number the map knows for a document ([] = unnumbered source).
+
+    Deliberately NOT served by the structural_anchors fallback that lookup_clause
+    uses. The caller turns this list into a flat assertion to the user — "no
+    clause 12 in this document, its source is numbered 1-8" — which is only sound
+    if the list is COMPLETE. clause_map is a full parse of the source PDF and can
+    be trusted whole. Anchors record only the numbered lines the parser
+    recognised, and nothing in them proves the parse reached the end of the
+    document: a run of 1..8 is equally consistent with an eight-section contract
+    and with a twelve-section one whose tail the parser lost. Asserting the
+    negative from that would manufacture exactly the confident-and-wrong answer
+    the anchor fallback exists to remove.
+
+    So anchors serve the positive path only (this number IS present, here is its
+    heading), and this stays empty until clause_map is actually backfilled —
+    which leaves the out-of-range check exactly as switched-off as it already is
+    for this corpus, rather than switching it on unsoundly.
+    """
     from sqlalchemy import text
     engine = get_engine()
     with engine.connect() as conn:
@@ -3403,5 +3491,5 @@ def doc_clause_numbers(wiki_id: str, session_id: str, doc_hint: str) -> list[str
             {"w": wiki_id, "sid": session_id, "doc": doc_hint},
         )
         nums = [r.clause_num for r in rows]
-        # "1" < "10" < "2" under string sort; sort numerically by dotted parts.
-        return sorted(nums, key=lambda n: [int(p) for p in n.split(".")])
+    # "1" < "10" < "2" under string sort; sort numerically by dotted parts.
+    return sorted(nums, key=lambda n: [int(p) for p in n.split(".")])
