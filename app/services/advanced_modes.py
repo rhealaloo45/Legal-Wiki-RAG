@@ -58,18 +58,53 @@ def _is_open_ended_column(col_name: str) -> bool:
 
 
 def _lookup_cached_metadata(session_id: str, doc_name: str, col_name: str) -> Optional[dict]:
-    """Try the page_metadata cache before firing an LLM call. Returns a
-    ready-to-store result dict, or None if there's no cache hit."""
-    field_key = _METADATA_FIELD_MAP.get(col_name.lower().strip())
-    if not (field_key and config.USE_DATABASE):
+    """Answer a Review/Compare cell without an LLM call, or return None.
+
+    Two sources, in order of how well-founded the answer is:
+
+    1. `page_metadata` — the original twelve-field cache. Fixed and
+       contract-shaped, kept because it is already populated and already
+       correct for the columns it covers.
+    2. The typed backbone, via `register.standard_cell` — the document's own
+       family metadata matched by schema-registry field name, then its
+       extracted clauses matched on clause_type. This is the § 06 upgrade:
+       the standard-field list stops being one hardcoded contract list and
+       becomes whatever the document's family actually declares, so a
+       litigation document resolves court, case number and disposition rather
+       than being asked for a liability cap it does not have.
+
+    Returning None never asserts the document is silent on the column — only
+    that nothing typed was extracted for it, and the LLM path should run.
+    """
+    if not config.USE_DATABASE:
         return None
+
+    field_key = _METADATA_FIELD_MAP.get(col_name.lower().strip())
+    if field_key:
+        try:
+            from services import db as _db, wikis as _wikis
+            cached = _db.get_metadata(_wikis.active_wiki_id(), session_id, doc_name)
+            if cached.get(field_key) is not None:
+                return {"value": cached[field_key], "confidence": 0.95, "quote": None}
+        except Exception as _e:
+            logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
+
     try:
-        from services import db as _db, wikis as _wikis
-        cached = _db.get_metadata(_wikis.active_wiki_id(), session_id, doc_name)
-        if cached.get(field_key) is not None:
-            return {"value": cached[field_key], "confidence": 0.95, "quote": None}
+        from services import register as _register, wikis as _wikis
+        hit = _register.standard_cell(_wikis.active_wiki_id(), session_id,
+                                      doc_name, col_name)
+        if hit and hit.get("value"):
+            logger.info("Review cell served from the backbone (%s): %s / %s",
+                        hit.get("source"), doc_name, col_name)
+            return {"value": hit["value"],
+                    # A field with no recorded confidence predates per-field
+                    # provenance. It is reported at the same 0.95 the
+                    # page_metadata path uses rather than as a fabricated
+                    # number of its own.
+                    "confidence": hit.get("confidence") if hit.get("confidence") is not None else 0.95,
+                    "quote": hit.get("quote")}
     except Exception as _e:
-        logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
+        logger.warning(f"Backbone cell lookup failed for {doc_name}/{col_name}: {_e}")
     return None
 
 # ---------------------------------------------------------------------------
