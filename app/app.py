@@ -1726,13 +1726,76 @@ def admin_wikis_archive():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/admin/documents/backfill_file_hashes", methods=["POST"])
+def admin_backfill_file_hashes():
+    """Compute file_hash (raw bytes, no extraction) for every document that
+    predates upload-time duplicate detection.
+
+    This is the cheap, zero-LLM backfill — it only ever opens the file and
+    hashes its bytes, so it never touches the reader or the OCR fallback.
+    Run this before a big re-upload; it's what makes wiki.ingest()'s file_hash
+    check actually recognize the overlap instead of every existing row coming
+    up NULL. Idempotent and safe to call repeatedly, same as the content_hash
+    backfill below.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import backbone as _backbone
+    wiki_id = current_wiki_id()
+    pending = _backbone.documents_missing_file_hash(wiki_id)
+    queued, no_file = [], []
+    for row in pending:
+        path = os.path.join(config.UPLOAD_PATH, row["source_doc"])
+        if os.path.exists(path):
+            queued.append(row["source_doc"])
+            executor.submit(_backfill_one_file_hash, wiki_id, row["session_id"],
+                           row["source_doc"], path)
+        else:
+            no_file.append(row["source_doc"])
+    return jsonify({
+        "status": "queued",
+        "total_missing": len(pending),
+        "queued": len(queued),
+        "no_file_on_disk": len(no_file),
+        "no_file_examples": no_file[:10],
+    })
+
+
+def _backfill_one_file_hash(wiki_id: str, session_id: str, source_doc: str, path: str):
+    try:
+        from services import backbone as _backbone
+        h = wiki._file_hash(path)
+        if h:
+            _backbone.backfill_file_hash(wiki_id, session_id, source_doc, h)
+    except Exception as e:
+        logger.warning("File-hash backfill failed for %s: %s", source_doc, e)
+
+
+@app.route("/admin/documents/backfill_file_hashes/status")
+def admin_backfill_file_hashes_status():
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import backbone as _backbone
+    pending = _backbone.documents_missing_file_hash(current_wiki_id())
+    return jsonify({"still_missing": len(pending)})
+
+
 @app.route("/admin/documents/backfill_hashes", methods=["POST"])
 def admin_backfill_content_hashes():
-    """Compute content_hash for every document that predates duplicate
-    detection, so the NEXT upload can actually recognize one of them.
+    """Compute content_hash (extracted text) for every document that predates
+    duplicate detection.
 
-    Without this, a fresh corpus re-upload finds nothing to match against —
-    every existing row's content_hash is NULL until this has run once.
+    WARNING — this is NOT free in this deployment: it calls the reader on
+    every document to extract text, and any scanned/low-text page routes
+    through Azure vision OCR (a real, billed LLM call per page), since
+    config.OCR_ENGINE=azure_vision here. Prefer /admin/documents/backfill_file_hashes
+    first — it catches exact re-uploads at zero cost with no extraction at
+    all. Only run this one with explicit go-ahead, for the secondary
+    same-text-different-bytes case.
+
     Queued per-document on the same executor ingest uses: a few hundred
     documents needing OCR can take a long time, and this must not block the
     request or hold a gunicorn worker hostage. Idempotent by construction —
