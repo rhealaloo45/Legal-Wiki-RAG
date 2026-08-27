@@ -2614,16 +2614,18 @@ _CROSS_REF_RE = re.compile(
 )
 
 
-def _failed_cross_reference(question: str, pages: dict,
-                            selected_titles: list) -> str | None:
-    """Report a cross-reference the retrieved context does not bear out.
+def _cross_reference_identity(question: str, pages: dict,
+                              selected_titles: list) -> tuple[str, str] | None:
+    """(citing_label, parties) for a cross-reference the retrieval does not bear
+    out, or None when the question makes no such claim or the claim is
+    satisfiable.
 
-    Returns a sentence naming the failure, or None when the question makes no
-    cross-reference claim or the claim is satisfiable. Deliberately conservative:
-    it only reports when the CITING document — the one after "as stated in" — is
-    absent from the retrieved pages entirely. A document that WAS retrieved may
-    genuinely quote the other's clause, and deciding that is the answer model's
-    job, not a regex's.
+    Deliberately conservative: fires only when the CITING document — the one
+    after "as stated in" — is absent from the retrieved pages entirely. A
+    document that WAS retrieved may genuinely quote the other's clause, and
+    deciding that is the answer model's job, not a regex's. Shared by
+    _failed_cross_reference (the context-injected warning) and generate_answer's
+    deterministic override (see there for why a warning alone was not enough).
     """
     m = _CROSS_REF_RE.search(question or "")
     if not m:
@@ -2647,14 +2649,52 @@ def _failed_cross_reference(question: str, pages: dict,
         token = _distinctive_party_token(name)
         if token and token.lower() in haystack:
             return None
-    parties = " and ".join(cited_names[:2])
+    return citing_label, " and ".join(cited_names[:2])
+
+
+def _failed_cross_reference(question: str, pages: dict,
+                            selected_titles: list) -> str | None:
+    """A context-injected warning naming a cross-reference the retrieval does
+    not bear out, or None. See generate_answer for the deterministic backstop
+    this warning alone turned out not to be sufficient on its own."""
+    identity = _cross_reference_identity(question, pages, selected_titles)
+    if not identity:
+        return None
+    citing_label, parties = identity
     return (f"the question asks for a provision \"as stated in\" the {citing_label} "
             f"between {parties}, and that document is NOT among the retrieved pages. "
             f"Its cross-reference therefore cannot be confirmed. Say plainly that the "
             f"two documents are unrelated and that it does not contain the provision "
-            f"asked about. Do NOT answer with the FIRST document's own equivalent "
-            f"clause — that is not what was asked and presenting it implies the "
-            f"cross-reference held.")
+            f"asked about.")
+
+
+def _cross_reference_failure_answer(question: str, pages: dict,
+                                    selected_titles: list) -> str | None:
+    """The complete, deterministic answer to a question whose cross-reference
+    is proven unsatisfiable, or None when the question makes none.
+
+    Confirmed live (Q01212) that a context-injected warning is not sufficient
+    on its own: the model wrote a compliant opening sentence saying the
+    cross-reference could not be confirmed, then added a SECOND section quoting
+    the first document's own governing-law clause anyway, under its own
+    heading, offered "for completeness." That reads to a user as though the
+    cross-reference held. The warning is a real signal (competing against many
+    other prompt rules, as the earlier fix for this same class of question
+    found), but whether the citing document was retrieved is a fact this
+    function already knows with certainty — nothing is gained by asking the
+    model to also arrive at it and then trusting it not to hedge past that
+    fact. So this bypasses generation entirely for this one question shape:
+    no LLM call, and no model output for a compliance check to fail.
+    """
+    identity = _cross_reference_identity(question, pages, selected_titles)
+    if not identity:
+        return None
+    citing_label, parties = identity
+    return (f"These two documents are unrelated. The {citing_label} between "
+            f"{parties} is not among the documents used to answer this "
+            f"question, and it does not contain the provision asked about. "
+            f"The question's premise — that this second document states or "
+            f"records that provision — does not hold.")
 
 
 # The "current value under the agreement family" shape asks for the value AFTER
@@ -4574,6 +4614,31 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "usage": {},
             "confidence_score": 0,
             "confidence_reason": "No context available.",
+            "token_breakdown": token_breakdown,
+            "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
+    # A failed cross-reference (see _cross_reference_failure_answer) is answered
+    # without calling the LLM at all — whether the citing document was
+    # retrieved is a fact already known with certainty, and a context-injected
+    # warning alone was confirmed live not to hold: the model can still write a
+    # compliant refusal sentence and then add a second section quoting the
+    # wrong document's clause anyway. Bypassing generation removes that failure
+    # mode by construction rather than asking the model not to take it.
+    _xref_answer = _cross_reference_failure_answer(question, pages, selected_titles)
+    if _xref_answer:
+        logger.info("Cross-reference proven unsatisfiable — answering deterministically, no LLM call")
+        return {
+            "answer": _xref_answer,
+            "pages_used": [],
+            "files_used": [],
+            "selected_titles": selected_titles,
+            "relations": relations,
+            "usage": {},
+            "confidence_score": 95,
+            "confidence_reason": "Deterministic: the cited document is confirmed absent from retrieval.",
+            "not_covered": True,
+            "citation_check": {"total": 0, "unverified": 0, "misattributed": 0},
             "token_breakdown": token_breakdown,
             "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
