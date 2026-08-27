@@ -73,7 +73,13 @@ clause-bearing.""")
 OBLIGATIONS — return an "obligations" array for every duty this text places on \
 a named party. An obligation is something a party must DO or must NOT do; a \
 definition, a recital, a representation about the past, or a grant of a right \
-is not one:
+is not one. Read the modal verb and treat it as decisive: "shall", "must", \
+"will", "agrees to", "undertakes to" and "shall not" create obligations; \
+"may", "can", "is entitled to", "is permitted to", "at its option" and "in \
+its discretion" create rights, and a right recorded as an obligation reverses \
+what the clause does. "May not" and "shall not be entitled to" are \
+prohibitions, and prohibitions ARE obligations — the negation is what \
+decides, not the word "may":
 [
   {
     "obligated_party": "The party who bears the duty, named as the document names them",

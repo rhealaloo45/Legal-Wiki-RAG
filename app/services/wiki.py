@@ -1179,6 +1179,35 @@ def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
 _TABLE_FIGURE_REVIEW_THRESHOLD = 0.75
 
 
+# A right recorded as a duty reverses what the clause does — the tracker
+# would report that a party must do something the agreement merely lets it
+# do. The prompt says so; a live ingest showed the model returning "may set
+# off any amount owed to it" as an obligation anyway, so the rule is enforced
+# here as well rather than only asked for.
+#
+# The negation is what decides, not the modal: "may not disclose" is a
+# prohibition and a real obligation, so only a permissive opener with no
+# negative attached is dropped.
+_PERMISSIVE_DUTY_RE = re.compile(
+    r"^\s*(?:may|can|could|is\s+(?:entitled|permitted|free)\s+to|"
+    r"shall\s+be\s+entitled\s+to|has\s+the\s+(?:right|option)\s+to|"
+    r"at\s+its\s+(?:option|discretion)|in\s+its\s+discretion)\b",
+    re.IGNORECASE,
+)
+_NEGATED_PERMISSIVE_RE = re.compile(
+    r"^\s*(?:may|can|could|shall\s+be\s+entitled)\s+(?:not|never|no)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_permissive_duty(duty: str | None) -> bool:
+    if not duty:
+        return False
+    if _NEGATED_PERMISSIVE_RE.match(duty):
+        return False
+    return bool(_PERMISSIVE_DUTY_RE.match(duty))
+
+
 def _persist_structured(session_id: str, doc_name: str, bucket: dict,
                         classification: dict, anchors_from_text: list) -> None:
     """Stage 04 — reconcile the structured rows and swap them in.
@@ -1265,6 +1294,7 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
         obligations = backbone.reconcile_rows(obligations, ("verbatim_text",)) \
             if all(o.get("verbatim_text") for o in obligations) \
             else backbone.reconcile_rows(obligations, ("obligated_party", "duty"))
+        obligations = [o for o in obligations if not _is_permissive_duty(o.get("duty"))]
         for o in obligations:
             o["page_num"] = o.pop("page", None)
             o["confidence"] = o.get("confidence") or o.get("_confidence")
