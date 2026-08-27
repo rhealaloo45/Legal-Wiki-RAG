@@ -1,4 +1,5 @@
-"""Phase 1 — the Contract Register, and the shared typed-field reader.
+"""Phase 1 — the Contract Register, the Obligation tracker, and the shared
+typed-field reader behind both.
 
 Target architecture § 06: "Every document appears automatically as a row the
 moment it finishes ingest." That is the whole feature — no extraction, no
@@ -20,6 +21,13 @@ needs the same per-document typed values the register shows, keyed by field
 name. Putting one reader behind both is the point: a column the register can
 display is by definition a column Review Table should never spend an LLM call
 on.
+
+The Obligation tracker sits at the bottom of this module for the same reason:
+it is the same kind of read, over `obligations` instead of the family tables,
+and it shares the value flattening. It reports its own emptiness honestly —
+a corpus ingested before obligation extraction was wired has no duties to
+show, and saying "nothing found" would misreport that as a corpus with no
+obligations in it.
 """
 from __future__ import annotations
 
@@ -100,6 +108,22 @@ def display_value(value):
     if isinstance(value, (list, tuple)):
         parts = [display_value(v) for v in value]
         return "; ".join(p for p in parts if p) or None
+    if isinstance(value, str):
+        # A coerced duration or currency written into a TEXT column comes back
+        # as its JSON text, not as an object — obligations.notice_period and
+        # contracts.term_length both do this. Unwrapping only a leading brace
+        # that parses to an object leaves real prose alone; a clause that
+        # happens to start with "{" and is not JSON fails to parse and is
+        # returned unchanged.
+        s = value.strip()
+        if s.startswith("{") and s.endswith("}"):
+            try:
+                import json
+                parsed = json.loads(s)
+            except Exception:
+                return value
+            if isinstance(parsed, dict):
+                return display_value(parsed)
     return str(value)
 
 
@@ -270,4 +294,98 @@ def register_rows(wiki_id: str, session_id: str, *,
              "count": sum(1 for d in docs if (d[1] or "generic") == k)}
             for k in schema_registry.family_keys()
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Obligation tracker
+# ---------------------------------------------------------------------------
+
+_OBLIGATION_COLUMNS = ("obligated_party", "duty", "trigger", "deadline",
+                       "notice_period", "consequence")
+
+
+def obligation_rows(wiki_id: str, session_id: str, *,
+                    party: str | None = None,
+                    source_doc: str | None = None,
+                    search: str | None = None,
+                    with_deadline: bool = False,
+                    limit: int = 1000, offset: int = 0) -> dict:
+    """Every extracted duty for the active wiki, filterable by who bears it.
+
+    `coverage` is the part that matters as much as the rows. Obligation
+    extraction was wired into ingest only in this phase, so a corpus ingested
+    before it has zero duties — and an empty table rendered as "no results"
+    would read as "these documents impose no obligations", which is a false
+    statement about the documents rather than a true one about the pipeline.
+    The caller gets the numbers to say which it is.
+    """
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc, obligated_party, duty, trigger, deadline,
+                   notice_period, consequence, verbatim_text, page_num,
+                   confidence, review_status
+            FROM obligations
+            WHERE wiki_id = :w AND session_id = :s
+            ORDER BY source_doc, id
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+        # Documents that could carry duties at all — the tracker's denominator.
+        # A judgment has none by design, so counting every document would
+        # understate coverage rather than overstate it.
+        eligible = conn.execute(text("""
+            SELECT COUNT(*) FROM documents
+            WHERE wiki_id = :w AND session_id = :s
+              AND COALESCE(doc_family, 'generic') IN ('contract', 'term_sheet', 'generic')
+        """), {"w": wiki_id, "s": session_id}).scalar() or 0
+
+    out: list[dict] = []
+    parties: dict[str, int] = {}
+    docs_with_rows: set[str] = set()
+    for r in rows:
+        item = {
+            "source_doc": r[0],
+            "obligated_party": display_value(r[1]),
+            "duty": display_value(r[2]),
+            "trigger": display_value(r[3]),
+            "deadline": display_value(r[4]),
+            "notice_period": display_value(r[5]),
+            "consequence": display_value(r[6]),
+            "verbatim_text": r[7],
+            "page_num": r[8],
+            "confidence": r[9],
+            "review_status": r[10],
+        }
+        docs_with_rows.add(r[0])
+        if item["obligated_party"]:
+            parties[item["obligated_party"]] = parties.get(item["obligated_party"], 0) + 1
+        out.append(item)
+
+    needle = (search or "").strip().lower()
+    filtered = [
+        o for o in out
+        if (not party or o["obligated_party"] == party)
+        and (not source_doc or o["source_doc"] == source_doc)
+        and (not with_deadline or o["deadline"])
+        and (not needle or needle in " ".join(
+            str(o.get(k) or "") for k in
+            ("source_doc", "obligated_party", "duty", "trigger", "deadline",
+             "consequence", "verbatim_text")).lower())
+    ]
+
+    return {
+        "columns": list(_OBLIGATION_COLUMNS),
+        "rows": filtered[offset:offset + limit] if limit else filtered[offset:],
+        "total": len(filtered),
+        "offset": offset,
+        "limit": limit,
+        "party": party,
+        "parties": [{"name": n, "count": c} for n, c in
+                    sorted(parties.items(), key=lambda kv: (-kv[1], kv[0]))],
+        "coverage": {
+            "obligations": len(out),
+            "documents_with_obligations": len(docs_with_rows),
+            "eligible_documents": int(eligible),
+            "with_deadline": sum(1 for o in out if o["deadline"]),
+        },
     }
