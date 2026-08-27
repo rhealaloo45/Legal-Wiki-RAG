@@ -4658,7 +4658,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "confidence_score": 95,
             "confidence_reason": "Deterministic: the cited document is confirmed absent from retrieval.",
             "not_covered": True,
-            "citation_check": {"total": 0, "unverified": 0, "misattributed": 0},
+            "citation_check": {"total": 0, "unverified": 0, "misattributed": 0,
+                               "verified": 0},
             "token_breakdown": token_breakdown,
             "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
@@ -5734,6 +5735,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total": len(_QUOTE_SPAN_RE.findall(answer)),
             "unverified": len(_unverified_quotes),
             "misattributed": len(_misattributed),
+            # A quote can be both unverified and misattributed, so the two
+            # counts are unioned rather than added — summing them would let a
+            # single bad quote fail twice and report fewer verified claims
+            # than the answer actually contains.
+            "verified": max(0, len(_QUOTE_SPAN_RE.findall(answer))
+                            - len(set(_unverified_quotes) | set(_misattributed))),
         },
         "token_breakdown": token_breakdown,
         "token_total": token_total,
