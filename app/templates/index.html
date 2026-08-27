@@ -3922,6 +3922,9 @@
             <div class="admin-nav-item" id="adminNav-register" data-target="register" onclick="switchAdminTab('register',this)">
               <span class="admin-nav-left"><i class="ti ti-table" style="font-size:16px"></i>Register</span>
             </div>
+            <div class="admin-nav-item" id="adminNav-obligations" data-target="obligations" onclick="switchAdminTab('obligations',this)">
+              <span class="admin-nav-left"><i class="ti ti-clock-exclamation" style="font-size:16px"></i>Obligations</span>
+            </div>
             <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
               <span class="admin-nav-left"><i class="ti ti-database" style="font-size:16px"></i>Wikis</span>
             </div>
@@ -3981,6 +3984,22 @@
               </div>
               <div class="admin-filter-row" id="admin-register-families"></div>
               <div class="admin-card admin-table-wrap"><div id="admin-register-table"></div></div>
+            </div>
+
+            <div id="admin-panel-obligations" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Obligations</div>
+                  <div class="admin-section-sub" id="admin-obligations-sub">&nbsp;</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button type="button" class="admin-pill-btn" id="admin-obl-deadline-btn" title="Show only duties the text puts a time limit on" onclick="toggleObligationDeadline()"><i class="ti ti-calendar-clock" style="font-size:14px"></i>With a deadline</button>
+                  <input id="admin-obligations-search" class="admin-search-input" type="search" placeholder="Search duties…" oninput="scheduleObligationSearch()">
+                  <button type="button" class="admin-pill-btn" title="Download this view as CSV" onclick="exportObligationsCsv()"><i class="ti ti-download" style="font-size:14px"></i>CSV</button>
+                </div>
+              </div>
+              <div class="admin-filter-row" id="admin-obligations-parties"></div>
+              <div class="admin-card admin-table-wrap"><div id="admin-obligations-table"></div></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4452,6 +4471,7 @@
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'wikis') loadAdminWikis();
       else if (name === 'register') loadAdminRegister();
+      else if (name === 'obligations') loadAdminObligations();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
       // Badge the Review Queue nav item even when it isn't the active section
       refreshAdminReviewBadge();
@@ -4460,7 +4480,7 @@
     function switchAdminTab(name, el) {
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register'].forEach(n => {
+      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
@@ -4469,6 +4489,7 @@
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'wikis') loadAdminWikis();
       else if (name === 'register') loadAdminRegister();
+      else if (name === 'obligations') loadAdminObligations();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
     }
 
@@ -4571,6 +4592,131 @@
           cols.map(c => cell(r.values[c])).join('') +
           `<td class="num">${r.page_count}</td><td class="num">${r.clause_count}</td><td class="num">${r.obligation_count}</td>` +
           '</tr>').join('') + '</tbody></table>';
+    }
+
+    // ---- Obligation tracker ------------------------------------------------
+    // Same shape as the register, over `obligations`. The empty state is the
+    // load-bearing part: a corpus ingested before obligation extraction was
+    // wired has no duties to show, and rendering that as "no results" would
+    // say something false about the documents.
+    let obligationParty = null;
+    let obligationDeadlineOnly = false;
+    let obligationData = null;
+    let obligationSearchTimer = null;
+
+    const OBLIGATION_LABELS = {
+      obligated_party: 'Party', duty: 'Duty', trigger: 'Trigger',
+      deadline: 'Deadline', notice_period: 'Notice', consequence: 'Consequence'
+    };
+
+    function scheduleObligationSearch() {
+      clearTimeout(obligationSearchTimer);
+      obligationSearchTimer = setTimeout(loadAdminObligations, 250);
+    }
+
+    function setObligationParty(name) {
+      obligationParty = name;
+      loadAdminObligations();
+    }
+
+    function toggleObligationDeadline() {
+      obligationDeadlineOnly = !obligationDeadlineOnly;
+      document.getElementById('admin-obl-deadline-btn').classList.toggle('accent', obligationDeadlineOnly);
+      loadAdminObligations();
+    }
+
+    async function loadAdminObligations() {
+      const el = document.getElementById('admin-obligations-table');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      const search = (document.getElementById('admin-obligations-search').value || '').trim();
+      const params = new URLSearchParams({ session_id: SID, limit: '2000' });
+      if (obligationParty) params.set('party', obligationParty);
+      if (search) params.set('search', search);
+      if (obligationDeadlineOnly) params.set('with_deadline', 'true');
+      try {
+        const res = await fetch('/obligations?' + params.toString());
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load obligations');
+        obligationData = d;
+        renderObligationParties(d);
+        renderObligationTable(d);
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    function renderObligationParties(d) {
+      const cov = d.coverage || {};
+      const pill = (key, label, count) =>
+        `<button type="button" class="admin-filter-pill${(obligationParty || null) === key ? ' active' : ''}" onclick="setObligationParty(${key === null ? 'null' : JSON.stringify(key).replace(/"/g, '&quot;')})">${escapeHtmlRule(label)}<span class="cnt">${count}</span></button>`;
+      // Long tail of one-off parties would push the table off screen; the
+      // search box covers anyone not in the top slice.
+      const top = (d.parties || []).slice(0, 12);
+      document.getElementById('admin-obligations-parties').innerHTML =
+        (cov.obligations ? pill(null, 'All parties', cov.obligations) : '') +
+        top.map(p => pill(p.name, p.name, p.count)).join('');
+    }
+
+    function renderObligationTable(d) {
+      const el = document.getElementById('admin-obligations-table');
+      const cov = d.coverage || {};
+      const sub = document.getElementById('admin-obligations-sub');
+      if (!cov.obligations) {
+        sub.textContent = 'Nothing extracted yet';
+        el.innerHTML = `<div style="padding:34px 26px;text-align:center;font-size:12.5px;line-height:1.7;color:var(--text-secondary)">
+          <i class="ti ti-clock-exclamation" style="font-size:26px;color:var(--text-muted);display:block;margin-bottom:10px"></i>
+          <b style="color:var(--text-primary)">No obligations have been extracted for this wiki.</b><br>
+          This does not mean these documents impose no duties. Obligation extraction was
+          wired into the ingest call only in Phase 1, so the
+          ${cov.eligible_documents || 0} document${cov.eligible_documents === 1 ? '' : 's'}
+          here that could carry duties were ingested before anything asked for them.<br>
+          <span style="color:var(--text-muted)">Re-ingesting a document fills its duties. Documents ingested from now on fill theirs automatically.</span>
+        </div>`;
+        return;
+      }
+      sub.textContent =
+        `${d.total.toLocaleString()} dut${d.total === 1 ? 'y' : 'ies'}` +
+        (d.party ? ` borne by ${d.party}` : '') +
+        ` — from ${cov.documents_with_obligations} of ${cov.eligible_documents} eligible documents, ` +
+        `${cov.with_deadline} with a stated deadline`;
+      const rows = d.rows || [];
+      if (!rows.length) {
+        el.innerHTML = '<div style="padding:26px;text-align:center;font-size:12px;color:var(--text-muted)">No duties match.</div>';
+        return;
+      }
+      const cols = d.columns || [];
+      const head = '<th>Document</th>' + cols.map(c =>
+        `<th>${escapeHtmlRule(OBLIGATION_LABELS[c] || c)}</th>`).join('') +
+        '<th style="text-align:right">Page</th>';
+      el.innerHTML = '<table class="admin-table"><thead><tr>' + head + '</tr></thead><tbody>' +
+        rows.map(r => {
+          const conf = r.confidence === null || r.confidence === undefined
+            ? 'confidence unknown' : `confidence ${Math.round(r.confidence * 100)}%`;
+          return '<tr>' +
+            `<td class="cell-doc" title="${escapeHtmlRule(r.source_doc)}">${escapeHtmlRule(_shortSourceDoc(r.source_doc))}</td>` +
+            cols.map(c => r[c]
+              ? `<td title="${escapeHtmlRule(c === 'duty' ? (r.verbatim_text || conf) : conf)}">${escapeHtmlRule(String(r[c]))}</td>`
+              : '<td class="cell-empty">—</td>').join('') +
+            `<td class="num">${r.page_num === null || r.page_num === undefined ? '—' : r.page_num}</td>` +
+            '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    function exportObligationsCsv() {
+      if (!obligationData || !(obligationData.rows || []).length) return;
+      const d = obligationData, cols = d.columns || [];
+      const header = ['Document'].concat(cols.map(c => OBLIGATION_LABELS[c] || c))
+        .concat(['Page', 'Verbatim text', 'Confidence']);
+      const q = s => '"' + String(s === null || s === undefined ? '' : s).replace(/"/g, '""') + '"';
+      const lines = [header.map(q).join(',')].concat(d.rows.map(r =>
+        [r.source_doc].concat(cols.map(c => r[c] || ''))
+          .concat([r.page_num, r.verbatim_text || '', r.confidence]).map(q).join(',')));
+      const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `obligations-${d.party || 'all'}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
     }
 
     function exportRegisterCsv() {
