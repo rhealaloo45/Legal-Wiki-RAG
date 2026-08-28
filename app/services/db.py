@@ -1942,7 +1942,8 @@ def get_page(wiki_id: str, session_id: str, title: str) -> dict | None:
     engine = get_engine()
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT content, summary, source_doc, contradiction_flagged, variants "
+            text("SELECT content, summary, source_doc, contradiction_flagged, variants, "
+                 "append_count "
                  "FROM pages WHERE wiki_id = :w AND session_id = :sid AND title = :title"),
             {"w": wiki_id, "sid": session_id, "title": title},
         ).fetchone()
@@ -1952,6 +1953,12 @@ def get_page(wiki_id: str, session_id: str, title: str) -> dict | None:
             "content": row.content,
             "summary": row.summary,
             "source_doc": row.source_doc,
+            # Required by run_compaction()'s post-lock staleness re-check. Without
+            # it that check read .get("append_count", 0) -> 0, which is always
+            # below the threshold, so every page was judged "no longer due" and
+            # compaction silently never ran while still paying for a lock and a
+            # re-read per candidate page on every single ingest.
+            "append_count": row.append_count or 0,
         }
         if row.contradiction_flagged:
             page["contradiction_flagged"] = True
