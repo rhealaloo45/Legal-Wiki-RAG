@@ -1726,6 +1726,162 @@ def admin_wikis_archive():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+@app.route("/admin/documents/reingest", methods=["POST"])
+def admin_reingest():
+    """Re-ingest documents: one, an explicit set, or a whole family/version band.
+
+    Selection (first match wins):
+        {"source_doc": "..."}                     one document
+        {"source_docs": ["...", "..."]}           an explicit set (a Collection)
+        {"family": "contract",                    everything in a family, optionally
+         "max_schema_version": 1}                 only what predates a schema change
+
+    `max_schema_version` is the point of stamping it: after changing what
+    extraction asks for, the documents that need redoing are exactly the ones
+    still carrying the old version, and re-running the rest costs money to
+    produce identical rows.
+
+    Swap, not blend. wiki.ingest() merges into existing pages by design — that
+    is right for a NEW document contributing to shared pages, and wrong for a
+    re-ingest, where the previous extraction of this same document is still
+    sitting there and would be appended to rather than replaced. So each
+    document's own page data is deleted first, inside the worker, immediately
+    before it is re-read. The typed tables already swap themselves
+    (backbone.replace_document_rows) and the Review Queue already supersedes
+    rather than deletes (db.supersede_review_items), so prior reviewer
+    judgements survive as history.
+
+    Cost-gated like /upload: a bulk-sized batch is held until the caller
+    re-POSTs with confirm=true, and anything past a handful is queued to the
+    executor rather than run inside the request.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+
+    data = request.get_json(silent=True) or {}
+    wiki_id = current_wiki_id()
+    session_id = _get_main_session_id() or data.get("session_id", "")
+    if not session_id:
+        return jsonify({"error": "No session to re-ingest"}), 400
+
+    from sqlalchemy import text as _sql
+    from services import db as _db
+
+    targets: list[str] = []
+    if data.get("source_doc"):
+        targets = [data["source_doc"]]
+    elif data.get("source_docs"):
+        targets = [d for d in data["source_docs"] if d]
+    elif data.get("family"):
+        params = {"w": wiki_id, "s": session_id, "f": data["family"]}
+        clause = ""
+        if data.get("max_schema_version") is not None:
+            clause = "AND schema_version <= :v"
+            params["v"] = int(data["max_schema_version"])
+        with _db.get_engine().connect() as c:
+            targets = [r[0] for r in c.execute(_sql(f"""
+                SELECT source_doc FROM documents
+                WHERE wiki_id = :w AND session_id = :s AND doc_family = :f {clause}
+                ORDER BY source_doc
+            """), params)]
+    else:
+        return jsonify({"error": "Specify source_doc, source_docs, or family"}), 400
+
+    if not targets:
+        return jsonify({"error": "No documents matched", "queued": 0}), 400
+
+    # Only documents whose file is still on disk can be re-read at all.
+    runnable, missing = [], []
+    for d in targets:
+        (runnable if os.path.exists(os.path.join(config.UPLOAD_PATH, d))
+         else missing).append(d)
+    if not runnable:
+        return jsonify({"error": "No source files on disk for the matched documents",
+                        "no_file_on_disk": len(missing),
+                        "no_file_examples": missing[:10]}), 400
+
+    estimate = cost_estimate.estimate_ingest_cost(
+        [os.path.join(config.UPLOAD_PATH, d) for d in runnable])
+    if (cost_estimate.needs_confirmation(estimate, len(runnable))
+            and str(data.get("confirm", "")).lower() != "true"):
+        return jsonify({
+            "status": "confirm_required",
+            "estimate": estimate,
+            "matched": len(targets),
+            "runnable": len(runnable),
+            "no_file_on_disk": len(missing),
+        })
+
+    _set_progress(session_id, {
+        "phase": "processing",
+        "docs": {"total": len(runnable), "wiki_done": 0},
+        "wiki": {"step": "re-ingesting", "message": "", "pages_total": 0,
+                 "relations_total": 0},
+        "docs_list": [{"name": d, "status": "queued", "pages": 0, "step": ""}
+                      for d in runnable],
+    })
+    for d in runnable:
+        executor.submit(_reingest_one, wiki_id, session_id, d)
+
+    return jsonify({
+        "status": "queued",
+        "matched": len(targets),
+        "queued": len(runnable),
+        "no_file_on_disk": len(missing),
+        "no_file_examples": missing[:10],
+        "estimate": estimate,
+    })
+
+
+def _reingest_one(wiki_id: str, session_id: str, source_doc: str):
+    """Delete this document's own page data, then ingest it again.
+
+    The delete is scoped to rows attributable to this document and runs in the
+    worker rather than up-front, so a queue of 400 documents does not strip the
+    wiki bare before the first one has been re-read.
+    """
+    path = os.path.join(config.UPLOAD_PATH, source_doc)
+    try:
+        from services import db as _db
+        report = _db.delete_document_data(wiki_id, session_id, source_doc)
+        logger.info("Re-ingest: cleared %s (%s)", source_doc, report)
+    except Exception as e:
+        # Do not ingest on top of data we failed to clear — that is the blend
+        # this route exists to avoid.
+        logger.error("Re-ingest: clearing %s failed, skipping: %s", source_doc, e)
+        _update_doc_status(session_id, source_doc, "error", f"clear failed: {e}"[:60])
+        with _get_progress_lock(session_id):
+            p = _get_progress(session_id)
+            p.setdefault("docs", {})["wiki_done"] = p.get("docs", {}).get("wiki_done", 0) + 1
+            _set_progress(session_id, p)
+        return
+    _ingest_single_doc_wiki(path, session_id)
+
+
+@app.route("/admin/documents/reingest/status")
+def admin_reingest_status():
+    """Schema-version spread per family — what a version-scoped re-ingest would hit."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from sqlalchemy import text as _sql
+    from services import db as _db
+    wiki_id = current_wiki_id()
+    session_id = _get_main_session_id() or request.args.get("session_id", "")
+    with _db.get_engine().connect() as c:
+        rows = c.execute(_sql("""
+            SELECT doc_family, schema_version, count(*)
+            FROM documents WHERE wiki_id = :w AND session_id = :s
+            GROUP BY 1, 2 ORDER BY 1, 2
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+    families: dict = {}
+    for fam, ver, n in rows:
+        families.setdefault(fam or "unknown", {})[str(ver)] = int(n)
+    return jsonify({"session_id": session_id, "by_family_and_version": families})
+
+
 @app.route("/admin/documents/backfill_file_hashes", methods=["POST"])
 def admin_backfill_file_hashes():
     """Compute file_hash (raw bytes, no extraction) for every document that
