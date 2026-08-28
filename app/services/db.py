@@ -2389,6 +2389,83 @@ def search_similar_pages(
         return [row.title for row in rows]
 
 
+def find_similar_documents(
+    wiki_id: str, session_id: str, source_doc: str, limit: int = 5,
+    same_type_only: bool = True, probe: int = 400,
+) -> list[dict]:
+    """Documents most similar to `source_doc`, for "closest precedent" queries.
+
+    Retrieval elsewhere is question-driven: it embeds the question and finds
+    pages. That can never answer "which OTHER documents resemble this one",
+    because the question names only one document and every page it retrieves
+    belongs to it — which is exactly why those questions came back as "no other
+    documents are present for comparison".
+
+    Method: average the target document's page vectors into one centroid, take
+    the nearest pages corpus-wide, then aggregate those page hits back up to
+    their documents. A document that matches on several pages ranks above one
+    that matches on a single stray page, so `pages_matched` is part of the
+    score rather than max-similarity alone.
+
+    same_type_only keeps a Disclosure Letter's precedents to other Disclosure
+    Letters — a precedent of a different instrument is rarely what is meant.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    tbl = _emb_table_name()
+    with engine.connect() as conn:
+        centroid = conn.execute(text(f"""
+            SELECT AVG(e.embedding)::text
+            FROM {tbl} e
+            JOIN pages p ON p.wiki_id = e.wiki_id AND p.session_id = e.session_id
+                        AND p.title = e.title
+            WHERE e.wiki_id = :w AND e.session_id = :sid AND p.source_doc = :d
+              AND e.title NOT LIKE 'Q:%'
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc}).scalar()
+        if not centroid:
+            return []
+
+        doc_type = conn.execute(text("""
+            SELECT doc_type FROM documents
+            WHERE wiki_id = :w AND source_doc = :d LIMIT 1
+        """), {"w": wiki_id, "d": source_doc}).scalar()
+
+        params = {"w": wiki_id, "sid": session_id, "c": centroid,
+                  "d": source_doc, "probe": probe, "limit": limit}
+        type_join, type_where = "", ""
+        if same_type_only and doc_type:
+            type_join = ("JOIN documents dd ON dd.wiki_id = p.wiki_id "
+                         "AND dd.source_doc = p.source_doc")
+            type_where = "AND dd.doc_type = :dt"
+            params["dt"] = doc_type
+
+        rows = conn.execute(text(f"""
+            WITH hits AS (
+                SELECT p.source_doc,
+                       1 - (e.embedding <=> CAST(:c AS vector)) AS score
+                FROM {tbl} e
+                JOIN pages p ON p.wiki_id = e.wiki_id AND p.session_id = e.session_id
+                            AND p.title = e.title
+                {type_join}
+                WHERE e.wiki_id = :w AND e.session_id = :sid
+                  AND p.source_doc <> :d
+                  AND e.title NOT LIKE 'Q:%'
+                  {type_where}
+                ORDER BY e.embedding <=> CAST(:c AS vector)
+                LIMIT :probe
+            )
+            SELECT source_doc, MAX(score) AS best, AVG(score) AS mean, COUNT(*) AS n
+            FROM hits
+            GROUP BY source_doc
+            ORDER BY (MAX(score) * 0.6 + AVG(score) * 0.4) DESC, n DESC
+            LIMIT :limit
+        """), params).fetchall()
+
+    return [{"source_doc": r[0], "best_score": round(float(r[1]), 4),
+             "mean_score": round(float(r[2]), 4), "pages_matched": int(r[3]),
+             "doc_type": doc_type} for r in rows]
+
+
 def backfill_embedding_families(wiki_id: str, session_id: str) -> int:
     """Populate page_embeddings.doc_family from existing metadata, no re-embed.
 
