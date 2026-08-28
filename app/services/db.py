@@ -2389,6 +2389,123 @@ def search_similar_pages(
         return [row.title for row in rows]
 
 
+def _cite_key(s: str) -> str:
+    """Comparison key for an authority name.
+
+    'Arbitration and Conciliation Act 1996' and 'Arbitration and Conciliation
+    Act, 1996' are the same statute recorded twice — normalized_form is
+    model-written and does not converge on punctuation. Stripping everything
+    but alphanumerics collapses that without pretending to understand citation
+    formats.
+    """
+    import re as _re
+    return _re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def find_documents_citing(wiki_id: str, session_id: str, authority: str,
+                          limit: int = 50) -> list[dict]:
+    """Documents that cite a given statute/rule/authority — a SQL join, no LLM.
+
+    Retrieval cannot answer "which documents cite the Arbitration Act": the
+    citation is one line inside documents that are otherwise about unrelated
+    subjects, so semantic similarity to the question ranks the wrong pages.
+    The citations table already holds the answer as structured rows.
+
+    Matched on a punctuation-stripped key so the two spellings of the same Act
+    that the extraction produced are counted as one authority.
+    """
+    from sqlalchemy import text
+    key = _cite_key(authority)
+    if not key:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc, citation_text, normalized_form, authority_type,
+                   page_num, confidence
+            FROM citations
+            WHERE wiki_id = :w AND session_id = :sid
+        """), {"w": wiki_id, "sid": session_id}).fetchall()
+
+    hits: dict[str, dict] = {}
+    for r in rows:
+        for cand in (r.normalized_form, r.citation_text):
+            ck = _cite_key(cand)
+            if ck and (key in ck or ck in key):
+                cur = hits.setdefault(r.source_doc, {
+                    "source_doc": r.source_doc,
+                    "citation_text": (r.citation_text or r.normalized_form or "").strip(),
+                    "authority_type": r.authority_type,
+                    "pages": set(),
+                })
+                if r.page_num:
+                    cur["pages"].add(int(r.page_num))
+                break
+    out = [{**h, "pages": sorted(h["pages"])} for h in hits.values()]
+    out.sort(key=lambda h: h["source_doc"])
+    return out[:limit]
+
+
+def get_authorities_cited(wiki_id: str, session_id: str, source_doc: str) -> list[dict]:
+    """Every authority a document cites, deduplicated by normalized key."""
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT citation_text, normalized_form, authority_type, page_num
+            FROM citations
+            WHERE wiki_id = :w AND session_id = :sid
+              AND (source_doc = :d OR source_doc ILIKE '%' || :d || '%')
+            ORDER BY page_num NULLS LAST
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc}).fetchall()
+    seen, out = set(), []
+    for r in rows:
+        label = (r.normalized_form or r.citation_text or "").strip()
+        k = _cite_key(label)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append({"authority": label, "authority_type": r.authority_type,
+                    "page_num": r.page_num})
+    return out
+
+
+def get_document_relations(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """Amendment / reference edges for a document, in BOTH directions.
+
+    "What does this agreement amend?" and "which documents amend it?" are
+    different questions over the same table, and only the outgoing direction is
+    visible from the document's own text — the incoming one exists solely as
+    rows written when the OTHER document was ingested.
+
+    Unresolved edges are returned separately rather than dropped: "references a
+    Share Purchase Agreement we do not hold" is a true and useful answer, and
+    silently omitting it would read as "references nothing".
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        out_rows = conn.execute(text("""
+            SELECT to_doc, to_doc_raw, label, resolved, confidence, evidence_text
+            FROM document_relations
+            WHERE wiki_id = :w AND session_id = :sid
+              AND (from_doc = :d OR from_doc ILIKE '%' || :d || '%')
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc}).fetchall()
+        in_rows = conn.execute(text("""
+            SELECT from_doc, label, confidence, evidence_text
+            FROM document_relations
+            WHERE wiki_id = :w AND session_id = :sid
+              AND to_doc IS NOT NULL
+              AND (to_doc = :d OR to_doc ILIKE '%' || :d || '%')
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc}).fetchall()
+
+    outgoing, unresolved = [], []
+    for r in out_rows:
+        rec = {"doc": r.to_doc, "raw": r.to_doc_raw, "label": r.label,
+               "evidence": (r.evidence_text or "")[:300]}
+        (outgoing if r.resolved and r.to_doc else unresolved).append(rec)
+    incoming = [{"doc": r.from_doc, "label": r.label,
+                 "evidence": (r.evidence_text or "")[:300]} for r in in_rows]
+    return {"outgoing": outgoing, "incoming": incoming, "unresolved": unresolved}
+
+
 def find_similar_documents(
     wiki_id: str, session_id: str, source_doc: str, limit: int = 5,
     same_type_only: bool = True, probe: int = 400,
