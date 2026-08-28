@@ -2089,6 +2089,85 @@ def is_document_archived(wiki_id: str, session_id: str, source_doc: str) -> bool
         return row is not None
 
 
+def delete_document_pages_exclusive(wiki_id: str, session_id: str,
+                                    source_doc: str) -> dict:
+    """Delete only the pages this document is the SOLE contributor to.
+
+    For re-ingest, not for document deletion. `pages.source_doc` records the
+    LAST document to write a page, so a merged concept page — one several
+    documents contributed to — can carry this document's name while most of
+    its content came from others. Deleting by source_doc alone therefore
+    destroys other documents' work, and re-ingesting this one document cannot
+    rebuild it: it only re-contributes its own share.
+
+    Measured on the live corpus when this was found the hard way: four
+    documents whose pypdf text is 248-1,860 characters were each credited with
+    12-13 pages, and clearing them by source_doc cost 36 pages of merged
+    content that no single re-ingest could restore.
+
+    `variants` is the discriminator — it holds one entry per contribution, and
+    is NULL exactly on pages written once. Shared pages are left in place for
+    wiki.ingest to merge into, which blends rather than swaps; blending a page
+    several documents built is the correct trade against deleting the other
+    contributors outright.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    report = {"pages_deleted": 0, "embeddings_deleted": 0, "relations_deleted": 0,
+              "shared_pages_kept": 0, "clause_map_deleted": 0,
+              "source_positions_deleted": 0}
+    with engine.connect() as conn:
+        titles = [r.title for r in conn.execute(text("""
+            SELECT title FROM pages
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
+              AND (variants IS NULL OR jsonb_array_length(variants) <= 1)
+              AND COALESCE(append_count, 0) <= 1
+        """), {"w": wiki_id, "sid": session_id, "doc": source_doc})]
+        report["shared_pages_kept"] = conn.execute(text("""
+            SELECT count(*) FROM pages
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc
+              AND NOT ((variants IS NULL OR jsonb_array_length(variants) <= 1)
+                       AND COALESCE(append_count, 0) <= 1)
+        """), {"w": wiki_id, "sid": session_id, "doc": source_doc}).scalar() or 0
+
+        if titles:
+            emb_tables = [r[0] for r in conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name LIKE 'page_embeddings%'"
+            ))]
+            for emb_table in emb_tables:
+                res = conn.execute(text(
+                    f'DELETE FROM "{emb_table}" WHERE wiki_id = :w AND session_id = :sid '
+                    f'AND title = ANY(:titles)'),
+                    {"w": wiki_id, "sid": session_id, "titles": titles})
+                report["embeddings_deleted"] += res.rowcount or 0
+
+            res = conn.execute(text("""
+                DELETE FROM pages WHERE wiki_id = :w AND session_id = :sid
+                  AND title = ANY(:titles)
+            """), {"w": wiki_id, "sid": session_id, "titles": titles})
+            report["pages_deleted"] = res.rowcount or 0
+
+            res = conn.execute(text("""
+                DELETE FROM relations WHERE wiki_id = :w AND session_id = :sid
+                  AND (from_title = ANY(:titles) OR to_title = ANY(:titles))
+            """), {"w": wiki_id, "sid": session_id, "titles": titles})
+            report["relations_deleted"] = res.rowcount or 0
+
+        # Both are per-document by construction, so they carry no other
+        # document's work and are safe to clear whole.
+        res = conn.execute(text(
+            "DELETE FROM clause_map WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc})
+        report["clause_map_deleted"] = res.rowcount or 0
+        res = conn.execute(text(
+            "DELETE FROM source_positions WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc})
+        report["source_positions_deleted"] = res.rowcount or 0
+        conn.commit()
+    return report
+
+
 def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Cascade-delete every DB row cleanly attributable to one document.
 
