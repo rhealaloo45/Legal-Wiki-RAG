@@ -2087,6 +2087,105 @@ _RX_ACK = re.compile(
 )
 
 
+_RX_PRECEDENT = re.compile(
+    r"\b(?:closest\s+precedents?|nearest\s+precedents?|which\s+other\s+documents?"
+    r"|what\s+other\s+documents?|similar\s+(?:documents?|agreements?|contracts?)"
+    r"|most\s+similar|comparable\s+(?:documents?|agreements?))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_precedent_query(question: str) -> bool:
+    """"Which other documents are the closest precedents to X?" and friends.
+
+    These cannot be served by ordinary retrieval: it embeds the QUESTION, and
+    every page that comes back belongs to the one document the question names,
+    so the model correctly reports it has nothing to compare against. The
+    answer needs a document-to-document search instead — see
+    db.find_similar_documents.
+    """
+    return bool(_RX_PRECEDENT.search(question or ""))
+
+
+def _precedent_answer(question: str, session_id: str) -> dict | None:
+    """Resolve the document the question is about, then rank its neighbours.
+
+    Returns None (fall through to the normal graph) whenever the anchor
+    document can't be identified or has no neighbours — a wrong precedent list
+    is worse than letting the usual pipeline answer.
+    """
+    from services import db as _db, wikis as _wikis, embedder as _embedder
+    try:
+        wiki_id = _wikis.active_wiki_id()
+        # Anchor: the document the question is about. Use the question's own
+        # embedding, then take the source_doc that owns the most top pages.
+        vec = _embedder.embed(question, is_query=True)
+        titles = _db.search_similar_pages(wiki_id, session_id, vec, limit=25,
+                                          exclude_cached=True)
+        if not titles:
+            return None
+        counts: dict[str, int] = {}
+        for t in titles:
+            pg = _db.get_page(wiki_id, session_id, t) or {}
+            sd = pg.get("source_doc")
+            if sd:
+                counts[sd] = counts.get(sd, 0) + 1
+        if not counts:
+            return None
+
+        # Page-count alone picks the wrong anchor when a same-worded but
+        # different-instrument document dominates the neighbourhood (a
+        # "Software License Agreement" question resolving to a Legal Opinion).
+        # The question almost always names the instrument, so a candidate whose
+        # recorded doc_type appears in the question outranks raw page count.
+        _q = (question or "").lower()
+        try:
+            type_of = _db.get_document_types(wiki_id, session_id) or {}
+        except Exception:
+            type_of = {}
+
+        def _anchor_score(sd: str) -> tuple:
+            dt = (type_of.get(sd) or "").lower()
+            typed = 1 if dt and dt in _q else 0
+            # also credit a doc whose filename words show up in the question
+            stem = re.sub(r"[^a-z0-9]+", " ", sd.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower())
+            toks = [t for t in stem.split() if len(t) > 4]
+            named = sum(1 for t in toks if t in _q)
+            return (typed, named, counts[sd])
+
+        anchor = max(counts, key=_anchor_score)
+
+        similar = _db.find_similar_documents(wiki_id, session_id, anchor, limit=5)
+        if not similar:
+            similar = _db.find_similar_documents(wiki_id, session_id, anchor,
+                                                 limit=5, same_type_only=False)
+        if not similar:
+            return None
+    except Exception as e:
+        logger.warning("[AGENT] precedent path failed, falling through: %s", e)
+        return None
+
+    def _clean(name: str) -> str:
+        return wiki._norm_doc_name(name) if hasattr(wiki, "_norm_doc_name") else name
+
+    lines = [f"The closest precedents to **{_clean(anchor)}** in this corpus are:", ""]
+    for i, s in enumerate(similar, 1):
+        pct = round(s["best_score"] * 100)
+        lines.append(f"{i}. **{_clean(s['source_doc'])}** — {pct}% similar"
+                     f" across {s['pages_matched']} matching section(s)")
+    lines.append("")
+    lines.append("Ranked by similarity between this document's content and every "
+                 "other document in the corpus, not by title or date.")
+    if similar and similar[0].get("doc_type"):
+        lines.append(f"Restricted to other documents of the same type "
+                     f"(*{similar[0]['doc_type']}*).")
+
+    payload = _canned_payload("\n".join(lines), "Precedents", "precedent-similarity")
+    payload["files_used"] = [s["source_doc"] for s in similar]
+    payload["meta_answer"] = False
+    return payload
+
+
 def _social_query_kind(question: str) -> str:
     """'greeting' | 'thanks' | 'farewell' | 'ack' | '' — whole-message match only."""
     q = (question or "").strip()
@@ -2741,6 +2840,19 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         yield {"stage": "complete", "status": "done", "type": "answer",
                "payload": _social_answer(social, session_id), "message": "Done"}
         return
+
+    # "Which other documents are the closest precedents to X?" needs a
+    # document-to-document search, which the retrieval graph cannot express —
+    # it embeds the question, so every page it finds belongs to the single
+    # document the question names. Falls through to the graph if the anchor
+    # document or its neighbours can't be resolved.
+    if not is_followup and _is_precedent_query(question):
+        _prec = _precedent_answer(question, session_id)
+        if _prec:
+            logger.info("[AGENT] precedent fast-path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _prec, "message": "Done"}
+            return
 
     # Meta questions short-circuit before the graph — no classify, no retrieve,
     # no generate, no validate. Skipped for follow-ups, where a bare "help" is
