@@ -136,9 +136,21 @@ NVIDIA_EMBEDDING_DIMENSIONS = int(os.getenv("NVIDIA_EMBEDDING_DIMENSIONS", "4096
 # ---------------------------------------------------------------------------
 
 # Ingest pipeline
-MAX_TOKENS_INGEST_SINGLE   = 16000  # Single-call short-doc synthesis (10-30 pages)
+# These are CEILINGS, not budgets: billing is on tokens actually produced, so a
+# cap set higher than a document needs costs nothing. A cap set too LOW is not
+# free — the model is cut off mid-JSON, the repair pass cannot close the
+# structure, and wiki.ingest logs "JSON repair failed — returning empty wiki
+# payload" and writes ZERO pages. The document looks ingested (it has a
+# documents row) while holding no content at all.
+#
+# 16000 did exactly that on the live corpus: a dense 18,260-character escrow
+# agreement with 31 structural anchors failed every retry and sat at 0 pages,
+# and produced 26 pages and 19 relations at 32000 with nothing else changed.
+# It is the same failure behind the "JSON repair failed" errors seen during the
+# 1,350-document ingest.
+MAX_TOKENS_INGEST_SINGLE   = 32000  # Single-call short-doc synthesis (10-30 pages)
 MAX_TOKENS_INGEST_OVERVIEW = 2000   # Phase-1 overview + topic list
-MAX_TOKENS_INGEST_DETAIL   = 8000   # Phase-2 per-segment detail extraction
+MAX_TOKENS_INGEST_DETAIL   = 16000  # Phase-2 per-segment detail extraction
 
 # Merge / maintenance  (cheap model)
 MAX_TOKENS_CONTRADICTION   = 300    # Pairwise contradiction pre-flight
