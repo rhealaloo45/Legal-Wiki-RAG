@@ -196,12 +196,26 @@ BROAD_QUESTION_PER_DOC_CAP   = 4     # Max pages any single document can contrib
 BROAD_QUESTION_TOTAL_CAP     = 60    # Final page budget for a broad question after diversification (vs. 15 for a normal question) — raised to fit a Parties page + clause page per document without starving document breadth
 # Fuse hypothetical-question vectors (written at ingest stage 06) into the retrieval
 # pool as a third RRF ranking. Reuses the query embedding page search already made, so
-# it costs no extra embedding call. OFF pending live verification: the questions this
-# corpus's ingest generated rank by TOPIC rather than by document — measured, one
-# question text is shared by 124 pages at identical scores — and RRF promotes whatever
-# any channel ranks highly, so switching it on risks pulling an unrelated agreement's
-# page into context. See search_similar_questions for the measurement and the filter.
-USE_QUESTION_EMBEDDINGS      = os.getenv("USE_QUESTION_EMBEDDINGS", "false").lower() == "true"
+# it costs no extra embedding call.
+#
+# Was OFF pending live verification: the questions this corpus's ingest generated rank
+# by TOPIC rather than by document — one question text was shared by 124 pages at
+# identical scores — and RRF promotes whatever any channel ranks highly, so switching
+# it on risked pulling an unrelated agreement's page into context.
+#
+# That verification has now run, twice measured, on the 1,384-document corpus:
+#   * Duplication is real but bounded and handled. 69% of the 33,957 question rows are
+#     unique to a single page and survive QUESTION_MAX_PAGES_SHARING=1; the generic
+#     texts cluster exactly where expected ("Which law governs the Agreement?" — 107
+#     pages) and the filter drops precisely those before ranking.
+#   * A/B over a 91-question stratified sample, same questions both arms: 53/91 off vs
+#     54/91 on. Net +1 is noise, and every question that moved (3 gained, 2 lost) was a
+#     `comparison`, where the two "losses" differ from their off-arm answers only in
+#     using terser document labels.
+# So: no measured accuracy gain, and — the part that matters — no sign of the
+# pollution that kept it off. Enabled because the blocking risk was tested and did not
+# appear, at 3% wall-time and no extra API call, not because it improved a number.
+USE_QUESTION_EMBEDDINGS      = os.getenv("USE_QUESTION_EMBEDDINGS", "true").lower() == "true"
 QUESTION_MAX_PAGES_SHARING   = 1     # Drop question texts shared by more than N pages before ranking (0 = keep all). 1 keeps the 75% of rows unique to a single page.
 
 # Reranking (Phase 3)
