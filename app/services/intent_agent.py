@@ -2087,6 +2087,163 @@ _RX_ACK = re.compile(
 )
 
 
+_RX_CITES = re.compile(
+    r"\b(?:which|what)\s+(?:documents?|agreements?|contracts?|judgments?)\b[^?]*"
+    r"\b(?:cite|cites|citing|rely\s+on|relies\s+on|reference|references|invoke)\b",
+    re.IGNORECASE,
+)
+_RX_CITED_BY = re.compile(
+    r"\b(?:what|which)\s+(?:authorities|statutes?|acts?|rules?|laws?|cases?)\b[^?]*"
+    r"\b(?:cite[sd]?|cited|relied|rely|invoked?|reference[sd]?)\b",
+    re.IGNORECASE,
+)
+_RX_AMENDS = re.compile(
+    r"\b(?:what|which)\b[^?]*\b(?:amends?|amended|amendment\s+to|supersedes?|"
+    r"replaces?|varies)\b",
+    re.IGNORECASE,
+)
+# The authority a "which documents cite X" question is asking about.
+_RX_AUTHORITY = re.compile(
+    # Lowercase connectors ("and", "of", "the") sit inside real statute names —
+    # "Arbitration and Conciliation Act 1996" — so a run of capitalised words
+    # alone clips the name at the connector and loses its distinctive head.
+    r"\b((?:[A-Z][\w'&.-]*\s+(?:(?:and|of|the|for|on)\s+)?){0,6}"
+    r"(?:Act|Rules?|Code|Regulations?|Convention|Guidelines?|Standard)"
+    # Names like "Code of Civil Procedure 1908" put the terminator FIRST, so
+    # the trailing phrase is part of the name, not the sentence around it.
+    r"(?:\s+(?:of|on|for)\s+(?:[A-Z][\w'&.-]*\s*){1,4})?"
+    r"(?:[,\s]+\d{4})?)",
+)
+
+
+def _is_structural_query(question: str) -> str:
+    """'cites' | 'cited_by' | 'amends' | '' — questions the typed tables answer.
+
+    Citation and amendment links are single lines inside documents that are
+    otherwise about unrelated subjects, so embedding the question ranks the
+    wrong pages: "which documents cite the Arbitration Act" retrieves documents
+    ABOUT arbitration, not the ones carrying the citation. The citations and
+    document_relations tables already hold these as structured rows, and a SQL
+    join answers exactly and with no LLM call.
+    """
+    q = question or ""
+    if _RX_CITES.search(q):
+        return "cites"
+    if _RX_CITED_BY.search(q):
+        return "cited_by"
+    if _RX_AMENDS.search(q):
+        return "amends"
+    return ""
+
+
+def _structural_answer(kind: str, question: str, session_id: str) -> dict | None:
+    """Answer a citation / amendment question from the typed tables.
+
+    Returns None whenever the lookup is empty or the subject can't be pinned,
+    so the normal pipeline still gets its chance — an empty structured answer
+    is not evidence that the answer does not exist.
+    """
+    from services import db as _db, wikis as _wikis
+    try:
+        wiki_id = _wikis.active_wiki_id()
+
+        if kind == "cites":
+            m = _RX_AUTHORITY.search(question)
+            authority = (m.group(1).strip() if m else "").strip(" ,")
+            if not authority:
+                return None
+            hits = _db.find_documents_citing(wiki_id, session_id, authority)
+            if not hits:
+                return None
+            lines = [f"**{len(hits)} document(s) cite {authority}:**", ""]
+            for h in hits[:25]:
+                pages = (f" (p. {', '.join(map(str, h['pages']))})"
+                         if h.get("pages") else "")
+                lines.append(f"- {wiki._norm_doc_name(h['source_doc'])}{pages}")
+            if len(hits) > 25:
+                lines.append(f"- …and {len(hits) - 25} more")
+            lines.append("")
+            lines.append("Read directly from the citation index, so this is every "
+                         "recorded occurrence rather than the closest matches.")
+            payload = _canned_payload("\n".join(lines), "Citations", "citation-index")
+            payload["files_used"] = [h["source_doc"] for h in hits[:25]]
+            payload["meta_answer"] = False
+            return payload
+
+        # cited_by / amends both need the document the question is about.
+        anchor = _resolve_anchor_doc(question, session_id, wiki_id)
+        if not anchor:
+            return None
+
+        if kind == "cited_by":
+            auths = _db.get_authorities_cited(wiki_id, session_id, anchor)
+            if not auths:
+                return None
+            lines = [f"**{wiki._norm_doc_name(anchor)}** cites "
+                     f"{len(auths)} authorit{'y' if len(auths) == 1 else 'ies'}:", ""]
+            for a in auths[:30]:
+                page = f" (p. {a['page_num']})" if a.get("page_num") else ""
+                kindlbl = f" — *{a['authority_type']}*" if a.get("authority_type") else ""
+                lines.append(f"- {a['authority']}{kindlbl}{page}")
+            payload = _canned_payload("\n".join(lines), "Citations", "citation-index")
+            payload["files_used"] = [anchor]
+            payload["meta_answer"] = False
+            return payload
+
+        rel = _db.get_document_relations(wiki_id, session_id, anchor)
+        if not any((rel["outgoing"], rel["incoming"], rel["unresolved"])):
+            return None
+        name = wiki._norm_doc_name(anchor)
+        lines = [f"**Document links recorded for {name}:**", ""]
+        for r in rel["outgoing"]:
+            lines.append(f"- {name} **{r['label']}** {wiki._norm_doc_name(r['doc'])}")
+        for r in rel["incoming"]:
+            lines.append(f"- {wiki._norm_doc_name(r['doc'])} **{r['label']}** {name}")
+        for r in rel["unresolved"]:
+            lines.append(f"- {name} **{r['label'].replace('-unresolved', '')}** "
+                         f"“{(r['raw'] or 'an unnamed document').strip()}” "
+                         f"— not held in this corpus")
+        lines.append("")
+        lines.append("Read from the document-relation index built at ingest.")
+        payload = _canned_payload("\n".join(lines), "Relations", "relation-index")
+        payload["files_used"] = [anchor] + [r["doc"] for r in rel["outgoing"] if r["doc"]]
+        payload["meta_answer"] = False
+        return payload
+    except Exception as e:
+        logger.warning("[AGENT] structural path failed, falling through: %s", e)
+        return None
+
+
+def _resolve_anchor_doc(question: str, session_id: str, wiki_id: str) -> str | None:
+    """The document a question is about, by page-vote over its own embedding."""
+    from services import db as _db, embedder as _embedder
+    vec = _embedder.embed(question, is_query=True)
+    titles = _db.search_similar_pages(wiki_id, session_id, vec, limit=25,
+                                      exclude_cached=True)
+    counts: dict[str, int] = {}
+    for t in titles:
+        pg = _db.get_page(wiki_id, session_id, t) or {}
+        sd = pg.get("source_doc")
+        if sd:
+            counts[sd] = counts.get(sd, 0) + 1
+    if not counts:
+        return None
+    q = (question or "").lower()
+    try:
+        type_of = _db.get_document_types(wiki_id, session_id) or {}
+    except Exception:
+        type_of = {}
+
+    def score(sd: str) -> tuple:
+        dt = (type_of.get(sd) or "").lower()
+        stem = re.sub(r"[^a-z0-9]+", " ",
+                      sd.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].lower())
+        named = sum(1 for t in stem.split() if len(t) > 4 and t in q)
+        return (1 if dt and dt in q else 0, named, counts[sd])
+
+    return max(counts, key=score)
+
+
 _RX_PRECEDENT = re.compile(
     r"\b(?:closest\s+precedents?|nearest\s+precedents?|which\s+other\s+documents?"
     r"|what\s+other\s+documents?|similar\s+(?:documents?|agreements?|contracts?)"
@@ -2846,6 +3003,20 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # it embeds the question, so every page it finds belongs to the single
     # document the question names. Falls through to the graph if the anchor
     # document or its neighbours can't be resolved.
+    # Citation and amendment questions are answered by a SQL join over the
+    # typed tables rather than by retrieval, which ranks documents ABOUT the
+    # subject above the ones actually carrying the citation.
+    if not is_followup:
+        _kind = _is_structural_query(question)
+        if _kind:
+            _structural = _structural_answer(_kind, question, session_id)
+            if _structural:
+                logger.info("[AGENT] structural fast-path (%s): %r",
+                            _kind, (question or "")[:70])
+                yield {"stage": "complete", "status": "done", "type": "answer",
+                       "payload": _structural, "message": "Done"}
+                return
+
     if not is_followup and _is_precedent_query(question):
         _prec = _precedent_answer(question, session_id)
         if _prec:
