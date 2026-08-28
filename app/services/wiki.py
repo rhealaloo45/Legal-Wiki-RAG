@@ -4133,6 +4133,71 @@ def _strip_fabricated_identifiers(answer: str, codes: list[str]) -> str:
     return answer
 
 
+# "N% / Rs. 17,118,112" — a milestone line carrying both its share of the
+# contract and its cash amount.
+_MILESTONE_ROW_RE = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s*%\s*/?\s*(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_MILESTONE_Q_RE = re.compile(
+    r"\b(milestones?|payment obligations?|payment schedules?|contract value|"
+    r"total value|payment terms|instal?lments?)\b", re.IGNORECASE,
+)
+
+
+def _append_milestone_total(answer: str, context: str, question: str) -> str:
+    """State the total contract value when a milestone schedule is being asked about.
+
+    Milestone schedules give each stage as "11% / Rs. 17,118,112" and never
+    state the total, so a question about payment obligations gets a faithful
+    table back and no headline number — the one figure the reader actually
+    wants. Summing is left to Python rather than the model, which is the wrong
+    tool for arithmetic over a dozen comma-formatted amounts.
+
+    Guarded deliberately: the total is only asserted when the percentages
+    account for ~100% of the contract, which is what proves the retrieved
+    context held the COMPLETE schedule rather than a fragment. A partial
+    schedule would otherwise produce a confident, badly wrong total.
+    """
+    if not answer or not _MILESTONE_Q_RE.search(question or ""):
+        return answer
+    if re.search(r"total contract value", answer, re.IGNORECASE):
+        return answer
+
+    rows = _MILESTONE_ROW_RE.findall(context or "")
+    if len(rows) < 2:
+        return answer
+
+    # Walk the rows in document order and stop at the first point where the
+    # percentages account for a whole contract. Deduplicating identical rows
+    # would be wrong — a schedule legitimately contains eight stages of
+    # "11% / Rs. 17,118,112" — while summing everything double-counts the
+    # schedule each time it reappears in another retrieved page. Taking the
+    # first run that reaches 100% handles both.
+    pct_sum = amount_sum = 0.0
+    used = 0
+    for pct, amt in rows:
+        try:
+            p = float(pct)
+            a = float(amt.replace(",", ""))
+        except ValueError:
+            return answer
+        if pct_sum + p > 103.0:
+            break
+        pct_sum += p
+        amount_sum += a
+        used += 1
+        if 97.0 <= pct_sum <= 103.0:
+            break
+
+    if not (97.0 <= pct_sum <= 103.0) or amount_sum <= 0 or used < 2:
+        return answer
+
+    return (f"{answer}\n\n**Total contract value: Rs. {amount_sum:,.0f}** "
+            f"— the sum of all {used} milestone payments in the schedule "
+            f"({pct_sum:.0f}% of contract value).")
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -5397,6 +5462,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # here both cleans the output and stops them from tripping the citation check
     # (which correctly flags "Not provided in excerpt" as a non-verbatim quote).
     answer = _strip_placeholder_quotes(answer)
+    answer = _append_milestone_total(answer, wiki_content, question)
 
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
