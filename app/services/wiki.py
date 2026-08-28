@@ -1272,6 +1272,47 @@ def _persist_structured(session_id: str, doc_name: str, bucket: dict,
             "notes": meta_report.notes(),
         }
 
+        # Promote the document-level facts the family extraction just produced
+        # onto the `documents` row. Without this they are extracted on every
+        # ingest, written into the typed table's typed_value blob, and then
+        # never surfaced: documents.effective_date / parties / expiry_date sat
+        # at 0% populated across the whole corpus, so the Contract Register and
+        # Obligation tracker (which read those columns) had nothing to show.
+        # Field names differ per family — a judgment has decided_date, an
+        # opinion has opinion_date — so each is mapped to the shared column.
+        _vals = meta_report.values or {}
+
+        def _first(*names):
+            for n in names:
+                v = _vals.get(n)
+                if v not in (None, "", [], {}):
+                    return v
+            return None
+
+        _parties = _first("parties")
+        if not _parties:
+            _sides = [v for v in (_vals.get("plaintiffs"), _vals.get("defendants"),
+                                  _vals.get("grantor"), _vals.get("grantee"))
+                      if v not in (None, "", [], {})]
+            flat = []
+            for s in _sides:
+                flat.extend(s if isinstance(s, list) else [s])
+            _parties = flat or None
+
+        _doc_meta = {
+            "effective_date": _first("effective_date", "opinion_date", "decided_date"),
+            "expiry_date": _first("expiry_date"),
+            "parties": _parties,
+            "status": _first("status", "disposition", "binding_status"),
+        }
+        _doc_meta = {k: v for k, v in _doc_meta.items() if v not in (None, "", [], {})}
+        if _doc_meta:
+            try:
+                backbone.upsert_document(wiki_id, session_id, doc_name, **_doc_meta)
+            except Exception as _dm_err:
+                logger.warning("Could not promote document metadata for %s: %s",
+                               doc_name, _dm_err)
+
         citations, _ = _ev.sanitize_rows(
             bucket.get("citations"),
             {"citation_text": "text", "authority_type": "text",
