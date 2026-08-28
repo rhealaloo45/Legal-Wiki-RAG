@@ -1837,16 +1837,23 @@ def admin_reingest():
 
 
 def _reingest_one(wiki_id: str, session_id: str, source_doc: str):
-    """Delete this document's own page data, then ingest it again.
+    """Delete this document's EXCLUSIVE page data, then ingest it again.
 
-    The delete is scoped to rows attributable to this document and runs in the
-    worker rather than up-front, so a queue of 400 documents does not strip the
-    wiki bare before the first one has been re-read.
+    Runs in the worker rather than up-front, so a queue of 400 documents does
+    not strip the wiki bare before the first one has been re-read.
+
+    Uses delete_document_pages_exclusive, not delete_document_data: the latter
+    clears every page whose source_doc names this document, and that column
+    records only the LAST writer, so merged concept pages built mostly by other
+    documents are caught by it. Re-ingesting one document cannot rebuild those
+    — it only re-contributes its own share — so a whole-document delete here
+    destroys other documents' work. Pages with more than one contributor are
+    left for wiki.ingest to merge into instead.
     """
     path = os.path.join(config.UPLOAD_PATH, source_doc)
     try:
         from services import db as _db
-        report = _db.delete_document_data(wiki_id, session_id, source_doc)
+        report = _db.delete_document_pages_exclusive(wiki_id, session_id, source_doc)
         logger.info("Re-ingest: cleared %s (%s)", source_doc, report)
     except Exception as e:
         # Do not ingest on top of data we failed to clear — that is the blend
