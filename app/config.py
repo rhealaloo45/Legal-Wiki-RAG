@@ -187,6 +187,11 @@ ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too comm
 # runs, one outlier at 10.36k on reasoning-token variance alone. 12k gives
 # that case real headroom instead of sitting right on the edge.
 MAX_DRAFT_WIKI_CONTEXT_CHARS = 4_000  # ~1000 tokens of grounding context — was 8000, halved to leave room for output
+# Clauses the Precedent layer feeds Draft Mode (Phase 2). A count, not a
+# character budget, because the unit retrieved is now a clause chosen for
+# relevance rather than a page cut to fit — the truncation this replaces is
+# exactly what silently dropped grounding from the end of the context.
+DRAFT_PRECEDENT_CLAUSES      = 12
 # On the active reasoning model (gpt-5-nano), hidden reasoning tokens count
 # against max_completion_tokens before any visible text — a cap set below
 # that reasoning floor returns EMPTY output with finish_reason="length",
