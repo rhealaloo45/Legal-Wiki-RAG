@@ -4993,6 +4993,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
+
+    # Drafting intent draws on the Precedent layer as well as the pages
+    # (§ Phase 2: "Draft Mode and the Ask tab's drafting intent both switch to
+    # clause-level embeddings, scoped to role-tagged precedent documents").
+    #
+    # Appended rather than substituted: a drafting question in the Ask tab is
+    # still answered from the retrieved pages, and the precedent clauses are
+    # the model material to draft FROM. Replacing the page context would drop
+    # the document the lawyer is actually asking about.
+    if intent == "drafting":
+        try:
+            from services import precedent as _prec
+            _pc = _prec.search_clauses(
+                _active_wiki_id(), session_id, question,
+                limit=getattr(config, "DRAFT_PRECEDENT_CLAUSES", 12))
+            if _pc:
+                _block = "\n".join(
+                    f"[PRECEDENT CLAUSE] {c['clause_type']} — {c['source_doc']}"
+                    f"\n{c['text']}\n" for c in _pc)
+                wiki_content = (
+                    f"{wiki_content}\n\n"
+                    f"--- PRECEDENT CLAUSES (drafting material from other "
+                    f"documents in this corpus; cite them as precedent, never "
+                    f"as terms of the document under discussion) ---\n{_block}")
+                logger.info("Drafting intent: added %d precedent clause(s)", len(_pc))
+        except Exception as _p_err:
+            logger.warning("Precedent clauses unavailable for drafting intent: %s",
+                           _p_err)
     prompt = (_ambiguity_directive_note + _unconfirmed_doc_note
               + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
