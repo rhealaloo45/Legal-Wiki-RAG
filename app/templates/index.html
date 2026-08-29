@@ -1368,6 +1368,27 @@
       margin-bottom: 12px;
     }
 
+    /* Phase 2 panels: a read-only counter chip, and the empty/loading state
+       every one of those tables falls back to. Both were being used by the
+       Collections / Playbooks / Precedent markup before they existed. */
+    .admin-chip {
+      font-size: 11.5px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      border: 1px solid var(--border, #2c333f);
+      background: var(--panel-2, rgba(127, 127, 127, .08));
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .admin-empty {
+      padding: 22px 16px;
+      text-align: center;
+      font-size: 13px;
+      opacity: .65;
+      line-height: 1.5;
+    }
+
     .admin-filter-pill {
       font-size: 11.5px;
       font-weight: 500;
@@ -3928,6 +3949,16 @@
             <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
               <span class="admin-nav-left"><i class="ti ti-database" style="font-size:16px"></i>Wikis</span>
             </div>
+            <div class="admin-rail-label" style="margin-top:16px">Playbooks</div>
+            <div class="admin-nav-item" id="adminNav-collections" data-target="collections" onclick="switchAdminTab('collections',this)">
+              <span class="admin-nav-left"><i class="ti ti-folders" style="font-size:16px"></i>Collections</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-playbooks" data-target="playbooks" onclick="switchAdminTab('playbooks',this)">
+              <span class="admin-nav-left"><i class="ti ti-clipboard-check" style="font-size:16px"></i>Playbooks</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-precedent" data-target="precedent" onclick="switchAdminTab('precedent',this)">
+              <span class="admin-nav-left"><i class="ti ti-search" style="font-size:16px"></i>Precedent</span>
+            </div>
           </div>
 
           <div class="admin-content">
@@ -4000,6 +4031,60 @@
               </div>
               <div class="admin-filter-row" id="admin-obligations-parties"></div>
               <div class="admin-card admin-table-wrap"><div id="admin-obligations-table"></div></div>
+            </div>
+
+            <div id="admin-panel-collections" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Collections</div>
+                  <div class="admin-section-sub" id="admin-collections-sub">Named sets of documents — what a playbook runs over</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-collection-name" class="admin-search-input" type="text" placeholder="New collection name…">
+                  <button type="button" class="admin-pill-btn primary" onclick="createCollection()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-collections-table"></div></div>
+              <div id="admin-collection-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-playbooks" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Playbooks</div>
+                  <div class="admin-section-sub" id="admin-playbooks-sub">House positions per clause type</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-playbook-name" class="admin-search-input" type="text" placeholder="New playbook name…">
+                  <button type="button" class="admin-pill-btn primary" onclick="createPlaybook()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-playbooks-table"></div></div>
+              <div id="admin-playbook-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+              <div class="admin-section-head" style="margin-top:18px">
+                <div><div class="admin-section-title" style="font-size:15px">Runs</div></div>
+                <button type="button" class="admin-pill-btn" onclick="loadPlaybookRuns()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-playbook-runs"></div></div>
+              <div id="admin-playbook-run-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-precedent" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Precedent layer</div>
+                  <div class="admin-section-sub" id="admin-precedent-sub">Clause-level search over role-tagged precedent documents</div>
+                </div>
+                <button type="button" class="admin-pill-btn" onclick="buildPrecedentEmbeddings()"><i class="ti ti-refresh" style="font-size:14px"></i>Embed pending</button>
+              </div>
+              <div class="admin-filter-row" id="admin-precedent-stats"></div>
+              <div class="admin-section-head" style="margin-top:6px">
+                <input id="admin-precedent-q" class="admin-search-input" style="flex:1"
+                       type="search" placeholder="Describe the clause you need — e.g. liability capped at fees paid in the last 12 months"
+                       onkeydown="if(event.key==='Enter')searchPrecedent()">
+                <button type="button" class="admin-pill-btn primary" onclick="searchPrecedent()"><i class="ti ti-search" style="font-size:14px"></i>Search</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-precedent-results"></div></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4481,7 +4566,8 @@
     function switchAdminTab(name, el) {
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
-      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations'].forEach(n => {
+      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations',
+       'collections', 'playbooks', 'precedent'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
@@ -4491,7 +4577,339 @@
       else if (name === 'wikis') loadAdminWikis();
       else if (name === 'register') loadAdminRegister();
       else if (name === 'obligations') loadAdminObligations();
+      else if (name === 'collections') loadCollections();
+      else if (name === 'playbooks') { loadPlaybooks(); loadPlaybookRuns(); }
+      else if (name === 'precedent') loadPrecedentStats();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
+    }
+
+    // ---- Collections -------------------------------------------------------
+    // A collection is a label over the corpus, never a container of it:
+    // deleting one removes the label and its membership rows, and every
+    // document stays exactly where it was. The delete confirmation says so,
+    // because "delete collection" otherwise reads as "delete these documents".
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function shortDoc(s) {
+      const base = String(s || '').split(/[\\/]/).pop();
+      return base.replace(/^[0-9a-f-]{36}_/i, '');
+    }
+
+    async function loadCollections() {
+      const el = document.getElementById('admin-collections-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      try {
+        const r = await fetch('/admin/collections');
+        const j = await r.json();
+        const rows = j.collections || [];
+        document.getElementById('admin-collections-sub').textContent =
+          rows.length + ' collection' + (rows.length === 1 ? '' : 's') + ' in this wiki';
+        if (!rows.length) {
+          el.innerHTML = '<div class="admin-empty">No collections yet. Create one above, then add documents to it by family or by name.</div>';
+          return;
+        }
+        el.innerHTML = '<table class="admin-table"><thead><tr>' +
+          '<th>Name</th><th>Description</th><th style="text-align:right">Documents</th><th></th>' +
+          '</tr></thead><tbody>' + rows.map(c =>
+            `<tr><td><strong>${esc(c.name)}</strong></td>` +
+            `<td>${esc(c.description || '')}</td>` +
+            `<td style="text-align:right">${c.document_count}</td>` +
+            `<td style="text-align:right;white-space:nowrap">` +
+            `<button class="admin-pill-btn" onclick="openCollection(${c.id})">Open</button> ` +
+            `<button class="admin-pill-btn" onclick="deleteCollection(${c.id},'${esc(c.name)}')">Delete</button>` +
+            `</td></tr>`).join('') + '</tbody></table>';
+      } catch (e) {
+        el.innerHTML = '<div class="admin-empty">Could not load collections.</div>';
+      }
+    }
+
+    async function createCollection() {
+      const input = document.getElementById('admin-collection-name');
+      const name = (input.value || '').trim();
+      if (!name) { showToast('Give the collection a name first.'); return; }
+      const r = await fetch('/admin/collections', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create collection.'); return; }
+      input.value = '';
+      showToast('Created “' + name + '”.');
+      loadCollections();
+      openCollection(j.id);
+    }
+
+    async function deleteCollection(id, name) {
+      if (!confirm('Delete the collection “' + name + '”?\n\nThe documents themselves are not deleted — only this named set.')) return;
+      const r = await fetch('/admin/collections/' + id, { method: 'DELETE' });
+      showToast(r.ok ? 'Deleted “' + name + '”.' : 'Could not delete.');
+      document.getElementById('admin-collection-detail').style.setProperty('display', 'none', 'important');
+      loadCollections();
+    }
+
+    async function openCollection(id) {
+      const box = document.getElementById('admin-collection-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/collections/' + id)).json();
+      const docs = j.documents || [];
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+           <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+           <div class="admin-section-sub">${docs.length} document${docs.length === 1 ? '' : 's'}</div></div>
+         </div>
+         <div class="admin-filter-row" style="gap:8px;flex-wrap:wrap">
+           <input id="cd-family" class="admin-search-input" placeholder="Add by family — contract, opinion, litigation…" style="min-width:260px">
+           <input id="cd-name" class="admin-search-input" placeholder="…or by name contains" style="min-width:200px">
+           <button class="admin-pill-btn primary" onclick="addToCollection(${id})">Add</button>
+         </div>
+         <div class="admin-table-wrap" style="max-height:340px;overflow:auto">
+         ${docs.length ? '<table class="admin-table"><thead><tr><th>Document</th><th>Family</th><th>Type</th><th></th></tr></thead><tbody>' +
+            docs.map(d => `<tr><td>${esc(shortDoc(d.source_doc))}</td><td>${esc(d.doc_family || '')}</td>` +
+              `<td>${esc(d.doc_type || '')}</td>` +
+              `<td style="text-align:right"><button class="admin-pill-btn" onclick="removeFromCollection(${id},'${esc(d.source_doc)}')">Remove</button></td></tr>`).join('') +
+            '</tbody></table>'
+           : '<div class="admin-empty">Empty — add documents by family or name above.</div>'}
+         </div>`;
+    }
+
+    async function addToCollection(id) {
+      const fam = (document.getElementById('cd-family').value || '').trim();
+      const nm = (document.getElementById('cd-name').value || '').trim();
+      if (!fam && !nm) { showToast('Give a family or a name fragment to match.'); return; }
+      const r = await fetch('/admin/collections/' + id + '/documents', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_family: fam || null, name_contains: nm || null })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not add documents.'); return; }
+      showToast(`Matched ${j.matched}, added ${j.added}` +
+                (j.already_present ? `, ${j.already_present} already there` : '') + '.');
+      openCollection(id); loadCollections();
+    }
+
+    async function removeFromCollection(id, doc) {
+      await fetch('/admin/collections/' + id + '/documents', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_docs: [doc] })
+      });
+      openCollection(id); loadCollections();
+    }
+
+    // ---- Playbooks ---------------------------------------------------------
+    async function loadPlaybooks() {
+      const el = document.getElementById('admin-playbooks-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks')).json();
+      const rows = j.playbooks || [];
+      document.getElementById('admin-playbooks-sub').textContent =
+        rows.length + ' playbook' + (rows.length === 1 ? '' : 's') + ' in this wiki';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No playbooks yet. Create one, add a rule per clause type, then run it over a collection.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th>Name</th><th style="text-align:right">Rules</th><th></th></tr></thead><tbody>' +
+        rows.map(p => `<tr><td><strong>${esc(p.name)}</strong></td>` +
+          `<td style="text-align:right">${p.rules}</td>` +
+          `<td style="text-align:right;white-space:nowrap">` +
+          `<button class="admin-pill-btn" onclick="openPlaybook(${p.id})">Open</button> ` +
+          `<button class="admin-pill-btn" onclick="deletePlaybook(${p.id},'${esc(p.name)}')">Delete</button>` +
+          `</td></tr>`).join('') + '</tbody></table>';
+    }
+
+    async function createPlaybook() {
+      const input = document.getElementById('admin-playbook-name');
+      const name = (input.value || '').trim();
+      if (!name) { showToast('Give the playbook a name first.'); return; }
+      const r = await fetch('/admin/playbooks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create playbook.'); return; }
+      input.value = ''; showToast('Created “' + name + '”.');
+      loadPlaybooks(); openPlaybook(j.id);
+    }
+
+    async function deletePlaybook(id, name) {
+      if (!confirm('Delete the playbook “' + name + '”?\n\nIts rules and past runs are deleted with it.')) return;
+      const r = await fetch('/admin/playbooks/' + id, { method: 'DELETE' });
+      showToast(r.ok ? 'Deleted.' : 'Could not delete.');
+      document.getElementById('admin-playbook-detail').style.setProperty('display', 'none', 'important');
+      loadPlaybooks(); loadPlaybookRuns();
+    }
+
+    async function openPlaybook(id) {
+      const box = document.getElementById('admin-playbook-detail');
+      box.style.setProperty('display', 'block', 'important');
+      const j = await (await fetch('/admin/playbooks/' + id)).json();
+      const cols = await (await fetch('/admin/collections')).json();
+      const rules = j.rules || [];
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+          <div class="admin-section-sub">${rules.length} rule${rules.length === 1 ? '' : 's'}</div></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="pb-collection" class="admin-search-input">
+              <option value="">Run over a collection…</option>
+              ${(cols.collections || []).map(c => `<option value="${c.id}">${esc(c.name)} (${c.document_count})</option>`).join('')}
+            </select>
+            <button class="admin-pill-btn primary" onclick="runPlaybook(${id})"><i class="ti ti-player-play" style="font-size:14px"></i>Run</button>
+          </div>
+        </div>
+        <div class="admin-table-wrap" style="max-height:300px;overflow:auto">
+        ${rules.length ? '<table class="admin-table"><thead><tr><th>Clause type</th><th>Standard</th><th>Fallback</th><th>Unacceptable</th><th>Severity</th><th></th></tr></thead><tbody>' +
+          rules.map(r => `<tr><td><strong>${esc(r.clause_type)}</strong></td><td>${esc(r.standard)}</td>` +
+            `<td>${esc(r.fallback || '—')}</td><td>${esc(r.unacceptable || '—')}</td><td>${esc(r.severity)}</td>` +
+            `<td style="text-align:right"><button class="admin-pill-btn" onclick="removeRule(${id},'${esc(r.clause_type)}')">Remove</button></td></tr>`).join('') +
+          '</tbody></table>' : '<div class="admin-empty">No rules yet — a playbook needs at least one to run.</div>'}
+        </div>
+        <div class="admin-filter-row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+          <input id="pr-type" class="admin-search-input" placeholder="Clause type — e.g. Liability Cap" style="min-width:180px">
+          <input id="pr-standard" class="admin-search-input" placeholder="Standard position (required)" style="min-width:230px">
+          <input id="pr-fallback" class="admin-search-input" placeholder="Fallback (optional)" style="min-width:180px">
+          <input id="pr-unacceptable" class="admin-search-input" placeholder="Unacceptable (optional)" style="min-width:180px">
+          <select id="pr-severity" class="admin-search-input"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
+          <button class="admin-pill-btn primary" onclick="addRule(${id})">Add rule</button>
+        </div>`;
+    }
+
+    async function addRule(id) {
+      const body = {
+        clause_type: document.getElementById('pr-type').value.trim(),
+        standard: document.getElementById('pr-standard').value.trim(),
+        fallback: document.getElementById('pr-fallback').value.trim() || null,
+        unacceptable: document.getElementById('pr-unacceptable').value.trim() || null,
+        severity: document.getElementById('pr-severity').value
+      };
+      const r = await fetch('/admin/playbooks/' + id + '/rules', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not add the rule.'); return; }
+      showToast('Rule saved.'); openPlaybook(id); loadPlaybooks();
+    }
+
+    async function removeRule(id, type) {
+      await fetch('/admin/playbooks/' + id + '/rules', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clause_type: type })
+      });
+      openPlaybook(id); loadPlaybooks();
+    }
+
+    // A run costs one model call per matching clause, so the server returns
+    // confirm_required with the exact count before anything is queued. The
+    // number shown here is counted from the database, not estimated.
+    async function runPlaybook(id, confirmed) {
+      const sel = document.getElementById('pb-collection');
+      if (!sel || !sel.value) { showToast('Pick a collection to run over.'); return; }
+      const body = { collection: parseInt(sel.value, 10) };
+      if (confirmed) body.confirm = 'true';
+      const r = await fetch('/admin/playbooks/' + id + '/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not start the run.'); return; }
+      if (j.status === 'confirm_required') {
+        if (confirm(`Run over ${j.documents} document(s) with ${j.rules} rule(s)?\n\n` +
+                    `${j.estimated_llm_calls} clauses will be classified — one model call each.`)) {
+          return runPlaybook(id, true);
+        }
+        return;
+      }
+      showToast(`Run started over ${j.documents} document(s).`);
+      setTimeout(loadPlaybookRuns, 1500);
+    }
+
+    async function loadPlaybookRuns() {
+      const el = document.getElementById('admin-playbook-runs');
+      if (!el) return;
+      const j = await (await fetch('/admin/playbooks/runs')).json();
+      const rows = j.runs || [];
+      if (!rows.length) { el.innerHTML = '<div class="admin-empty">No runs yet.</div>'; return; }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th>Playbook</th><th>Collection</th><th>Status</th><th style="text-align:right">Docs</th><th style="text-align:right">Findings</th><th></th></tr></thead><tbody>' +
+        rows.map(r => `<tr><td>${esc(r.playbook)}</td><td>${esc(r.collection || '—')}</td>` +
+          `<td>${esc(r.status)}</td><td style="text-align:right">${r.documents_done}/${r.documents_total}</td>` +
+          `<td style="text-align:right">${r.findings_total}</td>` +
+          `<td style="text-align:right"><button class="admin-pill-btn" onclick="openRun(${r.id})">Findings</button></td></tr>`).join('') +
+        '</tbody></table>';
+    }
+
+    // Findings are shown worst-first, and the verdict is colour-coded, because
+    // the point of a deviation report is that what needs attention is visible
+    // without reading every row.
+    async function openRun(id) {
+      const box = document.getElementById('admin-playbook-run-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks/runs/' + id)).json();
+      const v = j.verdicts || {};
+      const chip = (k, c) => v[k] ? `<span class="admin-chip" style="color:${c}">${v[k]} ${k}</span>` : '';
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.playbook)} — ${esc(j.collection || 'ad hoc')}</div>
+          <div class="admin-section-sub">${j.documents_done}/${j.documents_total} documents · ${j.findings_total} findings</div></div>
+        </div>
+        <div class="admin-filter-row">
+          ${chip('unacceptable', '#d9534f')}${chip('missing', '#e0a458')}
+          ${chip('fallback', '#8fa9e0')}${chip('unclear', '#999')}${chip('standard', '#4a9e6f')}
+        </div>
+        <div class="admin-table-wrap" style="max-height:420px;overflow:auto">
+        <table class="admin-table"><thead><tr><th>Verdict</th><th>Clause type</th><th>Document</th><th>Why</th><th>Suggested redline</th></tr></thead><tbody>` +
+        (j.findings || []).map(f => {
+          const col = { unacceptable: '#d9534f', missing: '#e0a458', fallback: '#8fa9e0', unclear: '#999', standard: '#4a9e6f' }[f.verdict] || '';
+          return `<tr><td style="color:${col};font-weight:600">${esc(f.verdict)}</td>` +
+            `<td>${esc(f.clause_type)}</td><td>${esc(shortDoc(f.source_doc))}</td>` +
+            `<td>${esc(f.rationale || '')}</td><td>${esc(f.redline || '')}</td></tr>`;
+        }).join('') + '</tbody></table></div>';
+    }
+
+    // ---- Precedent layer ---------------------------------------------------
+    async function loadPrecedentStats() {
+      const el = document.getElementById('admin-precedent-stats');
+      const [roles, cov] = await Promise.all([
+        (await fetch('/admin/precedent/roles')).json(),
+        (await fetch('/admin/precedent/embeddings')).json()
+      ]);
+      const r = roles.roles || {};
+      el.innerHTML =
+        `<span class="admin-chip">${r.precedent || 0} precedent</span>` +
+        `<span class="admin-chip">${r.reference || 0} reference</span>` +
+        `<span class="admin-chip">${cov.embedded || 0} / ${cov.eligible || 0} clauses embedded</span>` +
+        (cov.pending ? `<span class="admin-chip" style="color:#e0a458">${cov.pending} pending</span>` : '');
+    }
+
+    async function buildPrecedentEmbeddings() {
+      const r = await fetch('/admin/precedent/embeddings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      const j = await r.json();
+      showToast(j.status === 'up_to_date'
+        ? 'Every precedent clause is already embedded.'
+        : `Embedding ${j.pending} clause(s) in the background.`);
+      setTimeout(loadPrecedentStats, 3000);
+    }
+
+    async function searchPrecedent() {
+      const q = (document.getElementById('admin-precedent-q').value || '').trim();
+      const el = document.getElementById('admin-precedent-results');
+      if (!q) { showToast('Describe the clause you need.'); return; }
+      el.innerHTML = '<div class="admin-empty">Searching…</div>';
+      const j = await (await fetch('/admin/precedent/search?limit=15&q=' + encodeURIComponent(q))).json();
+      const rows = j.results || [];
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">Nothing matched. If the clause count above is 0, embed the precedent clauses first.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th style="text-align:right">Match</th><th>Clause type</th><th>From</th><th>Text</th></tr></thead><tbody>' +
+        rows.map(c => `<tr><td style="text-align:right">${(c.score * 100).toFixed(0)}%</td>` +
+          `<td><strong>${esc(c.clause_type)}</strong></td><td>${esc(shortDoc(c.source_doc))}</td>` +
+          `<td>${esc(c.text)}</td></tr>`).join('') + '</tbody></table>';
     }
 
     // ---- Contract Register -------------------------------------------------
