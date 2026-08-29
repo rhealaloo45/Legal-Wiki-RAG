@@ -1727,6 +1727,86 @@ def admin_wikis_archive():
 
 
 # ---------------------------------------------------------------------------
+# Precedent layer (Phase 2) — document roles + clause embeddings
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/precedent/roles", methods=["GET", "POST"])
+def admin_precedent_roles():
+    """Show the role split, derive it from families, or tag one document.
+
+    POST {"derive": true}                     fill untagged documents
+    POST {"derive": true, "overwrite": true}  re-derive, discarding manual tags
+    POST {"source_doc": "...", "role": "..."} tag one document explicitly
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import precedent as _prec
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        return jsonify({"roles": _prec.role_summary(wiki_id),
+                        "valid_roles": list(_prec.ROLES)})
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    if data.get("source_doc"):
+        try:
+            done = _prec.set_role(wiki_id, data["source_doc"], data.get("role", ""))
+        except ValueError as e:
+            return jsonify({"error": str(e)}), 400
+        return (jsonify({"status": "tagged", "roles": _prec.role_summary(wiki_id)})
+                if done else (jsonify({"error": "Document not found"}), 404))
+    if data.get("derive"):
+        res = _prec.derive_roles(wiki_id, overwrite=bool(data.get("overwrite")))
+        res["roles"] = _prec.role_summary(wiki_id)
+        return jsonify(res)
+    return jsonify({"error": "Provide derive:true, or source_doc + role"}), 400
+
+
+@app.route("/admin/precedent/embeddings", methods=["GET", "POST"])
+def admin_precedent_embeddings():
+    """Coverage, or queue embedding of clauses that have no vector yet.
+
+    Embeddings only — no chat model is involved, and only precedent-role
+    clauses are eligible, so reference material never enters the drafting pool.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import precedent as _prec
+    wiki_id = current_wiki_id()
+    session_id = _get_main_session_id() or request.args.get("session_id", "")
+    if request.method == "GET":
+        return jsonify(_prec.coverage(wiki_id, session_id))
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", session_id)
+    cov = _prec.coverage(wiki_id, session_id)
+    if not cov["pending"]:
+        return jsonify({"status": "up_to_date", **cov})
+    executor.submit(_prec.embed_pending, wiki_id, session_id, 128,
+                    data.get("max_clauses"))
+    return jsonify({"status": "queued", **cov})
+
+
+@app.route("/admin/precedent/search")
+def admin_precedent_search():
+    """Rank precedent clauses against a drafting request — what Draft Mode reads."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import precedent as _prec
+    q = (request.args.get("q") or "").strip()
+    if not q:
+        return jsonify({"error": "Provide q"}), 400
+    session_id = _get_main_session_id() or request.args.get("session_id", "")
+    return jsonify({"query": q, "results": _prec.search_clauses(
+        current_wiki_id(), session_id, q,
+        limit=int(request.args.get("limit", 12)),
+        clause_type=request.args.get("clause_type"))})
+
+
+# ---------------------------------------------------------------------------
 # Playbooks (Phase 2) — house positions per clause type, run over a Collection
 # ---------------------------------------------------------------------------
 
