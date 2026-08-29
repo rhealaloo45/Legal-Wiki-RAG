@@ -1726,6 +1726,111 @@ def admin_wikis_archive():
         return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
+# ---------------------------------------------------------------------------
+# Collections (Phase 2) — named, wiki-scoped document sets
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/collections", methods=["GET", "POST"])
+def admin_collections():
+    """List collections in the active wiki, or create one."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import collections as _col
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        return jsonify({"collections": _col.list_all(wiki_id)})
+
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", "")
+    try:
+        created = _col.create(wiki_id, session_id, data.get("name", ""),
+                              data.get("description"))
+    except _col.CollectionError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(created), 201
+
+
+@app.route("/admin/collections/<int:collection_id>",
+           methods=["GET", "PATCH", "DELETE"])
+def admin_collection(collection_id: int):
+    """Read, rename, or delete one collection.
+
+    DELETE removes the collection and its membership rows only — a collection
+    is a label over the corpus, never a container of it, so the documents stay.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import collections as _col
+    wiki_id = current_wiki_id()
+
+    if request.method == "GET":
+        found = _col.get(wiki_id, collection_id)
+        if not found:
+            return jsonify({"error": "Collection not found"}), 404
+        return jsonify(found)
+
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+
+    if request.method == "DELETE":
+        return (jsonify({"status": "deleted"}) if _col.delete(wiki_id, collection_id)
+                else (jsonify({"error": "Collection not found"}), 404))
+
+    data = request.get_json(silent=True) or {}
+    try:
+        changed = _col.rename(wiki_id, collection_id, data.get("name"),
+                              data.get("description"))
+    except _col.CollectionError as e:
+        return jsonify({"error": str(e)}), 400
+    if not changed:
+        return jsonify({"error": "Nothing to update, or collection not found"}), 400
+    return jsonify(_col.get(wiki_id, collection_id, with_documents=False))
+
+
+@app.route("/admin/collections/<int:collection_id>/documents",
+           methods=["POST", "DELETE"])
+def admin_collection_documents(collection_id: int):
+    """Add or remove member documents.
+
+    POST accepts either an explicit {"source_docs": [...]} or a filter
+    ({"doc_family"|"doc_type"|"name_contains"}). A filter is evaluated ONCE
+    here and its result stored as a fixed list: a collection that re-evaluated
+    on every read could change under a playbook run, leaving the run record
+    describing documents it never processed.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import collections as _col
+    wiki_id = current_wiki_id()
+    if not _col.get(wiki_id, collection_id, with_documents=False):
+        return jsonify({"error": "Collection not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", "")
+    docs = data.get("source_docs") or []
+
+    if request.method == "DELETE":
+        return jsonify({"removed": _col.remove_documents(wiki_id, collection_id, docs)})
+
+    if docs:
+        result = _col.add_documents(wiki_id, session_id, collection_id, docs)
+    elif any(data.get(k) for k in ("doc_family", "doc_type", "name_contains")):
+        result = _col.add_by_filter(wiki_id, session_id, collection_id,
+                                    data.get("doc_family"), data.get("doc_type"),
+                                    data.get("name_contains"))
+    else:
+        return jsonify({"error": "Provide source_docs, or a doc_family / "
+                                 "doc_type / name_contains filter"}), 400
+    return jsonify(result)
+
+
 @app.route("/admin/documents/reingest", methods=["POST"])
 def admin_reingest():
     """Re-ingest documents: one, an explicit set, or a whole family/version band.

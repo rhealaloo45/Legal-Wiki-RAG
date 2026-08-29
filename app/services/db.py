@@ -1070,6 +1070,51 @@ def _init_backbone_schema(conn, text) -> None:
         ON review_queue (wiki_id, session_id, source_doc)
     """))
 
+    # --- collections: a named set of documents (Phase 2) --------------------
+    # Shared plumbing under Playbooks and the Deviation Dashboard: both need
+    # "run this over these documents" and neither should invent its own idea
+    # of what a document set is.
+    #
+    # Wiki-scoped, and the UNIQUE is on (wiki_id, name) rather than name alone:
+    # two wikis are separate corpora and each may reasonably have its own
+    # "Active NDAs", the same way playbooks are wiki-scoped rather than drawn
+    # from a shared default set.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS collections (
+            id           BIGSERIAL PRIMARY KEY,
+            wiki_id      TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            description  TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, name)
+        )
+    """))
+    # Membership is stored explicitly rather than as a saved filter. A filter
+    # re-evaluates on every read, so a playbook run and the dashboard row that
+    # records it could silently cover different documents; an explicit list is
+    # what makes a recorded run reproducible. Filters are offered as a way to
+    # POPULATE the list, not as the list itself.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS collection_documents (
+            id            BIGSERIAL PRIMARY KEY,
+            collection_id BIGINT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+            wiki_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            source_doc    TEXT NOT NULL,
+            added_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (collection_id, source_doc)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS collections_wiki_idx ON collections (wiki_id)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS collection_documents_cid_idx
+        ON collection_documents (collection_id)
+    """))
+
     # --- hypothetical-question embeddings (§ 01 stage 06) --------------------
     # The third embedding type, alongside page-level and clause-level. Its own
     # table rather than extra rows in the page table: a question and a page
