@@ -1115,6 +1115,93 @@ def _init_backbone_schema(conn, text) -> None:
         ON collection_documents (collection_id)
     """))
 
+    # --- playbooks: house positions per clause type (Phase 2) ---------------
+    # Wiki-scoped by design (§ Access & Admin Lifecycle): a firm's own house
+    # rules and a client's differing playbook must not cross wikis, so there is
+    # no shared default set.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS playbooks (
+            id           BIGSERIAL PRIMARY KEY,
+            wiki_id      TEXT NOT NULL,
+            session_id   TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            description  TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, name)
+        )
+    """))
+    # One rule per clause type. The three positions are the vocabulary the doc
+    # specifies — standard / fallback / unacceptable — and a rule is useless
+    # without at least the standard one, which the service enforces.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS playbook_rules (
+            id            BIGSERIAL PRIMARY KEY,
+            playbook_id   BIGINT NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
+            wiki_id       TEXT NOT NULL,
+            clause_type   TEXT NOT NULL,
+            standard      TEXT NOT NULL,
+            fallback      TEXT,
+            unacceptable  TEXT,
+            guidance      TEXT,
+            severity      TEXT NOT NULL DEFAULT 'medium',
+            ordinal       INT  NOT NULL DEFAULT 0,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (playbook_id, clause_type)
+        )
+    """))
+    # A run records WHICH documents it covered, not just the collection id:
+    # collection membership can change afterwards, and a run whose scope can
+    # drift is not reproducible evidence. documents_covered is the frozen list.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS playbook_runs (
+            id                 BIGSERIAL PRIMARY KEY,
+            wiki_id            TEXT NOT NULL,
+            session_id         TEXT NOT NULL,
+            playbook_id        BIGINT NOT NULL REFERENCES playbooks(id) ON DELETE CASCADE,
+            collection_id      BIGINT,
+            collection_name    TEXT,
+            status             TEXT NOT NULL DEFAULT 'running',
+            documents_total    INT  NOT NULL DEFAULT 0,
+            documents_done     INT  NOT NULL DEFAULT 0,
+            findings_total     INT  NOT NULL DEFAULT 0,
+            documents_covered  JSONB,
+            error              TEXT,
+            started_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+            finished_at        TIMESTAMPTZ
+        )
+    """))
+    # One row per (document, clause type) assessed. verdict is the deviation
+    # signal the Phase 3 dashboard aggregates; `missing` is a real verdict, not
+    # an absence of one — a contract with no liability cap at all is a finding.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS playbook_findings (
+            id            BIGSERIAL PRIMARY KEY,
+            run_id        BIGINT NOT NULL REFERENCES playbook_runs(id) ON DELETE CASCADE,
+            wiki_id       TEXT NOT NULL,
+            source_doc    TEXT NOT NULL,
+            clause_type   TEXT NOT NULL,
+            clause_id     BIGINT,
+            verdict       TEXT NOT NULL,
+            severity      TEXT,
+            rationale     TEXT,
+            redline       TEXT,
+            clause_text   TEXT,
+            grounded      BOOLEAN,
+            confidence    REAL,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    for stmt in (
+        "CREATE INDEX IF NOT EXISTS playbooks_wiki_idx ON playbooks (wiki_id)",
+        "CREATE INDEX IF NOT EXISTS playbook_rules_pid_idx ON playbook_rules (playbook_id)",
+        "CREATE INDEX IF NOT EXISTS playbook_runs_wiki_idx ON playbook_runs (wiki_id, playbook_id)",
+        "CREATE INDEX IF NOT EXISTS playbook_findings_run_idx ON playbook_findings (run_id)",
+        "CREATE INDEX IF NOT EXISTS playbook_findings_verdict_idx "
+        "ON playbook_findings (wiki_id, verdict, clause_type)",
+    ):
+        conn.execute(text(stmt))
+
     # --- hypothetical-question embeddings (§ 01 stage 06) --------------------
     # The third embedding type, alongside page-level and clause-level. Its own
     # table rather than extra rows in the page table: a question and a page

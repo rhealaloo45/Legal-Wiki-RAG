@@ -1727,6 +1727,155 @@ def admin_wikis_archive():
 
 
 # ---------------------------------------------------------------------------
+# Playbooks (Phase 2) — house positions per clause type, run over a Collection
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/playbooks", methods=["GET", "POST"])
+def admin_playbooks():
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        return jsonify({"playbooks": _pb.list_all(wiki_id)})
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", "")
+    try:
+        return jsonify(_pb.create(wiki_id, session_id, data.get("name", ""),
+                                  data.get("description"))), 201
+    except _pb.PlaybookError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/admin/playbooks/<int:playbook_id>", methods=["GET", "DELETE"])
+def admin_playbook(playbook_id: int):
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        found = _pb.get(wiki_id, playbook_id)
+        return jsonify(found) if found else (jsonify({"error": "Not found"}), 404)
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    return (jsonify({"status": "deleted"}) if _pb.delete(wiki_id, playbook_id)
+            else (jsonify({"error": "Not found"}), 404))
+
+
+@app.route("/admin/playbooks/<int:playbook_id>/rules", methods=["POST", "DELETE"])
+def admin_playbook_rules(playbook_id: int):
+    """Add/replace a rule, or remove one. One rule per clause type."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb
+    wiki_id = current_wiki_id()
+    if not _pb.get(wiki_id, playbook_id):
+        return jsonify({"error": "Playbook not found"}), 404
+    data = request.get_json(silent=True) or {}
+    if request.method == "DELETE":
+        return jsonify({"removed": _pb.remove_rule(
+            wiki_id, playbook_id, data.get("clause_type", ""))})
+    try:
+        return jsonify(_pb.add_rule(
+            wiki_id, playbook_id, data.get("clause_type", ""),
+            data.get("standard", ""), data.get("fallback"),
+            data.get("unacceptable"), data.get("guidance"),
+            data.get("severity", "medium"), int(data.get("ordinal", 0))))
+    except _pb.PlaybookError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/admin/playbooks/<int:playbook_id>/run", methods=["POST"])
+def admin_playbook_run(playbook_id: int):
+    """Run a playbook over a collection or an explicit document list.
+
+    Cost-gated and queued like every other bulk operation: one LLM call per
+    matched clause, so a large collection is real spend and is held for
+    confirm=true before anything is queued.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb, collections as _col
+    wiki_id = current_wiki_id()
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", "")
+
+    book = _pb.get(wiki_id, playbook_id)
+    if not book:
+        return jsonify({"error": "Playbook not found"}), 404
+    if not book["rules"]:
+        return jsonify({"error": "Playbook has no rules to run"}), 400
+
+    collection_id = collection_name = None
+    if data.get("collection"):
+        collection_id = _col.resolve(wiki_id, data["collection"])
+        if not collection_id:
+            return jsonify({"error": "Collection not found"}), 404
+        meta = _col.get(wiki_id, collection_id, with_documents=False)
+        collection_name = meta["name"] if meta else None
+        documents = _col.documents_in(wiki_id, collection_id)
+    else:
+        documents = data.get("source_docs") or []
+    if not documents:
+        return jsonify({"error": "Nothing to run over — give a collection or source_docs"}), 400
+
+    # One classify call per matched clause. Counting them first is a DB read,
+    # so the estimate costs nothing and is exact rather than extrapolated.
+    clause_calls = 0
+    for d in documents:
+        for rule in book["rules"]:
+            clause_calls += len(_pb.clauses_for_rule(wiki_id, d, rule["clause_type"]))
+    if clause_calls > 50 and str(data.get("confirm", "")).lower() != "true":
+        return jsonify({
+            "status": "confirm_required",
+            "documents": len(documents), "rules": len(book["rules"]),
+            "estimated_llm_calls": clause_calls,
+        })
+
+    def _work():
+        try:
+            _pb.run(wiki_id, session_id, playbook_id, documents,
+                    collection_id, collection_name)
+        except Exception as e:
+            logger.error("Playbook run failed: %s", e)
+
+    executor.submit(_work)
+    return jsonify({"status": "queued", "documents": len(documents),
+                    "rules": len(book["rules"]),
+                    "estimated_llm_calls": clause_calls})
+
+
+@app.route("/admin/playbooks/runs")
+def admin_playbook_runs():
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb
+    pid = request.args.get("playbook_id")
+    return jsonify({"runs": _pb.list_runs(current_wiki_id(),
+                                          int(pid) if pid else None)})
+
+
+@app.route("/admin/playbooks/runs/<int:run_id>")
+def admin_playbook_run_detail(run_id: int):
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import playbooks as _pb
+    found = _pb.get_run(current_wiki_id(), run_id,
+                        with_findings=request.args.get("findings", "1") != "0")
+    return jsonify(found) if found else (jsonify({"error": "Run not found"}), 404)
+
+
+# ---------------------------------------------------------------------------
 # Collections (Phase 2) — named, wiki-scoped document sets
 # ---------------------------------------------------------------------------
 
