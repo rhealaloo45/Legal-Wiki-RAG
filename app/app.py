@@ -1842,7 +1842,13 @@ def admin_playbook(playbook_id: int):
     _lock = _locked_in_production()
     if _lock:
         return _lock
-    return (jsonify({"status": "deleted"}) if _pb.delete(wiki_id, playbook_id)
+    try:
+        deleted = _pb.delete(wiki_id, playbook_id)
+    except _pb.PlaybookError as e:
+        # A run is still in flight; deleting now would cascade the run row out
+        # from under the worker writing findings against it.
+        return jsonify({"error": str(e)}), 409
+    return (jsonify({"status": "deleted"}) if deleted
             else (jsonify({"error": "Not found"}), 404))
 
 
