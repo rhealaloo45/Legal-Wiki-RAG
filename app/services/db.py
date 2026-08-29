@@ -107,6 +107,13 @@ def _question_table_name() -> str:
     return f"question_embeddings_{config.EMBEDDING_PROVIDER}"
 
 
+def _clause_table_name() -> str:
+    """Clause-level vectors (the Precedent layer), per embedding provider —
+    same one-table-per-provider convention as the page and question tables."""
+    import config
+    return f"clause_embeddings_{config.EMBEDDING_PROVIDER}"
+
+
 def get_engine():
     global _engine
     if _engine is not None:
@@ -1234,6 +1241,43 @@ def _init_backbone_schema(conn, text) -> None:
         ))
     except Exception as _q_err:
         logger.warning("Could not create question-embedding table: %s", _q_err)
+        conn.rollback()
+
+    # --- clause embeddings: the Precedent layer (Phase 2) --------------------
+    # The embedding type Draft Mode reads from. Drafting needs the CLAUSE that
+    # solves a problem, not the page that mentions it: page vectors average a
+    # whole topic, so "limitation of liability capped at fees" ranks a page
+    # discussing liability generally above the clause that actually says it.
+    #
+    # Carries doc_family and role so retrieval can scope to role-tagged
+    # precedent documents without a join back to `documents` on every search,
+    # and keyed on clause_id so a re-ingest that replaces clauses replaces
+    # their vectors with them.
+    try:
+        import config as _cfg2
+        _emb_dims2 = _cfg2.get_embedding_dimensions()
+        _c_tbl = _clause_table_name()
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {_c_tbl} (
+                id           BIGSERIAL PRIMARY KEY,
+                wiki_id      TEXT NOT NULL DEFAULT '{DEFAULT_WIKI_ID}',
+                session_id   TEXT NOT NULL,
+                clause_id    BIGINT NOT NULL,
+                source_doc   TEXT NOT NULL,
+                clause_type  TEXT,
+                doc_family   TEXT,
+                role         TEXT,
+                embedding    vector({_emb_dims2}),
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (clause_id)
+            )
+        """))
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS {_c_tbl}_scope_idx "
+            f"ON {_c_tbl} (wiki_id, session_id, role)"
+        ))
+    except Exception as _c_err:
+        logger.warning("Could not create clause-embedding table: %s", _c_err)
         conn.rollback()
 
     # --- wiki_id on the legacy tables ---------------------------------------
