@@ -123,14 +123,38 @@ def get(wiki_id: str, playbook_id: int) -> dict | None:
 
 
 def delete(wiki_id: str, playbook_id: int) -> bool:
+    """Delete a playbook, its rules and its past runs.
+
+    Refuses while a run is still in flight. The cascade would otherwise remove
+    the run row out from under the worker still writing findings against it,
+    which fails on the foreign key mid-run — the run dies partway through and
+    the findings it had already produced go with it.
+    """
     if not _enabled():
         return False
     text = _text()
     with db.get_engine().connect() as c:
+        active = c.execute(text("""
+            SELECT count(*) FROM playbook_runs
+            WHERE playbook_id = :i AND status = 'running'
+        """), {"i": playbook_id}).scalar() or 0
+        if active:
+            raise PlaybookError(
+                f"{active} run(s) still in progress — wait for them to finish "
+                f"before deleting this playbook")
         res = c.execute(text("DELETE FROM playbooks WHERE wiki_id=:w AND id=:i"),
                         {"w": wiki_id, "i": playbook_id})
         c.commit()
     return (res.rowcount or 0) > 0
+
+
+def run_exists(run_id: int) -> bool:
+    """Whether the run row is still there — it is not, if the playbook was
+    deleted underneath a run in flight."""
+    text = _text()
+    with db.get_engine().connect() as c:
+        return bool(c.execute(text("SELECT 1 FROM playbook_runs WHERE id=:r"),
+                              {"r": run_id}).scalar())
 
 
 def add_rule(wiki_id: str, playbook_id: int, clause_type: str, standard: str,
@@ -431,6 +455,12 @@ def run(wiki_id: str, session_id: str, playbook_id: int, documents: list[str],
                        collection_id, collection_name)
     try:
         for doc in documents:
+            # The playbook can be deleted while this is running, which cascades
+            # the run row away. Stop cleanly rather than failing on the foreign
+            # key for every remaining clause.
+            if not run_exists(run_id):
+                logger.info("Playbook run %s was deleted mid-run — stopping", run_id)
+                return run_id
             for rule in book["rules"]:
                 hits = clauses_for_rule(wiki_id, doc, rule["clause_type"])
                 if not hits:
