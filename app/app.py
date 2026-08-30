@@ -1727,6 +1727,73 @@ def admin_wikis_archive():
 
 
 # ---------------------------------------------------------------------------
+# Prompt library (Phase 3) — reusable, wiki-scoped {{placeholder}} templates
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/prompts", methods=["GET", "POST"])
+def admin_prompts():
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import prompt_library as _lib
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        return jsonify({"templates": _lib.list_all(wiki_id, request.args.get("category")),
+                        "categories": _lib.categories(wiki_id)})
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    session_id = _get_main_session_id() or data.get("session_id", "")
+    try:
+        return jsonify(_lib.create(wiki_id, session_id, data.get("name", ""),
+                                   data.get("body", ""), data.get("category"))), 201
+    except _lib.PromptLibraryError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/admin/prompts/<int:template_id>", methods=["GET", "PATCH", "DELETE"])
+def admin_prompt(template_id: int):
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import prompt_library as _lib
+    wiki_id = current_wiki_id()
+    if request.method == "GET":
+        found = _lib.get(wiki_id, template_id)
+        return jsonify(found) if found else (jsonify({"error": "Not found"}), 404)
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if request.method == "DELETE":
+        return (jsonify({"status": "deleted"}) if _lib.delete(wiki_id, template_id)
+                else (jsonify({"error": "Not found"}), 404))
+    data = request.get_json(silent=True) or {}
+    try:
+        changed = _lib.update(wiki_id, template_id, data.get("name"),
+                              data.get("body"), data.get("category"))
+    except _lib.PromptLibraryError as e:
+        return jsonify({"error": str(e)}), 400
+    if not changed:
+        return jsonify({"error": "Nothing to update, or template not found"}), 400
+    return jsonify(_lib.get(wiki_id, template_id))
+
+
+@app.route("/admin/prompts/<int:template_id>/render", methods=["POST"])
+def admin_prompt_render(template_id: int):
+    """Fill a template's {{placeholders}}. Zero LLM calls — string
+    substitution only. A variable with no supplied value is left literal in
+    the output and listed in `missing`, so a half-filled template is still
+    usable rather than silently blank."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import prompt_library as _lib
+    found = _lib.get(current_wiki_id(), template_id)
+    if not found:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    return jsonify(_lib.render(found["body"], data.get("values") or {}))
+
+
+# ---------------------------------------------------------------------------
 # Deviation Dashboard (Phase 3) — a SQL aggregation over playbook_findings
 # ---------------------------------------------------------------------------
 
