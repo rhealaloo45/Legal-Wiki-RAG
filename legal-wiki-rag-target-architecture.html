@@ -1191,10 +1191,10 @@
         </div>
 
         <div class="phase">
-          <div class="phase-label">Phase 3<span class="sub">Depends on Phase 2</span></div>
+          <div class="phase-label">Phase 3<span class="sub">Depends on Phase 2</span> <span class="badge done">shipped</span></div>
           <div>
             <div class="phase-items">Deviation Dashboard · Prompt library</div>
-            <p class="phase-desc">The dashboard is a SQL aggregation over <code>playbook_runs</code> — dead until Playbooks has run against a Collection.</p>
+            <p class="phase-desc">The dashboard is a SQL aggregation over <code>playbook_findings</code> — no new tables, no LLM calls. Tested against real leftover run data from Phase 2 (25 findings, 5 documents), every aggregation cross-checked against a manual SQL query. The Prompt library is deliberately narrow — the spec names it under "Also fixing" with no further detail, not among the seven locked-in features — so it ships as named {{placeholder}} templates, CRUD plus a render endpoint, wiki-scoped, nothing more.</p>
           </div>
         </div>
       </section>
@@ -1325,9 +1325,10 @@
           <div class="phase-label">Phase 3<span class="sub">Depends on Phase 2</span></div>
           <div>
             <ul style="margin-bottom:0;">
-              <li>Deviation Dashboard (SQL aggregation over <code>playbook_runs</code>).</li>
-              <li>Prompt library.</li>
+              <li><span style="color:var(--done);">Deviation Dashboard (SQL aggregation over <code>playbook_findings</code>).</span> <span class="badge done">shipped</span> No new tables and no LLM calls — the whole feature is turning rows a playbook run already wrote into "which documents need attention, ranked, with why". Two shapes: an overview (one line per playbook, its latest <em>complete</em> run, sorted by <code>unacceptable + missing</code> count so the worst playbook surfaces first) and a per-run breakdown — by clause type, by document worst-first, and a priority list restricted to <code>unacceptable</code>/<code>missing</code> ordered by severity. Only completed runs are aggregated, deliberately: a run still in progress has partial findings, and surfacing it would show a document as compliant simply because its clauses have not been reached yet. <strong style="color:var(--text)">Stale-document detection</strong> compares a run's frozen <code>documents_covered</code> against the collection's <em>current</em> membership — this is why runs freeze that list rather than pointing at a live collection (§ Playbooks, above): without a frozen snapshot there is nothing to compare the present against. A document added to a collection after the run shows up as "not yet assessed" rather than silently reading as compliant. Verified against real leftover data from the earlier live Playbooks test — 25 findings across 5 documents — with every aggregation cross-checked against a manual SQL query rather than merely checked for a non-empty result, including adding and removing a document from the live collection to prove the stale flag actually reacts to membership changes rather than being computed once and cached.</li>
+              <li><span style="color:var(--done);">Prompt library.</span> <span class="badge done">shipped</span> The spec names this under "Also fixing" with no further detail — a smaller item than the seven locked-in features — so scope was kept correspondingly narrow rather than invented: named, wiki-scoped templates carrying <code>{{placeholder}}</code> variables, CRUD, and a render endpoint. Distinct from the existing House Rules (<code>services/rules.py</code>), which are global answer-style instructions silently appended to <em>every</em> prompt — this is a library a person picks <em>from</em> for one specific request, so it lives per wiki rather than in one shared global file. Rendering never blanks a missing variable: an unfilled <code>{{placeholder}}</code> is left literal in the output and named in a <code>missing</code> list, because a half-filled template that still shows what is missing is safer to hand someone than one with a silent gap where a name should be.</li>
             </ul>
+            <p class="phase-desc" style="margin-top:.6rem;">118 tests across both features, zero LLM calls — the Deviation Dashboard is a pure read over existing rows and the Prompt library is CRUD plus string substitution, so nothing here needed inference to verify. Each piece shipped as its own commit — service, then routes, then UI — tested clean before the next.</p>
           </div>
         </div>
 
