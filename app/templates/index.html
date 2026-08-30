@@ -1230,6 +1230,11 @@
       display: flex;
       flex-direction: column;
       gap: 2px;
+      /* #panel-admin is overflow:hidden on the row, so without this the rail
+         doesn't scroll — it silently clips. Five Phase 2/3 nav items pushed
+         the rail past the viewport height for the first time. */
+      overflow-y: auto;
+      overscroll-behavior: contain;
     }
 
     .admin-rail-label {
@@ -4109,7 +4114,7 @@
               <div class="admin-section-head">
                 <div>
                   <div class="admin-section-title">Prompt Library</div>
-                  <div class="admin-section-sub" id="admin-prompts-sub">Reusable templates with {{placeholder}} variables</div>
+                  <div class="admin-section-sub" id="admin-prompts-sub">Reusable templates with {% raw %}{{placeholder}}{% endraw %} variables</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
                   <input id="admin-prompt-name" class="admin-search-input" type="text" placeholder="New template name…">
@@ -4913,9 +4918,9 @@
       const rows = j.templates || [];
       document.getElementById('admin-prompts-sub').textContent =
         rows.length ? rows.length + ' template' + (rows.length === 1 ? '' : 's') + ' in this wiki'
-                    : 'Reusable templates with {{placeholder}} variables';
+                    : 'Reusable templates with {% raw %}{{placeholder}}{% endraw %} variables';
       if (!rows.length) {
-        el.innerHTML = '<div class="admin-empty">No templates yet. Create one above — use {{name}} for anything filled in at use time.</div>';
+        el.innerHTML = '<div class="admin-empty">No templates yet. Create one above — use {% raw %}{{name}}{% endraw %} for anything filled in at use time.</div>';
         return;
       }
       el.innerHTML = '<table class="admin-table"><thead><tr>' +
@@ -4935,7 +4940,7 @@
       if (!name) { showToast('Give the template a name first.'); return; }
       const r = await fetch('/admin/prompts', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, category: category || null, body: 'New template — edit me. Use {{placeholders}} for anything filled in at use time.' })
+        body: JSON.stringify({ name, category: category || null, body: 'New template — edit me. Use {% raw %}{{placeholders}}{% endraw %} for anything filled in at use time.' })
       });
       const j = await r.json();
       if (!r.ok) { showToast(j.error || 'Could not create template.'); return; }
@@ -4953,7 +4958,7 @@
     }
 
     // Detail view is edit + preview together: the variable inputs are
-    // generated FROM the body's own {{placeholders}}, so the preview always
+    // generated FROM the body's own {% raw %}{{placeholders}}{% endraw %}, so the preview always
     // matches what the template currently asks for, including right after an
     // edit that adds or removes a variable.
     async function openPrompt(id) {
