@@ -3962,6 +3962,9 @@
             <div class="admin-nav-item" id="adminNav-deviation" data-target="deviation" onclick="switchAdminTab('deviation',this)">
               <span class="admin-nav-left"><i class="ti ti-alert-triangle" style="font-size:16px"></i>Deviation</span>
             </div>
+            <div class="admin-nav-item" id="adminNav-prompts" data-target="prompts" onclick="switchAdminTab('prompts',this)">
+              <span class="admin-nav-left"><i class="ti ti-message-2" style="font-size:16px"></i>Prompt Library</span>
+            </div>
           </div>
 
           <div class="admin-content">
@@ -4100,6 +4103,22 @@
               </div>
               <div class="admin-card admin-table-wrap"><div id="admin-deviation-overview"></div></div>
               <div id="admin-deviation-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-prompts" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Prompt Library</div>
+                  <div class="admin-section-sub" id="admin-prompts-sub">Reusable templates with {{placeholder}} variables</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-prompt-name" class="admin-search-input" type="text" placeholder="New template name…">
+                  <input id="admin-prompt-category" class="admin-search-input" type="text" placeholder="Category (optional)" style="max-width:150px">
+                  <button type="button" class="admin-pill-btn primary" onclick="createPrompt()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-prompts-table"></div></div>
+              <div id="admin-prompt-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4582,7 +4601,7 @@
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
       ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations',
-       'collections', 'playbooks', 'precedent', 'deviation'].forEach(n => {
+       'collections', 'playbooks', 'precedent', 'deviation', 'prompts'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
@@ -4596,6 +4615,7 @@
       else if (name === 'playbooks') { loadPlaybooks(); loadPlaybookRuns(); }
       else if (name === 'precedent') loadPrecedentStats();
       else if (name === 'deviation') loadDeviationOverview();
+      else if (name === 'prompts') loadPrompts();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
     }
 
@@ -4883,6 +4903,123 @@
             `<td>${esc(f.clause_type)}</td><td>${esc(shortDoc(f.source_doc))}</td>` +
             `<td>${esc(f.rationale || '')}</td><td>${esc(f.redline || '')}</td></tr>`;
         }).join('') + '</tbody></table></div>';
+    }
+
+    // ---- Prompt Library ------------------------------------------------------
+    async function loadPrompts() {
+      const el = document.getElementById('admin-prompts-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/prompts')).json();
+      const rows = j.templates || [];
+      document.getElementById('admin-prompts-sub').textContent =
+        rows.length ? rows.length + ' template' + (rows.length === 1 ? '' : 's') + ' in this wiki'
+                    : 'Reusable templates with {{placeholder}} variables';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No templates yet. Create one above — use {{name}} for anything filled in at use time.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr>' +
+        '<th>Name</th><th>Category</th><th>Variables</th><th></th></tr></thead><tbody>' +
+        rows.map(t => `<tr><td><strong>${esc(t.name)}</strong></td>` +
+          `<td>${esc(t.category || '—')}</td>` +
+          `<td>${(t.variables || []).map(v => `<span class="admin-chip">${esc(v)}</span>`).join(' ') || '—'}</td>` +
+          `<td style="text-align:right;white-space:nowrap">` +
+          `<button class="admin-pill-btn" onclick="openPrompt(${t.id})">Open</button> ` +
+          `<button class="admin-pill-btn" onclick="deletePrompt(${t.id},'${esc(t.name)}')">Delete</button>` +
+          `</td></tr>`).join('') + '</tbody></table>';
+    }
+
+    async function createPrompt() {
+      const name = (document.getElementById('admin-prompt-name').value || '').trim();
+      const category = (document.getElementById('admin-prompt-category').value || '').trim();
+      if (!name) { showToast('Give the template a name first.'); return; }
+      const r = await fetch('/admin/prompts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, category: category || null, body: 'New template — edit me. Use {{placeholders}} for anything filled in at use time.' })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create template.'); return; }
+      document.getElementById('admin-prompt-name').value = '';
+      document.getElementById('admin-prompt-category').value = '';
+      showToast('Created “' + name + '”.');
+      loadPrompts(); openPrompt(j.id);
+    }
+
+    async function deletePrompt(id, name) {
+      if (!confirm('Delete the template “' + name + '”?')) return;
+      await fetch('/admin/prompts/' + id, { method: 'DELETE' });
+      document.getElementById('admin-prompt-detail').style.setProperty('display', 'none', 'important');
+      showToast('Deleted.'); loadPrompts();
+    }
+
+    // Detail view is edit + preview together: the variable inputs are
+    // generated FROM the body's own {{placeholders}}, so the preview always
+    // matches what the template currently asks for, including right after an
+    // edit that adds or removes a variable.
+    async function openPrompt(id) {
+      const box = document.getElementById('admin-prompt-detail');
+      box.style.setProperty('display', 'block', 'important');
+      const j = await (await fetch('/admin/prompts/' + id)).json();
+      renderPromptDetail(id, j);
+    }
+
+    function renderPromptDetail(id, j) {
+      const box = document.getElementById('admin-prompt-detail');
+      const varInputs = (j.variables || []).map(v =>
+        `<input class="admin-search-input pv-var" data-var="${esc(v)}" placeholder="${esc(v)}" style="min-width:140px" oninput="previewPrompt(${id})">`).join(' ');
+      box.innerHTML = `
+        <div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+          <div class="admin-section-sub">${esc(j.category || 'uncategorised')}</div></div>
+        </div>
+        <textarea id="pb-body" class="admin-search-input" style="width:100%;min-height:110px;font-family:monospace;font-size:12.5px"
+                  oninput="schedulePromptSave(${id})">${esc(j.body)}</textarea>
+        <div class="admin-filter-row" style="margin-top:8px">
+          <span style="font-size:12px;opacity:.7;align-self:center">Preview with:</span>
+          ${varInputs || '<span style="font-size:12px;opacity:.5">no variables</span>'}
+        </div>
+        <div class="admin-section-title" style="font-size:13px;margin-top:10px">Rendered</div>
+        <div class="admin-card" id="pb-preview" style="white-space:pre-wrap;font-size:13px;min-height:40px">${esc(j.body)}</div>
+        <div id="pb-save-status" style="font-size:11.5px;opacity:.6;margin-top:6px">&nbsp;</div>`;
+      previewPrompt(id);
+    }
+
+    let _promptSaveTimer = null;
+    function schedulePromptSave(id) {
+      clearTimeout(_promptSaveTimer);
+      document.getElementById('pb-save-status').textContent = 'Editing…';
+      _promptSaveTimer = setTimeout(() => savePromptBody(id), 600);
+    }
+
+    async function savePromptBody(id) {
+      const body = document.getElementById('pb-body').value;
+      const r = await fetch('/admin/prompts/' + id, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body })
+      });
+      const j = await r.json();
+      const status = document.getElementById('pb-save-status');
+      if (!r.ok) { status.textContent = j.error || 'Could not save.'; return; }
+      status.textContent = 'Saved.';
+      // Variables may have changed — rebuild the preview inputs to match.
+      renderPromptDetail(id, j);
+      loadPrompts();
+    }
+
+    async function previewPrompt(id) {
+      const values = {};
+      document.querySelectorAll('#admin-prompt-detail .pv-var').forEach(inp => {
+        values[inp.dataset.var] = inp.value;
+      });
+      // /render reads the SAVED body, so while an edit is still debouncing
+      // (see schedulePromptSave) this reflects the body as of the last save,
+      // not the unsaved keystrokes — it catches up ~600ms after typing stops.
+      const r = await fetch('/admin/prompts/' + id + '/render', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values })
+      });
+      const j = await r.json();
+      document.getElementById('pb-preview').textContent = j.text;
     }
 
     // ---- Deviation Dashboard ------------------------------------------------
