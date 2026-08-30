@@ -1209,6 +1209,30 @@ def _init_backbone_schema(conn, text) -> None:
     ):
         conn.execute(text(stmt))
 
+    # --- prompt library (Phase 3) --------------------------------------------
+    # Reusable, wiki-scoped prompt templates — "Also fixing: Prompt library".
+    # Distinct from services/rules.py's House Rules: those are global answer-
+    # style instructions appended to every prompt automatically. This is a
+    # library a person picks FROM for one drafting/query request, so it is
+    # wiki-scoped like everything else in this phase rather than a single
+    # global file, and stores {{placeholder}} bodies rather than fixed text.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS prompt_templates (
+            id          BIGSERIAL PRIMARY KEY,
+            wiki_id     TEXT NOT NULL,
+            session_id  TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            category    TEXT,
+            body        TEXT NOT NULL,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, name)
+        )
+    """))
+    conn.execute(text(
+        "CREATE INDEX IF NOT EXISTS prompt_templates_wiki_idx ON prompt_templates (wiki_id)"
+    ))
+
     # --- hypothetical-question embeddings (§ 01 stage 06) --------------------
     # The third embedding type, alongside page-level and clause-level. Its own
     # table rather than extra rows in the page table: a question and a page
