@@ -3959,6 +3959,9 @@
             <div class="admin-nav-item" id="adminNav-precedent" data-target="precedent" onclick="switchAdminTab('precedent',this)">
               <span class="admin-nav-left"><i class="ti ti-search" style="font-size:16px"></i>Precedent</span>
             </div>
+            <div class="admin-nav-item" id="adminNav-deviation" data-target="deviation" onclick="switchAdminTab('deviation',this)">
+              <span class="admin-nav-left"><i class="ti ti-alert-triangle" style="font-size:16px"></i>Deviation</span>
+            </div>
           </div>
 
           <div class="admin-content">
@@ -4085,6 +4088,18 @@
                 <button type="button" class="admin-pill-btn primary" onclick="searchPrecedent()"><i class="ti ti-search" style="font-size:14px"></i>Search</button>
               </div>
               <div class="admin-card admin-table-wrap"><div id="admin-precedent-results"></div></div>
+            </div>
+
+            <div id="admin-panel-deviation" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Deviation Dashboard</div>
+                  <div class="admin-section-sub" id="admin-deviation-sub">Which documents deviate from house positions, ranked</div>
+                </div>
+                <button type="button" class="admin-pill-btn" onclick="loadDeviationOverview()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-deviation-overview"></div></div>
+              <div id="admin-deviation-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4567,7 +4582,7 @@
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
       ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations',
-       'collections', 'playbooks', 'precedent'].forEach(n => {
+       'collections', 'playbooks', 'precedent', 'deviation'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
@@ -4580,6 +4595,7 @@
       else if (name === 'collections') loadCollections();
       else if (name === 'playbooks') { loadPlaybooks(); loadPlaybookRuns(); }
       else if (name === 'precedent') loadPrecedentStats();
+      else if (name === 'deviation') loadDeviationOverview();
       else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
     }
 
@@ -4867,6 +4883,95 @@
             `<td>${esc(f.clause_type)}</td><td>${esc(shortDoc(f.source_doc))}</td>` +
             `<td>${esc(f.rationale || '')}</td><td>${esc(f.redline || '')}</td></tr>`;
         }).join('') + '</tbody></table></div>';
+    }
+
+    // ---- Deviation Dashboard ------------------------------------------------
+    // Same verdict->colour convention as the Playbooks findings table, so a
+    // reviewer who has seen one recognises the other.
+    const VERDICT_COLOR = { unacceptable: '#d9534f', missing: '#e0a458',
+                            fallback: '#8fa9e0', unclear: '#999', standard: '#4a9e6f' };
+
+    async function loadDeviationOverview() {
+      const el = document.getElementById('admin-deviation-overview');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks/dashboard')).json();
+      const rows = j.playbooks || [];
+      document.getElementById('admin-deviation-sub').textContent =
+        rows.length ? rows.length + ' playbook' + (rows.length === 1 ? '' : 's') + ' with a completed run'
+                    : 'Which documents deviate from house positions, ranked';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No completed playbook runs yet. Run a playbook from the Playbooks tab, then come back here.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr>' +
+        '<th>Playbook</th><th>Collection</th><th style="text-align:right">Needs attention</th>' +
+        '<th></th><th style="text-align:right">Docs</th><th></th></tr></thead><tbody>' +
+        rows.map(r => {
+          const chips = ['unacceptable', 'missing', 'fallback', 'unclear', 'standard']
+            .filter(k => r.verdicts[k])
+            .map(k => `<span class="admin-chip" style="color:${VERDICT_COLOR[k]}">${r.verdicts[k]} ${k}</span>`)
+            .join(' ');
+          return `<tr><td><strong>${esc(r.playbook)}</strong></td><td>${esc(r.collection || '—')}</td>` +
+            `<td style="text-align:right;font-weight:600;color:${r.attention_needed ? '#d9534f' : 'inherit'}">${r.attention_needed}</td>` +
+            `<td>${chips}</td><td style="text-align:right">${r.documents_total}</td>` +
+            `<td style="text-align:right"><button class="admin-pill-btn" onclick="openDeviation(${r.playbook_id})">Open</button></td></tr>`;
+        }).join('') + '</tbody></table>';
+    }
+
+    async function openDeviation(playbookId) {
+      const box = document.getElementById('admin-deviation-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const r = await fetch(`/admin/playbooks/${playbookId}/deviation`);
+      const j = await r.json();
+      if (!r.ok) { box.innerHTML = `<div class="admin-empty">${esc(j.error || 'Could not load.')}</div>`; return; }
+
+      const stale = j.stale_documents || [];
+      const staleBlock = stale.length ? `
+        <div class="admin-filter-row" style="margin-top:4px">
+          <span class="admin-chip" style="color:#e0a458">${stale.length} document(s) added since this run — not yet assessed</span>
+        </div>` : '';
+
+      const typeRows = (j.by_clause_type || []).map(t => {
+        const cells = ['standard', 'fallback', 'unacceptable', 'missing', 'unclear']
+          .map(k => `<td style="text-align:right;${t[k] ? `color:${VERDICT_COLOR[k]}` : 'opacity:.35'}">${t[k] || 0}</td>`).join('');
+        return `<tr><td>${esc(t.clause_type)}</td>${cells}</tr>`;
+      }).join('');
+
+      const docRows = (j.by_document || []).map(d => {
+        const cnt = Object.entries(d.counts).map(([k, n]) => `${n} ${k}`).join(', ');
+        return `<tr><td style="color:${VERDICT_COLOR[d.worst]};font-weight:600">${esc(d.worst)}</td>` +
+          `<td>${esc(shortDoc(d.source_doc))}</td><td>${esc(cnt)}</td></tr>`;
+      }).join('');
+
+      const priRows = (j.priority_findings || []).map(f =>
+        `<tr><td style="color:${VERDICT_COLOR[f.verdict]};font-weight:600">${esc(f.verdict)}</td>` +
+        `<td>${esc(f.severity || '')}</td><td>${esc(f.clause_type)}</td>` +
+        `<td>${esc(shortDoc(f.source_doc))}</td><td>${esc(f.rationale || '')}</td>` +
+        `<td>${esc(f.redline || '')}</td></tr>`).join('');
+
+      box.innerHTML = `
+        <div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.playbook)} — ${esc(j.collection || 'ad hoc')}</div>
+          <div class="admin-section-sub">Run finished ${j.finished_at ? new Date(j.finished_at).toLocaleString() : '—'}</div></div>
+        </div>
+        ${staleBlock}
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">By clause type</div>
+        <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Clause type</th>
+          <th style="text-align:right">standard</th><th style="text-align:right">fallback</th>
+          <th style="text-align:right">unacceptable</th><th style="text-align:right">missing</th>
+          <th style="text-align:right">unclear</th></tr></thead><tbody>${typeRows}</tbody></table></div>
+
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">By document (worst-first)</div>
+        <div class="admin-table-wrap" style="max-height:260px;overflow:auto">
+          <table class="admin-table"><thead><tr><th>Worst verdict</th><th>Document</th><th>Findings</th></tr></thead>
+          <tbody>${docRows}</tbody></table></div>
+
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">Priority — needs a human</div>
+        <div class="admin-table-wrap" style="max-height:320px;overflow:auto">
+          <table class="admin-table"><thead><tr><th>Verdict</th><th>Severity</th><th>Clause type</th>
+          <th>Document</th><th>Why</th><th>Suggested redline</th></tr></thead>
+          <tbody>${priRows || '<tr><td colspan="6" class="admin-empty">Nothing needs attention.</td></tr>'}</tbody></table></div>`;
     }
 
     // ---- Precedent layer ---------------------------------------------------
