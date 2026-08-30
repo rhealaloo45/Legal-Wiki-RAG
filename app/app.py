@@ -1727,6 +1727,36 @@ def admin_wikis_archive():
 
 
 # ---------------------------------------------------------------------------
+# Deviation Dashboard (Phase 3) — a SQL aggregation over playbook_findings
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/playbooks/dashboard")
+def admin_deviation_overview():
+    """One line per playbook with a completed run: its latest run and that
+    run's verdict counts, worst-first."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import deviation as _dev
+    return jsonify({"playbooks": _dev.overview(current_wiki_id())})
+
+
+@app.route("/admin/playbooks/<int:playbook_id>/deviation")
+def admin_deviation_detail(playbook_id: int):
+    """Full breakdown for one playbook: by clause type, by document
+    (worst-first), a priority list, and documents added since the run that
+    have not been assessed yet. Defaults to the latest complete run; pass
+    ?run_id= to inspect a past one."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import deviation as _dev
+    run_id = request.args.get("run_id")
+    found = _dev.dashboard(current_wiki_id(), playbook_id,
+                           int(run_id) if run_id else None)
+    return jsonify(found) if found else (
+        jsonify({"error": "No completed run for this playbook"}), 404)
+
+
+# ---------------------------------------------------------------------------
 # Precedent layer (Phase 2) — document roles + clause embeddings
 # ---------------------------------------------------------------------------
 
