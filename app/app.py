@@ -1836,6 +1836,167 @@ def admin_deviation_detail(playbook_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Accuracy regression suite (Phase 3.5a)
+# ---------------------------------------------------------------------------
+
+def _regression_session_id() -> str:
+    """The wiki session the suite runs against — the same one /query uses."""
+    return _get_main_session_id() or ""
+
+
+@app.route("/admin/regression/cases", methods=["GET", "POST", "DELETE"])
+def admin_regression_cases():
+    """List, upsert, or delete stored regression cases."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    from services import db as _db
+
+    if request.method == "GET":
+        return jsonify({"cases": _db.get_regression_cases(
+            current_wiki_id(), sid,
+            archetype=request.args.get("archetype"),
+            active_only=request.args.get("all") != "1")})
+
+    data = request.get_json(silent=True) or {}
+    if request.method == "DELETE":
+        name = (data.get("name") or "").strip()
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        return jsonify({"deleted": _db.delete_regression_case(current_wiki_id(), sid, name)})
+
+    name = (data.get("name") or "").strip()
+    question = (data.get("question") or "").strip()
+    if not name or not question:
+        return jsonify({"error": "name and question are required"}), 400
+    fields = {k: data.get(k) for k in
+              ("archetype", "expect_scope_method", "expect_docs", "expect_abstain",
+               "must_contain", "must_not_contain", "expect_answer", "notes", "active")
+              if k in data}
+    case_id = _db.upsert_regression_case(current_wiki_id(), sid, name, question, **fields)
+    return jsonify({"id": case_id, "name": name})
+
+
+@app.route("/admin/regression/seed", methods=["POST"])
+def admin_regression_seed():
+    """Load the hand-verified seed case set. Idempotent."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    from services import regression_seed
+    return jsonify(regression_seed.load(current_wiki_id(), sid))
+
+
+@app.route("/admin/regression/estimate")
+def admin_regression_estimate():
+    """What a run would cost before starting one — the scope tier is free,
+    the other two are not, and that should be visible ahead of the click."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    from services import regression
+    tier = request.args.get("tier", "scope")
+    if tier not in regression.TIERS:
+        return jsonify({"error": f"tier must be one of {list(regression.TIERS)}"}), 400
+    return jsonify(regression.estimate_run(current_wiki_id(), sid, tier,
+                                           archetype=request.args.get("archetype")))
+
+
+@app.route("/admin/regression/run", methods=["POST"])
+def admin_regression_run():
+    """Execute a run.
+
+    The paid tiers require confirm:true in the body — the scope tier is free
+    and needs no ceremony, but a pipeline or graded run over the full case set
+    is a real spend and should not happen because a button was near the cursor.
+    """
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+
+    from services import regression
+    data = request.get_json(silent=True) or {}
+    tier = (data.get("tier") or "scope").strip()
+    if tier not in regression.TIERS:
+        return jsonify({"error": f"tier must be one of {list(regression.TIERS)}"}), 400
+
+    estimate = regression.estimate_run(current_wiki_id(), sid, tier,
+                                       archetype=data.get("archetype"))
+    if not estimate["free"] and not data.get("confirm"):
+        return jsonify({"error": "confirmation required for a paid tier",
+                        "estimate": estimate, "needs_confirm": True}), 409
+    try:
+        return jsonify(regression.run(
+            current_wiki_id(), sid, tier=tier,
+            archetype=data.get("archetype"), label=data.get("label"),
+            case_names=data.get("cases")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error("Regression run failed: %s", e)
+        return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
+
+
+@app.route("/admin/regression/runs")
+def admin_regression_runs():
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    from services import db as _db
+    run_id = request.args.get("run_id")
+    if run_id:
+        return jsonify({"results": _db.get_regression_results(int(run_id))})
+    return jsonify({"runs": _db.get_regression_runs(
+        current_wiki_id(), sid, tier=request.args.get("tier"),
+        limit=int(request.args.get("limit", 20)))})
+
+
+@app.route("/admin/regression/compare")
+def admin_regression_compare():
+    """Case-level diff between two runs — which cases newly fail, which newly
+    pass, and which changed scope resolution without changing pass/fail."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    a, b = request.args.get("a"), request.args.get("b")
+    if not a or not b:
+        return jsonify({"error": "a and b run ids are required"}), 400
+    from services import db as _db
+    return jsonify(_db.compare_regression_runs(int(a), int(b)))
+
+
+@app.route("/admin/regression/latency")
+def admin_regression_latency():
+    """p50/p90/p95 by scope method plus a per-stage breakdown, read from the
+    query traces already being written for every real query."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    from services import db as _db
+    days = int(request.args.get("days", 30))
+    return jsonify({"by_method": _db.latency_percentiles(sid, days=days),
+                    "by_stage": _db.stage_latency_breakdown(sid, days=days),
+                    "days": days})
+
+
+# ---------------------------------------------------------------------------
 # Precedent layer (Phase 2) — document roles + clause embeddings
 # ---------------------------------------------------------------------------
 
