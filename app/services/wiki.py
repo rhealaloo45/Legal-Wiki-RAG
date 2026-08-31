@@ -7862,6 +7862,13 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         return set()
     segments = _question_pair_segments(question)
     if not segments:
+        try:
+            combinatorial = _resolve_docs_by_combinatorial_pairing(question, session_id, max_docs)
+        except Exception as e:
+            logger.error("resolve_scope: combinatorial party-pairing failed: %s", e)
+            combinatorial = set()
+        if combinatorial:
+            return combinatorial
         return _resolve_one_party_pair(question, session_id, max_docs)
 
     union: set[str] = set()
@@ -7951,7 +7958,19 @@ def _resolve_one_party_pair(question: str, session_id: str,
     # match nothing or match by accident.
     tokens = tokens[:3]
     full_names = [token_full.get(t, t) for t in tokens]
+    return _resolve_docs_for_tokens(tokens, full_names, question, session_id, max_docs)
 
+
+def _resolve_docs_for_tokens(tokens: list[str], full_names: list[str], question: str,
+                             session_id: str, max_docs: int = 6) -> set[str]:
+    """Resolve documents whose title (or, failing that, content) carries every
+    one of ``tokens``.
+
+    Split out of ``_resolve_one_party_pair`` so the same title-cluster,
+    content-supplement, and narrowing logic can run on a token pair chosen by
+    combinatorial pairing (``_resolve_docs_by_combinatorial_pairing``) as well
+    as on the flat whole-question token extraction above it.
+    """
     try:
         cluster = {d for d in _db.find_source_docs_by_title_tokens(
             _active_wiki_id(), session_id, tokens, cap=max_docs * 5) if d}
@@ -8059,6 +8078,103 @@ def _resolve_one_party_pair(question: str, session_id: str,
                     tokens, len(narrowed), {_norm_doc_name(d) for d in narrowed})
         return narrowed
     return set()
+
+
+def _pairings(items: list[str]):
+    """Every way of grouping ``items`` into disjoint pairs, each yielded once.
+
+    Standard recursive construction: fix the first item, pair it with each of
+    the others in turn, and recurse on what's left. For n items this yields
+    (n-1)!! matchings — 3 for four items, 15 for six — never duplicating a
+    grouping under reordering, since the first item is always the one paired.
+    """
+    if not items:
+        yield []
+        return
+    first, rest = items[0], items[1:]
+    for i, other in enumerate(rest):
+        remaining = rest[:i] + rest[i + 1:]
+        for tail in _pairings(remaining):
+            yield [(first, other)] + tail
+
+
+def _resolve_docs_by_combinatorial_pairing(question: str, session_id: str,
+                                           max_docs: int = 6) -> set[str]:
+    """Resolve a question naming two (or three) whole matters that never
+    repeats the word "between" for each one.
+
+    ``_question_pair_segments`` only splits a question into per-matter
+    segments when "between" introduces EACH pair ("the agreement between A
+    and B ... the agreement between C and D"). Real questions often name two
+    matters without repeating it — "what does A owe B that isn't in C and
+    D's agreement", "can A and C each assign without B or D's consent" — and
+    the second phrasing doesn't even keep each matter's two parties adjacent:
+    it lists all the "first" parties together, then all the "second" parties,
+    so naive positional pairing (1st with 2nd, 3rd with 4th) gets it wrong
+    too. Confirmed live: this exact phrasing cost three real cross-document
+    questions their second document entirely — each answered "the agreement
+    isn't in the provided context" for a document that was in fact ingested,
+    indexed, and sitting in the same wiki as the one it did find.
+
+    Instead of parsing the sentence's grammar, this tries every way of
+    pairing up the party names the question names at all, resolves each
+    candidate pair through the exact same title/content/narrowing logic a
+    single explicit pair gets (``_resolve_docs_for_tokens``), and accepts a
+    grouping only if EVERY pair in it independently resolves to a real,
+    distinct document cluster. Wrong groupings are expected to fail outright
+    here, not just score worse — two parties who were never actually
+    counterparties on anything share no document, so their pair resolves to
+    nothing. If more than one grouping manages to resolve every pair, which
+    pair is which is genuinely ambiguous from the names alone — decline
+    rather than guess, the same rule the "between"-segment path already
+    applies to a partially-resolved split.
+
+    Capped at 6 tokens (three matters): combinatorial cost aside, a question
+    naming more than three matters by name alone is rare enough that
+    guessing the grouping is riskier than declining outright.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    tokens: list[str] = []
+    token_full: dict[str, str] = {}
+    for n in names:
+        tok = _distinctive_party_token(n)
+        if tok and tok.lower() not in {t.lower() for t in tokens}:
+            tokens.append(tok)
+            token_full[tok] = n
+    if len(tokens) < 4 or len(tokens) % 2 or len(tokens) > 6:
+        return set()
+
+    valid_matchings: list[list[set[str]]] = []
+    for matching in _pairings(tokens):
+        resolved: list[set[str]] = []
+        for a, b in matching:
+            got = _resolve_docs_for_tokens(
+                [a, b], [token_full.get(a, a), token_full.get(b, b)],
+                question, session_id, max_docs)
+            if not got:
+                resolved = []
+                break
+            resolved.append(got)
+        if not resolved:
+            continue
+        # Two different pairs landing on the same document is a sign the
+        # grouping is wrong — two distinct matters don't share one instrument.
+        if len(set.union(*resolved)) != sum(len(r) for r in resolved):
+            continue
+        valid_matchings.append(resolved)
+
+    if len(valid_matchings) != 1:
+        if len(valid_matchings) > 1:
+            logger.info("Combinatorial party-pairing: %d groupings of %s all resolved — "
+                        "ambiguous, declining", len(valid_matchings), tokens)
+        return set()
+
+    union: set[str] = set().union(*valid_matchings[0])
+    logger.info("Combinatorial party-pairing: %s → %d document(s): %s",
+                tokens, len(union), {_norm_doc_name(d) for d in union})
+    return union
 
 
 # Distinct legal-instrument categories a question may name. Counting how many
