@@ -607,6 +607,18 @@ def _run_schema_statements(conn, text) -> None:
             CREATE INDEX IF NOT EXISTS clauses_session_status_idx
             ON clauses (session_id, review_status)
         """))
+        # Canonical clause type (§ Phase 3.5c) — added BESIDE clause_type,
+        # which keeps the raw model-chosen label. NULL means "not mapped",
+        # which is a real answer here, not a missing value: see
+        # services/clause_vocab.py on why a nearest guess is worse.
+        conn.execute(text("""
+            ALTER TABLE clauses ADD COLUMN IF NOT EXISTS clause_type_canon TEXT
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clauses_canon_idx
+            ON clauses (wiki_id, session_id, clause_type_canon)
+            WHERE clause_type_canon IS NOT NULL
+        """))
 
         _init_regression_schema(conn, text)
         _init_backbone_schema(conn, text)
@@ -1759,16 +1771,22 @@ def insert_clauses(wiki_id: str, session_id: str, source_doc: str, clauses: list
             if not clause_type or not verbatim_text or not isinstance(confidence, (int, float)):
                 continue
             stakes = "high" if _is_high_stakes_clause_type(clause_type) else "low"
+            # Canonical type is derived here rather than backfilled later, so a
+            # newly ingested clause is queryable by canon immediately. NULL
+            # when the vocabulary declines — never a nearest guess.
+            from services import clause_vocab as _vocab
+            canon = _vocab.canonical(clause_type)
             conn.execute(
                 text("""
                     INSERT INTO clauses
-                        (wiki_id, session_id, source_doc, clause_type, verbatim_text,
-                         typed_value, confidence, page_num, stakes)
+                        (wiki_id, session_id, source_doc, clause_type, clause_type_canon,
+                         verbatim_text, typed_value, confidence, page_num, stakes)
                     VALUES
-                        (:w, :sid, :doc, :ctype, :vtext, :tval, :conf, :page, :stakes)
+                        (:w, :sid, :doc, :ctype, :canon, :vtext, :tval, :conf, :page, :stakes)
                 """),
                 {
                     "w": wiki_id, "sid": session_id, "doc": source_doc, "ctype": clause_type,
+                    "canon": canon,
                     # Verbatim clause text is the most sensitive thing this
                     # table holds — it is the client's actual contract wording.
                     # Encrypted at rest; no-op when no key is configured.
@@ -3877,6 +3895,182 @@ def compare_regression_runs(run_a: int, run_b: int) -> dict:
             else:
                 out["unchanged"] += 1
     return out
+
+
+def _init_normalized_columns(conn, text) -> None:
+    """Normalised value columns (§ Phase 3.5c), added beside the raw fields.
+
+    Every value column has a matching *_status column. That pairing is the
+    whole design: a NULL amount with status 'reference' means the figure lives
+    in a schedule, 'unparsed' means we could not read it, and 'absent' means
+    the field was empty. Gap detection must be able to tell those apart —
+    collapsing them into a bare NULL is what turns "we could not read this cap"
+    into "this contract has no cap".
+    """
+    conn.execute(text("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS liability_cap_amount NUMERIC"))
+    conn.execute(text("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS liability_cap_currency TEXT"))
+    conn.execute(text("ALTER TABLE contracts ADD COLUMN IF NOT EXISTS liability_cap_status TEXT"))
+    conn.execute(text("ALTER TABLE obligations ADD COLUMN IF NOT EXISTS deadline_days NUMERIC"))
+    conn.execute(text("ALTER TABLE obligations ADD COLUMN IF NOT EXISTS deadline_business_days BOOLEAN"))
+    conn.execute(text("ALTER TABLE obligations ADD COLUMN IF NOT EXISTS deadline_status TEXT"))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS contracts_cap_amount_idx
+        ON contracts (wiki_id, liability_cap_amount)
+        WHERE liability_cap_amount IS NOT NULL
+    """))
+
+
+def backfill_normalized_values(wiki_id: str, session_id: str | None = None,
+                               dry_run: bool = False) -> dict:
+    """Parse existing raw values into the normalised columns.
+
+    Deterministic, no model call, re-runnable after any parser change.
+    """
+    from sqlalchemy import text
+    from services import normalize
+    engine = get_engine()
+    out: dict = {"dry_run": dry_run}
+
+    with engine.connect() as conn:
+        _init_normalized_columns(conn, text)
+        conn.commit()
+
+        cap_where = "wiki_id = :w" + (" AND session_id = :sid" if session_id else "")
+        params: dict = {"w": wiki_id}
+        if session_id:
+            params["sid"] = session_id
+
+        caps = conn.execute(text(
+            f"SELECT id, liability_cap FROM contracts WHERE {cap_where}"), params).fetchall()
+        cap_stats: dict[str, int] = {}
+        for cid, raw in caps:
+            parsed = normalize.parse_money(raw)
+            cap_stats[parsed["status"]] = cap_stats.get(parsed["status"], 0) + 1
+            if not dry_run:
+                conn.execute(text("""
+                    UPDATE contracts
+                       SET liability_cap_amount = :a, liability_cap_currency = :c,
+                           liability_cap_status = :s
+                     WHERE id = :id
+                """), {"a": parsed["amount"], "c": parsed["currency"],
+                       "s": parsed["status"], "id": cid})
+
+        obls = conn.execute(text(
+            f"SELECT id, deadline FROM obligations WHERE {cap_where}"), params).fetchall()
+        obl_stats: dict[str, int] = {}
+        for oid, raw in obls:
+            parsed = normalize.parse_duration(raw)
+            obl_stats[parsed["status"]] = obl_stats.get(parsed["status"], 0) + 1
+            if not dry_run:
+                conn.execute(text("""
+                    UPDATE obligations
+                       SET deadline_days = :d, deadline_business_days = :b,
+                           deadline_status = :s
+                     WHERE id = :id
+                """), {"d": parsed["days"], "b": parsed["business_days"],
+                       "s": parsed["status"], "id": oid})
+        if not dry_run:
+            conn.commit()
+
+    out["liability_caps"] = {"rows": len(caps), "by_status": cap_stats}
+    out["obligations"] = {"rows": len(obls), "by_status": obl_stats}
+    return out
+
+
+def backfill_clause_type_canon(wiki_id: str, session_id: str | None = None,
+                               dry_run: bool = False) -> dict:
+    """Populate clauses.clause_type_canon from the raw clause_type.
+
+    Deterministic string mapping — no LLM call, no embedding, so this is free
+    and safe to re-run after every vocabulary change. Updates by distinct raw
+    label rather than row by row: 31,457 rows carry only ~6,000 distinct
+    labels, so this is a few thousand statements instead of thirty thousand.
+
+    Rows whose label does not map are set to NULL explicitly rather than left
+    at whatever they held before, so re-running after a vocabulary change can
+    take a mapping away as well as add one.
+    """
+    from sqlalchemy import text
+    from services import clause_vocab
+    engine = get_engine()
+    where = "wiki_id = :w" + (" AND session_id = :sid" if session_id else "")
+    params: dict = {"w": wiki_id}
+    if session_id:
+        params["sid"] = session_id
+
+    with engine.connect() as conn:
+        labels = [r[0] for r in conn.execute(text(
+            f"SELECT DISTINCT clause_type FROM clauses WHERE {where}"), params)]
+        mapping = clause_vocab.classify_all([l for l in labels if l])
+        mapped = {k: v for k, v in mapping.items() if v}
+        if dry_run:
+            rows = conn.execute(text(
+                f"SELECT count(*) FROM clauses WHERE {where} "
+                f"AND clause_type = ANY(:labels)"),
+                {**params, "labels": list(mapped.keys())}).scalar()
+            return {"dry_run": True, "labels_total": len(labels),
+                    "labels_mapped": len(mapped), "rows_would_map": int(rows or 0)}
+
+        updated = 0
+        for raw, canon in mapped.items():
+            updated += conn.execute(text(
+                f"UPDATE clauses SET clause_type_canon = :c "
+                f"WHERE {where} AND clause_type = :raw "
+                f"AND clause_type_canon IS DISTINCT FROM :c"),
+                {**params, "c": canon, "raw": raw}).rowcount or 0
+        unmapped_labels = [l for l in labels if l and not mapping.get(l)]
+        cleared = 0
+        if unmapped_labels:
+            cleared = conn.execute(text(
+                f"UPDATE clauses SET clause_type_canon = NULL "
+                f"WHERE {where} AND clause_type = ANY(:labels) "
+                f"AND clause_type_canon IS NOT NULL"),
+                {**params, "labels": unmapped_labels}).rowcount or 0
+        conn.commit()
+
+        total, with_canon = conn.execute(text(
+            f"SELECT count(*), count(clause_type_canon) FROM clauses WHERE {where}"),
+            params).fetchone()
+
+    return {"dry_run": False, "labels_total": len(labels), "labels_mapped": len(mapped),
+            "rows_updated": updated, "rows_cleared": cleared,
+            "rows_total": int(total), "rows_with_canon": int(with_canon),
+            "coverage": round(int(with_canon) / max(int(total), 1), 4)}
+
+
+def clause_canon_summary(wiki_id: str, session_id: str | None = None) -> dict:
+    """Canonical-type distribution, plus the biggest unmapped raw labels.
+
+    The unmapped list is the vocabulary's own to-do list — it is ordered by how
+    many clauses are affected, so extending the canon can be driven by volume
+    rather than by guesswork.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    where = "wiki_id = :w" + (" AND session_id = :sid" if session_id else "")
+    params: dict = {"w": wiki_id}
+    if session_id:
+        params["sid"] = session_id
+    with engine.connect() as conn:
+        by_canon = conn.execute(text(f"""
+            SELECT clause_type_canon, count(*) FROM clauses
+            WHERE {where} AND clause_type_canon IS NOT NULL
+            GROUP BY 1 ORDER BY 2 DESC
+        """), params).fetchall()
+        unmapped = conn.execute(text(f"""
+            SELECT clause_type, count(*) FROM clauses
+            WHERE {where} AND clause_type_canon IS NULL
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 30
+        """), params).fetchall()
+        total, with_canon = conn.execute(text(
+            f"SELECT count(*), count(clause_type_canon) FROM clauses WHERE {where}"),
+            params).fetchone()
+    return {
+        "rows_total": int(total), "rows_mapped": int(with_canon),
+        "coverage": round(int(with_canon) / max(int(total), 1), 4),
+        "by_canon": [{"canon": r[0], "count": int(r[1])} for r in by_canon],
+        "top_unmapped": [{"clause_type": r[0], "count": int(r[1])} for r in unmapped],
+    }
 
 
 def count_documents_by_party(wiki_id: str, session_id: str,
