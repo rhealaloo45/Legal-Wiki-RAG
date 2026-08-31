@@ -703,6 +703,50 @@ def _init_regression_schema(conn, text) -> None:
         CREATE INDEX IF NOT EXISTS regression_runs_scope_idx
         ON regression_runs (wiki_id, session_id, tier, started_at DESC)
     """))
+    _init_page_quality_schema(conn, text)
+
+
+def _init_page_quality_schema(conn, text) -> None:
+    """Per-page extraction provenance (§ Phase 3.5b).
+
+    Records only what the reader can actually observe: which engine ran, how
+    the page's text was obtained, and how much came back. Deliberately does
+    NOT carry a fabricated OCR confidence score — Tesseract can report one via
+    image_to_data, but the OCR path here tries several PSM modes behind a retry
+    wrapper and keeps the longest result, so there is no single confidence
+    figure that honestly describes the output. A column that would be filled
+    with a plausible-looking invented number is worse than no column: the whole
+    point of this table is telling a reader when not to trust a document.
+
+    `char_count` after extraction, against the same MIN_CHARS_PER_PAGE floor
+    the reader uses to decide a page needs OCR, is the signal that actually
+    matters — a page still under that floor after OCR ran is a page nobody
+    can answer questions from.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS page_quality (
+            id                BIGSERIAL PRIMARY KEY,
+            wiki_id           TEXT NOT NULL,
+            session_id        TEXT NOT NULL,
+            source_doc        TEXT NOT NULL,
+            page_num          INT  NOT NULL,
+            extraction_method TEXT NOT NULL,
+            ocr_engine        TEXT,
+            char_count        INT  NOT NULL DEFAULT 0,
+            needed_ocr        BOOLEAN NOT NULL DEFAULT FALSE,
+            below_floor       BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, source_doc, page_num)
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS page_quality_doc_idx
+        ON page_quality (wiki_id, session_id, source_doc)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS page_quality_problem_idx
+        ON page_quality (wiki_id, session_id) WHERE below_floor
+    """))
 
 
 # ---------------------------------------------------------------------------
@@ -3833,6 +3877,257 @@ def compare_regression_runs(run_a: int, run_b: int) -> dict:
             else:
                 out["unchanged"] += 1
     return out
+
+
+def count_documents_by_party(wiki_id: str, session_id: str,
+                             parties: list[str] | None = None,
+                             doc_type_hint: str | None = None,
+                             limit: int = 25) -> dict:
+    """Count documents matching a party (or every party pair member) and type.
+
+    Reads documents.parties, a clean JSONB string array populated on the large
+    majority of the corpus, so this is an exact count rather than an estimate
+    inferred from whatever retrieval happened to return. That distinction is
+    the entire point: asked "how many contracts do we have with X", a
+    retrieval-based answer reports how many documents it managed to fetch,
+    which on a corpus of 101 is a confidently wrong small number.
+
+    With two or more parties, counts documents naming ALL of them — "contracts
+    with X and Y" means the agreements between them, not the union.
+
+    Returns the matched documents too (capped), because a bare number a lawyer
+    cannot audit is not usable as an answer.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    clauses = ["d.wiki_id = :w", "d.session_id = :sid"]
+    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
+
+    for i, party in enumerate(parties or []):
+        # Party match is substring and case-insensitive against the array
+        # elements: the corpus stores full legal names ("Tata Power Renewable
+        # Energy Limited") and a lawyer asks for "Tata Power".
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(COALESCE(d.parties, '[]'::jsonb)) AS p(name)
+            WHERE p.name ILIKE :party{i}
+        )""")
+        params[f"party{i}"] = f"%{party.strip()}%"
+
+    if doc_type_hint:
+        clauses.append("d.doc_type ILIKE :dt")
+        params["dt"] = f"%{doc_type_hint.strip()}%"
+
+    where = " AND ".join(clauses)
+    with engine.connect() as conn:
+        total = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar()
+        rows = conn.execute(text(f"""
+            SELECT d.source_doc, d.doc_type, d.effective_date, d.parties
+            FROM documents d WHERE {where}
+            ORDER BY d.effective_date DESC NULLS LAST, d.source_doc
+            LIMIT :lim
+        """), params).fetchall()
+        by_type = conn.execute(text(f"""
+            SELECT COALESCE(NULLIF(d.doc_type, ''), 'Unclassified') AS t, count(*)
+            FROM documents d WHERE {where}
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """), params).fetchall()
+    return {
+        "total": int(total or 0),
+        "parties": parties or [],
+        "doc_type": doc_type_hint,
+        "by_type": [{"doc_type": r[0], "count": int(r[1])} for r in by_type],
+        "documents": [{"source_doc": r[0], "doc_type": r[1],
+                       "effective_date": str(r[2]) if r[2] else None,
+                       "parties": r[3]} for r in rows],
+        "truncated": int(total or 0) > len(rows),
+    }
+
+
+def upsert_page_quality(wiki_id: str, session_id: str, source_doc: str,
+                        page_quality: list[dict]) -> int:
+    """Store per-page extraction provenance for one document.
+
+    Replaced wholesale per document rather than appended: a re-ingest that
+    produced better text must not leave the old page's "OCR failed" row behind
+    to warn about a problem that no longer exists.
+    """
+    if not page_quality:
+        return 0
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            DELETE FROM page_quality
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = :d
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc})
+        n = 0
+        for pq in page_quality:
+            conn.execute(text("""
+                INSERT INTO page_quality
+                    (wiki_id, session_id, source_doc, page_num, extraction_method,
+                     ocr_engine, char_count, needed_ocr, below_floor)
+                VALUES (:w, :sid, :d, :p, :m, :e, :c, :n, :b)
+                ON CONFLICT (wiki_id, session_id, source_doc, page_num) DO UPDATE SET
+                    extraction_method = EXCLUDED.extraction_method,
+                    ocr_engine = EXCLUDED.ocr_engine,
+                    char_count = EXCLUDED.char_count,
+                    needed_ocr = EXCLUDED.needed_ocr,
+                    below_floor = EXCLUDED.below_floor
+            """), {"w": wiki_id, "sid": session_id, "d": source_doc,
+                   "p": pq.get("page_num"), "m": pq.get("extraction_method") or "unknown",
+                   "e": pq.get("ocr_engine"), "c": pq.get("char_count") or 0,
+                   "n": bool(pq.get("needed_ocr")), "b": bool(pq.get("below_floor"))})
+            n += 1
+        conn.commit()
+    return n
+
+
+def get_document_quality(wiki_id: str, session_id: str,
+                         source_docs: list[str]) -> dict[str, dict]:
+    """Extraction-quality summary per document, for the reader-facing warning.
+
+    Returns only documents that actually have a problem — a caller iterating
+    the result to build a warning should get nothing back for a clean corpus
+    rather than having to filter. Documents ingested before page_quality
+    existed simply have no rows and are absent, which reads correctly: the
+    warning says what is known to be bad, never asserts that silence is good.
+    """
+    if not source_docs:
+        return {}
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc,
+                   count(*)                                  AS pages,
+                   count(*) FILTER (WHERE below_floor)       AS unreadable,
+                   count(*) FILTER (WHERE needed_ocr)        AS ocr_pages,
+                   array_agg(page_num ORDER BY page_num) FILTER (WHERE below_floor) AS bad_pages
+            FROM page_quality
+            WHERE wiki_id = :w AND session_id = :sid AND source_doc = ANY(:docs)
+            GROUP BY source_doc
+            HAVING count(*) FILTER (WHERE below_floor) > 0
+        """), {"w": wiki_id, "sid": session_id, "docs": list(source_docs)}).fetchall()
+    return {r[0]: {"pages": int(r[1]), "unreadable_pages": int(r[2]),
+                   "ocr_pages": int(r[3]), "bad_page_numbers": list(r[4] or [])}
+            for r in rows}
+
+
+def corpus_quality_summary(wiki_id: str, session_id: str, limit: int = 100) -> dict:
+    """Admin-side view: which documents have unreadable pages, worst first."""
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        totals = conn.execute(text("""
+            SELECT count(DISTINCT source_doc), count(*),
+                   count(*) FILTER (WHERE below_floor),
+                   count(*) FILTER (WHERE needed_ocr)
+            FROM page_quality WHERE wiki_id = :w AND session_id = :sid
+        """), {"w": wiki_id, "sid": session_id}).fetchone()
+        rows = conn.execute(text("""
+            SELECT source_doc, count(*) AS pages,
+                   count(*) FILTER (WHERE below_floor) AS unreadable,
+                   count(*) FILTER (WHERE needed_ocr)  AS ocr_pages
+            FROM page_quality
+            WHERE wiki_id = :w AND session_id = :sid
+            GROUP BY source_doc
+            HAVING count(*) FILTER (WHERE below_floor) > 0
+            ORDER BY (count(*) FILTER (WHERE below_floor))::float / GREATEST(count(*),1) DESC,
+                     unreadable DESC
+            LIMIT :lim
+        """), {"w": wiki_id, "sid": session_id, "lim": limit}).fetchall()
+    return {
+        "documents_tracked": int(totals[0] or 0),
+        "pages_tracked": int(totals[1] or 0),
+        "pages_unreadable": int(totals[2] or 0),
+        "pages_needing_ocr": int(totals[3] or 0),
+        "documents": [{"source_doc": r[0], "pages": int(r[1]),
+                       "unreadable_pages": int(r[2]), "ocr_pages": int(r[3]),
+                       "unreadable_share": round(int(r[2]) / max(int(r[1]), 1), 3)}
+                      for r in rows],
+    }
+
+
+def find_duplicate_documents(wiki_id: str) -> list[dict]:
+    """Groups of documents sharing a file_hash — byte-identical uploads.
+
+    wiki.ingest already refuses a duplicate at upload time via
+    backbone.find_by_file_hash, and that check is correct, but it is a
+    read-then-write race: the check runs before extraction and the
+    `documents` row is not written until extraction finishes, tens of
+    seconds later. Two identical files ingested inside that window both see
+    an empty result and both insert. Every duplicate pair in this corpus
+    arrived that way — same bulk run, timestamps seconds apart.
+
+    Reports extraction richness per copy so a caller can keep the better one
+    rather than an arbitrary one. The files being byte-identical, differences
+    between copies are LLM extraction variance over the same bytes, not one
+    copy being more complete than the other in any meaningful sense.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.file_hash, d.session_id, d.source_doc, d.created_at,
+                   (SELECT count(*) FROM pages p WHERE p.source_doc = d.source_doc) AS pages,
+                   (SELECT count(*) FROM clauses c WHERE c.source_doc = d.source_doc) AS clauses,
+                   (SELECT count(*) FROM obligations o WHERE o.source_doc = d.source_doc) AS obligations
+            FROM documents d
+            WHERE d.wiki_id = :w AND d.file_hash IS NOT NULL
+              AND d.file_hash IN (
+                  SELECT file_hash FROM documents
+                  WHERE wiki_id = :w AND file_hash IS NOT NULL
+                  GROUP BY file_hash HAVING count(*) > 1)
+            ORDER BY d.file_hash, d.created_at
+        """), {"w": wiki_id}).fetchall()
+
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        groups.setdefault(r[0], []).append({
+            "session_id": r[1], "source_doc": r[2],
+            "created_at": r[3].isoformat() if r[3] else None,
+            "pages": int(r[4]), "clauses": int(r[5]), "obligations": int(r[6]),
+            "richness": int(r[4]) + int(r[5]) + int(r[6]),
+        })
+    out = []
+    for file_hash, copies in groups.items():
+        # Keep the richest copy; tie-break on oldest, so the choice is
+        # deterministic and re-running the report never proposes a different
+        # winner for the same data.
+        ranked = sorted(copies, key=lambda c: (-c["richness"], c["created_at"] or ""))
+        out.append({"file_hash": file_hash, "copies": copies,
+                    "keep": ranked[0]["source_doc"],
+                    "remove": [c["source_doc"] for c in ranked[1:]]})
+    return out
+
+
+def enforce_file_hash_uniqueness(wiki_id: str) -> dict:
+    """Add the unique index that closes the ingest race, if the data allows.
+
+    The application-level check cannot close this on its own — any check that
+    reads before a slow write has a window. A partial unique index on
+    (wiki_id, file_hash) makes the second insert fail regardless of timing,
+    which is the only version of this guarantee that holds under concurrency.
+
+    Refuses rather than forces when duplicates still exist: creating the index
+    would fail anyway, and reporting which groups block it is more useful than
+    a raw Postgres error.
+    """
+    dupes = find_duplicate_documents(wiki_id)
+    if dupes:
+        return {"created": False, "blocked_by": len(dupes),
+                "groups": [{"keep": g["keep"], "remove": g["remove"]} for g in dupes]}
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS documents_wiki_file_hash_uniq
+            ON documents (wiki_id, file_hash)
+            WHERE file_hash IS NOT NULL
+        """))
+        conn.commit()
+    return {"created": True, "blocked_by": 0, "groups": []}
 
 
 def latency_percentiles(wiki_session_id: str, days: int = 30) -> list[dict]:
