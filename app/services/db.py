@@ -2373,6 +2373,11 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
 
     Does NOT touch the uploaded file on disk or sessions.json — see
     services/documents.py, which owns those and calls this for the DB side.
+    Does NOT touch `entities` — it's a global canonical-entity registry
+    shared across documents (keyed by wiki_id/canonical_key, not
+    source_doc); this document's rows in `entity_aliases` are removed,
+    which may leave an entity with zero remaining aliases, but that's an
+    orphan in a dedup table, not a data-integrity problem worth chasing here.
 
     Deliberately scoped to what pages.source_doc actually records: a
     shared/merged concept page (a statute, a clause type referenced by
@@ -2390,8 +2395,45 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
     report = {
         "pages_deleted": 0, "embeddings_deleted": 0,
         "clause_map_deleted": 0, "source_positions_deleted": 0,
-        "relations_deleted": 0,
+        "relations_deleted": 0, "contradictions_deleted": 0,
+        "page_metadata_deleted": 0,
+        "clauses_deleted": 0, "clause_embeddings_deleted": 0,
+        "question_embeddings_deleted": 0,
+        "contracts_deleted": 0, "obligations_deleted": 0,
+        "litigation_facts_deleted": 0, "authorizations_deleted": 0,
+        "opinions_deleted": 0, "citations_deleted": 0,
+        "structural_anchors_deleted": 0, "entity_aliases_deleted": 0,
+        "tables_deleted": 0, "figures_deleted": 0,
+        "review_queue_deleted": 0, "document_relations_deleted": 0,
+        "collection_documents_deleted": 0, "playbook_findings_deleted": 0,
+        "documents_deleted": 0,
     }
+
+    # Tables keyed directly by (wiki_id, session_id, source_doc) — the
+    # Phase-0-ish typed tables added alongside `documents`, none of them
+    # carrying a real FK to it (confirmed: only collection_documents,
+    # playbook_rules/runs/findings have any pg_constraint fkey, and none
+    # point at `documents`), so deletion order among them doesn't matter.
+    simple_tables = [
+        ("contracts", "contracts_deleted"),
+        ("obligations", "obligations_deleted"),
+        ("litigation_facts", "litigation_facts_deleted"),
+        ("authorizations", "authorizations_deleted"),
+        ("opinions", "opinions_deleted"),
+        ("citations", "citations_deleted"),
+        ("structural_anchors", "structural_anchors_deleted"),
+        ("tables", "tables_deleted"),
+        ("figures", "figures_deleted"),
+        ("review_queue", "review_queue_deleted"),
+        ("collection_documents", "collection_documents_deleted"),
+        ("clauses", "clauses_deleted"),
+    ]
+    # entity_aliases and playbook_findings share the same source_doc filter
+    # but have no session_id column.
+    wiki_only_tables = [
+        ("entity_aliases", "entity_aliases_deleted"),
+        ("playbook_findings", "playbook_findings_deleted"),
+    ]
 
     with engine.connect() as conn:
         titles = [r.title for r in conn.execute(
@@ -2440,6 +2482,63 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
             )
             report["relations_deleted"] = result.rowcount or 0
 
+            result = conn.execute(
+                text("""
+                    DELETE FROM contradictions
+                    WHERE wiki_id = :w AND session_id = :sid AND page_title = ANY(:titles)
+                """),
+                {"w": wiki_id, "sid": session_id, "titles": titles},
+            )
+            report["contradictions_deleted"] = result.rowcount or 0
+
+            result = conn.execute(
+                text("""
+                    DELETE FROM page_metadata
+                    WHERE wiki_id = :w AND session_id = :sid AND title = ANY(:titles)
+                """),
+                {"w": wiki_id, "sid": session_id, "titles": titles},
+            )
+            report["page_metadata_deleted"] = result.rowcount or 0
+
+        # clause_embeddings* / question_embeddings* — same per-provider
+        # table-name discovery as page_embeddings above.
+        for prefix, key in (("clause_embeddings", "clause_embeddings_deleted"),
+                            ("question_embeddings", "question_embeddings_deleted")):
+            emb_tables = [r[0] for r in conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name LIKE :pat"
+            ), {"pat": f"{prefix}%"})]
+            for emb_table in emb_tables:
+                result = conn.execute(
+                    text(f'DELETE FROM "{emb_table}" WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc'),
+                    {"w": wiki_id, "sid": session_id, "doc": source_doc},
+                )
+                report[key] += result.rowcount or 0
+
+        for table, key in simple_tables:
+            result = conn.execute(
+                text(f'DELETE FROM "{table}" WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc'),
+                {"w": wiki_id, "sid": session_id, "doc": source_doc},
+            )
+            report[key] = result.rowcount or 0
+
+        for table, key in wiki_only_tables:
+            result = conn.execute(
+                text(f'DELETE FROM "{table}" WHERE wiki_id = :w AND source_doc = :doc'),
+                {"w": wiki_id, "doc": source_doc},
+            )
+            report[key] = result.rowcount or 0
+
+        result = conn.execute(
+            text("""
+                DELETE FROM document_relations
+                WHERE wiki_id = :w AND session_id = :sid
+                  AND (from_doc = :doc OR to_doc = :doc)
+            """),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
+        )
+        report["document_relations_deleted"] = result.rowcount or 0
+
         result = conn.execute(
             text("DELETE FROM clause_map WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
             {"w": wiki_id, "sid": session_id, "doc": source_doc},
@@ -2456,6 +2555,16 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
             text("DELETE FROM document_status WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
             {"w": wiki_id, "sid": session_id, "doc": source_doc},
         )
+
+        # The `documents` row itself, last — every child table above is
+        # keyed by source_doc directly (not documents.id via FK), so
+        # nothing depends on ordering this before them; kept last only
+        # for readability (row of record removed once its parts are gone).
+        result = conn.execute(
+            text("DELETE FROM documents WHERE wiki_id = :w AND session_id = :sid AND source_doc = :doc"),
+            {"w": wiki_id, "sid": session_id, "doc": source_doc},
+        )
+        report["documents_deleted"] = result.rowcount or 0
 
         conn.commit()
 
