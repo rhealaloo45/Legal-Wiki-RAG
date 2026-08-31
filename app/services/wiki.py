@@ -8267,6 +8267,103 @@ def _resolve_docs_by_combinatorial_pairing(question: str, session_id: str,
     return union
 
 
+# "the original <TYPE> agreement" — names a document by TYPE alone, no party,
+# because the question is naming it in contrast to an amendment of it named
+# elsewhere in the same question. Non-greedy up to the first instrument-type
+# suffix word, so "the original IT Outsourcing Agreement say" captures "IT
+# Outsourcing Agreement" rather than running past it into the verb.
+_ORIGINAL_TYPE_RE = re.compile(
+    r'\boriginal\s+((?:[A-Za-z][A-Za-z&\'/-]*\s+){0,4}?(?:agreement|contract|deed|'
+    r'lease|licen[cs]e|nda|mou|memorandum))\b',
+    re.IGNORECASE,
+)
+_AMENDMENT_WORD_RE = re.compile(r'\bamendments?\b', re.IGNORECASE)
+
+
+def _resolve_original_of_amendment(question: str, session_id: str,
+                                   max_docs: int = 4) -> set[str]:
+    """Resolve "the original X agreement ... the Y amendment" — a document
+    named only by TYPE, referenced opposite an amendment the question names
+    by an umbrella party with no corporate suffix at all.
+
+    Confirmed live: "What did the original IT Outsourcing Agreement say about
+    payment terms, and how does the Apex Meridian amendment change that?"
+    resolved to neither document. "Apex Meridian" carries no suffix
+    _PARTY_NAME_RE can anchor on, and it is genuinely ambiguous alone on this
+    corpus — Apex Meridian Software, Apex Meridian Mobility, and Apex Meridian
+    Travel are three unrelated real entities sharing that prefix — so every
+    resolver gated on a distinctive single name declines, correctly, rather
+    than guess which one. The question's own second constraint, "amendment",
+    breaks that ambiguity the same way an instrument type breaks an umbrella
+    party name elsewhere in this file: intersected with content matching
+    "Apex Meridian", exactly one document survives.
+
+    Once that amendment is pinned, ingest's own cross-reference resolution
+    frequently cannot name what it amends either — an amendment stating "the
+    agreement dated as referenced in the recitals below" gives the resolver
+    no inline filename or date to match, leaving document_relations with an
+    unresolved edge (from_doc set, to_doc NULL). The documents.parties column
+    is populated independently of that resolution, from the same extraction
+    that reads the amendment's own signature block, so the original is found
+    directly by "which document names these same parties and has the type
+    this question names" — see db.find_docs_sharing_parties.
+
+    Requires both signals: an "original <type>" phrase AND the word
+    "amendment" appearing elsewhere in the question. Returns a set only when
+    both the amendment and its original resolve to exactly one document each.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    m = _ORIGINAL_TYPE_RE.search(question)
+    if not m or not _AMENDMENT_WORD_RE.search(question):
+        return set()
+    type_hint = re.sub(r'\s+', ' ', m.group(1)).strip()
+
+    amendment_doc: str | None = None
+    for phrase in _bare_proper_noun_phrase_candidates(question) + _bare_proper_noun_candidates(question):
+        try:
+            content_docs = set(_db.find_source_docs_mentioning_phrase(
+                _active_wiki_id(), session_id, phrase, cap=30) or [])
+        except Exception as e:
+            logger.error("resolve_scope: original-of-amendment content lookup failed for %r: %s", phrase, e)
+            continue
+        if not content_docs:
+            continue
+        try:
+            amendment_docs = {d for d in _db.find_source_docs_by_title_tokens(
+                _active_wiki_id(), session_id, ['Amendment'], cap=2000) if d}
+        except Exception as e:
+            logger.error("resolve_scope: original-of-amendment title lookup failed: %s", e)
+            continue
+        hit = content_docs & amendment_docs
+        if len(hit) == 1:
+            amendment_doc = next(iter(hit))
+            break
+    if not amendment_doc:
+        return set()
+
+    try:
+        originals = _db.find_docs_sharing_parties(
+            _active_wiki_id(), session_id, amendment_doc, type_hint,
+            exclude=amendment_doc, cap=max_docs)
+    except Exception as e:
+        logger.error("resolve_scope: original-of-amendment party lookup failed: %s", e)
+        return set()
+    if not originals:
+        return set()
+    # More than one survivor is usually the same real document ingested twice
+    # under different filenames (a plain PDF and its separately-run OCR
+    # twin) rather than genuinely different instruments — including both is
+    # redundant, not wrong, unlike the different-referent ambiguity the rest
+    # of this file declines on. find_docs_sharing_parties' own cap (max_docs)
+    # already bounds how far that can run.
+    result = {amendment_doc, *originals}
+    logger.info("Original-of-amendment: type=%r amendment=%s → %d document(s): %s",
+                type_hint, _norm_doc_name(amendment_doc), len(result),
+                {_norm_doc_name(d) for d in result})
+    return result
+
+
 # Distinct legal-instrument categories a question may name. Counting how many
 # DIFFERENT categories appear tells scope resolution whether a question about a
 # named party wants ONE of its instruments (summarise "the NordForge NDA") or a
@@ -9181,6 +9278,17 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             compound_docs = _resolve_docs_by_named_instruments(question, session_id)
         except Exception as e:
             logger.error("resolve_scope: named-instrument list resolution failed: %s", e)
+    # A third shape neither of the above reaches: a document named by TYPE
+    # alone ("the original IT Outsourcing Agreement"), opposite an amendment
+    # named by an umbrella party with no corporate suffix ("the Apex Meridian
+    # amendment") — genuinely ambiguous alone on this corpus, broken only by
+    # intersecting with "amendment" the same way an instrument type breaks an
+    # umbrella party elsewhere in this file. Same priority, same reasoning.
+    if not compound_docs:
+        try:
+            compound_docs = _resolve_original_of_amendment(question, session_id)
+        except Exception as e:
+            logger.error("resolve_scope: original-of-amendment resolution failed: %s", e)
     if compound_docs:
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(compound_docs),
