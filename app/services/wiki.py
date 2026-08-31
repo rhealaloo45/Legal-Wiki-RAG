@@ -9057,19 +9057,34 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # a two-SSA comparison resolved "party" to the Tata Steel agreement alone
     # and the answer compared it against nothing. Only fires when every pair
     # resolves, so it never trades a real single-document match for a partial one.
+    #
+    # Not every compound question repeats "between" once per matter, though —
+    # see _resolve_docs_by_combinatorial_pairing's docstring — so this tries
+    # that too when the explicit split finds nothing. Both attempts have to
+    # run HERE, ahead of the single-party branch below, not merely inside
+    # _resolve_docs_by_party_pair: confirmed live, a 4-party question with no
+    # repeated "between" reached the single-party branch first, which found
+    # one party's name resolved to exactly one document and returned
+    # immediately — the compound path never got a turn at all, regardless of
+    # what it would itself have found.
     _pair_segments = _question_pair_segments(question)
+    compound_docs: set[str] = set()
     if _pair_segments:
         try:
             compound_docs = _resolve_docs_by_party_pair(question, session_id)
         except Exception as e:
             logger.error("resolve_scope: compound party-pair resolution failed: %s", e)
-            compound_docs = set()
-        if compound_docs:
-            return _enforce_question_family(
-                {"scope": "single_doc", "target_docs": sorted(compound_docs),
-                 "target_family": None, "is_broad": False,
-                 "confidence": 0.8, "method": "party-pair-compound"},
-                _fam_name, _fam_docs)
+    else:
+        try:
+            compound_docs = _resolve_docs_by_combinatorial_pairing(question, session_id)
+        except Exception as e:
+            logger.error("resolve_scope: combinatorial party-pairing failed: %s", e)
+    if compound_docs:
+        return _enforce_question_family(
+            {"scope": "single_doc", "target_docs": sorted(compound_docs),
+             "target_family": None, "is_broad": False,
+             "confidence": 0.8, "method": "party-pair-compound"},
+            _fam_name, _fam_docs)
 
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
