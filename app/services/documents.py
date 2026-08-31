@@ -89,6 +89,51 @@ def unarchive_document(wiki_id: str, session_id: str, source_doc: str) -> dict:
     return {"status": "active", "source_doc": source_doc}
 
 
+def resolve_duplicates(wiki_id: str, sessions: dict, dry_run: bool = True) -> dict:
+    """Remove redundant copies of byte-identical documents, keeping the richest.
+
+    Only ever touches documents that share a file_hash with another document
+    in the same wiki — the files are identical bytes, so no copy holds content
+    another lacks, and what differs between them is extraction variance over
+    the same input. See db.find_duplicate_documents for how the survivor is
+    chosen (richest, oldest on a tie) and why these got past the upload-time
+    check in the first place.
+
+    Defaults to dry_run: this deletes real rows and real files, and the
+    caller should see the plan before it executes. The caller owns
+    save_sessions() afterwards, same contract as hard_delete_document.
+    """
+    groups = db.find_duplicate_documents(wiki_id)
+    plan, removed = [], []
+    for g in groups:
+        by_doc = {c["source_doc"]: c for c in g["copies"]}
+        for doc in g["remove"]:
+            plan.append({"remove": doc, "keeping": g["keep"],
+                         "removed_richness": by_doc[doc]["richness"],
+                         "kept_richness": by_doc[g["keep"]]["richness"],
+                         "session_id": by_doc[doc]["session_id"]})
+    if dry_run:
+        return {"dry_run": True, "groups": len(groups), "would_remove": plan}
+
+    for item in plan:
+        try:
+            report = hard_delete_document(wiki_id, item["session_id"],
+                                          item["remove"], sessions)
+            removed.append({"source_doc": item["remove"],
+                            "keeping": item["keeping"], "report": report})
+            logger.info("Duplicate resolved: removed %r, kept %r",
+                        item["remove"], item["keeping"])
+        except Exception as e:
+            logger.error("Failed to remove duplicate %r: %s", item["remove"], e)
+            removed.append({"source_doc": item["remove"], "error": str(e)})
+
+    # Only now can the unique index be created — it is what actually closes
+    # the race, the application check alone cannot.
+    index = db.enforce_file_hash_uniqueness(wiki_id)
+    return {"dry_run": False, "groups": len(groups), "removed": removed,
+            "unique_index": index}
+
+
 def hard_delete_document(wiki_id: str, session_id: str, source_doc: str, sessions: dict) -> dict:
     """Permanently remove a document: DB rows, the uploaded file, and its
     sessions.json file_paths entry.
