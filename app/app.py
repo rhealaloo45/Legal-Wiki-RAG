@@ -1997,6 +1997,108 @@ def admin_regression_latency():
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.5b/c — corpus quality, duplicates, vocabulary, normalisation
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/quality/summary")
+def admin_quality_summary():
+    """Documents with pages that could not be extracted, worst first."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    return jsonify(_db.corpus_quality_summary(current_wiki_id(), sid))
+
+
+@app.route("/admin/duplicates", methods=["GET", "POST"])
+def admin_duplicates():
+    """Report byte-identical document groups; POST confirm:true resolves them.
+
+    Resolution keeps the richest copy and hard-deletes the rest, then adds the
+    unique index that closes the ingest race for good.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db, documents as _documents
+    if request.method == "GET":
+        return jsonify({"groups": _db.find_duplicate_documents(current_wiki_id())})
+
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    sessions = load_sessions()
+    result = _documents.resolve_duplicates(current_wiki_id(), sessions,
+                                           dry_run=not data.get("confirm"))
+    if data.get("confirm"):
+        save_sessions(sessions)
+    return jsonify(result)
+
+
+@app.route("/admin/vocabulary", methods=["GET", "POST"])
+def admin_vocabulary():
+    """Canonical clause-type coverage; POST re-runs the backfill.
+
+    Deterministic string mapping — no LLM call, so the backfill is free and
+    safe to re-run after any vocabulary change.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    sid = _regression_session_id()
+    if request.method == "GET":
+        return jsonify(_db.clause_canon_summary(current_wiki_id(), sid or None))
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    data = request.get_json(silent=True) or {}
+    return jsonify(_db.backfill_clause_type_canon(
+        current_wiki_id(), sid or None, dry_run=bool(data.get("dry_run"))))
+
+
+@app.route("/admin/vocabulary/compare")
+def admin_vocabulary_compare():
+    """Diff the keyword matcher against the canonical one for Playbook rules.
+
+    The gate on cutting Playbooks over. Zero LLM calls — this compares which
+    clauses each matcher SELECTS, not what a model would say about them.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db, playbooks as _pb
+    from sqlalchemy import text as _sql
+    wiki_id = current_wiki_id()
+    limit = int(request.args.get("limit", 40))
+    with _db.get_engine().connect() as c:
+        rules = [r[0] for r in c.execute(_sql(
+            "SELECT DISTINCT clause_type FROM playbook_rules WHERE wiki_id=:w"),
+            {"w": wiki_id})]
+        docs = [r[0] for r in c.execute(_sql(
+            "SELECT DISTINCT source_doc FROM playbook_findings WHERE wiki_id=:w LIMIT :l"),
+            {"w": wiki_id, "l": limit})]
+    if not rules:
+        return jsonify({"error": "No playbook rules to compare"}), 400
+    return jsonify(_pb.compare_rule_matching(wiki_id, docs, rules))
+
+
+@app.route("/admin/normalize", methods=["POST"])
+def admin_normalize():
+    """Parse raw money/duration values into the normalised columns."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    data = request.get_json(silent=True) or {}
+    sid = _regression_session_id()
+    return jsonify(_db.backfill_normalized_values(
+        current_wiki_id(), sid or None, dry_run=bool(data.get("dry_run"))))
+
+
+# ---------------------------------------------------------------------------
 # Precedent layer (Phase 2) — document roles + clause embeddings
 # ---------------------------------------------------------------------------
 

@@ -694,7 +694,13 @@ one used elsewhere in this system: 1.0 = exact verbatim match with no ambiguity,
 stated but the exact wording required light interpretation, 0.5 = the clause is implied rather \
 than explicitly stated, 0.0 = you are not actually confident this is a real clause in the text. \
 Extract every clause you can identify — do not filter by confidence, low-confidence entries are \
-exactly what the Review Queue is for. COVER EVERY NUMBERED SECTION: if the document numbers its \
+exactly what the Review Queue is for. CONTRACT VALUE: if the document states a total, aggregate or \
+annual contract value, a total consideration, or a total price, ALWAYS emit it as its own clause \
+with type "Total Contract Value" and typed_value {{"total": "<amount exactly as written, including \
+currency>"}}. This field was previously extracted only when the model happened to volunteer it — \
+present on roughly 17 of 31,000 clauses across this corpus — so it is called out explicitly here \
+rather than left to judgement. Never compute or infer it: emit it only when the document states it. \
+COVER EVERY NUMBERED SECTION: if the document numbers its \
 sections, each numbered heading must appear as a "clauses" entry, including the back-half \
 boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
 Severability, Counterparts, Further Assurance). Those carry no negotiated value, which is exactly \
@@ -834,7 +840,11 @@ never paraphrase. "typed_value" is an optional small object holding the clause's
 when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact verbatim match with \
 no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
 clause is implied rather than explicitly stated, 0.0 = you are not actually confident this is a \
-real clause. Extract every clause you can identify — do not filter by confidence. COVER EVERY \
+real clause. Extract every clause you can identify — do not filter by confidence. CONTRACT VALUE: \
+if this segment states a total, aggregate or annual contract value, a total consideration, or a \
+total price, ALWAYS emit it as its own clause with type "Total Contract Value" and typed_value \
+{{"total": "<amount exactly as written, including currency>"}}. Never compute or infer it: emit it \
+only when the segment states it. COVER EVERY \
 NUMBERED SECTION in this segment: each numbered heading must appear as a "clauses" entry, including \
 back-half boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
 Severability, Counterparts, Further Assurance) — those get skipped precisely because they carry no \

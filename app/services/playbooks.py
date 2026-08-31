@@ -228,6 +228,16 @@ def clauses_for_rule(wiki_id: str, source_doc: str, clause_type: str) -> list[di
     Keyword match, not equality — see the module docstring. Rejected clauses
     are excluded: a reviewer has already said that row is wrong, and assessing
     it would report a deviation that rests on discredited text.
+
+    STILL THE KEYWORD MATCHER. The canonical vocabulary (§ Phase 3.5c) exists
+    and is backfilled, but this function has deliberately not been switched
+    over to it yet — see clauses_for_rule_canon and compare_rule_matching
+    below. Today's matcher OVER-matches, which shows up as a visibly wrong
+    finding a reviewer can catch; a canonical matcher with a bad mapping
+    UNDER-matches, and a clause that is silently never assessed produces no
+    finding at all for anyone to notice. Trading a loud failure for a quiet
+    one is a regression even if the match rate improves, so the cutover waits
+    on a reviewed diff rather than on the new code merely existing.
     """
     if not _enabled():
         return []
@@ -250,6 +260,94 @@ def clauses_for_rule(wiki_id: str, source_doc: str, clause_type: str) -> list[di
                         "page_num": r[3], "confidence": r[4],
                         "review_status": r[5]})
     return out
+
+
+def clauses_for_rule_canon(wiki_id: str, source_doc: str, clause_type: str) -> list[dict]:
+    """Canonical-type equivalent of clauses_for_rule. Not yet wired into runs.
+
+    Selects on clauses.clause_type_canon, so a "Liability Cap" rule matches
+    `liability_cap` and NOT `liability_cap_exclusion` — the carve-out is a
+    different clause with a different standard, and assessing it against the
+    cap rule is the defect this replaces.
+
+    Returns [] when the rule's own name does not map to a canonical type: a
+    rule the vocabulary cannot place must select nothing rather than fall back
+    to keywords, or the comparison below would silently measure the old
+    matcher twice.
+    """
+    if not _enabled():
+        return []
+    from services import clause_vocab
+    canon = clause_vocab.canonical(clause_type)
+    if not canon:
+        return []
+    text = _text()
+    with db.get_engine().connect() as c:
+        rows = c.execute(text("""
+            SELECT id, clause_type, verbatim_text, page_num, confidence, review_status
+            FROM clauses
+            WHERE wiki_id = :w AND source_doc = :d
+              AND review_status <> 'rejected'
+              AND clause_type_canon = :canon
+        """), {"w": wiki_id, "d": source_doc, "canon": canon}).fetchall()
+    return [{"id": int(r[0]), "clause_type": r[1], "text": r[2], "page_num": r[3],
+             "confidence": r[4], "review_status": r[5]} for r in rows]
+
+
+def compare_rule_matching(wiki_id: str, source_docs: list[str],
+                          clause_types: list[str]) -> dict:
+    """Diff the keyword matcher against the canonical matcher, without running
+    either against a model.
+
+    This is the gate on the cutover. Three numbers matter, and they are not
+    equally important:
+
+      dropped   clauses the keyword matcher assessed that the canonical one
+                does not. Mostly the intended fix (carve-outs leaving a cap
+                rule), but a genuine cap the vocabulary failed to map would
+                also land here — every entry needs a human eye.
+      added     clauses the canonical matcher picks up that keywords missed.
+      unmapped  rules whose own name does not map to a canonical type. These
+                would select nothing after a cutover, which is the loudest
+                possible under-match, so a non-empty list here blocks it.
+
+    Zero LLM calls: this compares selection, not verdicts.
+    """
+    if not _enabled():
+        return {"error": "playbooks disabled"}
+    from services import clause_vocab
+    dropped, added = [], []
+    unmapped_rules = [ct for ct in clause_types if not clause_vocab.canonical(ct)]
+    kw_total = canon_total = 0
+
+    for doc in source_docs:
+        for ct in clause_types:
+            kw = {c["id"]: c for c in clauses_for_rule(wiki_id, doc, ct)}
+            cn = {c["id"]: c for c in clauses_for_rule_canon(wiki_id, doc, ct)}
+            kw_total += len(kw)
+            canon_total += len(cn)
+            for cid in kw.keys() - cn.keys():
+                dropped.append({"rule": ct, "source_doc": doc, "clause_id": cid,
+                                "clause_type": kw[cid]["clause_type"]})
+            for cid in cn.keys() - kw.keys():
+                added.append({"rule": ct, "source_doc": doc, "clause_id": cid,
+                              "clause_type": cn[cid]["clause_type"]})
+
+    def _by_type(items):
+        agg: dict[str, int] = {}
+        for i in items:
+            agg[i["clause_type"]] = agg.get(i["clause_type"], 0) + 1
+        return sorted(agg.items(), key=lambda x: -x[1])
+
+    return {
+        "documents": len(source_docs), "rules": len(clause_types),
+        "keyword_selected": kw_total, "canon_selected": canon_total,
+        "dropped_count": len(dropped), "added_count": len(added),
+        "dropped_by_type": _by_type(dropped), "added_by_type": _by_type(added),
+        "unmapped_rules": unmapped_rules,
+        "safe_to_cut_over": not unmapped_rules,
+        "dropped_sample": dropped[:40], "added_sample": added[:40],
+    }
 
 
 # ---------------------------------------------------------------------------
