@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in · LexWiki</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+    /* Tokens mirrored from index.html so the gate doesn't look like a
+       different product than the app behind it. */
+    :root {
+      --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      --bg-base: #F1F3F6;
+      --bg-surface: #ffffff;
+      --bg-input: #FAFBFC;
+      --btn-primary: #1a1a1a;
+      --accent: #2B5CE6;
+      --accent-border: #C7D2FE;
+      --red: #A32D2D;
+      --red-light: #FCEBEB;
+      --red-border: #F7C1C1;
+      --border: rgba(0, 0, 0, 0.06);
+      --border-strong: rgba(0, 0, 0, 0.12);
+      --text-primary: #1a1a1a;
+      --text-secondary: #6B7280;
+      --text-muted: #9CA3AF;
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --shadow-card: 0 1px 2px rgba(20, 20, 40, 0.04), 0 2px 10px rgba(20, 20, 40, 0.04);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-base);
+      font-family: var(--font-sans);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      width: 100%;
+      max-width: 380px;
+      padding: 36px 32px 32px;
+    }
+
+    .brand {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 6px;
+    }
+
+    .subtitle {
+      font-size: 13.5px;
+      color: var(--text-secondary);
+      margin-bottom: 26px;
+    }
+
+    label {
+      display: block;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 6px;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 10px 12px;
+      font-family: inherit;
+      font-size: 14px;
+      color: var(--text-primary);
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-md);
+      margin-bottom: 16px;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-border);
+    }
+
+    button {
+      width: 100%;
+      padding: 11px 16px;
+      font-family: inherit;
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+      background: var(--btn-primary);
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: opacity .15s ease;
+    }
+
+    button:hover { opacity: .88; }
+    button:active { opacity: .8; }
+
+    .error {
+      background: var(--red-light);
+      border: 1px solid var(--red-border);
+      color: var(--red);
+      font-size: 13px;
+      padding: 10px 12px;
+      border-radius: var(--radius-md);
+      margin-bottom: 18px;
+    }
+
+    .footnote {
+      margin-top: 22px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      text-align: center;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="card">
+    <div class="brand">LexWiki</div>
+    <div class="subtitle">Sign in to continue</div>
+
+    {% if error %}
+    <div class="error" role="alert">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('login', next=next_url) }}">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" value="{{ username }}"
+             autocomplete="username" autofocus required>
+
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password"
+             autocomplete="current-password" required>
+
+      <button type="submit">Sign in</button>
+    </form>
+
+    <div class="footnote">Authorised access only. Attempts are logged.</div>
+  </div>
+</body>
+
+</html>
