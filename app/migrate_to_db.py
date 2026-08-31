@@ -48,7 +48,7 @@ def main() -> None:
         if not os.path.exists(json_path):
             continue
 
-        existing = _db.count_pages(session_id)
+        existing = _db.count_pages(_db.DEFAULT_WIKI_ID, session_id)
         if existing > 0:
             logger.info("Session %s already has %d pages in DB — skipping.", session_id, existing)
             sessions_skipped += 1
@@ -56,7 +56,7 @@ def main() -> None:
 
         logger.info("Migrating session %s ...", session_id)
         try:
-            _db.migrate_from_json(session_id, json_path)
+            _db.migrate_from_json(_db.DEFAULT_WIKI_ID, session_id, json_path)
             os.rename(json_path, json_path + ".migrated")
             sessions_migrated += 1
         except Exception as e:

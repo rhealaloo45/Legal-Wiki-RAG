@@ -1187,6 +1187,621 @@
       line-height: 1
     }
 
+    .ftree-manage-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-family: inherit;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      background: var(--bg-input);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 5px 10px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background .1s, color .1s;
+    }
+
+    .ftree-manage-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+
+    .ftree-manage-btn.danger {
+      color: var(--red);
+    }
+
+    .ftree-manage-btn.danger:hover {
+      background: var(--red-light);
+      border-color: var(--red-border);
+    }
+
+    /* ============================================================
+       Admin panel — dedicated nav rail + dashboard-style sections.
+       ============================================================ */
+    .admin-rail {
+      width: 196px;
+      flex-shrink: 0;
+      background: var(--bg-surface);
+      border-right: .5px solid var(--border);
+      padding: 16px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      /* #panel-admin is overflow:hidden on the row, so without this the rail
+         doesn't scroll — it silently clips. Five Phase 2/3 nav items pushed
+         the rail past the viewport height for the first time. */
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+
+    .admin-rail-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      padding: 0 10px;
+      margin: 4px 0 8px;
+    }
+
+    .admin-nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 9px 10px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-secondary);
+    }
+
+    .admin-nav-item:hover {
+      background: var(--bg-hover);
+    }
+
+    .admin-nav-item.active {
+      background: var(--accent-light);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .admin-nav-item .admin-nav-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .admin-nav-badge {
+      font-size: 10px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--red);
+      border-radius: 20px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 5px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .admin-content {
+      flex: 1;
+      overflow-y: auto;
+      padding: 26px 32px;
+    }
+
+    .admin-section-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .admin-section-title {
+      font-size: 17px;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .admin-section-sub {
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      margin-top: 3px;
+    }
+
+    .admin-card {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+    }
+
+    .admin-pill-btn {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: var(--radius-md);
+      padding: 7px 13px;
+      cursor: pointer;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      transition: background .15s;
+      white-space: nowrap;
+    }
+
+    .admin-pill-btn:hover { background: var(--bg-hover); }
+
+    .admin-pill-btn.primary {
+      background: var(--btn-primary);
+      color: #fff;
+      border-color: var(--btn-primary);
+    }
+    .admin-pill-btn.primary:hover { background: #000; }
+
+    .admin-pill-btn.accent {
+      background: var(--accent-light);
+      color: var(--accent);
+      border-color: var(--accent-border);
+    }
+    .admin-pill-btn.accent:hover { background: #E3E9FE; }
+
+    .admin-search-input {
+      font-size: 12px;
+      border-radius: var(--radius-md);
+      padding: 7px 11px;
+      min-width: 240px;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+      outline: none;
+    }
+    .admin-search-input:focus { border-color: var(--accent-border); }
+
+    .admin-filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    /* Phase 2 panels: a read-only counter chip, and the empty/loading state
+       every one of those tables falls back to. Both were being used by the
+       Collections / Playbooks / Precedent markup before they existed. */
+    .admin-chip {
+      font-size: 11.5px;
+      padding: 3px 9px;
+      border-radius: 20px;
+      border: 1px solid var(--border, #2c333f);
+      background: var(--panel-2, rgba(127, 127, 127, .08));
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .admin-empty {
+      padding: 22px 16px;
+      text-align: center;
+      font-size: 13px;
+      opacity: .65;
+      line-height: 1.5;
+    }
+
+    .admin-filter-pill {
+      font-size: 11.5px;
+      font-weight: 500;
+      border-radius: 20px;
+      padding: 5px 12px;
+      cursor: pointer;
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+    .admin-filter-pill:hover { background: var(--bg-hover); }
+    .admin-filter-pill.active {
+      background: var(--accent-light);
+      color: var(--accent);
+      border-color: var(--accent-border);
+    }
+    .admin-filter-pill .cnt {
+      font-family: var(--font-mono, monospace);
+      opacity: .65;
+      margin-left: 5px;
+    }
+
+    /* The register is genuinely wide — a family can define a dozen columns.
+       It scrolls inside its own card rather than pushing the page sideways. */
+    .admin-table-wrap { overflow: auto; max-height: calc(100vh - 260px); }
+
+    .admin-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    .admin-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--bg-surface);
+      text-align: left;
+      font-size: 10.5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--text-muted);
+      padding: 11px 12px;
+      border-bottom: .5px solid var(--border);
+      white-space: nowrap;
+    }
+    .admin-table td {
+      padding: 10px 12px;
+      border-bottom: .5px solid var(--border);
+      color: var(--text-secondary);
+      vertical-align: top;
+      max-width: 260px;
+    }
+    .admin-table tr:last-child td { border-bottom: none; }
+    .admin-table tr:hover td { background: var(--bg-hover); }
+    .admin-table td.num {
+      font-family: var(--font-mono, monospace);
+      font-size: 11.5px;
+      text-align: right;
+      white-space: nowrap;
+    }
+    .admin-table .cell-doc { color: var(--text-primary); font-weight: 500; }
+    /* A value the extraction flagged is marked in the cell itself — a
+       reviewer scanning the register should see doubt without opening the
+       Review Queue to find it. */
+    .admin-table .cell-flagged { color: var(--amber); }
+    .admin-table .cell-empty { color: var(--text-muted); }
+
+    .admin-badge {
+      font-size: 10.5px;
+      font-family: var(--font-mono, monospace);
+      font-weight: 600;
+      border-radius: 20px;
+      padding: 2px 8px;
+      letter-spacing: .01em;
+      white-space: nowrap;
+    }
+    .admin-badge.green { color: var(--green-text); background: var(--green-light); border: 1px solid var(--green-border); }
+    .admin-badge.amber { color: var(--amber); background: var(--amber-light); border: 1px solid var(--amber-border); }
+    .admin-badge.red { color: var(--red); background: var(--red-light); border: 1px solid var(--red-border); }
+    .admin-badge.muted { color: var(--text-muted); background: var(--bg-hover); border: 1px solid var(--border); }
+
+    .admin-stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 22px;
+    }
+
+    .admin-stat-tile {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 16px 18px;
+    }
+
+    .admin-stat-val { font-size: 24px; font-weight: 700; }
+    .admin-stat-label { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+
+    .admin-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 18px;
+      border-bottom: .5px solid var(--border);
+    }
+    .admin-row:last-child { border-bottom: none; }
+
+    .admin-icon-btn {
+      width: 26px;
+      height: 26px;
+      border-radius: var(--radius-md);
+      border: .5px solid var(--border);
+      background: var(--bg-surface);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    .admin-icon-btn:hover { background: var(--bg-hover); }
+    .admin-icon-btn.danger { color: var(--red); }
+
+    .review-cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .review-col-head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+
+    .review-card {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-card);
+      padding: 14px 16px;
+      margin-bottom: 10px;
+    }
+
+    .review-card.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px var(--accent-light);
+    }
+
+    .review-conf-track {
+      width: 52px;
+      height: 5px;
+      border-radius: 4px;
+      background: var(--bg-hover);
+      overflow: hidden;
+    }
+    .review-conf-fill { display: block; height: 100%; border-radius: 4px; }
+
+    /* Document-centric review: queue | extracted metadata | source text.
+       Three panes so a value and the words it came from are on screen at the
+       same time — verifying an extraction against the document is the whole
+       job, and it cannot be done from a list of values alone. */
+    .review-doc-grid {
+      display: grid;
+      grid-template-columns: 260px minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+      height: calc(100vh - 230px);
+      min-height: 420px;
+    }
+    /* Each pane is its own flex column: a fixed header, a scrolling body and
+       (for the metadata pane) a fixed footer. The header must not scroll with
+       the content, and must be opaque — an inherited background resolved to
+       transparent and let text scroll through it. */
+    .review-doc-list, .review-doc-meta, .review-doc-source {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: 12px;
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .review-doc-list { overflow-y: auto; display: block; }
+    .review-doc-source { background: var(--bg-input); }
+    .review-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+    .review-empty {
+      padding: 26px 18px; text-align: center;
+      font-size: 12px; color: var(--text-muted);
+    }
+    .review-doc-item {
+      padding: 11px 13px;
+      border-bottom: .5px solid var(--border);
+      cursor: pointer;
+      transition: background .12s;
+    }
+    .review-doc-item:last-child { border-bottom: none; }
+    .review-doc-item:hover { background: var(--bg-hover); }
+    .review-doc-item.active {
+      background: var(--bg-hover);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    .review-doc-name {
+      font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+      line-height: 1.4; margin-bottom: 4px;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .review-doc-sub {
+      font-size: 11px; color: var(--text-muted);
+      display: flex; align-items: center; gap: 6px;
+    }
+    /* Two top-level columns — the clickable name/value area, and actions.
+       Name/value keep their own aligned sub-grid inside the clickable area,
+       so wrapping it for click-to-locate doesn't collapse the columns. */
+    .review-field-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      padding: 9px 14px;
+      border-bottom: .5px solid var(--border);
+      font-size: 12px;
+    }
+    .review-field-row:last-child { border-bottom: none; }
+    .review-field-name {
+      color: var(--text-muted);
+      font-family: var(--font-mono, monospace);
+      font-size: 11.5px;
+      word-break: break-word;
+    }
+    .review-field-value {
+      color: var(--text-primary); line-height: 1.5; word-break: break-word;
+    }
+    .review-field-null { color: var(--text-muted); font-style: italic; }
+    .review-conf-chip {
+      font-size: 10.5px; font-weight: 700;
+      font-family: var(--font-mono, monospace);
+      padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+    }
+    .review-conf-quiet {
+      font-size: 10.5px; font-weight: 400;
+      font-family: var(--font-mono, monospace);
+      color: var(--text-muted); white-space: nowrap;
+    }
+    .review-pane-head {
+      flex: none;
+      padding: 10px 14px;
+      border-bottom: .5px solid var(--border);
+      font-size: 11.5px; font-weight: 600;
+      color: var(--text-primary);
+      background: var(--bg-surface);
+      position: sticky; top: 0; z-index: 3;
+      display: flex; align-items: baseline; gap: 8px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .review-doc-source .review-pane-head {
+      background: var(--bg-input);
+      text-transform: uppercase; letter-spacing: .05em;
+      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+    }
+    .review-doc-list .review-pane-head {
+      text-transform: uppercase; letter-spacing: .05em;
+      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+    }
+    .review-head-sub {
+      font-size: 11px; font-weight: 400; color: var(--text-muted);
+      margin-left: auto; flex: none;
+    }
+    .review-sub-head {
+      padding: 9px 14px;
+      background: var(--bg-input);
+      border-top: .5px solid var(--border);
+      border-bottom: .5px solid var(--border);
+      font-size: 10.5px; font-weight: 700;
+      letter-spacing: .05em; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .review-doc-typeline {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 10px 14px; font-size: 12px; color: var(--text-secondary);
+    }
+    .review-doc-footer {
+      flex: none;
+      display: flex; gap: 9px;
+      padding: 11px 14px;
+      border-top: .5px solid var(--border);
+      background: var(--bg-surface);
+    }
+    .review-item-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto;
+      gap: 10px; align-items: start;
+      padding: 10px 14px;
+      border-bottom: .5px solid var(--border);
+    }
+    .review-item-row:last-child { border-bottom: none; }
+    .review-item-text {
+      display: block; font-size: 11.5px; line-height: 1.5;
+      color: var(--text-secondary); word-break: break-word;
+    }
+    .rfield-actions {
+      display: flex; align-items: center; gap: 5px; flex: none;
+    }
+    .rfield-note {
+      font-size: 11px; line-height: 1.45; color: var(--amber); margin-top: 4px;
+    }
+    .rfield-raw {
+      font-size: 11px; color: var(--text-muted); margin-top: 3px;
+      word-break: break-word;
+    }
+    .rfield-edited {
+      display: inline-flex; align-items: center; gap: 3px;
+      margin-left: 7px; padding: 1px 6px; border-radius: 5px;
+      background: var(--bg-hover); color: var(--green-text);
+      font-size: 10.5px; font-weight: 600; white-space: nowrap;
+    }
+    .rfield-editor input, .rfield-editor textarea {
+      width: 100%; box-sizing: border-box;
+      padding: 7px 9px; border-radius: 7px;
+      border: .5px solid var(--border-strong, var(--border));
+      background: var(--bg-input); color: var(--text-primary);
+      font-family: inherit; font-size: 12px; line-height: 1.5;
+      resize: vertical;
+    }
+    .rfield-editor input:focus, .rfield-editor textarea:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .rfield-editor-actions {
+      display: flex; align-items: center; gap: 7px;
+      margin-top: 7px; flex-wrap: wrap;
+    }
+    .rfield-hint { font-size: 10.5px; color: var(--text-muted); }
+
+    /* Clicking a field or a flagged item locates it in the source pane.
+       Only the name+value area is clickable — the confidence chip and edit
+       button sit outside it so clicking them doesn't also trigger a jump. */
+    .review-field-click {
+      display: grid;
+      grid-template-columns: 118px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+      min-width: 0;
+      cursor: pointer; border-radius: 6px; margin: -4px -6px; padding: 4px 6px;
+      transition: background .12s;
+    }
+    .review-item-click {
+      display: block; min-width: 0;
+      cursor: pointer; border-radius: 6px; margin: -4px -6px; padding: 4px 6px;
+      transition: background .12s;
+    }
+    .review-field-click:hover, .review-item-click:hover { background: var(--bg-hover); }
+    .review-field-row.rq-active, .review-item-row.rq-active {
+      background: var(--bg-hover);
+      box-shadow: inset 2px 0 0 var(--accent);
+    }
+    mark.rq-hl {
+      background: var(--accent-bg, var(--bg-hover));
+      color: var(--text-primary);
+      box-shadow: inset 0 0 0 1px var(--accent);
+      border-radius: 3px;
+      padding: 0 1px;
+    }
+    .rq-source-note {
+      padding: 8px 14px;
+      font-size: 11px; color: var(--text-muted);
+      border-bottom: .5px solid var(--border);
+      display: flex; align-items: center; gap: 6px;
+    }
+    .review-source-page.rq-page-match { background: var(--bg-hover); }
+    .review-source-page {
+      padding: 12px 14px;
+      border-bottom: .5px solid var(--border);
+    }
+    .review-source-title {
+      font-size: 11.5px; font-weight: 600; color: var(--text-primary);
+      margin-bottom: 5px;
+    }
+    .review-source-body {
+      font-size: 11.5px; line-height: 1.65; color: var(--text-secondary);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .review-mode-switch {
+      display: inline-flex; border: .5px solid var(--border);
+      border-radius: 8px; overflow: hidden;
+    }
+    .review-mode-btn {
+      border: none; background: transparent; cursor: pointer;
+      padding: 6px 11px; font-size: 11.5px; color: var(--text-muted);
+      font-family: inherit;
+    }
+    .review-mode-btn.active { background: var(--bg-hover); color: var(--text-primary); }
+
+    @media (max-width: 1200px) {
+      .review-doc-grid { grid-template-columns: 220px minmax(0, 1fr); }
+      .review-doc-source { display: none; }
+    }
+    @media (max-width: 860px) {
+      .review-cols { grid-template-columns: 1fr; }
+      .review-doc-grid { grid-template-columns: 1fr; height: auto; }
+      .admin-stat-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
     .ftree-card-icon .ti-file-type-pdf { color: var(--red) }
     .ftree-card-icon .ti-file-text { color: var(--text-muted) }
 
@@ -2773,12 +3388,18 @@
         </div>
         <div class="graph-btn" id="tour-graph-btn" onclick="toggleGraph()"><i class="ti ti-topology-star-ring"
             style="font-size:13px"></i>Knowledge graph</div>
+        <div class="graph-btn" id="tour-admin-btn" onclick="openAdmin()"><i class="ti ti-settings-2"
+            style="font-size:13px"></i>Admin</div>
         <div class="icon-btn" aria-label="log" onclick="toggleLog()" title="Session log"><i
             class="ti ti-file-description"></i></div>
         <div class="icon-btn" id="tour-rules-btn" aria-label="rules" onclick="toggleRules()" title="Instructions"><i
             class="ti ti-list-check"></i></div>
         <div class="help-btn" aria-label="help" onclick="startTutorial()" title="Take the tour"><i
             class="ti ti-help-circle"></i></div>
+        {% if auth_enabled %}
+        <div class="icon-btn" aria-label="sign out" onclick="logout()"
+             title="Sign out{% if username %} ({{ username }}){% endif %}"><i class="ti ti-logout"></i></div>
+        {% endif %}
       </div>
     </div>
 
@@ -3295,9 +3916,267 @@
           <div class="files-toolbar">
             <div style="display:flex;align-items:center;gap:8px"><span class="files-title">Document library</span><span
                 class="files-count" id="files-count-badge">0 files</span></div>
+            <button type="button" class="icon-btn" style="width:auto;padding:0 10px;gap:6px;font-size:12px"
+                    title="Archive, restore, delete, or check ingest status in Admin" onclick="openAdmin()">
+              <i class="ti ti-settings-2" style="font-size:14px"></i><span>Admin</span>
+            </button>
           </div>
           <div class="ftree" id="file-tree">
             <div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No files ingested yet.</div>
+          </div>
+        </div>
+
+        <!-- ADMIN -->
+        <div id="panel-admin" class="d-none" style="display:none;flex:1;flex-direction:row;overflow:hidden">
+          <div class="admin-rail">
+            <button type="button" class="icon-btn" style="margin-bottom:10px" title="Back to chat" onclick="switchTab('ask', document.querySelector('.tab[data-target=&quot;ask&quot;]'))"><i class="ti ti-arrow-left"></i></button>
+            <div class="admin-rail-label">Operations</div>
+            <div class="admin-nav-item active" id="adminNav-ingest" data-target="ingest" onclick="switchAdminTab('ingest',this)">
+              <span class="admin-nav-left"><i class="ti ti-upload" style="font-size:16px"></i>Ingest</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-documents" data-target="documents" onclick="switchAdminTab('documents',this)">
+              <span class="admin-nav-left"><i class="ti ti-files" style="font-size:16px"></i>Documents</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-wiki" data-target="wiki" onclick="switchAdminTab('wiki',this)">
+              <span class="admin-nav-left"><i class="ti ti-topology-star-ring" style="font-size:16px"></i>Wiki</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-review" data-target="review" onclick="switchAdminTab('review',this)">
+              <span class="admin-nav-left"><i class="ti ti-checklist" style="font-size:16px"></i>Review Queue</span>
+              <span class="admin-nav-badge d-none" id="admin-review-badge">0</span>
+            </div>
+            <div class="admin-rail-label" style="margin-top:16px">Corpus</div>
+            <div class="admin-nav-item" id="adminNav-register" data-target="register" onclick="switchAdminTab('register',this)">
+              <span class="admin-nav-left"><i class="ti ti-table" style="font-size:16px"></i>Register</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-obligations" data-target="obligations" onclick="switchAdminTab('obligations',this)">
+              <span class="admin-nav-left"><i class="ti ti-clock-exclamation" style="font-size:16px"></i>Obligations</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
+              <span class="admin-nav-left"><i class="ti ti-database" style="font-size:16px"></i>Wikis</span>
+            </div>
+            <div class="admin-rail-label" style="margin-top:16px">Playbooks</div>
+            <div class="admin-nav-item" id="adminNav-collections" data-target="collections" onclick="switchAdminTab('collections',this)">
+              <span class="admin-nav-left"><i class="ti ti-folders" style="font-size:16px"></i>Collections</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-playbooks" data-target="playbooks" onclick="switchAdminTab('playbooks',this)">
+              <span class="admin-nav-left"><i class="ti ti-clipboard-check" style="font-size:16px"></i>Playbooks</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-precedent" data-target="precedent" onclick="switchAdminTab('precedent',this)">
+              <span class="admin-nav-left"><i class="ti ti-search" style="font-size:16px"></i>Precedent</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-deviation" data-target="deviation" onclick="switchAdminTab('deviation',this)">
+              <span class="admin-nav-left"><i class="ti ti-alert-triangle" style="font-size:16px"></i>Deviation</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-prompts" data-target="prompts" onclick="switchAdminTab('prompts',this)">
+              <span class="admin-nav-left"><i class="ti ti-message-2" style="font-size:16px"></i>Prompt Library</span>
+            </div>
+          </div>
+
+          <div class="admin-content">
+
+            <div id="admin-panel-ingest">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Ingest</div>
+                  <div class="admin-section-sub">Current session — <span id="admin-ingest-session-name">this session</span></div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button type="button" class="admin-pill-btn" title="Re-queue any uploaded docs that never finished ingesting" onclick="adminResumeIngest()"><i class="ti ti-refresh" style="font-size:14px"></i>Resume ingest</button>
+                  <button type="button" class="admin-pill-btn primary" title="Start a new ingest" onclick="newSession()"><i class="ti ti-upload" style="font-size:14px"></i>New ingest</button>
+                </div>
+              </div>
+              <div class="admin-stat-grid" id="admin-ingest-stats"></div>
+              <div class="admin-card">
+                <div style="padding:14px 18px;border-bottom:.5px solid var(--border);font-size:12.5px;font-weight:600">Recent activity</div>
+                <div id="admin-ingest-status"></div>
+              </div>
+            </div>
+
+            <div id="admin-panel-documents" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Documents</div>
+                  <div class="admin-section-sub" id="admin-documents-sub">&nbsp;</div>
+                </div>
+              </div>
+              <div class="admin-card" id="document-manage-list"></div>
+            </div>
+
+            <div id="admin-panel-wiki" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Wiki pages</div>
+                  <div class="admin-section-sub" id="admin-wiki-sub">&nbsp;</div>
+                </div>
+                <button type="button" class="admin-pill-btn accent" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i>Knowledge graph</button>
+              </div>
+              <div class="admin-card" id="admin-wiki-page-list"></div>
+            </div>
+
+            <div id="admin-panel-register" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Register</div>
+                  <div class="admin-section-sub" id="admin-register-sub">&nbsp;</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-register-search" class="admin-search-input" type="search" placeholder="Search documents and values…" oninput="scheduleRegisterSearch()">
+                  <button type="button" class="admin-pill-btn" title="Download this view as CSV" onclick="exportRegisterCsv()"><i class="ti ti-download" style="font-size:14px"></i>CSV</button>
+                </div>
+              </div>
+              <div class="admin-filter-row" id="admin-register-families"></div>
+              <div class="admin-card admin-table-wrap"><div id="admin-register-table"></div></div>
+            </div>
+
+            <div id="admin-panel-obligations" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Obligations</div>
+                  <div class="admin-section-sub" id="admin-obligations-sub">&nbsp;</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <button type="button" class="admin-pill-btn" id="admin-obl-deadline-btn" title="Show only duties the text puts a time limit on" onclick="toggleObligationDeadline()"><i class="ti ti-calendar-clock" style="font-size:14px"></i>With a deadline</button>
+                  <input id="admin-obligations-search" class="admin-search-input" type="search" placeholder="Search duties…" oninput="scheduleObligationSearch()">
+                  <button type="button" class="admin-pill-btn" title="Download this view as CSV" onclick="exportObligationsCsv()"><i class="ti ti-download" style="font-size:14px"></i>CSV</button>
+                </div>
+              </div>
+              <div class="admin-filter-row" id="admin-obligations-parties"></div>
+              <div class="admin-card admin-table-wrap"><div id="admin-obligations-table"></div></div>
+            </div>
+
+            <div id="admin-panel-collections" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Collections</div>
+                  <div class="admin-section-sub" id="admin-collections-sub">Named sets of documents — what a playbook runs over</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-collection-name" class="admin-search-input" type="text" placeholder="New collection name…">
+                  <button type="button" class="admin-pill-btn primary" onclick="createCollection()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-collections-table"></div></div>
+              <div id="admin-collection-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-playbooks" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Playbooks</div>
+                  <div class="admin-section-sub" id="admin-playbooks-sub">House positions per clause type</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-playbook-name" class="admin-search-input" type="text" placeholder="New playbook name…">
+                  <button type="button" class="admin-pill-btn primary" onclick="createPlaybook()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-playbooks-table"></div></div>
+              <div id="admin-playbook-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+              <div class="admin-section-head" style="margin-top:18px">
+                <div><div class="admin-section-title" style="font-size:15px">Runs</div></div>
+                <button type="button" class="admin-pill-btn" onclick="loadPlaybookRuns()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-playbook-runs"></div></div>
+              <div id="admin-playbook-run-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-precedent" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Precedent layer</div>
+                  <div class="admin-section-sub" id="admin-precedent-sub">Clause-level search over role-tagged precedent documents</div>
+                </div>
+                <button type="button" class="admin-pill-btn" onclick="buildPrecedentEmbeddings()"><i class="ti ti-refresh" style="font-size:14px"></i>Embed pending</button>
+              </div>
+              <div class="admin-filter-row" id="admin-precedent-stats"></div>
+              <div class="admin-section-head" style="margin-top:6px">
+                <input id="admin-precedent-q" class="admin-search-input" style="flex:1"
+                       type="search" placeholder="Describe the clause you need — e.g. liability capped at fees paid in the last 12 months"
+                       onkeydown="if(event.key==='Enter')searchPrecedent()">
+                <button type="button" class="admin-pill-btn primary" onclick="searchPrecedent()"><i class="ti ti-search" style="font-size:14px"></i>Search</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-precedent-results"></div></div>
+            </div>
+
+            <div id="admin-panel-deviation" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Deviation Dashboard</div>
+                  <div class="admin-section-sub" id="admin-deviation-sub">Which documents deviate from house positions, ranked</div>
+                </div>
+                <button type="button" class="admin-pill-btn" onclick="loadDeviationOverview()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-deviation-overview"></div></div>
+              <div id="admin-deviation-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-prompts" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Prompt Library</div>
+                  <div class="admin-section-sub" id="admin-prompts-sub">Reusable templates with {% raw %}{{placeholder}}{% endraw %} variables</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <input id="admin-prompt-name" class="admin-search-input" type="text" placeholder="New template name…">
+                  <input id="admin-prompt-category" class="admin-search-input" type="text" placeholder="Category (optional)" style="max-width:150px">
+                  <button type="button" class="admin-pill-btn primary" onclick="createPrompt()"><i class="ti ti-plus" style="font-size:14px"></i>Create</button>
+                </div>
+              </div>
+              <div class="admin-card admin-table-wrap"><div id="admin-prompts-table"></div></div>
+              <div id="admin-prompt-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <div id="admin-panel-wikis" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Wikis</div>
+                  <div class="admin-section-sub" id="admin-wikis-sub">Isolated corpora — one active at a time</div>
+                </div>
+                <button type="button" class="admin-pill-btn primary" title="Create a new empty wiki" onclick="adminCreateWiki()"><i class="ti ti-plus" style="font-size:14px"></i>New wiki</button>
+              </div>
+              <div class="admin-card" style="padding:14px 18px;margin-bottom:14px;font-size:12px;line-height:1.6;color:var(--text-muted)">
+                <i class="ti ti-alert-triangle" style="font-size:13px;vertical-align:-1px;margin-right:4px;color:var(--amber)"></i>
+                Switching the active wiki changes what every feature reads and writes — chat, Review Table, ingest, the Review Queue. Requests already running keep the wiki they started with.
+              </div>
+              <div class="admin-card" id="admin-wikis-list"></div>
+            </div>
+
+            <div id="admin-panel-review" class="d-none" style="display:none" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
+              <div class="admin-section-head" style="margin-bottom:6px">
+                <div>
+                  <div class="admin-section-title">Review Queue</div>
+                  <div class="admin-section-sub" id="admin-review-sub">&nbsp;</div>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center">
+                  <div class="review-mode-switch">
+                    <button type="button" id="reviewModeDocs" class="review-mode-btn active" onclick="setReviewMode('documents')">By document</button>
+                    <button type="button" id="reviewModeItems" class="review-mode-btn" onclick="setReviewMode('items')">By item</button>
+                  </div>
+                  <button type="button" class="admin-pill-btn accent" title="Bulk-accept every low-stakes item at or above 60% confidence" onclick="adminBulkAcceptClauses()"><i class="ti ti-checks" style="font-size:14px"></i>Accept all ≥0.6</button>
+                </div>
+              </div>
+
+              <!-- Document-centric view: pick a document, see everything
+                   extracted from it beside the text it was extracted from. -->
+              <div id="review-doc-view" class="review-doc-grid">
+                <div class="review-doc-list" id="rq-doc-list"></div>
+                <div class="review-doc-meta" id="review-doc-meta">
+                  <div class="review-empty">Select a document to review its extracted metadata.</div>
+                </div>
+                <div class="review-doc-source" id="review-doc-source">
+                  <div class="review-empty">Source text appears here.</div>
+                </div>
+              </div>
+
+              <!-- Item-centric view: the stakes-tiered triage list. -->
+              <div id="review-item-view" style="display:none">
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:18px">
+                  <b style="color:var(--text-secondary)">A</b> accept · <b style="color:var(--text-secondary)">R</b> reject · <b style="color:var(--text-secondary)">J/K</b> navigate
+                </div>
+                <div id="admin-review-queue-list"></div>
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -3522,6 +4401,7 @@
     const METRIC_INFO = {
       confidence: { title: 'Confidence', desc: 'How well a model judges the retrieved context supports this answer.' },
       grounding:  { title: 'Grounding', desc: '% of the answer\'s checkable claims verified against the source text.' },
+      claims:     { title: 'Claims', desc: 'Quoted spans found verbatim in the exact text the model was given, and attributed to the right document. A count, not a score — nothing predicts it.' },
     };
 
     function metricInfo(label, score, key) {
@@ -3670,12 +4550,14 @@
     function switchTab(name, el) {
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
+      document.getElementById('sidebar').style.display = '';
       document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-draft').style.setProperty('display', 'none', 'important');
       document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-admin').style.setProperty('display', 'none', 'important');
       document.getElementById('doc-reader').style.display = 'none';
 
       if (name === 'ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
@@ -3683,6 +4565,1717 @@
       else if (name === 'compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
       else if (name === 'draft') document.getElementById('panel-draft').style.setProperty('display', 'flex', 'important');
       else if (name === 'files') { const fp = document.getElementById('panel-files'); fp.style.setProperty('display', 'flex', 'important'); fp.style.flexDirection = 'column'; }
+    }
+
+    // ============================================================
+    // Admin panel — separate from the chat tabs above. Operational
+    // surface (ingest, document lifecycle, wiki management, review
+    // queue) kept apart from Ask/Compare/Draft on purpose.
+    // ============================================================
+    function openAdmin() {
+      document.getElementById('panel-upload').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-ask').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-review').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-compare').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-draft').style.setProperty('display', 'none', 'important');
+      document.getElementById('panel-files').style.setProperty('display', 'none', 'important');
+      document.getElementById('doc-reader').style.display = 'none';
+      document.querySelectorAll('#modeTabs .tab').forEach(t => t.classList.remove('active'));
+      // Admin is its own dedicated view, not a chat surface — the session
+      // sidebar has nothing to do with it, so it goes away while open
+      // rather than sitting between the topbar and the admin nav rail.
+      document.getElementById('sidebar').style.display = 'none';
+      const ap = document.getElementById('panel-admin');
+      ap.style.setProperty('display', 'flex', 'important');
+      document.getElementById('admin-ingest-session-name').textContent = document.getElementById('top-session-name').textContent || 'this session';
+      // Refresh whichever sub-section is currently active
+      const activeSub = document.querySelector('#panel-admin .admin-nav-item.active');
+      const name = activeSub ? activeSub.dataset.target : 'ingest';
+      if (name === 'ingest') loadAdminIngestStatus();
+      else if (name === 'documents') loadDocumentManageList();
+      else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'wikis') loadAdminWikis();
+      else if (name === 'register') loadAdminRegister();
+      else if (name === 'obligations') loadAdminObligations();
+      else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
+      // Badge the Review Queue nav item even when it isn't the active section
+      refreshAdminReviewBadge();
+    }
+
+    function switchAdminTab(name, el) {
+      document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations',
+       'collections', 'playbooks', 'precedent', 'deviation', 'prompts'].forEach(n => {
+        document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
+      });
+      document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
+      if (name === 'ingest') loadAdminIngestStatus();
+      else if (name === 'documents') loadDocumentManageList();
+      else if (name === 'wiki') loadAdminWikiPages();
+      else if (name === 'wikis') loadAdminWikis();
+      else if (name === 'register') loadAdminRegister();
+      else if (name === 'obligations') loadAdminObligations();
+      else if (name === 'collections') loadCollections();
+      else if (name === 'playbooks') { loadPlaybooks(); loadPlaybookRuns(); }
+      else if (name === 'precedent') loadPrecedentStats();
+      else if (name === 'deviation') loadDeviationOverview();
+      else if (name === 'prompts') loadPrompts();
+      else if (name === 'review') { setReviewMode(reviewMode); document.getElementById('admin-panel-review').focus(); }
+    }
+
+    // ---- Collections -------------------------------------------------------
+    // A collection is a label over the corpus, never a container of it:
+    // deleting one removes the label and its membership rows, and every
+    // document stays exactly where it was. The delete confirmation says so,
+    // because "delete collection" otherwise reads as "delete these documents".
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g,
+        c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+    function shortDoc(s) {
+      const base = String(s || '').split(/[\\/]/).pop();
+      return base.replace(/^[0-9a-f-]{36}_/i, '');
+    }
+
+    async function loadCollections() {
+      const el = document.getElementById('admin-collections-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      try {
+        const r = await fetch('/admin/collections');
+        const j = await r.json();
+        const rows = j.collections || [];
+        document.getElementById('admin-collections-sub').textContent =
+          rows.length + ' collection' + (rows.length === 1 ? '' : 's') + ' in this wiki';
+        if (!rows.length) {
+          el.innerHTML = '<div class="admin-empty">No collections yet. Create one above, then add documents to it by family or by name.</div>';
+          return;
+        }
+        el.innerHTML = '<table class="admin-table"><thead><tr>' +
+          '<th>Name</th><th>Description</th><th style="text-align:right">Documents</th><th></th>' +
+          '</tr></thead><tbody>' + rows.map(c =>
+            `<tr><td><strong>${esc(c.name)}</strong></td>` +
+            `<td>${esc(c.description || '')}</td>` +
+            `<td style="text-align:right">${c.document_count}</td>` +
+            `<td style="text-align:right;white-space:nowrap">` +
+            `<button class="admin-pill-btn" onclick="openCollection(${c.id})">Open</button> ` +
+            `<button class="admin-pill-btn" onclick="deleteCollection(${c.id},'${esc(c.name)}')">Delete</button>` +
+            `</td></tr>`).join('') + '</tbody></table>';
+      } catch (e) {
+        el.innerHTML = '<div class="admin-empty">Could not load collections.</div>';
+      }
+    }
+
+    async function createCollection() {
+      const input = document.getElementById('admin-collection-name');
+      const name = (input.value || '').trim();
+      if (!name) { showToast('Give the collection a name first.'); return; }
+      const r = await fetch('/admin/collections', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create collection.'); return; }
+      input.value = '';
+      showToast('Created “' + name + '”.');
+      loadCollections();
+      openCollection(j.id);
+    }
+
+    async function deleteCollection(id, name) {
+      if (!confirm('Delete the collection “' + name + '”?\n\nThe documents themselves are not deleted — only this named set.')) return;
+      const r = await fetch('/admin/collections/' + id, { method: 'DELETE' });
+      showToast(r.ok ? 'Deleted “' + name + '”.' : 'Could not delete.');
+      document.getElementById('admin-collection-detail').style.setProperty('display', 'none', 'important');
+      loadCollections();
+    }
+
+    async function openCollection(id) {
+      const box = document.getElementById('admin-collection-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/collections/' + id)).json();
+      const docs = j.documents || [];
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+           <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+           <div class="admin-section-sub">${docs.length} document${docs.length === 1 ? '' : 's'}</div></div>
+         </div>
+         <div class="admin-filter-row" style="gap:8px;flex-wrap:wrap">
+           <input id="cd-family" class="admin-search-input" placeholder="Add by family — contract, opinion, litigation…" style="min-width:260px">
+           <input id="cd-name" class="admin-search-input" placeholder="…or by name contains" style="min-width:200px">
+           <button class="admin-pill-btn primary" onclick="addToCollection(${id})">Add</button>
+         </div>
+         <div class="admin-table-wrap" style="max-height:340px;overflow:auto">
+         ${docs.length ? '<table class="admin-table"><thead><tr><th>Document</th><th>Family</th><th>Type</th><th></th></tr></thead><tbody>' +
+            docs.map(d => `<tr><td>${esc(shortDoc(d.source_doc))}</td><td>${esc(d.doc_family || '')}</td>` +
+              `<td>${esc(d.doc_type || '')}</td>` +
+              `<td style="text-align:right"><button class="admin-pill-btn" onclick="removeFromCollection(${id},'${esc(d.source_doc)}')">Remove</button></td></tr>`).join('') +
+            '</tbody></table>'
+           : '<div class="admin-empty">Empty — add documents by family or name above.</div>'}
+         </div>`;
+    }
+
+    async function addToCollection(id) {
+      const fam = (document.getElementById('cd-family').value || '').trim();
+      const nm = (document.getElementById('cd-name').value || '').trim();
+      if (!fam && !nm) { showToast('Give a family or a name fragment to match.'); return; }
+      const r = await fetch('/admin/collections/' + id + '/documents', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ doc_family: fam || null, name_contains: nm || null })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not add documents.'); return; }
+      showToast(`Matched ${j.matched}, added ${j.added}` +
+                (j.already_present ? `, ${j.already_present} already there` : '') + '.');
+      openCollection(id); loadCollections();
+    }
+
+    async function removeFromCollection(id, doc) {
+      await fetch('/admin/collections/' + id + '/documents', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_docs: [doc] })
+      });
+      openCollection(id); loadCollections();
+    }
+
+    // ---- Playbooks ---------------------------------------------------------
+    async function loadPlaybooks() {
+      const el = document.getElementById('admin-playbooks-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks')).json();
+      const rows = j.playbooks || [];
+      document.getElementById('admin-playbooks-sub').textContent =
+        rows.length + ' playbook' + (rows.length === 1 ? '' : 's') + ' in this wiki';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No playbooks yet. Create one, add a rule per clause type, then run it over a collection.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th>Name</th><th style="text-align:right">Rules</th><th></th></tr></thead><tbody>' +
+        rows.map(p => `<tr><td><strong>${esc(p.name)}</strong></td>` +
+          `<td style="text-align:right">${p.rules}</td>` +
+          `<td style="text-align:right;white-space:nowrap">` +
+          `<button class="admin-pill-btn" onclick="openPlaybook(${p.id})">Open</button> ` +
+          `<button class="admin-pill-btn" onclick="deletePlaybook(${p.id},'${esc(p.name)}')">Delete</button>` +
+          `</td></tr>`).join('') + '</tbody></table>';
+    }
+
+    async function createPlaybook() {
+      const input = document.getElementById('admin-playbook-name');
+      const name = (input.value || '').trim();
+      if (!name) { showToast('Give the playbook a name first.'); return; }
+      const r = await fetch('/admin/playbooks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create playbook.'); return; }
+      input.value = ''; showToast('Created “' + name + '”.');
+      loadPlaybooks(); openPlaybook(j.id);
+    }
+
+    async function deletePlaybook(id, name) {
+      if (!confirm('Delete the playbook “' + name + '”?\n\nIts rules and past runs are deleted with it.')) return;
+      const r = await fetch('/admin/playbooks/' + id, { method: 'DELETE' });
+      showToast(r.ok ? 'Deleted.' : 'Could not delete.');
+      document.getElementById('admin-playbook-detail').style.setProperty('display', 'none', 'important');
+      loadPlaybooks(); loadPlaybookRuns();
+    }
+
+    async function openPlaybook(id) {
+      const box = document.getElementById('admin-playbook-detail');
+      box.style.setProperty('display', 'block', 'important');
+      const j = await (await fetch('/admin/playbooks/' + id)).json();
+      const cols = await (await fetch('/admin/collections')).json();
+      const rules = j.rules || [];
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+          <div class="admin-section-sub">${rules.length} rule${rules.length === 1 ? '' : 's'}</div></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <select id="pb-collection" class="admin-search-input">
+              <option value="">Run over a collection…</option>
+              ${(cols.collections || []).map(c => `<option value="${c.id}">${esc(c.name)} (${c.document_count})</option>`).join('')}
+            </select>
+            <button class="admin-pill-btn primary" onclick="runPlaybook(${id})"><i class="ti ti-player-play" style="font-size:14px"></i>Run</button>
+          </div>
+        </div>
+        <div class="admin-table-wrap" style="max-height:300px;overflow:auto">
+        ${rules.length ? '<table class="admin-table"><thead><tr><th>Clause type</th><th>Standard</th><th>Fallback</th><th>Unacceptable</th><th>Severity</th><th></th></tr></thead><tbody>' +
+          rules.map(r => `<tr><td><strong>${esc(r.clause_type)}</strong></td><td>${esc(r.standard)}</td>` +
+            `<td>${esc(r.fallback || '—')}</td><td>${esc(r.unacceptable || '—')}</td><td>${esc(r.severity)}</td>` +
+            `<td style="text-align:right"><button class="admin-pill-btn" onclick="removeRule(${id},'${esc(r.clause_type)}')">Remove</button></td></tr>`).join('') +
+          '</tbody></table>' : '<div class="admin-empty">No rules yet — a playbook needs at least one to run.</div>'}
+        </div>
+        <div class="admin-filter-row" style="gap:8px;flex-wrap:wrap;margin-top:10px">
+          <input id="pr-type" class="admin-search-input" placeholder="Clause type — e.g. Liability Cap" style="min-width:180px">
+          <input id="pr-standard" class="admin-search-input" placeholder="Standard position (required)" style="min-width:230px">
+          <input id="pr-fallback" class="admin-search-input" placeholder="Fallback (optional)" style="min-width:180px">
+          <input id="pr-unacceptable" class="admin-search-input" placeholder="Unacceptable (optional)" style="min-width:180px">
+          <select id="pr-severity" class="admin-search-input"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option></select>
+          <button class="admin-pill-btn primary" onclick="addRule(${id})">Add rule</button>
+        </div>`;
+    }
+
+    async function addRule(id) {
+      const body = {
+        clause_type: document.getElementById('pr-type').value.trim(),
+        standard: document.getElementById('pr-standard').value.trim(),
+        fallback: document.getElementById('pr-fallback').value.trim() || null,
+        unacceptable: document.getElementById('pr-unacceptable').value.trim() || null,
+        severity: document.getElementById('pr-severity').value
+      };
+      const r = await fetch('/admin/playbooks/' + id + '/rules', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not add the rule.'); return; }
+      showToast('Rule saved.'); openPlaybook(id); loadPlaybooks();
+    }
+
+    async function removeRule(id, type) {
+      await fetch('/admin/playbooks/' + id + '/rules', {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clause_type: type })
+      });
+      openPlaybook(id); loadPlaybooks();
+    }
+
+    // A run costs one model call per matching clause, so the server returns
+    // confirm_required with the exact count before anything is queued. The
+    // number shown here is counted from the database, not estimated.
+    async function runPlaybook(id, confirmed) {
+      const sel = document.getElementById('pb-collection');
+      if (!sel || !sel.value) { showToast('Pick a collection to run over.'); return; }
+      const body = { collection: parseInt(sel.value, 10) };
+      if (confirmed) body.confirm = 'true';
+      const r = await fetch('/admin/playbooks/' + id + '/run', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not start the run.'); return; }
+      if (j.status === 'confirm_required') {
+        if (confirm(`Run over ${j.documents} document(s) with ${j.rules} rule(s)?\n\n` +
+                    `${j.estimated_llm_calls} clauses will be classified — one model call each.`)) {
+          return runPlaybook(id, true);
+        }
+        return;
+      }
+      showToast(`Run started over ${j.documents} document(s).`);
+      setTimeout(loadPlaybookRuns, 1500);
+    }
+
+    async function loadPlaybookRuns() {
+      const el = document.getElementById('admin-playbook-runs');
+      if (!el) return;
+      const j = await (await fetch('/admin/playbooks/runs')).json();
+      const rows = j.runs || [];
+      if (!rows.length) { el.innerHTML = '<div class="admin-empty">No runs yet.</div>'; return; }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th>Playbook</th><th>Collection</th><th>Status</th><th style="text-align:right">Docs</th><th style="text-align:right">Findings</th><th></th></tr></thead><tbody>' +
+        rows.map(r => `<tr><td>${esc(r.playbook)}</td><td>${esc(r.collection || '—')}</td>` +
+          `<td>${esc(r.status)}</td><td style="text-align:right">${r.documents_done}/${r.documents_total}</td>` +
+          `<td style="text-align:right">${r.findings_total}</td>` +
+          `<td style="text-align:right"><button class="admin-pill-btn" onclick="openRun(${r.id})">Findings</button></td></tr>`).join('') +
+        '</tbody></table>';
+    }
+
+    // Findings are shown worst-first, and the verdict is colour-coded, because
+    // the point of a deviation report is that what needs attention is visible
+    // without reading every row.
+    async function openRun(id) {
+      const box = document.getElementById('admin-playbook-run-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks/runs/' + id)).json();
+      const v = j.verdicts || {};
+      const chip = (k, c) => v[k] ? `<span class="admin-chip" style="color:${c}">${v[k]} ${k}</span>` : '';
+      box.innerHTML =
+        `<div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.playbook)} — ${esc(j.collection || 'ad hoc')}</div>
+          <div class="admin-section-sub">${j.documents_done}/${j.documents_total} documents · ${j.findings_total} findings</div></div>
+        </div>
+        <div class="admin-filter-row">
+          ${chip('unacceptable', '#d9534f')}${chip('missing', '#e0a458')}
+          ${chip('fallback', '#8fa9e0')}${chip('unclear', '#999')}${chip('standard', '#4a9e6f')}
+        </div>
+        <div class="admin-table-wrap" style="max-height:420px;overflow:auto">
+        <table class="admin-table"><thead><tr><th>Verdict</th><th>Clause type</th><th>Document</th><th>Why</th><th>Suggested redline</th></tr></thead><tbody>` +
+        (j.findings || []).map(f => {
+          const col = { unacceptable: '#d9534f', missing: '#e0a458', fallback: '#8fa9e0', unclear: '#999', standard: '#4a9e6f' }[f.verdict] || '';
+          return `<tr><td style="color:${col};font-weight:600">${esc(f.verdict)}</td>` +
+            `<td>${esc(f.clause_type)}</td><td>${esc(shortDoc(f.source_doc))}</td>` +
+            `<td>${esc(f.rationale || '')}</td><td>${esc(f.redline || '')}</td></tr>`;
+        }).join('') + '</tbody></table></div>';
+    }
+
+    // ---- Prompt Library ------------------------------------------------------
+    async function loadPrompts() {
+      const el = document.getElementById('admin-prompts-table');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/prompts')).json();
+      const rows = j.templates || [];
+      document.getElementById('admin-prompts-sub').textContent =
+        rows.length ? rows.length + ' template' + (rows.length === 1 ? '' : 's') + ' in this wiki'
+                    : 'Reusable templates with {% raw %}{{placeholder}}{% endraw %} variables';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No templates yet. Create one above — use {% raw %}{{name}}{% endraw %} for anything filled in at use time.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr>' +
+        '<th>Name</th><th>Category</th><th>Variables</th><th></th></tr></thead><tbody>' +
+        rows.map(t => `<tr><td><strong>${esc(t.name)}</strong></td>` +
+          `<td>${esc(t.category || '—')}</td>` +
+          `<td>${(t.variables || []).map(v => `<span class="admin-chip">${esc(v)}</span>`).join(' ') || '—'}</td>` +
+          `<td style="text-align:right;white-space:nowrap">` +
+          `<button class="admin-pill-btn" onclick="openPrompt(${t.id})">Open</button> ` +
+          `<button class="admin-pill-btn" onclick="deletePrompt(${t.id},'${esc(t.name)}')">Delete</button>` +
+          `</td></tr>`).join('') + '</tbody></table>';
+    }
+
+    async function createPrompt() {
+      const name = (document.getElementById('admin-prompt-name').value || '').trim();
+      const category = (document.getElementById('admin-prompt-category').value || '').trim();
+      if (!name) { showToast('Give the template a name first.'); return; }
+      const r = await fetch('/admin/prompts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, category: category || null, body: 'New template — edit me. Use {% raw %}{{placeholders}}{% endraw %} for anything filled in at use time.' })
+      });
+      const j = await r.json();
+      if (!r.ok) { showToast(j.error || 'Could not create template.'); return; }
+      document.getElementById('admin-prompt-name').value = '';
+      document.getElementById('admin-prompt-category').value = '';
+      showToast('Created “' + name + '”.');
+      loadPrompts(); openPrompt(j.id);
+    }
+
+    async function deletePrompt(id, name) {
+      if (!confirm('Delete the template “' + name + '”?')) return;
+      await fetch('/admin/prompts/' + id, { method: 'DELETE' });
+      document.getElementById('admin-prompt-detail').style.setProperty('display', 'none', 'important');
+      showToast('Deleted.'); loadPrompts();
+    }
+
+    // Detail view is edit + preview together: the variable inputs are
+    // generated FROM the body's own {% raw %}{{placeholders}}{% endraw %}, so the preview always
+    // matches what the template currently asks for, including right after an
+    // edit that adds or removes a variable.
+    async function openPrompt(id) {
+      const box = document.getElementById('admin-prompt-detail');
+      box.style.setProperty('display', 'block', 'important');
+      const j = await (await fetch('/admin/prompts/' + id)).json();
+      renderPromptDetail(id, j);
+    }
+
+    function renderPromptDetail(id, j) {
+      const box = document.getElementById('admin-prompt-detail');
+      const varInputs = (j.variables || []).map(v =>
+        `<input class="admin-search-input pv-var" data-var="${esc(v)}" placeholder="${esc(v)}" style="min-width:140px" oninput="previewPrompt(${id})">`).join(' ');
+      box.innerHTML = `
+        <div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.name)}</div>
+          <div class="admin-section-sub">${esc(j.category || 'uncategorised')}</div></div>
+        </div>
+        <textarea id="pb-body" class="admin-search-input" style="width:100%;min-height:110px;font-family:monospace;font-size:12.5px"
+                  oninput="schedulePromptSave(${id})">${esc(j.body)}</textarea>
+        <div class="admin-filter-row" style="margin-top:8px">
+          <span style="font-size:12px;opacity:.7;align-self:center">Preview with:</span>
+          ${varInputs || '<span style="font-size:12px;opacity:.5">no variables</span>'}
+        </div>
+        <div class="admin-section-title" style="font-size:13px;margin-top:10px">Rendered</div>
+        <div class="admin-card" id="pb-preview" style="white-space:pre-wrap;font-size:13px;min-height:40px">${esc(j.body)}</div>
+        <div id="pb-save-status" style="font-size:11.5px;opacity:.6;margin-top:6px">&nbsp;</div>`;
+      previewPrompt(id);
+    }
+
+    let _promptSaveTimer = null;
+    function schedulePromptSave(id) {
+      clearTimeout(_promptSaveTimer);
+      document.getElementById('pb-save-status').textContent = 'Editing…';
+      _promptSaveTimer = setTimeout(() => savePromptBody(id), 600);
+    }
+
+    async function savePromptBody(id) {
+      const body = document.getElementById('pb-body').value;
+      const r = await fetch('/admin/prompts/' + id, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ body })
+      });
+      const j = await r.json();
+      const status = document.getElementById('pb-save-status');
+      if (!r.ok) { status.textContent = j.error || 'Could not save.'; return; }
+      status.textContent = 'Saved.';
+      // Variables may have changed — rebuild the preview inputs to match.
+      renderPromptDetail(id, j);
+      loadPrompts();
+    }
+
+    async function previewPrompt(id) {
+      const values = {};
+      document.querySelectorAll('#admin-prompt-detail .pv-var').forEach(inp => {
+        values[inp.dataset.var] = inp.value;
+      });
+      // /render reads the SAVED body, so while an edit is still debouncing
+      // (see schedulePromptSave) this reflects the body as of the last save,
+      // not the unsaved keystrokes — it catches up ~600ms after typing stops.
+      const r = await fetch('/admin/prompts/' + id + '/render', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values })
+      });
+      const j = await r.json();
+      document.getElementById('pb-preview').textContent = j.text;
+    }
+
+    // ---- Deviation Dashboard ------------------------------------------------
+    // Same verdict->colour convention as the Playbooks findings table, so a
+    // reviewer who has seen one recognises the other.
+    const VERDICT_COLOR = { unacceptable: '#d9534f', missing: '#e0a458',
+                            fallback: '#8fa9e0', unclear: '#999', standard: '#4a9e6f' };
+
+    async function loadDeviationOverview() {
+      const el = document.getElementById('admin-deviation-overview');
+      el.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const j = await (await fetch('/admin/playbooks/dashboard')).json();
+      const rows = j.playbooks || [];
+      document.getElementById('admin-deviation-sub').textContent =
+        rows.length ? rows.length + ' playbook' + (rows.length === 1 ? '' : 's') + ' with a completed run'
+                    : 'Which documents deviate from house positions, ranked';
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">No completed playbook runs yet. Run a playbook from the Playbooks tab, then come back here.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr>' +
+        '<th>Playbook</th><th>Collection</th><th style="text-align:right">Needs attention</th>' +
+        '<th></th><th style="text-align:right">Docs</th><th></th></tr></thead><tbody>' +
+        rows.map(r => {
+          const chips = ['unacceptable', 'missing', 'fallback', 'unclear', 'standard']
+            .filter(k => r.verdicts[k])
+            .map(k => `<span class="admin-chip" style="color:${VERDICT_COLOR[k]}">${r.verdicts[k]} ${k}</span>`)
+            .join(' ');
+          return `<tr><td><strong>${esc(r.playbook)}</strong></td><td>${esc(r.collection || '—')}</td>` +
+            `<td style="text-align:right;font-weight:600;color:${r.attention_needed ? '#d9534f' : 'inherit'}">${r.attention_needed}</td>` +
+            `<td>${chips}</td><td style="text-align:right">${r.documents_total}</td>` +
+            `<td style="text-align:right"><button class="admin-pill-btn" onclick="openDeviation(${r.playbook_id})">Open</button></td></tr>`;
+        }).join('') + '</tbody></table>';
+    }
+
+    async function openDeviation(playbookId) {
+      const box = document.getElementById('admin-deviation-detail');
+      box.style.setProperty('display', 'block', 'important');
+      box.innerHTML = '<div class="admin-empty">Loading…</div>';
+      const r = await fetch(`/admin/playbooks/${playbookId}/deviation`);
+      const j = await r.json();
+      if (!r.ok) { box.innerHTML = `<div class="admin-empty">${esc(j.error || 'Could not load.')}</div>`; return; }
+
+      const stale = j.stale_documents || [];
+      const staleBlock = stale.length ? `
+        <div class="admin-filter-row" style="margin-top:4px">
+          <span class="admin-chip" style="color:#e0a458">${stale.length} document(s) added since this run — not yet assessed</span>
+        </div>` : '';
+
+      const typeRows = (j.by_clause_type || []).map(t => {
+        const cells = ['standard', 'fallback', 'unacceptable', 'missing', 'unclear']
+          .map(k => `<td style="text-align:right;${t[k] ? `color:${VERDICT_COLOR[k]}` : 'opacity:.35'}">${t[k] || 0}</td>`).join('');
+        return `<tr><td>${esc(t.clause_type)}</td>${cells}</tr>`;
+      }).join('');
+
+      const docRows = (j.by_document || []).map(d => {
+        const cnt = Object.entries(d.counts).map(([k, n]) => `${n} ${k}`).join(', ');
+        return `<tr><td style="color:${VERDICT_COLOR[d.worst]};font-weight:600">${esc(d.worst)}</td>` +
+          `<td>${esc(shortDoc(d.source_doc))}</td><td>${esc(cnt)}</td></tr>`;
+      }).join('');
+
+      const priRows = (j.priority_findings || []).map(f =>
+        `<tr><td style="color:${VERDICT_COLOR[f.verdict]};font-weight:600">${esc(f.verdict)}</td>` +
+        `<td>${esc(f.severity || '')}</td><td>${esc(f.clause_type)}</td>` +
+        `<td>${esc(shortDoc(f.source_doc))}</td><td>${esc(f.rationale || '')}</td>` +
+        `<td>${esc(f.redline || '')}</td></tr>`).join('');
+
+      box.innerHTML = `
+        <div class="admin-section-head" style="margin-top:0">
+          <div><div class="admin-section-title" style="font-size:15px">${esc(j.playbook)} — ${esc(j.collection || 'ad hoc')}</div>
+          <div class="admin-section-sub">Run finished ${j.finished_at ? new Date(j.finished_at).toLocaleString() : '—'}</div></div>
+        </div>
+        ${staleBlock}
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">By clause type</div>
+        <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Clause type</th>
+          <th style="text-align:right">standard</th><th style="text-align:right">fallback</th>
+          <th style="text-align:right">unacceptable</th><th style="text-align:right">missing</th>
+          <th style="text-align:right">unclear</th></tr></thead><tbody>${typeRows}</tbody></table></div>
+
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">By document (worst-first)</div>
+        <div class="admin-table-wrap" style="max-height:260px;overflow:auto">
+          <table class="admin-table"><thead><tr><th>Worst verdict</th><th>Document</th><th>Findings</th></tr></thead>
+          <tbody>${docRows}</tbody></table></div>
+
+        <div class="admin-section-title" style="font-size:13px;margin-top:14px">Priority — needs a human</div>
+        <div class="admin-table-wrap" style="max-height:320px;overflow:auto">
+          <table class="admin-table"><thead><tr><th>Verdict</th><th>Severity</th><th>Clause type</th>
+          <th>Document</th><th>Why</th><th>Suggested redline</th></tr></thead>
+          <tbody>${priRows || '<tr><td colspan="6" class="admin-empty">Nothing needs attention.</td></tr>'}</tbody></table></div>`;
+    }
+
+    // ---- Precedent layer ---------------------------------------------------
+    async function loadPrecedentStats() {
+      const el = document.getElementById('admin-precedent-stats');
+      const [roles, cov] = await Promise.all([
+        (await fetch('/admin/precedent/roles')).json(),
+        (await fetch('/admin/precedent/embeddings')).json()
+      ]);
+      const r = roles.roles || {};
+      el.innerHTML =
+        `<span class="admin-chip">${r.precedent || 0} precedent</span>` +
+        `<span class="admin-chip">${r.reference || 0} reference</span>` +
+        `<span class="admin-chip">${cov.embedded || 0} / ${cov.eligible || 0} clauses embedded</span>` +
+        (cov.pending ? `<span class="admin-chip" style="color:#e0a458">${cov.pending} pending</span>` : '');
+    }
+
+    async function buildPrecedentEmbeddings() {
+      const r = await fetch('/admin/precedent/embeddings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      const j = await r.json();
+      showToast(j.status === 'up_to_date'
+        ? 'Every precedent clause is already embedded.'
+        : `Embedding ${j.pending} clause(s) in the background.`);
+      setTimeout(loadPrecedentStats, 3000);
+    }
+
+    async function searchPrecedent() {
+      const q = (document.getElementById('admin-precedent-q').value || '').trim();
+      const el = document.getElementById('admin-precedent-results');
+      if (!q) { showToast('Describe the clause you need.'); return; }
+      el.innerHTML = '<div class="admin-empty">Searching…</div>';
+      const j = await (await fetch('/admin/precedent/search?limit=15&q=' + encodeURIComponent(q))).json();
+      const rows = j.results || [];
+      if (!rows.length) {
+        el.innerHTML = '<div class="admin-empty">Nothing matched. If the clause count above is 0, embed the precedent clauses first.</div>';
+        return;
+      }
+      el.innerHTML = '<table class="admin-table"><thead><tr><th style="text-align:right">Match</th><th>Clause type</th><th>From</th><th>Text</th></tr></thead><tbody>' +
+        rows.map(c => `<tr><td style="text-align:right">${(c.score * 100).toFixed(0)}%</td>` +
+          `<td><strong>${esc(c.clause_type)}</strong></td><td>${esc(shortDoc(c.source_doc))}</td>` +
+          `<td>${esc(c.text)}</td></tr>`).join('') + '</tbody></table>';
+    }
+
+    // ---- Contract Register -------------------------------------------------
+    // A pure read over the backbone: every ingested document is already a row.
+    // The column set comes from the server, per family — a litigation document
+    // has no liability cap, so it is not given an empty column for one.
+    let registerFamily = null;
+    let registerData = null;
+    let registerSearchTimer = null;
+
+    const REGISTER_LABELS = {
+      parties: 'Parties', governing_law: 'Governing law', effective_date: 'Effective date',
+      expiry_date: 'Expiry date', liability_cap: 'Liability cap', ip_ownership: 'IP ownership',
+      notice_period: 'Notice period', payment_terms: 'Payment terms', term_length: 'Term',
+      renewal_terms: 'Renewal', termination: 'Termination', confidentiality: 'Confidentiality',
+      binding_status: 'Binding status', exclusivity: 'Exclusivity', proposed_terms: 'Proposed terms',
+      conditions_precedent: 'Conditions precedent', expiry_of_offer: 'Offer expiry',
+      court: 'Court', case_number: 'Case number', disposition: 'Disposition',
+      decided_date: 'Decided', procedural_posture: 'Posture', plaintiffs: 'Plaintiffs',
+      defendants: 'Defendants', holding: 'Holding', relief_granted: 'Relief granted',
+      relief_sought: 'Relief sought', statutes_cited: 'Statutes cited',
+      grantor: 'Grantor', grantee: 'Grantee', scope_of_authority: 'Scope', limitations: 'Limitations',
+      resolving_body: 'Resolving body', addressee: 'Addressee', opinion_date: 'Opinion date',
+      matters_opined: 'Matters opined', conclusion: 'Conclusion', assumptions: 'Assumptions',
+      qualifications: 'Qualifications', reliance_limitation: 'Reliance limitation',
+      subject_matter: 'Subject matter', key_terms: 'Key terms', matter_reference: 'Matter reference'
+    };
+    const registerLabel = n => REGISTER_LABELS[n] || n.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase());
+
+    function scheduleRegisterSearch() {
+      clearTimeout(registerSearchTimer);
+      registerSearchTimer = setTimeout(loadAdminRegister, 250);
+    }
+
+    function setRegisterFamily(key) {
+      registerFamily = key;
+      loadAdminRegister();
+    }
+
+    async function loadAdminRegister() {
+      const el = document.getElementById('admin-register-table');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      const search = (document.getElementById('admin-register-search').value || '').trim();
+      const params = new URLSearchParams({ session_id: SID, limit: '2000' });
+      if (registerFamily) params.set('family', registerFamily);
+      if (search) params.set('search', search);
+      try {
+        const res = await fetch('/register?' + params.toString());
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load the register');
+        registerData = d;
+        renderRegisterFamilies(d);
+        renderRegisterTable(d);
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    function renderRegisterFamilies(d) {
+      const total = (d.families || []).reduce((a, f) => a + f.count, 0);
+      const pill = (key, label, count) =>
+        `<button type="button" class="admin-filter-pill${(registerFamily || null) === key ? ' active' : ''}" onclick="setRegisterFamily(${key === null ? 'null' : "'" + key + "'"})">${escapeHtmlRule(label)}<span class="cnt">${count}</span></button>`;
+      document.getElementById('admin-register-families').innerHTML =
+        pill(null, 'All families', total) +
+        (d.families || []).filter(f => f.count > 0).map(f => pill(f.key, f.label, f.count)).join('');
+    }
+
+    function renderRegisterTable(d) {
+      const el = document.getElementById('admin-register-table');
+      const rows = d.rows || [];
+      document.getElementById('admin-register-sub').textContent =
+        `${d.total.toLocaleString()} document${d.total === 1 ? '' : 's'}` +
+        (d.family ? ` in ${d.family.replace(/_/g, ' ')}` : ' across every family') +
+        ' — read straight from the backbone, no extraction';
+      if (!rows.length) {
+        el.innerHTML = '<div style="padding:26px;text-align:center;font-size:12px;color:var(--text-muted)">No documents match.</div>';
+        return;
+      }
+      const cols = d.columns || [];
+      const head = ['<th>Document</th>', d.family ? '' : '<th>Family</th>', '<th>Type</th>', '<th>Jurisdiction</th>']
+        .concat(cols.map(c => `<th>${escapeHtmlRule(registerLabel(c))}</th>`))
+        .concat(['<th style="text-align:right">Pages</th>',
+                 '<th style="text-align:right">Clauses</th>',
+                 '<th style="text-align:right">Duties</th>']).join('');
+      const cell = v => {
+        if (!v || v.value === null || v.value === undefined || v.value === '')
+          return '<td class="cell-empty">—</td>';
+        const cls = v.flagged ? 'cell-flagged' : '';
+        const title = v.confidence === null || v.confidence === undefined
+          ? 'confidence unknown' : `confidence ${Math.round(v.confidence * 100)}%`;
+        return `<td class="${cls}" title="${title}">${escapeHtmlRule(String(v.value))}</td>`;
+      };
+      el.innerHTML = '<table class="admin-table"><thead><tr>' + head + '</tr></thead><tbody>' +
+        rows.map(r => '<tr>' +
+          `<td class="cell-doc" title="${escapeHtmlRule(r.source_doc)}">${escapeHtmlRule(_shortSourceDoc(r.source_doc))}</td>` +
+          (d.family ? '' : `<td>${escapeHtmlRule((r.doc_family || 'unclassified').replace(/_/g, ' '))}</td>`) +
+          `<td>${escapeHtmlRule(r.doc_type || '—')}</td>` +
+          `<td>${escapeHtmlRule(r.jurisdiction || '—')}</td>` +
+          cols.map(c => cell(r.values[c])).join('') +
+          `<td class="num">${r.page_count}</td><td class="num">${r.clause_count}</td><td class="num">${r.obligation_count}</td>` +
+          '</tr>').join('') + '</tbody></table>';
+    }
+
+    // ---- Obligation tracker ------------------------------------------------
+    // Same shape as the register, over `obligations`. The empty state is the
+    // load-bearing part: a corpus ingested before obligation extraction was
+    // wired has no duties to show, and rendering that as "no results" would
+    // say something false about the documents.
+    let obligationParty = null;
+    let obligationDeadlineOnly = false;
+    let obligationData = null;
+    let obligationSearchTimer = null;
+
+    const OBLIGATION_LABELS = {
+      obligated_party: 'Party', duty: 'Duty', trigger: 'Trigger',
+      deadline: 'Deadline', notice_period: 'Notice', consequence: 'Consequence'
+    };
+
+    function scheduleObligationSearch() {
+      clearTimeout(obligationSearchTimer);
+      obligationSearchTimer = setTimeout(loadAdminObligations, 250);
+    }
+
+    function setObligationParty(name) {
+      obligationParty = name;
+      loadAdminObligations();
+    }
+
+    function toggleObligationDeadline() {
+      obligationDeadlineOnly = !obligationDeadlineOnly;
+      document.getElementById('admin-obl-deadline-btn').classList.toggle('accent', obligationDeadlineOnly);
+      loadAdminObligations();
+    }
+
+    async function loadAdminObligations() {
+      const el = document.getElementById('admin-obligations-table');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      const search = (document.getElementById('admin-obligations-search').value || '').trim();
+      const params = new URLSearchParams({ session_id: SID, limit: '2000' });
+      if (obligationParty) params.set('party', obligationParty);
+      if (search) params.set('search', search);
+      if (obligationDeadlineOnly) params.set('with_deadline', 'true');
+      try {
+        const res = await fetch('/obligations?' + params.toString());
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load obligations');
+        obligationData = d;
+        renderObligationParties(d);
+        renderObligationTable(d);
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    function renderObligationParties(d) {
+      const cov = d.coverage || {};
+      const pill = (key, label, count) =>
+        `<button type="button" class="admin-filter-pill${(obligationParty || null) === key ? ' active' : ''}" onclick="setObligationParty(${key === null ? 'null' : JSON.stringify(key).replace(/"/g, '&quot;')})">${escapeHtmlRule(label)}<span class="cnt">${count}</span></button>`;
+      // Long tail of one-off parties would push the table off screen; the
+      // search box covers anyone not in the top slice.
+      const top = (d.parties || []).slice(0, 12);
+      document.getElementById('admin-obligations-parties').innerHTML =
+        (cov.obligations ? pill(null, 'All parties', cov.obligations) : '') +
+        top.map(p => pill(p.name, p.name, p.count)).join('');
+    }
+
+    function renderObligationTable(d) {
+      const el = document.getElementById('admin-obligations-table');
+      const cov = d.coverage || {};
+      const sub = document.getElementById('admin-obligations-sub');
+      if (!cov.obligations) {
+        sub.textContent = 'Nothing extracted yet';
+        el.innerHTML = `<div style="padding:34px 26px;text-align:center;font-size:12.5px;line-height:1.7;color:var(--text-secondary)">
+          <i class="ti ti-clock-exclamation" style="font-size:26px;color:var(--text-muted);display:block;margin-bottom:10px"></i>
+          <b style="color:var(--text-primary)">No obligations have been extracted for this wiki.</b><br>
+          This does not mean these documents impose no duties. Obligation extraction was
+          wired into the ingest call only in Phase 1, so the
+          ${cov.eligible_documents || 0} document${cov.eligible_documents === 1 ? '' : 's'}
+          here that could carry duties were ingested before anything asked for them.<br>
+          <span style="color:var(--text-muted)">Re-ingesting a document fills its duties. Documents ingested from now on fill theirs automatically.</span>
+        </div>`;
+        return;
+      }
+      sub.textContent =
+        `${d.total.toLocaleString()} dut${d.total === 1 ? 'y' : 'ies'}` +
+        (d.party ? ` borne by ${d.party}` : '') +
+        ` — from ${cov.documents_with_obligations} of ${cov.eligible_documents} eligible documents, ` +
+        `${cov.with_deadline} with a stated deadline`;
+      const rows = d.rows || [];
+      if (!rows.length) {
+        el.innerHTML = '<div style="padding:26px;text-align:center;font-size:12px;color:var(--text-muted)">No duties match.</div>';
+        return;
+      }
+      const cols = d.columns || [];
+      const head = '<th>Document</th>' + cols.map(c =>
+        `<th>${escapeHtmlRule(OBLIGATION_LABELS[c] || c)}</th>`).join('') +
+        '<th style="text-align:right">Page</th>';
+      el.innerHTML = '<table class="admin-table"><thead><tr>' + head + '</tr></thead><tbody>' +
+        rows.map(r => {
+          const conf = r.confidence === null || r.confidence === undefined
+            ? 'confidence unknown' : `confidence ${Math.round(r.confidence * 100)}%`;
+          return '<tr>' +
+            `<td class="cell-doc" title="${escapeHtmlRule(r.source_doc)}">${escapeHtmlRule(_shortSourceDoc(r.source_doc))}</td>` +
+            cols.map(c => r[c]
+              ? `<td title="${escapeHtmlRule(c === 'duty' ? (r.verbatim_text || conf) : conf)}">${escapeHtmlRule(String(r[c]))}</td>`
+              : '<td class="cell-empty">—</td>').join('') +
+            `<td class="num">${r.page_num === null || r.page_num === undefined ? '—' : r.page_num}</td>` +
+            '</tr>';
+        }).join('') + '</tbody></table>';
+    }
+
+    function exportObligationsCsv() {
+      // Say why nothing downloaded. This table is empty for any corpus
+      // ingested before obligation extraction was wired, so a silent no-op
+      // here is the common case, not the rare one.
+      if (!obligationData || !(obligationData.rows || []).length) {
+        showToast('No obligations to export', 'info');
+        return;
+      }
+      const d = obligationData, cols = d.columns || [];
+      const header = ['Document'].concat(cols.map(c => OBLIGATION_LABELS[c] || c))
+        .concat(['Page', 'Verbatim text', 'Confidence']);
+      const q = s => '"' + String(s === null || s === undefined ? '' : s).replace(/"/g, '""') + '"';
+      const lines = [header.map(q).join(',')].concat(d.rows.map(r =>
+        [r.source_doc].concat(cols.map(c => r[c] || ''))
+          .concat([r.page_num, r.verbatim_text || '', r.confidence]).map(q).join(',')));
+      const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `obligations-${d.party || 'all'}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    function exportRegisterCsv() {
+      if (!registerData || !(registerData.rows || []).length) {
+        showToast('No documents to export', 'info');
+        return;
+      }
+      const d = registerData, cols = d.columns || [];
+      const header = ['Document', 'Family', 'Type', 'Jurisdiction']
+        .concat(cols.map(registerLabel)).concat(['Pages', 'Clauses', 'Duties']);
+      const q = s => '"' + String(s === null || s === undefined ? '' : s).replace(/"/g, '""') + '"';
+      const lines = [header.map(q).join(',')].concat(d.rows.map(r => [
+        r.source_doc, r.doc_family || '', r.doc_type || '', r.jurisdiction || ''
+      ].concat(cols.map(c => (r.values[c] || {}).value || ''))
+       .concat([r.page_count, r.clause_count, r.obligation_count]).map(q).join(',')));
+      const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `register-${d.family || 'all'}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function loadAdminWikis() {
+      const el = document.getElementById('admin-wikis-list');
+      el.innerHTML = '<div style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch('/admin/wikis');
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load wikis');
+        const rows = d.wikis || [];
+        document.getElementById('admin-wikis-sub').textContent =
+          `${rows.length} wiki${rows.length === 1 ? '' : 's'} — one active at a time`;
+        el.innerHTML = `
+          <div class="admin-row" style="font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted)">
+            <span style="flex:1">Name</span><span style="width:90px">Pages</span>
+            <span style="width:90px">Docs</span><span style="width:90px">Status</span>
+            <span style="width:150px;text-align:right">Actions</span>
+          </div>` + rows.map(w => {
+            const isActive = w.is_active;
+            const archived = w.status !== 'active';
+            return `<div class="admin-row">
+              <span style="flex:1;min-width:0;display:flex;align-items:center;gap:7px">
+                ${isActive ? '<i class="ti ti-circle-check-filled" style="color:var(--green-text);font-size:14px" title="Active wiki"></i>' : '<i class="ti ti-circle" style="color:var(--text-muted);font-size:14px"></i>'}
+                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtmlRule(w.name)}</span>
+              </span>
+              <span style="width:90px;font-family:var(--font-mono,monospace);font-size:11.5px">${w.page_count.toLocaleString()}</span>
+              <span style="width:90px;font-family:var(--font-mono,monospace);font-size:11.5px">${w.document_count.toLocaleString()}</span>
+              <span style="width:90px"><span class="admin-badge ${isActive ? 'green' : archived ? 'muted' : ''}">${isActive ? 'active' : archived ? 'archived' : 'available'}</span></span>
+              <span style="width:150px;display:flex;gap:5px;justify-content:flex-end">
+                ${isActive || archived ? '' : `<button type="button" class="admin-icon-btn" title="Make this the active wiki" onclick="adminActivateWiki('${w.id}','${escapeHtmlRule(w.name).replace(/'/g, "\\'")}')"><i class="ti ti-switch-horizontal" style="font-size:13px"></i></button>`}
+                ${isActive || archived ? '' : `<button type="button" class="admin-icon-btn danger" title="Archive this wiki" onclick="adminArchiveWiki('${w.id}','${escapeHtmlRule(w.name).replace(/'/g, "\\'")}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`}
+              </span>
+            </div>`;
+          }).join('');
+      } catch (e) {
+        el.innerHTML = `<div style="padding:22px;text-align:center;font-size:12px;color:var(--red)">${escapeHtmlRule(e.message)}</div>`;
+      }
+    }
+
+    async function adminCreateWiki() {
+      const name = window.prompt('Name for the new wiki:');
+      if (!name || !name.trim()) return;
+      try {
+        const res = await fetch('/admin/wikis/create', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: name.trim() }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Create failed');
+        showToast('Wiki created — it starts empty', 'success');
+        loadAdminWikis();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function adminActivateWiki(wikiId, name) {
+      // Worth an explicit confirm: this changes what every feature in the app
+      // is reading, not just what this screen shows.
+      if (!window.confirm(`Switch the active wiki to "${name}"?\n\nEvery feature — chat, Review Table, ingest, the Review Queue — will read and write this wiki from now on.`)) return;
+      try {
+        const res = await fetch('/admin/wikis/activate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wiki_id: wikiId }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Switch failed');
+        showToast(`Active wiki is now "${name}" — reloading…`, 'success');
+        // A full reload, not just re-fetching this list: chat, the sessions
+        // sidebar, the "Ingest name" chip, and Files/Review/Wiki are all
+        // scoped by session pointers resolved server-side at page load —
+        // an AJAX-only refresh of this screen would leave every other panel
+        // silently still showing the wiki that was active a moment ago.
+        setTimeout(() => location.reload(), 700);
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function adminArchiveWiki(wikiId, name) {
+      if (!window.confirm(`Archive "${name}"?\n\nIts documents and pages are kept, but it can no longer be made active.`)) return;
+      try {
+        const res = await fetch('/admin/wikis/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ wiki_id: wikiId, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Archive failed');
+        showToast('Wiki archived', 'success');
+        loadAdminWikis();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function refreshAdminReviewBadge() {
+      try {
+        const res = await fetch(`/review_queue?session_id=${SID}`);
+        const data = await res.json();
+        const n = (data.clauses || []).length;
+        const badge = document.getElementById('admin-review-badge');
+        badge.textContent = n;
+        badge.classList.toggle('d-none', n === 0);
+      } catch (e) { /* non-critical */ }
+    }
+
+    function _ingestStatusMeta(status) {
+      if (status === 'done') return { label: 'indexed', cls: 'green' };
+      if (status === 'error') return { label: 'error', cls: 'red' };
+      if (status === 'awaiting_confirmation') return { label: 'awaiting confirm', cls: 'amber' };
+      return { label: status || 'queued', cls: 'muted' };
+    }
+
+    async function loadAdminIngestStatus() {
+      const statsEl = document.getElementById('admin-ingest-stats');
+      const listEl = document.getElementById('admin-ingest-status');
+      listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/progress?session_id=${SID}`);
+        const data = await res.json();
+        const docs = data.docs_list || [];
+
+        const counts = { total: docs.length, indexed: 0, processing: 0, errors: 0 };
+        docs.forEach(d => {
+          if (d.status === 'done') counts.indexed++;
+          else if (d.status === 'error') counts.errors++;
+          else counts.processing++;
+        });
+        statsEl.innerHTML = `
+          <div class="admin-stat-tile"><div class="admin-stat-val">${counts.total}</div><div class="admin-stat-label">Total documents</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--green-border)"><div class="admin-stat-val" style="color:var(--green-text)">${counts.indexed}</div><div class="admin-stat-label">Indexed</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--accent-border)"><div class="admin-stat-val" style="color:var(--accent)">${counts.processing}</div><div class="admin-stat-label">Processing / queued</div></div>
+          <div class="admin-stat-tile" style="border-color:var(--red-border)"><div class="admin-stat-val" style="color:var(--red)">${counts.errors}</div><div class="admin-stat-label">Errors</div></div>
+        `;
+
+        if (!docs.length) {
+          listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No ingest activity for this session yet.</div>';
+          return;
+        }
+        listEl.innerHTML = docs.map(d => {
+          const meta = _ingestStatusMeta(d.status);
+          return `<div class="admin-row">
+              <i class="ti ti-file-text" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
+              <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px">${escapeHtmlRule(d.name)}</span>
+              <span style="font-size:11px;color:var(--text-muted);flex-shrink:0">${d.pages ? `${d.pages} pages` : ''}</span>
+              <span class="admin-badge ${meta.cls}" style="flex-shrink:0;width:96px;text-align:center">${meta.label}</span>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        console.error('loadAdminIngestStatus error:', e);
+        statsEl.innerHTML = '';
+        listEl.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load ingest status.</div>';
+      }
+    }
+
+    async function adminResumeIngest() {
+      try {
+        const res = await fetch(`/resume_ingest?session_id=${SID}`);
+        const d = await res.json();
+        if (d.status === 'confirm_required') {
+          const est = d.estimate || {};
+          const cost = (est.estimated_cost_usd ?? 0).toFixed(2);
+          const msg = `${d.pending} pending doc(s), ~${est.estimated_llm_calls ?? '?'} LLM calls, ~$${cost} estimated cost.\n\nProceed?`;
+          if (!window.confirm(msg)) return;
+          const cRes = await fetch(`/resume_ingest?session_id=${SID}&confirm=true`);
+          const cd = await cRes.json();
+          if (cd.error) { showToast(cd.error, 'error'); return; }
+          showToast(`Resuming ${cd.resuming} doc(s)`, 'success');
+        } else if (d.error) {
+          showToast(d.error, 'error');
+        } else if (d.status === 'nothing_to_resume') {
+          showToast('Nothing to resume — every uploaded doc is already indexed', 'success');
+        } else {
+          showToast(`Resuming ${d.resuming} doc(s)`, 'success');
+        }
+        loadAdminIngestStatus();
+      } catch (e) {
+        showToast('Resume ingest failed', 'error');
+      }
+    }
+
+    // source_doc is "<session_id>_<relative/path/flattened/with/underscores>"
+    // (see flatten_doc_key in services/documents.py) — the UUID prefix is
+    // meaningless to a human and, being first, is exactly what a
+    // left-to-right ellipsis keeps while cutting off the actual filename.
+    // Strip the prefix, and truncate from the front (not the end) so the
+    // filename — always last, extension included — stays visible.
+    function _shortSourceDoc(sourceDoc) {
+      return (sourceDoc || '').replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/i, '');
+    }
+
+    async function loadAdminWikiPages() {
+      const el = document.getElementById('admin-wiki-page-list');
+      const sub = document.getElementById('admin-wiki-sub');
+      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/admin/wiki/pages?session_id=${SID}`);
+        const data = await res.json();
+        const pages = data.pages || [];
+        sub.textContent = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
+        if (!pages.length) {
+          el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No wiki pages yet.</div>';
+          return;
+        }
+        const header = `<div class="admin-row" style="font-size:10.5px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;padding-top:9px;padding-bottom:9px">
+            <span style="flex:1">Title</span>
+            <span style="width:150px">Source</span>
+            <span style="width:70px;text-align:right">Chars</span>
+            <span style="width:96px;text-align:right">Actions</span>
+          </div>`;
+        el.innerHTML = header + pages.map(p => {
+          const escTitle = p.title.replace(/'/g, "\\'");
+          const flag = p.contradiction_flagged
+            ? `<i class="ti ti-alert-triangle" style="color:var(--red);font-size:13px;flex-shrink:0" title="Contradiction flagged"></i>`
+            : '';
+          const shortSource = _shortSourceDoc(p.source_doc);
+          return `<div class="admin-row">
+              <span style="flex:1;min-width:0;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;align-items:center;gap:6px">${escapeHtmlRule(p.title)}${flag}</span>
+              <span style="width:150px;font-size:11.5px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left" title="${escapeHtmlRule(p.source_doc || '')}">${escapeHtmlRule(shortSource)}</span>
+              <span style="width:70px;text-align:right;font-size:11.5px;color:var(--text-muted)">${p.char_count || 0}</span>
+              <span style="width:96px;display:flex;gap:5px;justify-content:flex-end">
+                <button type="button" class="admin-icon-btn" title="Rename" onclick="adminRenamePage('${escTitle}')"><i class="ti ti-edit" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" title="Merge into another page" onclick="adminMergePage('${escTitle}')"><i class="ti ti-git-merge" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn danger" title="Delete" onclick="adminDeletePage('${escTitle}')"><i class="ti ti-trash" style="font-size:13px"></i></button>
+              </span>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        console.error('loadAdminWikiPages error:', e);
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load wiki pages.</div>';
+      }
+    }
+
+    async function adminRenamePage(oldTitle) {
+      const newTitle = window.prompt(`Rename "${oldTitle}" to:`, oldTitle);
+      if (!newTitle || newTitle === oldTitle) return;
+      try {
+        const res = await fetch('/admin/wiki/page/rename', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, old_title: oldTitle, new_title: newTitle }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Rename failed');
+        showToast(`Renamed to "${newTitle}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function adminMergePage(sourceTitle) {
+      const targetTitle = window.prompt(`Merge "${sourceTitle}" into which page? (content is appended, "${sourceTitle}" is then removed)`, '');
+      if (!targetTitle || targetTitle === sourceTitle) return;
+      if (!window.confirm(`Merge "${sourceTitle}" into "${targetTitle}"?\n\nThis appends its content and removes "${sourceTitle}". Cannot be undone.`)) return;
+      try {
+        const res = await fetch('/admin/wiki/page/merge', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_title: sourceTitle, target_title: targetTitle, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Merge failed');
+        showToast(`Merged into "${targetTitle}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function adminDeletePage(title) {
+      if (!window.confirm(`Permanently delete page "${title}"?\n\nThis removes it from relations, clause map, and embeddings. Cannot be undone.`)) return;
+      try {
+        const res = await fetch('/admin/wiki/page/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, title: title, confirm: true }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Delete failed');
+        showToast(`Deleted "${title}"`, 'success');
+        loadAdminWikiPages();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    // ============================================================
+    // Review Queue — target architecture § 02, first slice.
+    // Flagged clause -> stakes check -> bulk-accept (low-stakes,
+    // >=0.6) or individual sign-off (high-stakes) -> trusted.
+    // ============================================================
+    let reviewQueueItems = [];
+    let reviewQueueSelected = -1;
+
+    async function loadAdminReviewQueue() {
+      const el = document.getElementById('admin-review-queue-list');
+      const sub = document.getElementById('admin-review-sub');
+      el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/review_queue?session_id=${SID}`);
+        const data = await res.json();
+        reviewQueueItems = data.clauses || [];
+        reviewQueueSelected = reviewQueueItems.length ? 0 : -1;
+        const highCount = reviewQueueItems.filter(c => c.stakes === 'high').length;
+        const lowCount = reviewQueueItems.length - highCount;
+        sub.textContent = `${reviewQueueItems.length} pending · ${highCount} high-stakes · ${lowCount} low-stakes`;
+        renderReviewQueue();
+        const badge = document.getElementById('admin-review-badge');
+        badge.textContent = reviewQueueItems.length;
+        badge.classList.toggle('d-none', reviewQueueItems.length === 0);
+      } catch (e) {
+        console.error('loadAdminReviewQueue error:', e);
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load the Review Queue.</div>';
+      }
+    }
+
+    function _confidenceColor(c) {
+      return c >= 0.8 ? 'var(--green-text)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
+    }
+    function _confidenceBarColor(c) {
+      return c >= 0.8 ? 'var(--green)' : c >= 0.5 ? 'var(--amber)' : 'var(--red)';
+    }
+
+    function renderReviewQueue() {
+      const el = document.getElementById('admin-review-queue-list');
+      if (!reviewQueueItems.length) {
+        el.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Nothing pending — every extracted clause has been reviewed.</div>';
+        return;
+      }
+      // Kind labels for the non-clause flags the backbone adds. A doc-type
+      // card and a clause card are triaged very differently, so the kind is
+      // shown rather than left for the reviewer to infer from the text.
+      const KIND_LABEL = {
+        clause: null, doc_type: 'Doc type', metadata: 'Metadata',
+        table: 'Table', figure: 'Figure',
+      };
+      const cardHtml = (c, idx, badgeClass) => {
+        const selected = idx === reviewQueueSelected;
+        const pct = Math.round(c.confidence * 100);
+        const kind = c.item_kind || 'clause';
+        const kindLabel = KIND_LABEL[kind];
+        const body = c.verbatim_text || '';
+        return `<div class="review-card${selected ? ' selected' : ''}" onclick="reviewQueueSelected=${idx};renderReviewQueue()">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+              <span style="display:flex;align-items:center;gap:6px;min-width:0">
+                ${kindLabel ? `<span class="admin-badge amber" style="flex:none">${escapeHtmlRule(kindLabel)}</span>` : ''}
+                <span class="admin-badge ${badgeClass}">${escapeHtmlRule(c.clause_type)}</span>
+              </span>
+              <span style="display:flex;align-items:center;gap:6px;flex:none">
+                <span class="review-conf-track"><span class="review-conf-fill" style="width:${pct}%;background:${_confidenceBarColor(c.confidence)}"></span></span>
+                <span style="font-size:11px;font-weight:700;font-family:var(--font-mono,monospace);color:${_confidenceColor(c.confidence)}">${pct}%</span>
+              </span>
+            </div>
+            ${body ? `<div style="font-size:12.5px;line-height:1.55;color:var(--text-primary);font-style:italic">&ldquo;${escapeHtmlRule(body)}&rdquo;</div>` : ''}
+            ${c.reason ? `<div style="font-size:11.5px;line-height:1.5;color:var(--text-muted);margin-top:${body ? '7px' : '0'}"><i class="ti ti-alert-triangle" style="font-size:12px;vertical-align:-1px;margin-right:3px"></i>${escapeHtmlRule(c.reason)}</div>` : ''}
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:11px">
+              <span style="font-size:11px;color:var(--text-muted)">${escapeHtmlRule(_shortSourceDoc(c.source_doc || ''))}${c.page_num ? ` · p.${c.page_num}` : ''}</span>
+              <span style="display:flex;gap:5px">
+                <button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept (A)" onclick="event.stopPropagation();adminResolveClause(${c.id},'accept','${kind}')"><i class="ti ti-check" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(${c.id},'${kind}')"><i class="ti ti-edit" style="font-size:13px"></i></button>
+                <button type="button" class="admin-icon-btn danger" title="Reject (R)" onclick="event.stopPropagation();adminResolveClause(${c.id},'reject','${kind}')"><i class="ti ti-x" style="font-size:13px"></i></button>
+              </span>
+            </div>
+          </div>`;
+      };
+      const highStakes = [];
+      const lowStakes = [];
+      reviewQueueItems.forEach((c, idx) => (c.stakes === 'high' ? highStakes : lowStakes).push([c, idx]));
+      const emptyTier = 'Nothing pending in this tier.';
+      el.innerHTML = `<div class="review-cols">
+          <div>
+            <div class="review-col-head" style="color:var(--red)"><span style="width:7px;height:7px;border-radius:50%;background:var(--red)"></span>High-stakes — individual sign-off only</div>
+            ${highStakes.length ? highStakes.map(([c, idx]) => cardHtml(c, idx, 'red')).join('') : `<div class="admin-card" style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">${emptyTier}</div>`}
+          </div>
+          <div>
+            <div class="review-col-head" style="color:var(--text-muted)"><span style="width:7px;height:7px;border-radius:50%;background:var(--text-muted)"></span>Low-stakes — bulk-eligible</div>
+            ${lowStakes.length ? lowStakes.map(([c, idx]) => cardHtml(c, idx, 'muted')).join('') : `<div class="admin-card" style="padding:22px;text-align:center;font-size:12px;color:var(--text-muted)">${emptyTier}</div>`}
+          </div>
+        </div>`;
+    }
+
+    // --- Document-centric review ------------------------------------------
+    let reviewMode = 'documents';
+    let reviewDocs = [];
+    let reviewDocSelected = null;
+    let reviewDocPages = [];    // source pages for the selected document
+    let reviewDocItems = [];    // flagged items for the selected document
+    let reviewActiveKey = null; // 'field-3' | 'item-5' — which row is highlighted
+
+    function setReviewMode(mode) {
+      reviewMode = mode;
+      document.getElementById('reviewModeDocs').classList.toggle('active', mode === 'documents');
+      document.getElementById('reviewModeItems').classList.toggle('active', mode === 'items');
+      document.getElementById('review-doc-view').style.display = mode === 'documents' ? 'grid' : 'none';
+      document.getElementById('review-item-view').style.display = mode === 'items' ? 'block' : 'none';
+      if (mode === 'documents') loadReviewDocuments();
+      else loadAdminReviewQueue();
+    }
+
+    // Stored names are "<uuid>_<folder>_<folder>_<file>.pdf". Showing that in
+    // a heading is unreadable, so display uses the last meaningful segment —
+    // "Shareholder Agreement 1" rather than the whole path in capitals.
+    function _docDisplayName(sourceDoc) {
+      let s = _shortSourceDoc(sourceDoc || '');
+      s = s.replace(/\.(pdf|docx|txt)$/i, '');
+      const parts = s.split('_').map(p => p.trim()).filter(Boolean);
+      const meaningful = parts.filter(p => !/^(redacted|copy|final|v\d+)\s*(\(\d+\))?$/i.test(p));
+      return (meaningful.length ? meaningful[meaningful.length - 1] : (parts[parts.length - 1] || s)) || s;
+    }
+
+    // Confidence colours are CSS variables, so they cannot be concatenated
+    // with an alpha suffix — doing so produced invalid CSS and a chip with no
+    // background at all. Tint comes from a separate token instead.
+    function _confTone(conf) {
+      if (conf === null || conf === undefined) return { fg: 'var(--text-muted)', bg: 'var(--bg-hover)' };
+      if (conf >= 0.8) return { fg: 'var(--green-text)', bg: 'var(--bg-hover)' };
+      if (conf >= 0.5) return { fg: 'var(--amber)', bg: 'var(--bg-hover)' };
+      return { fg: 'var(--red)', bg: 'var(--bg-hover)' };
+    }
+
+    function _confChip(conf, quiet) {
+      // A null confidence renders as unknown, never as a number. Documents
+      // ingested before per-field confidence existed genuinely have no score,
+      // and inventing one is the exact failure this queue exists to catch.
+      const label = (conf === null || conf === undefined) ? 'n/a' : Number(conf).toFixed(2);
+      // Quiet mode: a confident, unflagged field gets a plain muted label
+      // instead of a colored pill. A document with a dozen metadata fields
+      // renders as a wall of identical green badges otherwise, which buries
+      // the one or two fields actually worth a reviewer's attention.
+      if (quiet && conf !== null && conf !== undefined && conf >= 0.9) {
+        return '<span class="review-conf-quiet">' + label + '</span>';
+      }
+      const t = _confTone(conf);
+      return '<span class="review-conf-chip" style="background:' + t.bg + ';color:' + t.fg + '">' + label + '</span>';
+    }
+
+    async function loadReviewDocuments() {
+      const list = document.getElementById('rq-doc-list');
+      list.innerHTML = '<div class="review-empty">Loading&hellip;</div>';
+      try {
+        const res = await fetch('/review_queue/documents?session_id=' + SID);
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load');
+        const allDocs = d.documents || [];
+        // The queue is a to-do list, not a corpus browser — a document with
+        // nothing pending has nothing to act on here, so it doesn't belong in
+        // the list at all (it was previously kept in with a "clear" badge,
+        // which read as still-in-the-queue even though there was no longer
+        // anything to review).
+        reviewDocs = allDocs.filter(x => x.pending_total > 0);
+        document.getElementById('admin-review-sub').textContent =
+          allDocs.length + ' document' + (allDocs.length === 1 ? '' : 's') +
+          ' · ' + reviewDocs.length + ' with items awaiting review';
+        if (!reviewDocs.length) {
+          list.innerHTML = '<div class="review-empty">Queue is empty — nothing awaiting review.</div>';
+          reviewDocSelected = null;
+          const meta = document.getElementById('review-doc-meta');
+          const src = document.getElementById('review-doc-source');
+          if (meta) meta.innerHTML = '<div class="review-empty">Queue is empty — nothing awaiting review.</div>';
+          if (src) src.innerHTML = '';
+          return;
+        }
+        const rows = reviewDocs.map((doc, i) => {
+          const badge = '<span class="admin-badge ' + (doc.pending_high_stakes ? 'red' : 'amber') + '">' + doc.pending_total + ' waiting</span>';
+          return '<div class="review-doc-item' + (i === reviewDocSelected ? ' active' : '') + '" onclick="selectReviewDoc(' + i + ')">' +
+              '<div class="review-doc-name">' + escapeHtmlRule(_docDisplayName(doc.source_doc)) + '</div>' +
+              '<div class="review-doc-sub">' + _confChip(doc.family_confidence) +
+                '<span>' + escapeHtmlRule(doc.doc_family || 'unclassified') + '</span>' +
+                '<span>· ' + doc.page_count + 'p</span>' +
+              '</div>' +
+              '<div style="margin-top:6px">' + badge + '</div>' +
+            '</div>';
+        }).join('');
+        list.innerHTML = '<div class="review-pane-head">Documents</div>' + rows;
+        selectReviewDoc(reviewDocSelected === null ? 0 : Math.min(reviewDocSelected, reviewDocs.length - 1));
+      } catch (e) {
+        list.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
+      }
+    }
+
+    function _fieldValueText(value) {
+      if (value === null || value === undefined || value === '') return '';
+      if (Array.isArray(value)) return value.join('; ');
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    }
+
+    function _isListField(f) {
+      return Array.isArray(f.value) ||
+        /parties|plaintiffs|defendants|assumptions|qualifications|matters_opined|statutes_cited/.test(f.name || '');
+    }
+
+    function _renderFieldRow(f, idx) {
+      const shown = _fieldValueText(f.value);
+      const isNull = shown === '';
+      const edited = !!f.edited;
+      const active = reviewActiveKey === ('field-' + idx);
+      return '<div class="review-field-row' + (active ? ' rq-active' : '') + '" id="rfield-' + idx + '">' +
+          '<div class="review-field-click" onclick="highlightField(' + idx + ')">' +
+            '<span class="review-field-name">' + escapeHtmlRule(f.name) +
+              (f.high_stakes ? ' <i class="ti ti-alert-triangle" style="font-size:11px;color:var(--red)" title="High stakes — individual sign-off"></i>' : '') +
+            '</span>' +
+            '<span class="review-field-value">' +
+              '<span class="rfield-display">' +
+                (isNull ? '<span class="review-field-null">not stated</span>' : escapeHtmlRule(shown)) +
+                (edited ? '<span class="rfield-edited" title="Corrected by a reviewer"><i class="ti ti-user-check" style="font-size:11px"></i> edited</span>' : '') +
+              '</span>' +
+              (f.reason ? '<div class="rfield-note"><i class="ti ti-alert-triangle" style="font-size:11px"></i> ' + escapeHtmlRule(f.reason) + '</div>' : '') +
+              (f.raw && _fieldValueText(f.raw) !== shown ? '<div class="rfield-raw">extracted: ' + escapeHtmlRule(_fieldValueText(f.raw)) + '</div>' : '') +
+              (edited && f.previous_value ? '<div class="rfield-raw">was: ' + escapeHtmlRule(_fieldValueText(f.previous_value)) + '</div>' : '') +
+            '</span>' +
+          '</div>' +
+          '<span class="rfield-actions">' + _confChip(f.confidence, true) +
+            '<button type="button" class="admin-icon-btn" title="Edit this value" onclick="event.stopPropagation();startFieldEdit(' + idx + ')"><i class="ti ti-pencil" style="font-size:13px"></i></button>' +
+          '</span>' +
+        '</div>';
+    }
+
+    function startFieldEdit(idx) {
+      const doc = reviewDocs[reviewDocSelected];
+      if (!doc) return;
+      const f = doc.fields[idx];
+      const row = document.getElementById('rfield-' + idx);
+      if (!row || !f) return;
+      const current = _fieldValueText(f.value);
+      const multi = current.length > 60 || _isListField(f);
+      const hint = _isListField(f)
+        ? 'Separate multiple entries with a semicolon'
+        : 'Leave blank to record this as not stated';
+      row.querySelector('.review-field-value').innerHTML =
+        '<div class="rfield-editor" onclick="event.stopPropagation()">' +
+          (multi
+            ? '<textarea id="rfield-input-' + idx + '" rows="3">' + escapeHtmlRule(current) + '</textarea>'
+            : '<input id="rfield-input-' + idx + '" type="text" value="' + escapeHtmlRule(current) + '">') +
+          '<div class="rfield-editor-actions">' +
+            '<button type="button" class="admin-pill-btn primary" onclick="saveFieldEdit(' + idx + ')"><i class="ti ti-check" style="font-size:13px"></i>Save</button>' +
+            '<button type="button" class="admin-pill-btn" onclick="selectReviewDoc(reviewDocSelected)">Cancel</button>' +
+            '<span class="rfield-hint">' + hint + '</span>' +
+          '</div>' +
+        '</div>';
+      const input = document.getElementById('rfield-input-' + idx);
+      if (input) { input.focus(); }
+    }
+
+    async function saveFieldEdit(idx) {
+      const doc = reviewDocs[reviewDocSelected];
+      const f = doc && doc.fields[idx];
+      const input = document.getElementById('rfield-input-' + idx);
+      if (!doc || !f || !input) return;
+      const value = input.value.trim();
+      // A list-shaped field goes back as a list, so a corrected party list
+      // stays a list rather than collapsing into one long string.
+      const payloadValue = value === ''
+        ? null
+        : (_isListField(f) ? value.split(';').map(x => x.trim()).filter(Boolean) : value);
+      try {
+        const res = await fetch('/review_queue/field', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: doc.source_doc,
+                                 field: f.name, value: payloadValue,
+                                 family: doc.doc_family }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Save failed');
+        showToast(f.name + ' updated', 'success');
+        await loadReviewDocuments();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    // --- Locate-in-source: click a field or item, see it in the text -------
+    // Matches exact first (the common case), then falls back to a
+    // whitespace-normalized match — the stored page text can wrap or space
+    // a phrase slightly differently than the extracted field does. A
+    // position map ties the normalized match back to real character offsets
+    // so the original text (with its own whitespace) is what gets wrapped,
+    // not a re-flowed copy of it.
+    function _normalizeWithMap(s) {
+      let out = '';
+      const map = [];
+      let inWS = false;
+      for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (/\s/.test(ch)) {
+          if (!inWS) { out += ' '; map.push(i); }
+          inWS = true;
+        } else {
+          out += ch; map.push(i);
+          inWS = false;
+        }
+      }
+      return { norm: out, map: map };
+    }
+
+    function _findHighlightSpan(target) {
+      const clean = (target || '').trim();
+      if (!clean) return null;
+      for (let pi = 0; pi < reviewDocPages.length; pi++) {
+        const content = reviewDocPages[pi].content || '';
+        const idx = content.indexOf(clean);
+        if (idx !== -1) return { pageIndex: pi, start: idx, end: idx + clean.length };
+
+        const c = _normalizeWithMap(content);
+        const t = _normalizeWithMap(clean);
+        if (!t.norm) continue;
+        const nIdx = c.norm.indexOf(t.norm);
+        if (nIdx !== -1) {
+          const start = c.map[nIdx];
+          const end = c.map[nIdx + t.norm.length - 1] + 1;
+          return { pageIndex: pi, start: start, end: end };
+        }
+      }
+      return null;
+    }
+
+    // What text a given selection is actually looking for. Prefers the raw
+    // pre-coercion extraction over the cleaned-up value — "15th March 2024"
+    // is what the document says; "2024-03-15" never appears in it verbatim.
+    function _activeTargetText() {
+      if (!reviewActiveKey) return '';
+      const [kind, idxStr] = reviewActiveKey.split('-');
+      const idx = parseInt(idxStr, 10);
+      const doc = reviewDocs[reviewDocSelected];
+      if (kind === 'field') {
+        const f = doc && doc.fields[idx];
+        if (!f) return '';
+        const raw = f.raw ? _fieldValueText(f.raw) : '';
+        return raw || _fieldValueText(f.value);
+      }
+      if (kind === 'item') {
+        const it = reviewDocItems[idx];
+        return it ? (it.verbatim_text || '') : '';
+      }
+      return '';
+    }
+
+    function renderSourcePane() {
+      const src = document.getElementById('review-doc-source');
+      if (!src) return;
+      const target = _activeTargetText();
+      const span = target ? _findHighlightSpan(target) : null;
+
+      const pagesHtml = reviewDocPages.length ? reviewDocPages.map((p, pi) => {
+        const content = p.content || p.summary || '';
+        const isMatch = span && span.pageIndex === pi;
+        const body = isMatch
+          ? escapeHtmlRule(content.slice(0, span.start)) +
+            '<mark class="rq-hl" id="rq-hl-mark">' + escapeHtmlRule(content.slice(span.start, span.end)) + '</mark>' +
+            escapeHtmlRule(content.slice(span.end))
+          : escapeHtmlRule(content);
+        return '<div class="review-source-page' + (isMatch ? ' rq-page-match' : '') + '">' +
+            '<div class="review-source-title">' + escapeHtmlRule(p.title) + '</div>' +
+            '<div class="review-source-body">' + body + '</div>' +
+          '</div>';
+      }).join('') : '<div class="review-empty">No extracted pages for this document.</div>';
+
+      const note = (reviewActiveKey && target && !span)
+        ? '<div class="rq-source-note"><i class="ti ti-info-circle" style="font-size:12px"></i>Not found verbatim in the text below — it may be paraphrased, on a page not shown here, or already corrected.</div>'
+        : '';
+
+      src.innerHTML = '<div class="review-pane-head">Source — what was extracted from</div>' +
+        note +
+        '<div class="review-scroll">' + pagesHtml + '</div>';
+
+      if (span) {
+        requestAnimationFrame(() => {
+          const mark = document.getElementById('rq-hl-mark');
+          if (mark) mark.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        });
+      }
+    }
+
+    function highlightField(idx) {
+      const doc = reviewDocs[reviewDocSelected];
+      const f = doc && doc.fields[idx];
+      if (!f) return;
+      const text = (f.raw ? _fieldValueText(f.raw) : '') || _fieldValueText(f.value);
+      if (!text) { showToast('This field has no value to locate', 'error'); return; }
+      reviewActiveKey = 'field-' + idx;
+      document.querySelectorAll('.review-field-row').forEach(el => el.classList.remove('rq-active'));
+      document.querySelectorAll('.review-item-row').forEach(el => el.classList.remove('rq-active'));
+      const row = document.getElementById('rfield-' + idx);
+      if (row) row.classList.add('rq-active');
+      renderSourcePane();
+    }
+
+    function highlightItem(idx) {
+      const it = reviewDocItems[idx];
+      if (!it || !it.verbatim_text) { showToast('No text to locate for this item', 'error'); return; }
+      reviewActiveKey = 'item-' + idx;
+      document.querySelectorAll('.review-field-row').forEach(el => el.classList.remove('rq-active'));
+      document.querySelectorAll('.review-item-row').forEach(el => el.classList.remove('rq-active'));
+      const row = document.getElementById('ritem-' + idx);
+      if (row) row.classList.add('rq-active');
+      renderSourcePane();
+    }
+
+    async function selectReviewDoc(idx) {
+      reviewDocSelected = idx;
+      const doc = reviewDocs[idx];
+      if (!doc) return;
+      document.querySelectorAll('#rq-doc-list .review-doc-item')
+        .forEach((el, i) => el.classList.toggle('active', i === idx));
+
+      const meta = document.getElementById('review-doc-meta');
+      const src = document.getElementById('review-doc-source');
+      const fieldsHtml = doc.fields.length
+        ? doc.fields.map((f, i) => _renderFieldRow(f, i)).join('')
+        : '<div class="review-empty">No typed metadata extracted for this family.</div>';
+
+      meta.innerHTML =
+        '<div class="review-pane-head">' +
+          '<span>' + escapeHtmlRule(_docDisplayName(doc.source_doc)) + '</span>' +
+          '<span class="review-head-sub">' + escapeHtmlRule(doc.doc_family || 'unclassified') +
+            (doc.jurisdiction ? ' · ' + escapeHtmlRule(doc.jurisdiction) : '') +
+            ' · ' + doc.page_count + 'p</span>' +
+        '</div>' +
+        '<div class="review-scroll">' +
+          '<div class="review-doc-typeline">' +
+            (doc.doc_type ? '<span>' + escapeHtmlRule(doc.doc_type) + '</span>'
+                          : '<span style="color:var(--text-muted)">type not stated</span>') +
+            '<span style="margin-left:auto;display:flex;align-items:center;gap:6px">' +
+              '<span style="font-size:11px;color:var(--text-muted)">classification</span>' +
+              _confChip(doc.family_confidence) +
+            '</span>' +
+          '</div>' +
+          '<div class="review-sub-head">Extracted metadata</div>' +
+          fieldsHtml +
+          '<div class="review-sub-head">Flagged items <span id="review-item-count"></span></div>' +
+          '<div id="review-doc-items"><div class="review-empty">Loading&hellip;</div></div>' +
+        '</div>' +
+        '<div class="review-doc-footer">' +
+          '<button type="button" class="admin-pill-btn primary" style="flex:1;justify-content:center" onclick="resolveReviewDoc(\'approve\')"><i class="ti ti-check" style="font-size:14px"></i>Approve</button>' +
+          '<button type="button" class="admin-pill-btn" style="flex:1;justify-content:center;color:var(--red)" onclick="resolveReviewDoc(\'reject\')"><i class="ti ti-x" style="font-size:14px"></i>Reject</button>' +
+        '</div>';
+      src.innerHTML = '<div class="review-pane-head">Source — what was extracted from</div>' +
+                      '<div class="review-empty">Loading&hellip;</div>';
+
+      try {
+        const res = await fetch('/review_queue/document?session_id=' + SID +
+                                '&source_doc=' + encodeURIComponent(doc.source_doc));
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed to load');
+
+        reviewDocPages = d.pages || [];
+        reviewDocItems = d.items || [];
+
+        const cnt = document.getElementById('review-item-count');
+        if (cnt) cnt.textContent = reviewDocItems.length ? '· ' + reviewDocItems.length : '';
+        const itemsEl = document.getElementById('review-doc-items');
+        if (itemsEl) {
+          itemsEl.innerHTML = reviewDocItems.length ? reviewDocItems.map((it, ii) => {
+            const active = reviewActiveKey === ('item-' + ii);
+            return '<div class="review-item-row' + (active ? ' rq-active' : '') + '" id="ritem-' + ii + '">' +
+              '<div class="review-item-click" onclick="highlightItem(' + ii + ')">' +
+                '<span style="display:flex;align-items:center;gap:6px;margin-bottom:3px;flex-wrap:wrap">' +
+                  (it.stakes === 'high' ? '<span class="admin-badge red">high</span>' : '') +
+                  '<span style="font-size:11.5px;font-weight:600">' + escapeHtmlRule(it.clause_type) + '</span>' +
+                '</span>' +
+                '<span class="review-item-text">' + escapeHtmlRule((it.verbatim_text || '').slice(0, 260)) + '</span>' +
+                (it.reason ? '<div class="rfield-note">' + escapeHtmlRule(it.reason) + '</div>' : '') +
+              '</div>' +
+              '<span class="rfield-actions">' + _confChip(it.confidence) +
+                '<button type="button" class="admin-icon-btn" style="color:var(--green-text)" title="Accept" onclick="event.stopPropagation();adminResolveClause(' + it.id + ',\'accept\',\'' + it.item_kind + '\')"><i class="ti ti-check" style="font-size:13px"></i></button>' +
+                '<button type="button" class="admin-icon-btn" title="Edit and accept" onclick="event.stopPropagation();adminEditClause(' + it.id + ',\'' + it.item_kind + '\')"><i class="ti ti-pencil" style="font-size:13px"></i></button>' +
+                '<button type="button" class="admin-icon-btn danger" title="Reject" onclick="event.stopPropagation();adminResolveClause(' + it.id + ',\'reject\',\'' + it.item_kind + '\')"><i class="ti ti-x" style="font-size:13px"></i></button>' +
+              '</span>' +
+            '</div>';
+          }).join('')
+          : '<div class="review-empty">Nothing flagged for this document.</div>';
+        }
+
+        renderSourcePane();
+      } catch (e) {
+        const itemsEl = document.getElementById('review-doc-items');
+        if (itemsEl) itemsEl.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
+        src.innerHTML = '<div class="review-empty" style="color:var(--red)">' + escapeHtmlRule(e.message) + '</div>';
+      }
+    }
+
+    async function resolveReviewDoc(action) {
+      const doc = reviewDocs[reviewDocSelected];
+      if (!doc) return;
+      const name = _docDisplayName(doc.source_doc);
+      const msg = action === 'approve'
+        ? 'Approve every pending item for "' + name + '"?\n\nHigh-stakes clauses below 60% confidence stay pending — reviewing by document does not bypass individual sign-off.'
+        : 'Reject every pending item for "' + name + '"?';
+      if (!window.confirm(msg)) return;
+      try {
+        const res = await fetch('/review_queue/resolve_document', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: doc.source_doc,
+                                 action: action, min_confidence: 0.6 }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Failed');
+        const done = (d.clauses || 0) + (d.items || 0);
+        showToast(d.remaining
+          ? done + ' resolved · ' + d.remaining + ' still need individual sign-off'
+          : done + ' resolved — document clear', 'success');
+        await loadReviewDocuments();
+        refreshAdminReviewBadge();
+      } catch (e) { showToast(e.message, 'error'); }
+    }
+
+    async function adminResolveClause(clauseId, action, itemKind, editedText) {
+      try {
+        // item_kind decides which table the server resolves against. Ids are
+        // per-table, so sending the wrong kind would resolve a different row
+        // that happens to share the id — echo back what the queue gave us.
+        const item = reviewQueueItems.find(c => c.id === clauseId);
+        const kind = itemKind || (item && item.item_kind) || 'clause';
+        const body = { session_id: SID, clause_id: clauseId, action, item_kind: kind };
+        if (editedText) body.edited_text = editedText;
+        const res = await fetch('/review_queue/resolve', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Resolve failed');
+        showToast(action === 'reject' ? 'Rejected' : 'Accepted', 'success');
+        if (reviewMode === 'documents') await loadReviewDocuments();
+        else loadAdminReviewQueue();
+        refreshAdminReviewBadge();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    function adminEditClause(clauseId, itemKind) {
+      const kind = itemKind || 'clause';
+      // Match on id AND kind: the two backing tables number their rows
+      // independently, so an id alone can name two different items.
+      const current = reviewQueueItems.find(
+        c => c.id === clauseId && (c.item_kind || 'clause') === kind);
+      const edited = window.prompt('Corrected value:', current ? current.verbatim_text : '');
+      if (!edited || !edited.trim()) return;
+      adminResolveClause(clauseId, 'edit', kind, edited.trim());
+    }
+
+    async function adminBulkAcceptClauses() {
+      if (!window.confirm('Accept every pending low-stakes clause at or above 60% confidence?\n\nHigh-stakes clauses (liability, indemnity, termination, lifecycle) always require individual sign-off and are never included.')) return;
+      try {
+        const res = await fetch('/review_queue/bulk_accept', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, min_confidence: 0.6 }),
+        });
+        const d = await res.json();
+        if (!res.ok) throw new Error(d.error || 'Bulk accept failed');
+        showToast(`Accepted ${d.accepted} item(s)`, 'success');
+        if (reviewMode === 'documents') await loadReviewDocuments();
+        else loadAdminReviewQueue();
+        refreshAdminReviewBadge();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    function handleReviewQueueKeydown(event) {
+      if (!reviewQueueItems.length) return;
+      const key = event.key.toLowerCase();
+      if (key === 'j') {
+        reviewQueueSelected = Math.min(reviewQueueSelected + 1, reviewQueueItems.length - 1);
+        renderReviewQueue();
+        event.preventDefault();
+      } else if (key === 'k') {
+        reviewQueueSelected = Math.max(reviewQueueSelected - 1, 0);
+        renderReviewQueue();
+        event.preventDefault();
+      } else if ((key === 'a' || key === 'r') && reviewQueueSelected >= 0) {
+        const sel = reviewQueueItems[reviewQueueSelected];
+        adminResolveClause(sel.id, key === 'a' ? 'accept' : 'reject',
+                           sel.item_kind || 'clause');
+        event.preventDefault();
+      }
     }
 
     function toggleGraph() {
@@ -4440,6 +7033,14 @@
       openPdfModal(canonicalName, scrollToText || '', highlights, pageNum || null);
     };
 
+    // POST rather than a plain link to /logout: a GET logout can be fired by
+    // any third-party page embedding it as an image, which just annoys the
+    // user. SameSite=Lax blocks the cross-site POST equivalent.
+    function logout() {
+      fetch('/logout', { method: 'POST' })
+        .finally(() => { window.location.href = '/login'; });
+    }
+
     async function toggleLog() {
       const o = document.getElementById('log-overlay');
       if (o.style.display === 'none') {
@@ -5126,9 +7727,51 @@
       try {
         const res = await fetch('/upload', { method: 'POST', body: fd });
         const d = await res.json();
-        if (d.error) { showToast(d.error, 'error'); return; }
+        if (d.error) {
+          showToast(d.error, 'error');
+          if (d.rejected && d.rejected.length) {
+            showToast(`Rejected: ${d.rejected.map(r => `${r.filename} (${r.reason})`).join('; ')}`, 'error');
+          }
+          // Restore the upload UI — nothing was queued, so there's no ingest to show
+          document.getElementById('ingest-dash').classList.add('d-none');
+          document.getElementById('upload-zone').style.display = '';
+          document.getElementById('pick-btns-wrap').classList.remove('d-none');
+          document.getElementById('upl-title-wrap').style.display = '';
+          document.getElementById('upload-btn').disabled = false;
+          return;
+        }
 
-        totalFilesQueued = d.files_queued || 0;
+        if (d.rejected && d.rejected.length) {
+          showToast(`${d.rejected.length} file(s) skipped: ${d.rejected.map(r => `${r.filename} (${r.reason})`).join('; ')}`, 'error');
+        }
+
+        if (d.status === 'confirm_required') {
+          // Cost pre-flight gate tripped (bulk-sized batch) — files are
+          // already saved, just not queued for ingest yet. See services/cost_estimate.py.
+          const est = d.estimate || {};
+          const cost = (est.estimated_cost_usd ?? 0).toFixed(2);
+          const msg = `Bulk upload: ${est.document_count ?? stagedFiles.length} file(s), ` +
+            `~${est.estimated_llm_calls ?? '?'} LLM calls, ~$${cost} estimated cost.\n\nProceed with ingestion?`;
+          if (!window.confirm(msg)) {
+            document.getElementById('ingest-dash').classList.add('d-none');
+            document.getElementById('upload-zone').style.display = '';
+            document.getElementById('pick-btns-wrap').classList.remove('d-none');
+            document.getElementById('upl-title-wrap').style.display = '';
+            document.getElementById('upload-btn').disabled = false;
+            showToast('Upload cancelled', 'error');
+            return;
+          }
+          const cRes = await fetch(`/resume_ingest?session_id=${SID}&confirm=true`);
+          const cData = await cRes.json();
+          if (cData.error) {
+            showToast(cData.error, 'error');
+            document.getElementById('upload-btn').disabled = false;
+            return;
+          }
+          totalFilesQueued = cData.resuming || 0;
+        } else {
+          totalFilesQueued = d.files_queued || 0;
+        }
 
         const pollTimer = setInterval(async () => {
           try {
@@ -5673,6 +8316,24 @@
         groundingBadge = `<span class="conf"><span class="conf-dot" style="background:${gColor}"></span>${metricInfo('Grounding', gScore, 'grounding')}</span>`;
       }
 
+      // Claim tally — target architecture § 02's "11 of 12 claims verified".
+      // Deliberately a count rather than a percentage: these are substring
+      // checks against the exact context the model was given, so they are true
+      // by construction, and rendering them as a percentage next to two
+      // self-reported ones would hide that difference. Hidden when the answer
+      // quotes nothing, since "0 of 0" says nothing about it.
+      const cc = wikiResult.citation_check || {};
+      let claimsBadge = '';
+      if (cc.total) {
+        const verified = cc.verified != null
+          ? cc.verified : Math.max(0, cc.total - (cc.unverified || 0) - (cc.misattributed || 0));
+        const cColor = verified === cc.total ? 'var(--green)'
+          : (verified >= cc.total * 0.7 ? 'var(--amber)' : 'var(--red)');
+        claimsBadge = `<span class="conf"><span class="conf-dot" style="background:${cColor}"></span>` +
+          `<span class="metric-info" data-metric="claims" onmouseenter="showMetricInfo(event,'claims')" onmouseleave="hideMetricInfo()">` +
+          `${verified} of ${cc.total} claim${cc.total === 1 ? '' : 's'} verified</span></span>`;
+      }
+
       // The backend flags an answer that LEADS with "the documents don't cover
       // this". Both percentages are literally correct on such an answer — the
       // model is confident in its REFUSAL, and the refusal accurately describes
@@ -5684,7 +8345,8 @@
         ? '<span class="tag-synth tag-notcovered">NOT COVERED</span>'
         : `<span class="tag-synth">SYNTHESIZED</span>
               <span class="conf"><span class="conf-dot" style="background:${confDot}"></span>${metricInfo('Confidence', score, 'confidence')}</span>
-              ${groundingBadge}`;
+              ${groundingBadge}
+              ${claimsBadge}`;
 
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
@@ -6033,6 +8695,7 @@
               message_id: msg.id,
               answer: msg.content,
               confidence_score: meta.confidence_score || 0,
+              citation_check: meta.citation_check || {},
               files_used: meta.files_used || [],
               token_total: meta.token_total || {},
               validation: meta.validation || {},
@@ -6476,6 +9139,165 @@
         treeDiv.innerHTML = renderNode(tree, 0);
 
       } catch (e) { console.error('loadFileTree error:', e); }
+    }
+
+    // ============================================================
+    // Admin document lifecycle (target architecture § 01.4)
+    // Archive/restore are reversible and need no confirmation; hard delete
+    // is a separate, deliberate action with its own confirm() per the doc's
+    // "own confirmation" requirement — never triggered by the same click as
+    // archive.
+    // ============================================================
+
+    // Builds the same nested {folder: {...}} shape loadFileTree() gets from
+    // /files, but from /document/list's flat array — so leaves carry the
+    // full doc object (status, source_doc) instead of just the string
+    // 'file', and archived documents (which /files deliberately excludes,
+    // see db.get_pages's archived_clause) are included.
+    function _buildAdminDocTree(docs) {
+      const root = {};
+      for (const doc of docs) {
+        const parts = doc.path.split('/');
+        let curr = root;
+        for (let i = 0; i < parts.length; i++) {
+          if (i === parts.length - 1) {
+            curr[parts[i]] = doc;
+          } else {
+            curr[parts[i]] = (curr[parts[i]] && typeof curr[parts[i]] === 'object' && !curr[parts[i]].path) ? curr[parts[i]] : {};
+            curr = curr[parts[i]];
+          }
+        }
+      }
+      return root;
+    }
+
+    function _isAdminDocLeaf(node) {
+      return node && typeof node === 'object' && typeof node.path === 'string';
+    }
+
+    // Same collapsible folder-row behavior as loadFileTree()'s renderNode
+    // (root open, everything below starts collapsed) — leaves render as
+    // admin rows (badge + archive/restore/delete) instead of the Files
+    // tab's icon-card grid, since there's action buttons to fit here.
+    function _renderAdminDocNode(node, depth) {
+      let html = '';
+      const indent = depth * 18;
+      const keys = Object.keys(node).sort((a, b) => a.localeCompare(b));
+      const folderKeys = keys.filter(k => !_isAdminDocLeaf(node[k]));
+      const fileKeys = keys.filter(k => _isAdminDocLeaf(node[k]));
+      const openByDefault = depth === 0;
+
+      function countLeaves(n) {
+        let c = 0;
+        for (const k in n) c += _isAdminDocLeaf(n[k]) ? 1 : countLeaves(n[k]);
+        return c;
+      }
+
+      for (const k of folderKeys) {
+        const childCount = countLeaves(node[k]);
+        const folderId = 'adoc_' + Math.random().toString(36).slice(2, 8);
+        const chevron = openByDefault ? 'ti-chevron-down' : 'ti-chevron-right';
+        const childDisplay = openByDefault ? '' : 'none';
+        html += `<div class="ftree-row folder-row" style="padding-left:${14 + indent}px" onclick="this.classList.toggle('collapsed');var ch=document.getElementById('${folderId}');ch.style.display=ch.style.display==='none'?'':'none';var ic=this.querySelector('.fold-chevron');ic.classList.toggle('ti-chevron-down');ic.classList.toggle('ti-chevron-right')">`
+          + `<i class="ti ${chevron} ftree-icon fold-chevron" style="color:var(--accent)"></i>`
+          + `<span class="folder-name">${escapeHtmlRule(k)}</span>`
+          + `<span class="ftree-meta">${childCount} file${childCount !== 1 ? 's' : ''}</span>`
+          + `</div>`;
+        html += `<div id="${folderId}" style="display:${childDisplay}">${_renderAdminDocNode(node[k], depth + 1)}</div>`;
+      }
+
+      for (const k of fileKeys) {
+        const doc = node[k];
+        const archived = doc.status === 'archived';
+        const escPath = doc.path.replace(/'/g, "\\'");
+        const escSrc = doc.source_doc.replace(/'/g, "\\'");
+        const ext = k.split('.').pop().toLowerCase();
+        const icon = ext === 'pdf' ? 'ti-file-type-pdf' : 'ti-file-text';
+        const actionBtns = archived
+          ? `<button type="button" class="admin-icon-btn" title="Restore to active" onclick="event.stopPropagation();restoreDocument('${escSrc}', '${escPath}')"><i class="ti ti-rotate" style="font-size:13px"></i></button>
+             <button type="button" class="admin-icon-btn danger" title="Permanently delete" onclick="event.stopPropagation();deleteDocumentConfirm('${escSrc}', '${escPath}')"><i class="ti ti-trash" style="font-size:13px"></i></button>`
+          : `<button type="button" class="admin-icon-btn" title="Archive — hides from search/chat, fully reversible" onclick="event.stopPropagation();archiveDocument('${escSrc}', '${escPath}')"><i class="ti ti-archive" style="font-size:13px"></i></button>`;
+        html += `<div class="admin-row" style="padding-left:${14 + indent}px;cursor:pointer" title="View ${k.replace(/"/g, '&quot;')}" onclick="openDoc('${escPath}')">
+            <i class="ti ${icon}" style="color:var(--text-muted);font-size:16px;flex-shrink:0"></i>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;${archived ? 'color:var(--text-muted);text-decoration:line-through' : ''}">${escapeHtmlRule(k)}</span>
+            <span class="admin-badge ${archived ? 'amber' : 'green'}" style="flex-shrink:0">${archived ? 'archived' : 'active'}</span>
+            <span style="display:flex;gap:6px;flex-shrink:0">${actionBtns}</span>
+          </div>`;
+      }
+      return html;
+    }
+
+    async function loadDocumentManageList() {
+      const manageDiv = document.getElementById('document-manage-list');
+      const sub = document.getElementById('admin-documents-sub');
+      manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">Loading…</div>';
+      try {
+        const res = await fetch(`/document/list?session_id=${SID}`);
+        const data = await res.json();
+        const docs = data.documents || [];
+        sub.textContent = `${docs.length} document${docs.length === 1 ? '' : 's'}`;
+        if (!docs.length) {
+          manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--text-muted)">No documents ingested yet.</div>';
+          return;
+        }
+        const tree = _buildAdminDocTree(docs);
+        manageDiv.innerHTML = _renderAdminDocNode(tree, 0);
+      } catch (e) {
+        console.error('loadDocumentManageList error:', e);
+        manageDiv.innerHTML = '<div class="p-4 text-center" style="font-size:12px;color:var(--red)">Failed to load documents.</div>';
+      }
+    }
+
+    async function archiveDocument(sourceDoc, path) {
+      try {
+        const res = await fetch('/document/archive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Archive failed'); }
+        showToast(`Archived "${path}"`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function restoreDocument(sourceDoc, path) {
+      try {
+        const res = await fetch('/document/unarchive', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Restore failed'); }
+        showToast(`Restored "${path}"`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
+    }
+
+    async function deleteDocumentConfirm(sourceDoc, path) {
+      const ok = confirm(
+        `Permanently delete "${path}"?\n\nThis removes the file, its clause/citation records, and its embeddings. ` +
+        `This cannot be undone. Content that was merged into pages shared with other documents may not be fully ` +
+        `removable — see the architecture doc's known limitation.\n\nArchive instead if you're not certain.`
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch('/document/delete', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: SID, source_doc: sourceDoc, confirm: true }),
+        });
+        if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Delete failed'); }
+        const report = await res.json();
+        showToast(`Deleted "${path}" (${report.pages_deleted} page(s), ${report.embeddings_deleted} embedding(s))`, 'success');
+        loadDocumentManageList();
+        loadFileTree();
+      } catch (e) {
+        showToast(e.message, 'error');
+      }
     }
 
     // ============================================================

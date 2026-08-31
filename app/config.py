@@ -1,7 +1,14 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Resolve .env next to this file rather than relative to the process CWD.
+# The scripts in this directory (manage_user.py, ingest_docs.py, the backfill
+# utilities) get run both from the repo root and from app/, and a CWD-relative
+# lookup silently yields an empty DATABASE_URL from the wrong one — which looks
+# like "the database is empty", not "the config didn't load".
+# load_dotenv does not override already-set variables, so real environment
+# settings (App Service config on Azure) still take precedence over this file.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # ---------------------------------------------------------------------------
 # Database — set DATABASE_URL to enable PostgreSQL storage (Phase 2+).
@@ -9,6 +16,44 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 USE_DATABASE = bool(DATABASE_URL)
+
+# ---------------------------------------------------------------------------
+# Authentication — single-user login (target architecture § 01.4).
+# One password-gated account with full access. No roles, no ACL, no per-user
+# chat isolation; all deferred by design. Credentials live in the `users`
+# table, so AUTH_ENABLED requires DATABASE_URL to be set.
+#
+# AUTH_ENABLED defaults ON: a login layer that silently no-ops when a config
+# value is missing is worse than one that refuses to start. Set it to false
+# only to deliberately run an ungated instance (e.g. the file-storage fallback
+# mode with no DATABASE_URL) — app.py logs a loud warning when it's off.
+# ---------------------------------------------------------------------------
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() == "true"
+
+# Signs the session cookie. MUST be set to a fixed random value in any
+# real deployment — app.py generates an ephemeral one when this is empty,
+# which logs every user out on each restart and breaks entirely across
+# multiple gunicorn workers (each would sign with a different key).
+FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "")
+
+# Marks the session cookie HTTPS-only. Cannot default to True: on plain
+# http://localhost the browser silently drops a Secure cookie, so login would
+# appear to succeed and then bounce straight back to the login page with no
+# visible error. Left False for local dev, set SESSION_COOKIE_SECURE=true in
+# any deployment that terminates TLS (Azure App Service does).
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() == "true"
+
+# How long a login lasts before re-authentication is required.
+SESSION_LIFETIME_DAYS = int(os.getenv("SESSION_LIFETIME_DAYS", "7"))
+
+# Login rate limiting. Counted over a rolling window from the login_attempts
+# table (DB-backed so the limit holds across gunicorn workers, not per-process).
+# Attempts made while already locked out are NOT recorded — otherwise a
+# persistent attacker would keep extending the window and lock the single
+# legitimate user out indefinitely.
+LOGIN_RATE_WINDOW_MINUTES = int(os.getenv("LOGIN_RATE_WINDOW_MINUTES", "15"))
+LOGIN_MAX_FAILURES_PER_USER = int(os.getenv("LOGIN_MAX_FAILURES_PER_USER", "5"))
+LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "10"))
 
 # ---------------------------------------------------------------------------
 # Production wiki mode — every wiki-scoped call (retrieval, files, graph) is
@@ -91,9 +136,21 @@ NVIDIA_EMBEDDING_DIMENSIONS = int(os.getenv("NVIDIA_EMBEDDING_DIMENSIONS", "4096
 # ---------------------------------------------------------------------------
 
 # Ingest pipeline
-MAX_TOKENS_INGEST_SINGLE   = 16000  # Single-call short-doc synthesis (10-30 pages)
+# These are CEILINGS, not budgets: billing is on tokens actually produced, so a
+# cap set higher than a document needs costs nothing. A cap set too LOW is not
+# free — the model is cut off mid-JSON, the repair pass cannot close the
+# structure, and wiki.ingest logs "JSON repair failed — returning empty wiki
+# payload" and writes ZERO pages. The document looks ingested (it has a
+# documents row) while holding no content at all.
+#
+# 16000 did exactly that on the live corpus: a dense 18,260-character escrow
+# agreement with 31 structural anchors failed every retry and sat at 0 pages,
+# and produced 26 pages and 19 relations at 32000 with nothing else changed.
+# It is the same failure behind the "JSON repair failed" errors seen during the
+# 1,350-document ingest.
+MAX_TOKENS_INGEST_SINGLE   = 32000  # Single-call short-doc synthesis (10-30 pages)
 MAX_TOKENS_INGEST_OVERVIEW = 2000   # Phase-1 overview + topic list
-MAX_TOKENS_INGEST_DETAIL   = 8000   # Phase-2 per-segment detail extraction
+MAX_TOKENS_INGEST_DETAIL   = 16000  # Phase-2 per-segment detail extraction
 
 # Merge / maintenance  (cheap model)
 MAX_TOKENS_CONTRADICTION   = 300    # Pairwise contradiction pre-flight
@@ -130,6 +187,11 @@ ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too comm
 # runs, one outlier at 10.36k on reasoning-token variance alone. 12k gives
 # that case real headroom instead of sitting right on the edge.
 MAX_DRAFT_WIKI_CONTEXT_CHARS = 4_000  # ~1000 tokens of grounding context — was 8000, halved to leave room for output
+# Clauses the Precedent layer feeds Draft Mode (Phase 2). A count, not a
+# character budget, because the unit retrieved is now a clause chosen for
+# relevance rather than a page cut to fit — the truncation this replaces is
+# exactly what silently dropped grounding from the end of the context.
+DRAFT_PRECEDENT_CLAUSES      = 12
 # On the active reasoning model (gpt-5-nano), hidden reasoning tokens count
 # against max_completion_tokens before any visible text — a cap set below
 # that reasoning floor returns EMPTY output with finish_reason="length",
@@ -149,6 +211,29 @@ HYBRID_BM25_SUPPLEMENT_N     = 8     # BM25 keyword pages added on top of vector
 BROAD_QUESTION_VECTOR_TOP_K  = 80    # Wider candidate pool for "across all X" questions, before per-document diversification
 BROAD_QUESTION_PER_DOC_CAP   = 4     # Max pages any single document can contribute to a broad-question candidate list
 BROAD_QUESTION_TOTAL_CAP     = 60    # Final page budget for a broad question after diversification (vs. 15 for a normal question) — raised to fit a Parties page + clause page per document without starving document breadth
+# Fuse hypothetical-question vectors (written at ingest stage 06) into the retrieval
+# pool as a third RRF ranking. Reuses the query embedding page search already made, so
+# it costs no extra embedding call.
+#
+# Was OFF pending live verification: the questions this corpus's ingest generated rank
+# by TOPIC rather than by document — one question text was shared by 124 pages at
+# identical scores — and RRF promotes whatever any channel ranks highly, so switching
+# it on risked pulling an unrelated agreement's page into context.
+#
+# That verification has now run, twice measured, on the 1,384-document corpus:
+#   * Duplication is real but bounded and handled. 69% of the 33,957 question rows are
+#     unique to a single page and survive QUESTION_MAX_PAGES_SHARING=1; the generic
+#     texts cluster exactly where expected ("Which law governs the Agreement?" — 107
+#     pages) and the filter drops precisely those before ranking.
+#   * A/B over a 91-question stratified sample, same questions both arms: 53/91 off vs
+#     54/91 on. Net +1 is noise, and every question that moved (3 gained, 2 lost) was a
+#     `comparison`, where the two "losses" differ from their off-arm answers only in
+#     using terser document labels.
+# So: no measured accuracy gain, and — the part that matters — no sign of the
+# pollution that kept it off. Enabled because the blocking risk was tested and did not
+# appear, at 3% wall-time and no extra API call, not because it improved a number.
+USE_QUESTION_EMBEDDINGS      = os.getenv("USE_QUESTION_EMBEDDINGS", "true").lower() == "true"
+QUESTION_MAX_PAGES_SHARING   = 1     # Drop question texts shared by more than N pages before ranking (0 = keep all). 1 keeps the 75% of rows unique to a single page.
 
 # Reranking (Phase 3)
 RRF_K                        = 60    # Reciprocal Rank Fusion constant — standard default; larger = flatter weighting of rank position
@@ -249,3 +334,18 @@ TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")
 # use when Tesseract can't read a scanned page, e.g. skewed/low-quality scans).
 # Only takes effect when LLM_PROVIDER=azure, since it reuses the Azure client.
 OCR_ENGINE = os.getenv("OCR_ENGINE", "tesseract").lower()
+
+# Stage 01 structural pass (target architecture § 01 stage 01, § 01.1).
+# Sends table-bearing and chart/diagram pages to the vision deployment even
+# though they already extracted enough text — the character count says the
+# page read fine while a table's structure has actually been flattened away.
+#
+# OFF by default, deliberately. Every other OCR call in this pipeline is a
+# fallback for a page that produced nothing; this one spends money on pages
+# that already produced text, per page across every document. That is a cost
+# decision to make on purpose, not one to inherit by upgrading. Requires
+# OCR_ENGINE=azure_vision — Tesseract cannot read table structure or describe
+# a figure, so escalating to it would cost time and learn nothing.
+STRUCTURAL_VISION_ENABLED = os.getenv("STRUCTURAL_VISION_ENABLED", "false").lower() == "true"
+# Hard cap on structural vision calls per document, strongest signal first.
+STRUCTURAL_VISION_MAX_PAGES = int(os.getenv("STRUCTURAL_VISION_MAX_PAGES", "5"))
