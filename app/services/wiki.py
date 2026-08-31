@@ -7403,6 +7403,96 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     return primary
 
 
+# A question can name SEVERAL documents by informal nickname — "the Amberline
+# NDA, the Apex Cobalt NDA, and the Apex Falcora EV NDA" — with no corporate
+# suffix on any of them at all, so _PARTY_NAME_RE never sees them and the
+# combinatorial party-pairing above never fires. _resolve_docs_by_party's own
+# second-document recovery is deliberately restricted to suffix_candidates
+# ONLY (see its docstring: a bare word standing in for a party identity isn't
+# the same guarantee a real corporate-suffixed name is), so three bare
+# nicknames collapse onto whichever ONE is most distinctive and the other two
+# are never looked for. Confirmed live: exactly this question answered as if
+# only the Apex Cobalt NDA existed, though the Amberline and Apex Falcora EV
+# NDAs were both real, indexed documents.
+#
+# This pattern is narrow enough to resolve safely on syntax alone: a run of
+# capitalised words immediately followed by a naming word for the KIND of
+# instrument, since a lawyer names a document that way ("the Amberline NDA")
+# far more often than that phrase shape occurs by coincidence in ordinary
+# prose.
+_NAMED_INSTRUMENT_RE = re.compile(
+    r'\b(?:the\s+)?((?:[A-Z][A-Za-z0-9&\'.\-]*\s+){0,3}[A-Z][A-Za-z0-9&\'.\-]*)\s+'
+    r'(NDAs?|Non-Disclosure\s+Agreements?|Agreements?|Notices?|Petitions?|'
+    r'Judg(?:e)?ments?|Affidavits?|Complaints?|Contracts?)\b'
+)
+
+
+def _resolve_docs_by_named_instruments(question: str, session_id: str,
+                                       max_docs: int = 6) -> set[str]:
+    """Resolve a question naming several documents by nickname, each with no
+    corporate suffix to anchor on — see the note above _NAMED_INSTRUMENT_RE.
+
+    Each "<Name> <kind>" mention is resolved independently: a content search
+    on the name, narrowed to whichever of those candidates ALSO carries the
+    stated kind word in its own page titles. Accepts the whole result only
+    when every distinct name resolves to a real, non-empty cluster and no two
+    names collapse onto the same document — otherwise this is either not
+    actually a multi-document question or genuinely ambiguous, and the
+    existing single-name resolver is left to make its own, narrower call.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    seen_names: list[str] = []
+    kinds: dict[str, str] = {}
+    for m in _NAMED_INSTRUMENT_RE.finditer(question):
+        name, kind = m.group(1).strip(), m.group(2).strip()
+        if name.lower() not in {n.lower() for n in seen_names}:
+            seen_names.append(name)
+            kinds[name] = kind
+    if len(seen_names) < 2:
+        return set()
+
+    resolved: list[set[str]] = []
+    for name in seen_names:
+        try:
+            content_docs = {d for d in _db.find_source_docs_mentioning_phrase(
+                _active_wiki_id(), session_id, name, cap=20) if d}
+        except Exception as e:
+            logger.error("resolve_scope: named-instrument content lookup failed for %r: %s", name, e)
+            return set()
+        if not content_docs:
+            return set()
+        kind_word = re.sub(r'\s+', ' ', kinds[name]).rstrip('s')
+        try:
+            # Uncapped in effect (2000 comfortably exceeds this corpus's total
+            # document count): the result is intersected with content_docs
+            # below, which is already small, so a low cap here would only
+            # truncate the WRONG set — confirmed live, a cap of 60 silently
+            # excluded the one real NDA document this exact search needed,
+            # since a common instrument word like "NDA" alone matches
+            # hundreds of titles corpus-wide.
+            title_docs = {d for d in _db.find_source_docs_by_title_tokens(
+                _active_wiki_id(), session_id, [kind_word], cap=2000) if d}
+        except Exception as e:
+            logger.error("resolve_scope: named-instrument title lookup failed for %r: %s", name, e)
+            return set()
+        narrowed = (content_docs & title_docs) if title_docs else content_docs
+        if not narrowed or len(narrowed) > max_docs:
+            return set()
+        resolved.append(narrowed)
+
+    if len(set.union(*resolved)) != sum(len(r) for r in resolved):
+        # Two different nicknames landed on the same document — either the
+        # same document was named twice, or the nicknames aren't actually
+        # distinct enough to trust; either way, not a case to guess on.
+        return set()
+
+    union: set[str] = set().union(*resolved)
+    logger.info("Named-instrument list %s → %d document(s): %s",
+                seen_names, len(union), {_norm_doc_name(d) for d in union})
+    return union
+
+
 # Ceiling on how many documents an umbrella party may hit before its doc set is
 # treated as unusable even for intersection. Generous on purpose — the set is
 # only ever intersected with a family below, never used on its own — but bounded,
@@ -9079,6 +9169,18 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             compound_docs = _resolve_docs_by_combinatorial_pairing(question, session_id)
         except Exception as e:
             logger.error("resolve_scope: combinatorial party-pairing failed: %s", e)
+    # Neither pairing approach sees a question naming several documents by
+    # bare nickname ("the Amberline NDA, the Apex Cobalt NDA, and the Apex
+    # Falcora EV NDA") — no corporate suffix on any of them for _PARTY_NAME_RE
+    # to anchor on. Tried at this same priority, ahead of single-party
+    # resolution, for the identical reason the pairing attempts are: letting
+    # one name's own resolver run first and return immediately on its single
+    # best match never gives this a turn, regardless of what it would find.
+    if not compound_docs:
+        try:
+            compound_docs = _resolve_docs_by_named_instruments(question, session_id)
+        except Exception as e:
+            logger.error("resolve_scope: named-instrument list resolution failed: %s", e)
     if compound_docs:
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(compound_docs),
