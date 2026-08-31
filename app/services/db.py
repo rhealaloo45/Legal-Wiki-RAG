@@ -608,9 +608,101 @@ def _run_schema_statements(conn, text) -> None:
             ON clauses (session_id, review_status)
         """))
 
+        _init_regression_schema(conn, text)
         _init_backbone_schema(conn, text)
 
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Accuracy regression suite (target architecture § Phase 3.5a)
+# ---------------------------------------------------------------------------
+
+def _init_regression_schema(conn, text) -> None:
+    """Stored regression cases, runs and per-case results.
+
+    Three tiers, deliberately separated by what they cost to run:
+
+      scope    — asserts resolve_scope()'s decision only. No pipeline, no
+                 LLM, no embedding call. Free, so it can run on every commit,
+                 and it covers the failure class this corpus actually keeps
+                 hitting (which documents a question resolves to).
+      pipeline — runs the real /query pipeline and asserts structural facts
+                 about the answer: did it abstain, did it cite, which
+                 documents did it read. Costs one query per case.
+      graded   — pipeline plus an LLM judge scoring the answer text against
+                 a stored expected answer. Costs the query plus the judge.
+
+    A case carries expectations for every tier it participates in; a run
+    names the tier it executed, so a cheap scope run and an expensive graded
+    run over the same cases stay comparable but never get confused for one
+    another.
+    """
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS regression_cases (
+            id                  BIGSERIAL PRIMARY KEY,
+            wiki_id             TEXT NOT NULL,
+            session_id          TEXT NOT NULL,
+            name                TEXT NOT NULL,
+            question            TEXT NOT NULL,
+            archetype           TEXT,
+            -- tier: scope
+            expect_scope_method TEXT,
+            expect_docs         JSONB,
+            -- tier: pipeline
+            expect_abstain      BOOLEAN NOT NULL DEFAULT FALSE,
+            must_contain        JSONB,
+            must_not_contain    JSONB,
+            -- tier: graded
+            expect_answer       TEXT,
+            notes               TEXT,
+            active              BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+            UNIQUE (wiki_id, session_id, name)
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS regression_runs (
+            id            BIGSERIAL PRIMARY KEY,
+            wiki_id       TEXT NOT NULL,
+            session_id    TEXT NOT NULL,
+            tier          TEXT NOT NULL,
+            label         TEXT,
+            git_sha       TEXT,
+            status        TEXT NOT NULL DEFAULT 'running',
+            cases_total   INT NOT NULL DEFAULT 0,
+            cases_passed  INT NOT NULL DEFAULT 0,
+            cases_failed  INT NOT NULL DEFAULT 0,
+            error         TEXT,
+            started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            finished_at   TIMESTAMPTZ
+        )
+    """))
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS regression_results (
+            id                  BIGSERIAL PRIMARY KEY,
+            run_id              BIGINT NOT NULL REFERENCES regression_runs(id) ON DELETE CASCADE,
+            case_id             BIGINT,
+            case_name           TEXT NOT NULL,
+            passed              BOOLEAN NOT NULL,
+            failures            JSONB,
+            actual_scope_method TEXT,
+            actual_docs         JSONB,
+            answer              TEXT,
+            scores              JSONB,
+            total_ms            INT,
+            trace_id            BIGINT,
+            created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS regression_results_run_idx
+        ON regression_results (run_id)
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS regression_runs_scope_idx
+        ON regression_runs (wiki_id, session_id, tier, started_at DESC)
+    """))
 
 
 # ---------------------------------------------------------------------------
@@ -3519,6 +3611,281 @@ def upsert_metadata(wiki_id: str, session_id: str, doc_name: str, metadata: dict
             params,
         )
         conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Accuracy regression suite — cases, runs, results (§ Phase 3.5a)
+# ---------------------------------------------------------------------------
+
+def upsert_regression_case(wiki_id: str, session_id: str, name: str,
+                           question: str, **fields) -> int:
+    """Create or update one regression case, keyed by (wiki, session, name).
+
+    Upsert rather than insert so re-running a seed loader is idempotent —
+    a case set lives in source control and gets re-applied, and duplicating
+    every case on each load would silently inflate every later pass rate.
+    """
+    from sqlalchemy import text
+    import json as _json
+    cols = {
+        "archetype": fields.get("archetype"),
+        "expect_scope_method": fields.get("expect_scope_method"),
+        "expect_docs": _json.dumps(fields.get("expect_docs")) if fields.get("expect_docs") is not None else None,
+        "expect_abstain": bool(fields.get("expect_abstain", False)),
+        "must_contain": _json.dumps(fields.get("must_contain")) if fields.get("must_contain") is not None else None,
+        "must_not_contain": _json.dumps(fields.get("must_not_contain")) if fields.get("must_not_contain") is not None else None,
+        "expect_answer": fields.get("expect_answer"),
+        "notes": fields.get("notes"),
+        "active": bool(fields.get("active", True)),
+    }
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            INSERT INTO regression_cases
+                (wiki_id, session_id, name, question, archetype, expect_scope_method,
+                 expect_docs, expect_abstain, must_contain, must_not_contain,
+                 expect_answer, notes, active)
+            VALUES (:w, :sid, :n, :q, :arch, :method, :docs, :abst, :mc, :mnc, :ans, :notes, :active)
+            ON CONFLICT (wiki_id, session_id, name) DO UPDATE SET
+                question = EXCLUDED.question,
+                archetype = EXCLUDED.archetype,
+                expect_scope_method = EXCLUDED.expect_scope_method,
+                expect_docs = EXCLUDED.expect_docs,
+                expect_abstain = EXCLUDED.expect_abstain,
+                must_contain = EXCLUDED.must_contain,
+                must_not_contain = EXCLUDED.must_not_contain,
+                expect_answer = EXCLUDED.expect_answer,
+                notes = EXCLUDED.notes,
+                active = EXCLUDED.active
+            RETURNING id
+        """), {"w": wiki_id, "sid": session_id, "n": name, "q": question,
+               "arch": cols["archetype"], "method": cols["expect_scope_method"],
+               "docs": cols["expect_docs"], "abst": cols["expect_abstain"],
+               "mc": cols["must_contain"], "mnc": cols["must_not_contain"],
+               "ans": cols["expect_answer"], "notes": cols["notes"],
+               "active": cols["active"]}).fetchone()
+        conn.commit()
+        return int(row[0])
+
+
+def get_regression_cases(wiki_id: str, session_id: str,
+                         archetype: str | None = None,
+                         active_only: bool = True) -> list[dict]:
+    """All stored cases, oldest first so run output is stably ordered."""
+    from sqlalchemy import text
+    engine = get_engine()
+    sql = """
+        SELECT id, name, question, archetype, expect_scope_method, expect_docs,
+               expect_abstain, must_contain, must_not_contain, expect_answer,
+               notes, active
+        FROM regression_cases
+        WHERE wiki_id = :w AND session_id = :sid
+    """
+    params: dict = {"w": wiki_id, "sid": session_id}
+    if active_only:
+        sql += " AND active"
+    if archetype:
+        sql += " AND archetype = :arch"
+        params["arch"] = archetype
+    sql += " ORDER BY id"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [{"id": int(r[0]), "name": r[1], "question": r[2], "archetype": r[3],
+             "expect_scope_method": r[4], "expect_docs": r[5],
+             "expect_abstain": r[6], "must_contain": r[7],
+             "must_not_contain": r[8], "expect_answer": r[9],
+             "notes": r[10], "active": r[11]} for r in rows]
+
+
+def delete_regression_case(wiki_id: str, session_id: str, name: str) -> bool:
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        n = conn.execute(text("""
+            DELETE FROM regression_cases
+            WHERE wiki_id = :w AND session_id = :sid AND name = :n
+        """), {"w": wiki_id, "sid": session_id, "n": name}).rowcount
+        conn.commit()
+    return bool(n)
+
+
+def start_regression_run(wiki_id: str, session_id: str, tier: str,
+                         label: str | None = None, git_sha: str | None = None,
+                         cases_total: int = 0) -> int:
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            INSERT INTO regression_runs (wiki_id, session_id, tier, label, git_sha, cases_total)
+            VALUES (:w, :sid, :t, :l, :g, :n) RETURNING id
+        """), {"w": wiki_id, "sid": session_id, "t": tier, "l": label,
+               "g": git_sha, "n": cases_total}).fetchone()
+        conn.commit()
+        return int(row[0])
+
+
+def record_regression_result(run_id: int, case: dict, passed: bool,
+                             failures: list[str], **actual) -> None:
+    from sqlalchemy import text
+    import json as _json
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            INSERT INTO regression_results
+                (run_id, case_id, case_name, passed, failures, actual_scope_method,
+                 actual_docs, answer, scores, total_ms, trace_id)
+            VALUES (:r, :c, :n, :p, :f, :m, :d, :a, :s, :ms, :t)
+        """), {"r": run_id, "c": case.get("id"), "n": case.get("name") or "?",
+               "p": passed, "f": _json.dumps(failures or []),
+               "m": actual.get("scope_method"),
+               "d": _json.dumps(actual.get("docs")) if actual.get("docs") is not None else None,
+               "a": actual.get("answer"),
+               "s": _json.dumps(actual.get("scores")) if actual.get("scores") is not None else None,
+               "ms": actual.get("total_ms"), "t": actual.get("trace_id")})
+        conn.commit()
+
+
+def finish_regression_run(run_id: int, passed: int, failed: int,
+                          status: str = "complete", error: str | None = None) -> None:
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        conn.execute(text("""
+            UPDATE regression_runs
+               SET cases_passed = :p, cases_failed = :f, status = :s,
+                   error = :e, finished_at = now()
+             WHERE id = :id
+        """), {"p": passed, "f": failed, "s": status, "e": error, "id": run_id})
+        conn.commit()
+
+
+def get_regression_runs(wiki_id: str, session_id: str, tier: str | None = None,
+                        limit: int = 20) -> list[dict]:
+    from sqlalchemy import text
+    engine = get_engine()
+    sql = """
+        SELECT id, tier, label, git_sha, status, cases_total, cases_passed,
+               cases_failed, error, started_at, finished_at
+        FROM regression_runs WHERE wiki_id = :w AND session_id = :sid
+    """
+    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
+    if tier:
+        sql += " AND tier = :t"
+        params["t"] = tier
+    sql += " ORDER BY started_at DESC LIMIT :lim"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [{"id": int(r[0]), "tier": r[1], "label": r[2], "git_sha": r[3],
+             "status": r[4], "cases_total": r[5], "cases_passed": r[6],
+             "cases_failed": r[7], "error": r[8],
+             "started_at": r[9].isoformat() if r[9] else None,
+             "finished_at": r[10].isoformat() if r[10] else None} for r in rows]
+
+
+def get_regression_results(run_id: int) -> list[dict]:
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT case_name, passed, failures, actual_scope_method, actual_docs,
+                   answer, scores, total_ms, trace_id
+            FROM regression_results WHERE run_id = :r ORDER BY id
+        """), {"r": run_id}).fetchall()
+    return [{"case_name": r[0], "passed": r[1], "failures": r[2],
+             "actual_scope_method": r[3], "actual_docs": r[4], "answer": r[5],
+             "scores": r[6], "total_ms": r[7], "trace_id": r[8]} for r in rows]
+
+
+def compare_regression_runs(run_a: int, run_b: int) -> dict:
+    """Case-level diff between two runs — the point of storing runs at all.
+
+    Reports which cases newly fail in B (regressions), which newly pass
+    (fixes), and which changed scope resolution without changing pass/fail
+    (a silent behaviour change worth seeing before it becomes a bug).
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT COALESCE(a.case_name, b.case_name) AS name,
+                   a.passed, b.passed, a.actual_scope_method, b.actual_scope_method
+            FROM (SELECT * FROM regression_results WHERE run_id = :a) a
+            FULL OUTER JOIN (SELECT * FROM regression_results WHERE run_id = :b) b
+              ON a.case_name = b.case_name
+            ORDER BY 1
+        """), {"a": run_a, "b": run_b}).fetchall()
+    out = {"regressions": [], "fixes": [], "scope_changed": [],
+           "unchanged": 0, "only_in_a": [], "only_in_b": []}
+    for name, pa, pb, ma, mb in rows:
+        if pa is None:
+            out["only_in_b"].append(name)
+            continue
+        if pb is None:
+            out["only_in_a"].append(name)
+            continue
+        if pa and not pb:
+            out["regressions"].append({"case": name, "scope_was": ma, "scope_now": mb})
+        elif pb and not pa:
+            out["fixes"].append({"case": name, "scope_was": ma, "scope_now": mb})
+        else:
+            if ma != mb:
+                out["scope_changed"].append({"case": name, "was": ma, "now": mb})
+            else:
+                out["unchanged"] += 1
+    return out
+
+
+def latency_percentiles(wiki_session_id: str, days: int = 30) -> list[dict]:
+    """p50/p90/p95 total latency grouped by scope-resolution method.
+
+    Reads query_traces, which already records per-stage timings, the scope
+    decision and token counts for every real query — the § 08 latency
+    targets have had nothing measuring them, and this is that, with no new
+    instrumentation needed.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT COALESCE(trace->'scope_decision'->>'method', 'unknown') AS method,
+                   count(*) AS n,
+                   round(percentile_cont(0.5)  WITHIN GROUP (ORDER BY total_ms)) AS p50,
+                   round(percentile_cont(0.90) WITHIN GROUP (ORDER BY total_ms)) AS p90,
+                   round(percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms)) AS p95,
+                   round(avg((trace->>'llm_call_count')::numeric), 2) AS avg_llm_calls
+            FROM query_traces
+            WHERE wiki_session_id = :sid
+              AND created_at > now() - make_interval(days => :d)
+              AND total_ms IS NOT NULL
+            GROUP BY 1 ORDER BY n DESC
+        """), {"sid": wiki_session_id, "d": days}).fetchall()
+    return [{"method": r[0], "queries": int(r[1]), "p50_ms": int(r[2] or 0),
+             "p90_ms": int(r[3] or 0), "p95_ms": int(r[4] or 0),
+             "avg_llm_calls": float(r[5] or 0)} for r in rows]
+
+
+def stage_latency_breakdown(wiki_session_id: str, days: int = 30) -> list[dict]:
+    """Median wall time per pipeline stage — says which stage to attack.
+
+    Stages come from the trace's own `stages` array, so this stays correct
+    if the graph gains or loses a node.
+    """
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT s->>'name' AS stage,
+                   count(*) AS n,
+                   round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (s->>'duration_ms')::numeric)) AS p50,
+                   round(percentile_cont(0.95) WITHIN GROUP (ORDER BY (s->>'duration_ms')::numeric)) AS p95
+            FROM query_traces q
+            CROSS JOIN LATERAL jsonb_array_elements(q.trace->'stages') AS s
+            WHERE q.wiki_session_id = :sid
+              AND q.created_at > now() - make_interval(days => :d)
+            GROUP BY 1 ORDER BY p50 DESC NULLS LAST
+        """), {"sid": wiki_session_id, "d": days}).fetchall()
+    return [{"stage": r[0], "samples": int(r[1]), "p50_ms": int(r[2] or 0),
+             "p95_ms": int(r[3] or 0)} for r in rows]
 
 
 # ---------------------------------------------------------------------------
