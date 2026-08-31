@@ -186,9 +186,19 @@ def _read_pdf_with_positions(file_path: str) -> dict:
         text = (page.extract_text() or "").strip()
         page_texts.append(text)
 
+    # Per-page extraction provenance (§ Phase 3.5b). Tracked here rather than
+    # inferred later because this is the only point that knows HOW a page's
+    # text was obtained — after this function returns, a native page and a
+    # rescued-by-OCR page are indistinguishable strings.
+    methods = ["native"] * len(page_texts)
+    needed_ocr = [False] * len(page_texts)
+
     if _ocr_available:
         needs_ocr = [i for i, t in enumerate(page_texts) if len(t) < MIN_CHARS_PER_PAGE]
         if needs_ocr:
+            for i in needs_ocr:
+                needed_ocr[i] = True
+                methods[i] = "ocr_failed"   # upgraded below only if OCR delivers
             try:
                 doc = fitz.open(file_path)
                 for i in needs_ocr:
@@ -196,11 +206,20 @@ def _read_pdf_with_positions(file_path: str) -> dict:
                         ocr_text = _ocr_page(doc[i])
                         if ocr_text.strip():
                             page_texts[i] = ocr_text
+                            methods[i] = "ocr"
                     except Exception:
                         pass
                 doc.close()
             except Exception:
                 pass
+    else:
+        # No OCR available at all: a short page stays short and nothing was
+        # tried. Recorded as its own method so a corpus ingested without OCR
+        # installed is never mistaken for one where OCR ran and failed.
+        for i, t in enumerate(page_texts):
+            if len(t) < MIN_CHARS_PER_PAGE:
+                needed_ocr[i] = True
+                methods[i] = "ocr_unavailable"
 
     full_text = "\n".join(page_texts)
     full_text = re.sub(r"\n{3,}", "\n\n", full_text)
@@ -208,6 +227,7 @@ def _read_pdf_with_positions(file_path: str) -> dict:
     full_text = full_text.strip()
 
     page_map = []
+    page_quality = []
     offset = 0
     for i, pt in enumerate(page_texts):
         cleaned = re.sub(r"\n{3,}", "\n\n", pt)
@@ -217,9 +237,19 @@ def _read_pdf_with_positions(file_path: str) -> dict:
             start = offset
         end = start + len(cleaned)
         page_map.append({"page_num": i + 1, "char_start": start, "char_end": end})
+        page_quality.append({
+            "page_num": i + 1,
+            "extraction_method": methods[i],
+            "ocr_engine": config.OCR_ENGINE if needed_ocr[i] else None,
+            "char_count": len(cleaned),
+            "needed_ocr": needed_ocr[i],
+            # The load-bearing flag: still under the floor AFTER whatever
+            # extraction ran. This is a page no answer can be grounded in.
+            "below_floor": len(cleaned) < MIN_CHARS_PER_PAGE,
+        })
         offset = end
 
-    return {"text": full_text, "page_map": page_map}
+    return {"text": full_text, "page_map": page_map, "page_quality": page_quality}
 
 
 def _read_pdf(file_path: str) -> str:

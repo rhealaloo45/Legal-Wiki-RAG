@@ -2116,8 +2116,50 @@ _RX_AUTHORITY = re.compile(
 )
 
 
+# Counting over document metadata (§ Phase 3.5b). Deliberately narrow: the
+# noun being counted must be a DOCUMENT word. "How many days' notice is
+# required" and "how many parties signed" are ordinary factual questions that
+# the retrieval pipeline answers well today, and a greedy counting detector
+# stealing them would be a regression, not a feature — which is the one real
+# risk this branch carries.
+# Words that, appearing between "how many" and a document noun, mean the
+# question is counting something OTHER than documents — "how many PARTIES
+# signed the agreement", "how many DAYS notice does the contract require".
+# Without this the filler happily spans a different head noun and the branch
+# steals an ordinary factual question, which is the one regression this
+# feature can cause. Found by testing, not by inspection.
+_COUNT_BLOCKERS = (
+    r"parties|part(?:y|ies)|days?|years?|months?|weeks?|hours?|people|persons?|"
+    r"signator(?:y|ies)|pages?|copies|times?|clauses?|sections?|schedules?|"
+    r"annexures?|milestones?|employees?|shares?|installments?|instalments?|"
+    r"signed|is|are|was|were|do|does|did|have|has|had|must|shall|require[sd]?|"
+    r"needs?|takes?|remain|survive[sd]?"
+)
+_RX_COUNT = re.compile(
+    r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
+    rf"(?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    r"(?:contracts?|agreements?|documents?|ndas?|msas?|deeds?|leases?|"
+    r"licen[cs]es?|amendments?|policies)\b",
+    re.IGNORECASE,
+)
+# A counting question must also name who or what to count, otherwise "how many
+# contracts do we have" is a whole-corpus count — which is valid, and handled,
+# but the party form is the one that needs extraction.
+_RX_COUNT_PARTY = re.compile(
+    r"\b(?:with|for|involving|between|from|against)\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+)
+_RX_COUNT_DOCTYPE = re.compile(
+    r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
+    rf"((?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    r"(?:contracts?|agreements?|documents?|ndas?|msas?|deeds?|leases?|"
+    r"licen[cs]es?|amendments?|policies))\b",
+    re.IGNORECASE,
+)
+
+
 def _is_structural_query(question: str) -> str:
-    """'cites' | 'cited_by' | 'amends' | '' — questions the typed tables answer.
+    """'cites' | 'cited_by' | 'amends' | 'count' | '' — questions the typed tables answer.
 
     Citation and amendment links are single lines inside documents that are
     otherwise about unrelated subjects, so embedding the question ranks the
@@ -2133,7 +2175,85 @@ def _is_structural_query(question: str) -> str:
         return "cited_by"
     if _RX_AMENDS.search(q):
         return "amends"
+    # Checked last: an amendment question phrased as "how many documents amend
+    # X" is better served by the amends branch, which names them rather than
+    # only counting them.
+    if _RX_COUNT.search(q):
+        return "count"
     return ""
+
+
+def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
+    """Answer "how many contracts do we have with X" by counting, not retrieving.
+
+    Returns None on an empty count rather than reporting zero. A zero here has
+    two very different causes — the party genuinely has no documents, or the
+    name was not extracted the way the question spells it — and they are not
+    distinguishable from this side. Falling through to retrieval lets the
+    normal pipeline try, which is the safer of the two failure modes: a wrong
+    "you have none" is far worse than a slow answer.
+    """
+    from services import db as _db, wiki
+    parties: list[str] = []
+    m = _RX_COUNT_PARTY.search(question or "")
+    if m:
+        raw = m.group(1).strip().rstrip(".,;:?")
+        # "X and Y" is two parties; "Tata Sons and Company Limited" is one.
+        # Split only when both sides survive as plausible names, and let the
+        # AND-semantics of the query do the rest — a bad split narrows the
+        # count rather than inflating it, which fails safe.
+        parts = re.split(r"\s+(?:and|&)\s+", raw)
+        parties = [p.strip() for p in parts if len(p.strip()) > 2]
+
+    doc_type = None
+    dm = _RX_COUNT_DOCTYPE.search(question or "")
+    if dm:
+        phrase = dm.group(1).strip().lower()
+        # Only a qualified type ("supply agreements") narrows the query; the
+        # bare noun ("contracts", "documents") is the generic ask and must not
+        # be used as a doc_type filter or it matches almost nothing.
+        generic = {"contract", "contracts", "agreement", "agreements",
+                   "document", "documents"}
+        if phrase not in generic:
+            words = [w for w in phrase.split() if w not in ("the", "our", "all", "total")]
+            if words and words[0] not in generic:
+                doc_type = " ".join(words)
+
+    if not parties and not doc_type:
+        return None
+
+    try:
+        result = _db.count_documents_by_party(wiki_id, session_id, parties, doc_type)
+    except Exception as e:
+        logger.error("[AGENT] count fast-path failed: %s", e)
+        return None
+    if not result["total"]:
+        return None
+
+    subject = " and ".join(parties) if parties else (doc_type or "the corpus")
+    noun = doc_type or "document"
+    lines = [f"**{result['total']} {noun}(s) matching {subject}.**", ""]
+    if len(result["by_type"]) > 1:
+        lines.append("By document type:")
+        for t in result["by_type"]:
+            lines.append(f"- {t['doc_type']}: {t['count']}")
+        lines.append("")
+    shown = result["documents"]
+    if shown:
+        lines.append(f"{'Most recent, by effective date' if len(shown) > 1 else 'Document'}:")
+        for d in shown:
+            date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+            lines.append(f"- {wiki._norm_doc_name(d['source_doc'])}{date}")
+        if result["truncated"]:
+            lines.append(f"- …and {result['total'] - len(shown)} more")
+    lines.append("")
+    lines.append("Counted directly from the document index rather than from a text "
+                 "search, so this is the complete total, not the closest matches.")
+
+    payload = _canned_payload("\n".join(lines), "Count", "document-index")
+    payload["files_used"] = [d["source_doc"] for d in shown]
+    payload["meta_answer"] = False
+    return payload
 
 
 def _structural_answer(kind: str, question: str, session_id: str) -> dict | None:
@@ -2169,6 +2289,9 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
             payload["files_used"] = [h["source_doc"] for h in hits[:25]]
             payload["meta_answer"] = False
             return payload
+
+        if kind == "count":
+            return _count_answer(question, session_id, wiki_id)
 
         # cited_by / amends both need the document the question is about.
         anchor = _resolve_anchor_doc(question, session_id, wiki_id)
@@ -2250,6 +2373,77 @@ _RX_PRECEDENT = re.compile(
     r"|most\s+similar|comparable\s+(?:documents?|agreements?))\b",
     re.IGNORECASE,
 )
+
+
+# Clause-level precedent, asked conversationally (§ Phase 3.5b). The Precedent
+# layer's clause search has existed since Phase 2 but was reachable only from
+# Draft Mode and an admin route — a lawyer asking "have we agreed to this
+# before" in Ask got ordinary retrieval, which ranks documents ABOUT the topic
+# rather than the clauses that actually match. Same retrieval, new entry point,
+# no drafting step.
+_RX_CLAUSE_PRECEDENT = re.compile(
+    r"\b(?:"
+    r"have\s+we\s+(?:ever\s+)?(?:agreed|accepted|signed\s+up|conceded|given)"
+    r"|has\s+(?:the\s+)?(?:company|firm|business)\s+(?:ever\s+)?agreed"
+    r"|(?:what|which)\s+(?:did|have)\s+we\s+(?:do|done|agree[d]?)\s+(?:before|previously|in\s+the\s+past)"
+    r"|do\s+we\s+have\s+precedent"
+    r"|(?:any|show\s+me)\s+precedent\s+for"
+    r"|where\s+else\s+have\s+we\s+(?:agreed|used|accepted)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_clause_precedent_query(question: str) -> bool:
+    """"Have we agreed to this kind of term before, and what did we do?"
+
+    Distinct from _is_precedent_query, which finds documents similar to a named
+    document. This one has no anchor document at all — the subject is a KIND OF
+    TERM, and the answer is the clauses themselves.
+    """
+    return bool(_RX_CLAUSE_PRECEDENT.search(question or ""))
+
+
+def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
+    """Rank precedent clauses matching the term the question describes.
+
+    Costs one embedding call (the question), no completion call — the answer is
+    assembled from the retrieved clauses rather than written by a model, so
+    nothing here can invent a term the corpus does not contain.
+
+    Returns None on no hits rather than reporting an absence: clause embeddings
+    do not cover the whole corpus (see precedent.coverage), so "nothing found"
+    here genuinely means "not found in the embedded subset", which is not a
+    statement worth making to a lawyer.
+    """
+    from services import precedent as _prec, wikis as _wikis, wiki
+    try:
+        wiki_id = _wikis.active_wiki_id()
+        hits = _prec.search_clauses(wiki_id, session_id, question, limit=8)
+    except Exception as e:
+        logger.error("[AGENT] clause-precedent fast-path failed: %s", e)
+        return None
+    if not hits:
+        return None
+
+    lines = [f"**{len(hits)} precedent clause(s) matching that term:**", ""]
+    for h in hits:
+        doc = wiki._norm_doc_name(h.get("source_doc") or "")
+        ctype = h.get("clause_type") or "Clause"
+        text_ = (h.get("verbatim_text") or h.get("text") or "").strip()
+        if len(text_) > 600:
+            text_ = text_[:600].rsplit(" ", 1)[0] + "…"
+        lines.append(f"**{ctype}** — {doc}")
+        lines.append(f"> {text_}")
+        lines.append("")
+    lines.append("Ranked from the precedent clause index by similarity to your "
+                 "question, and quoted verbatim — these are clauses already agreed "
+                 "in the documents named, not drafting suggestions.")
+
+    payload = _canned_payload("\n".join(lines), "Precedent", "clause-precedent")
+    payload["files_used"] = list({h["source_doc"] for h in hits if h.get("source_doc")})
+    payload["meta_answer"] = False
+    return payload
 
 
 def _is_precedent_query(question: str) -> bool:
@@ -3025,6 +3219,17 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                    "payload": _prec, "message": "Done"}
             return
 
+    # Clause-level precedent — "have we agreed to this before". Checked after
+    # the document-level path above, which is the more specific question when
+    # both could match.
+    if not is_followup and _is_clause_precedent_query(question):
+        _cprec = _clause_precedent_answer(question, session_id)
+        if _cprec:
+            logger.info("[AGENT] clause-precedent fast-path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _cprec, "message": "Done"}
+            return
+
     # Meta questions short-circuit before the graph — no classify, no retrieve,
     # no generate, no validate. Skipped for follow-ups, where a bare "help" is
     # far more likely to be an answer to a previous prompt than a fresh request
@@ -3159,6 +3364,14 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                     gk_aside_wanted = False
             if advice_seeking:
                 chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
+            # Answer handoff (§ Phase 3.5b) — names the shipped surface that
+            # owns this answer's depth, when one has something to show.
+            # Attached to the finished payload, never merged into the answer
+            # text, for the same reason the general-knowledge aside is not.
+            from services import handoffs as _handoffs
+            _ho = _handoffs.suggest(question, chunk["payload"], session_id)
+            if _ho:
+                chunk["payload"]["handoff"] = _ho
             # Attached to the finished payload, never merged into the answer
             # text — the separation between cited and general content is
             # structural, not a formatting convention the model has to honour.

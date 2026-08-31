@@ -1487,6 +1487,25 @@ def ingest(file_path: str, session_id: str) -> dict:
     text = result["text"]
     page_map = result["page_map"]
 
+    # Per-page extraction provenance (§ Phase 3.5b). Written before any of the
+    # expensive extraction below, and never allowed to fail the ingest: this
+    # table exists to disclose a quality problem, so a bug in the disclosure
+    # must not become a reason the document does not get ingested at all.
+    page_quality = result.get("page_quality") or []
+    if config.USE_DATABASE and page_quality:
+        try:
+            _db.upsert_page_quality(_active_wiki_id(), session_id, doc_name, page_quality)
+            _unreadable = sum(1 for p in page_quality if p.get("below_floor"))
+            if _unreadable:
+                logger.warning("%s: %d of %d page(s) unreadable after extraction "
+                               "— Document QA warning will fire",
+                               doc_name, _unreadable, len(page_quality))
+                _log_event(session_id, "QUALITY",
+                           f"{doc_name}: {_unreadable} of {len(page_quality)} "
+                           f"page(s) could not be read")
+        except Exception as e:
+            logger.error("Failed to record page quality for %s: %s", doc_name, e)
+
     # --- Duplicate check #2: identical extracted text, different bytes -----
     # Secondary safety net for the case file_hash can't catch — same content
     # re-saved/re-scanned into a byte-different file. Only reachable once
@@ -6024,7 +6043,64 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         },
         "token_breakdown": token_breakdown,
         "token_total": token_total,
+        # Document QA warning (§ Phase 3.5b). Names the documents this answer
+        # rests on whose text could not be fully extracted, so a reader can see
+        # that a confident-looking answer was written over a partially
+        # unreadable source. Additive metadata — the answer text is untouched.
+        "document_quality_warning": _document_quality_warning(session_id, files_used),
     }
+
+
+def _document_quality_warning(session_id: str, files_used: list[str]) -> dict | None:
+    """Reader-facing flag for documents whose pages failed to extract.
+
+    Reports only what is known to be bad. A document with no page_quality rows
+    — ingested before the table existed — is absent from the result rather than
+    reported as clean, because "we have no quality record for this" and "this
+    document is fine" are different statements and only one of them is true.
+
+    Never raises: this is disclosure, and a failure to disclose must not also
+    take down the answer it was attached to.
+    """
+    if not config.USE_DATABASE or not files_used:
+        return None
+    try:
+        quality = _db.get_document_quality(_active_wiki_id(), session_id, list(files_used))
+    except Exception as e:
+        logger.error("Document quality lookup failed: %s", e)
+        return None
+    if not quality:
+        return None
+
+    docs = []
+    for source_doc, q in quality.items():
+        pages = q["bad_page_numbers"]
+        shown = ", ".join(str(p) for p in pages[:8]) + ("…" if len(pages) > 8 else "")
+        docs.append({"source_doc": source_doc, "name": _norm_doc_name(source_doc),
+                     "unreadable_pages": q["unreadable_pages"],
+                     "total_pages": q["pages"], "page_numbers": pages,
+                     "page_list": shown})
+    docs.sort(key=lambda d: -d["unreadable_pages"])
+
+    total_bad = sum(d["unreadable_pages"] for d in docs)
+    if len(docs) == 1:
+        d = docs[0]
+        # Fully unreadable reads very differently from partially unreadable and
+        # deserves its own sentence — the answer above it was written with
+        # effectively nothing from this document.
+        if d["unreadable_pages"] >= d["total_pages"]:
+            message = (f"None of the {d['total_pages']} page(s) of "
+                       f"“{d['name']}” could be read as text. Any answer "
+                       f"drawn from that document may be incomplete or wrong.")
+        else:
+            message = (f"{d['unreadable_pages']} of {d['total_pages']} page(s) of "
+                       f"“{d['name']}” could not be reliably interpreted "
+                       f"(page {d['page_list']}). Analysis of that document may be "
+                       f"incomplete.")
+    else:
+        message = (f"{total_bad} page(s) across {len(docs)} of the documents used "
+                   f"could not be reliably interpreted. Analysis may be incomplete.")
+    return {"message": message, "documents": docs, "unreadable_pages": total_bad}
 
 
 # ---------------------------------------------------------------------------
