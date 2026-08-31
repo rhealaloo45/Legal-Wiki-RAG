@@ -19,3 +19,4 @@ langchain-core
 # Offline RAG evaluation (Groundedness/Relevance/Retrieval against Azure OpenAI judge)
 azure-ai-evaluation
 azure-identity
+cryptography>=42.0

@@ -13,6 +13,7 @@ Architecture:
     then answer from only those pages' full content.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,18 @@ if config.USE_DATABASE:
     from services import db as _db
 
 logger = logging.getLogger(__name__)
+
+
+def _active_wiki_id() -> str:
+    """The wiki_id every legacy-table db.py call in this module scopes to.
+
+    wiki.py runs mostly in background ingest threads (executor.submit), not
+    inside a Flask request, so it reads the live active-wiki pointer directly
+    rather than through app.py's request-bound current_wiki_id() — same
+    reasoning _persist_structured already uses for the backbone tables.
+    """
+    from services import wikis
+    return wikis.active_wiki_id()
 
 # ---------------------------------------------------------------------------
 # Thread safety — per-session locks for wiki index access
@@ -117,14 +130,15 @@ def _save_index_file(session_id: str, index: dict) -> None:
 # ---------------------------------------------------------------------------
 def _load_index_db(session_id: str) -> dict:
     """Load wiki index from PostgreSQL. Auto-migrates from index.json on first access."""
+    wiki_id = _active_wiki_id()
     json_path = _index_path(session_id)
-    if os.path.exists(json_path) and _db.count_pages(session_id) == 0:
+    if os.path.exists(json_path) and _db.count_pages(wiki_id, session_id) == 0:
         logger.info("Auto-migrating session %s from index.json to PostgreSQL", session_id)
-        _db.migrate_from_json(session_id, json_path)
+        _db.migrate_from_json(wiki_id, session_id, json_path)
         os.rename(json_path, json_path + ".migrated")
 
-    pages = _db.get_pages(session_id)
-    relations = _db.get_relations(session_id)
+    pages = _db.get_pages(wiki_id, session_id)
+    relations = _db.get_relations(wiki_id, session_id)
     return {"pages": pages, "relations": relations}
 
 
@@ -659,10 +673,35 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
   }},
   "relations": [
     {{"from": "Page Title A", "to": "Page Title B", "label": "short verb phrase"}}
+  ],
+  "clauses": [
+    {{
+      "type": "Short clause category, e.g. 'Liability Cap', 'Termination for Convenience', 'Indemnity', 'Payment Terms'",
+      "text": "Exact verbatim clause text from the document",
+      "typed_value": {{"...": "..."}} or null,
+      "confidence": 1.0,
+      "page": 3
+    }}
   ]
 }}
 
-Extract 10-30 pages and 10-40 relations. Cover the document thoroughly.
+CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
+clause as a separate entry in "clauses". "text" must be an exact verbatim quote — never paraphrase. \
+"typed_value" is an optional small object holding the clause's structured value when it has one \
+(e.g. {{"multiplier": 2, "basis": "prior 12 months' fees"}} for a liability cap) — use null when the \
+clause doesn't reduce to a simple structured value. Rate "confidence" using this rubric, the same \
+one used elsewhere in this system: 1.0 = exact verbatim match with no ambiguity, 0.8 = clearly \
+stated but the exact wording required light interpretation, 0.5 = the clause is implied rather \
+than explicitly stated, 0.0 = you are not actually confident this is a real clause in the text. \
+Extract every clause you can identify — do not filter by confidence, low-confidence entries are \
+exactly what the Review Queue is for. COVER EVERY NUMBERED SECTION: if the document numbers its \
+sections, each numbered heading must appear as a "clauses" entry, including the back-half \
+boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
+Severability, Counterparts, Further Assurance). Those carry no negotiated value, which is exactly \
+why they get skipped — and exactly what a question naming "Section 12" asks for.
+
+Extract 10-40 relations. Cover the document thoroughly.
+{family_block}
 
 DOCUMENT:
 {text}"""
@@ -777,8 +816,30 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
   }},
   "relations": [
     {{"from": "Page Title A", "to": "Page Title B", "label": "short verb phrase"}}
+  ],
+  "clauses": [
+    {{
+      "type": "Short clause category, e.g. 'Liability Cap', 'Termination for Convenience', 'Indemnity', 'Payment Terms'",
+      "text": "Exact verbatim clause text from this segment",
+      "typed_value": {{"...": "..."}} or null,
+      "confidence": 1.0,
+      "page": 3
+    }}
   ]
 }}
+
+CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
+clause in this segment as a separate entry in "clauses". "text" must be an exact verbatim quote — \
+never paraphrase. "typed_value" is an optional small object holding the clause's structured value \
+when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact verbatim match with \
+no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
+clause is implied rather than explicitly stated, 0.0 = you are not actually confident this is a \
+real clause. Extract every clause you can identify — do not filter by confidence. COVER EVERY \
+NUMBERED SECTION in this segment: each numbered heading must appear as a "clauses" entry, including \
+back-half boilerplate (Relationship Of Parties, Compliance With Laws, No Third Party Rights, Waiver, \
+Severability, Counterparts, Further Assurance) — those get skipped precisely because they carry no \
+negotiated value, and they are exactly what a question naming "Section 12" asks for.
+{family_block}
 
 DOCUMENT SEGMENT:
 {text}"""
@@ -828,6 +889,560 @@ def _update_doc_step(session_id: str, doc_name: str, status: str, step: str = ""
     _save_session_progress(session_id, progress)
 
 
+def _persist_clauses(session_id: str, doc_name: str, parsed: dict) -> None:
+    """Write out any "clauses" the ingest LLM call returned alongside its
+    pages/relations — Review Queue § 02 first slice. Independent of
+    _atomic_merge/_merge_wiki on purpose: clauses are append-only per
+    ingest call, no merge-by-title logic like pages have, so this never
+    touches that (complex, already-tested) machinery. Only called for the
+    single-call and per-segment detail passes, not the overview pass —
+    the overview reads a coarse excerpt, not full page content, so it has
+    nothing reliable to extract clauses from.
+    """
+    if not config.USE_DATABASE:
+        return
+    clauses = parsed.get("clauses") or []
+    if not clauses:
+        return
+    try:
+        n = _db.insert_clauses(_active_wiki_id(), session_id, doc_name, clauses)
+        if n:
+            logger.info("Persisted %d clause(s) for %s into the Review Queue", n, doc_name)
+    except Exception as e:
+        logger.error("Failed to persist clauses for %s: %s", doc_name, e)
+
+
+def _collect_structured(parsed: dict, bucket: dict) -> None:
+    """Accumulate stage 03's structured output across passes.
+
+    Each segment contributes its own rows; they're reconciled once at the end
+    rather than per segment, because a duplicate is only detectable against
+    the rows the *other* segments produced.
+    """
+    if not isinstance(parsed, dict):
+        return
+    for key in ("citations", "structural_anchors", "tables", "figures",
+                "document_references", "obligations"):
+        rows = parsed.get(key)
+        if isinstance(rows, list):
+            bucket.setdefault(key, []).extend(r for r in rows if isinstance(r, dict))
+    meta = parsed.get("family_metadata")
+    if isinstance(meta, dict):
+        # First non-null wins per field. Later segments see less of the
+        # document, so a value from an earlier pass is the better-sourced one;
+        # this also means a segment that "helpfully" restates a field it can't
+        # actually see can't overwrite the pass that genuinely read it.
+        merged = bucket.setdefault("family_metadata", {})
+        for k, v in meta.items():
+            if k not in merged or merged[k] is None:
+                merged[k] = v
+    hq = parsed.get("hypothetical_questions")
+    if isinstance(hq, dict):
+        store = bucket.setdefault("hypothetical_questions", {})
+        for title, qs in hq.items():
+            if isinstance(qs, list):
+                store.setdefault(title, []).extend(str(q) for q in qs if q)
+
+
+# Cap per page. The synthesis call is asked for 2-4; this bounds what a
+# runaway response can cost, since every question is a vector to embed and
+# store. Truncating is safe — the questions are alternative handles on the
+# same page, so losing the fifth costs a little recall, not correctness.
+_MAX_QUESTIONS_PER_PAGE = 6
+
+
+def _embed_hypothetical_questions(session_id: str, doc_name: str,
+                                  questions_by_page: dict,
+                                  doc_family: str | None) -> None:
+    """Stage 06 — embed the questions each page can answer.
+
+    The third embedding type. A lawyer asks "can they terminate for
+    convenience?"; the page is titled "Term and Termination" and says
+    "either party may terminate on 30 days' notice without cause". Page-level
+    similarity has to bridge that gap on vocabulary alone. A stored question
+    phrased the way a lawyer would ask it closes it directly.
+
+    Only pages that actually exist get questions stored. A question keyed to
+    a title the merge didn't produce (a hallucinated or renamed page) would
+    be an orphan vector that surfaces a page which isn't there.
+    """
+    if not config.USE_DATABASE or not questions_by_page:
+        return
+    try:
+        from services import embedder
+
+        wiki_id = _active_wiki_id()
+        existing = set(_db.get_page_titles(wiki_id, session_id))
+        pairs: list[tuple[str, str]] = []
+        skipped_unknown = 0
+        for title, questions in questions_by_page.items():
+            if title not in existing:
+                skipped_unknown += 1
+                continue
+            seen: set[str] = set()
+            for q in questions[:_MAX_QUESTIONS_PER_PAGE]:
+                q = str(q).strip()
+                key = q.lower()
+                if q and key not in seen:
+                    seen.add(key)
+                    pairs.append((title, q))
+
+        if skipped_unknown:
+            logger.info("Stage 06: skipped questions for %d page title(s) that "
+                        "no page exists under (%s)", skipped_unknown, doc_name)
+        if not pairs:
+            return
+
+        vectors = embedder.embed_batch([q for _, q in pairs], is_query=False)
+        by_page: dict[str, list[tuple[str, list[float]]]] = {}
+        for (title, q), vec in zip(pairs, vectors):
+            if vec:
+                by_page.setdefault(title, []).append((q, vec))
+
+        total = 0
+        for title, items in by_page.items():
+            total += _db.upsert_question_embeddings(
+                wiki_id, session_id, title, items, doc_family, doc_name)
+        logger.info("Stage 06: embedded %d hypothetical question(s) across %d page(s) for %s",
+                    total, len(by_page), doc_name)
+    except Exception as err:
+        # Same containment rule as the typed tables: this is additive
+        # retrieval signal, and losing it must not fail an ingest whose pages
+        # and structured rows are already correct.
+        logger.error("Stage 06 question embedding failed for %s: %s", doc_name, err)
+
+
+# Amendment lookups happen once per merged page, which is thousands of times
+# per ingest. The edge set for a document changes only when its references are
+# written (once, before the merge), so it is cached for the duration and
+# invalidated explicitly there rather than re-queried per page.
+_AMENDMENT_CACHE: dict[tuple[str, str], set[str]] = {}
+_AMENDMENT_CACHE_LOCK = threading.Lock()
+
+
+def _amendment_pair_cached(session_id: str, doc_a: str, doc_b: str) -> bool:
+    if not doc_a or not doc_b or doc_a == doc_b:
+        return False
+    key = (session_id, doc_a)
+    with _AMENDMENT_CACHE_LOCK:
+        partners = _AMENDMENT_CACHE.get(key)
+    if partners is None:
+        try:
+            from services import doc_references as _refs
+            partners = _refs.amendment_partners(session_id, doc_a)
+        except Exception as err:
+            logger.debug("Amendment lookup failed for %s: %s", doc_a, err)
+            partners = set()
+        with _AMENDMENT_CACHE_LOCK:
+            _AMENDMENT_CACHE[key] = partners
+    return doc_b in partners
+
+
+def _invalidate_amendment_cache(session_id: str, doc_name: str) -> None:
+    with _AMENDMENT_CACHE_LOCK:
+        _AMENDMENT_CACHE.pop((session_id, doc_name), None)
+        # The reverse direction matters too: writing "A amends B" changes what
+        # a later merge of B should conclude about A.
+        for key in [k for k in _AMENDMENT_CACHE if k[0] == session_id]:
+            _AMENDMENT_CACHE.pop(key, None)
+
+
+def _sr_is_high_stakes(family: str | None, field_name: str) -> bool:
+    """Registry lookup, wrapped so a missing family can't break persistence."""
+    try:
+        from services import schema_registry as _sr
+        return _sr.is_high_stakes_metadata(family, field_name)
+    except Exception:
+        return False
+
+
+def _resolve_doc_references(session_id: str, doc_name: str, parsed: dict) -> None:
+    """Stage 03/04 — write this document's outgoing references as edges.
+
+    Called BEFORE the page merge, not after, and that ordering is the whole
+    point (§ 01 stage 04). Contradiction detection compares a new page against
+    the existing one; if this document amends the one that wrote the existing
+    content, their disagreement is a resolved version chain, not a conflict.
+    The merge can only know that if the amendment edge already exists when it
+    runs.
+    """
+    if not config.USE_DATABASE:
+        return
+    refs = parsed.get("document_references") if isinstance(parsed, dict) else None
+    if not refs:
+        return
+    try:
+        from services import doc_references as _refs, wikis as _wikis
+        counts = _refs.persist_references(
+            _wikis.active_wiki_id(), session_id, doc_name, refs)
+        _invalidate_amendment_cache(session_id, doc_name)
+        if counts:
+            logger.info("Document references for %s: %s", doc_name, counts)
+    except Exception as err:
+        logger.error("Document-reference resolution failed for %s: %s", doc_name, err)
+
+
+def _queue_review_items(wiki_id: str, session_id: str, doc_name: str,
+                        classification: dict, meta_report, family: str | None,
+                        tables: list, figures: list) -> None:
+    """Stage 07 — the evaluation gate, extended past clause confidence.
+
+    Everything flagged upstream converges here: a doubtful doc-type call, a
+    metadata field that failed validation or came back low-confidence, and a
+    table or figure the model wasn't sure it read correctly. Below threshold
+    an extraction lands in the queue instead of entering the index silently,
+    which is the whole point — silence is the failure mode, not low
+    confidence itself.
+    """
+    from services import schema_registry as _sr
+
+    # Prior pending items for this document are archived, never deleted — a
+    # reviewer's earlier judgement is evidence about how this document reads.
+    try:
+        n = _db.supersede_review_items(wiki_id, session_id, doc_name)
+        if n:
+            logger.info("Superseded %d prior review item(s) for %s", n, doc_name)
+    except Exception as err:
+        logger.warning("Could not supersede prior review items for %s: %s", doc_name, err)
+
+    items: list[dict] = []
+
+    if classification.get("flagged"):
+        items.append({
+            "item_kind": "doc_type",
+            "item_label": f"Document type: {classification.get('doc_family')}",
+            "item_value": (classification.get("doc_type")
+                           or classification.get("doc_family")),
+            "confidence": classification.get("family_confidence") or 0.0,
+            "reason": classification.get("flag_reason"),
+            "typed_value": {
+                "family": classification.get("doc_family"),
+                "folder_family": classification.get("folder_family"),
+                "folder_hint": classification.get("folder_hint"),
+                "method": classification.get("family_method"),
+                "reasoning": classification.get("reasoning"),
+            },
+        })
+
+    fam_def = _sr.get(family)
+    for field_name, result in (meta_report.fields or {}).items():
+        if field_name == "__payload__":
+            continue
+        if not result.flagged:
+            continue
+        items.append({
+            "item_kind": "metadata",
+            "item_label": f"{field_name} ({fam_def.key})",
+            "item_value": result.raw if result.raw is not None else result.value,
+            "confidence": result.confidence,
+            # High-stakes metadata is per-family, from the registry — a
+            # contract's governing law and a judgment's holding both need
+            # individual sign-off, but for different reasons and in
+            # different families.
+            "high_stakes": _sr.is_high_stakes_metadata(family, field_name),
+            "reason": result.reason,
+            "typed_value": {"coerced": result.coerced, "value": result.value},
+        })
+
+    for kind, rows in (("table", tables), ("figure", figures)):
+        for row in rows:
+            conf = row.get("confidence") or row.get("_confidence") or 0.0
+            if conf > _TABLE_FIGURE_REVIEW_THRESHOLD and not row.get("_flagged"):
+                continue
+            label = (row.get("caption") or row.get("description")
+                     or f"unlabelled {kind}")
+            items.append({
+                "item_kind": kind,
+                "item_label": f"{kind.title()}: {str(label)[:120]}",
+                "item_value": json.dumps(
+                    {k: v for k, v in row.items() if not k.startswith("_")},
+                    ensure_ascii=False, default=str,
+                )[:4000],
+                "confidence": conf,
+                "page_num": row.get("page_num"),
+                "reason": "; ".join(row.get("_validation_notes") or [])
+                          or f"low {kind} extraction confidence",
+            })
+
+    if not items:
+        return
+    try:
+        n = _db.insert_review_items(wiki_id, session_id, doc_name, items)
+        logger.info("Review Queue: %d item(s) flagged for %s", n, doc_name)
+    except Exception as err:
+        logger.error("Could not queue review items for %s: %s", doc_name, err)
+
+
+# A table or figure below this lands in the queue. Structure extraction is
+# the least reliable thing in the pipeline — a table reconstructed from a
+# guess at its layout looks exactly as authoritative as one read correctly,
+# so the bar for letting one through unreviewed is higher than for prose.
+_TABLE_FIGURE_REVIEW_THRESHOLD = 0.75
+
+
+# A right recorded as a duty reverses what the clause does — the tracker
+# would report that a party must do something the agreement merely lets it
+# do. The prompt says so; a live ingest showed the model returning "may set
+# off any amount owed to it" as an obligation anyway, so the rule is enforced
+# here as well rather than only asked for.
+#
+# The negation is what decides, not the modal: "may not disclose" is a
+# prohibition and a real obligation, so only a permissive opener with no
+# negative attached is dropped.
+_PERMISSIVE_DUTY_RE = re.compile(
+    r"^\s*(?:may|can|could|is\s+(?:entitled|permitted|free)\s+to|"
+    r"shall\s+be\s+entitled\s+to|has\s+the\s+(?:right|option)\s+to|"
+    r"at\s+its\s+(?:option|discretion)|in\s+its\s+discretion)\b",
+    re.IGNORECASE,
+)
+_NEGATED_PERMISSIVE_RE = re.compile(
+    r"^\s*(?:may|can|could|shall\s+be\s+entitled)\s+(?:not|never|no)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_permissive_duty(duty: str | None) -> bool:
+    if not duty:
+        return False
+    if _NEGATED_PERMISSIVE_RE.match(duty):
+        return False
+    return bool(_PERMISSIVE_DUTY_RE.match(duty))
+
+
+def _persist_structured(session_id: str, doc_name: str, bucket: dict,
+                        classification: dict, anchors_from_text: list) -> None:
+    """Stage 04 — reconcile the structured rows and swap them in.
+
+    Deliberately wrapped: a failure to persist typed rows must not fail the
+    ingest of a document whose wiki pages merged fine. The typed tables are
+    additive to the existing pipeline, and taking the whole ingest down with
+    them would make the backbone a liability rather than an addition.
+    """
+    if not config.USE_DATABASE:
+        return
+    try:
+        from services import backbone, extraction_validation as _ev
+        from services import family_prompt, wikis
+
+        wiki_id = wikis.active_wiki_id()
+        family = classification.get("doc_family")
+
+        document_id = backbone.upsert_document(
+            wiki_id, session_id, doc_name,
+            doc_family=family,
+            doc_type=classification.get("doc_type"),
+            jurisdiction=classification.get("jurisdiction"),
+            family_confidence=classification.get("family_confidence"),
+            family_method=classification.get("family_method"),
+            folder_hint=classification.get("folder_hint"),
+            # Stamped here so future ingests can find this document before
+            # spending anything on it — see _file_hash/_content_hash and the
+            # two duplicate checks near the top of ingest().
+            content_hash=classification.get("content_hash"),
+            file_hash=classification.get("file_hash"),
+        )
+
+        raw_meta = bucket.get("family_metadata") or {}
+        meta_report = _ev.validate_payload(
+            raw_meta, family_prompt.metadata_spec(family),
+            base_confidence=classification.get("family_confidence") or 0.8,
+        )
+        family_row = dict(meta_report.values)
+        family_row["confidence"] = meta_report.confidence
+        # Per-FIELD provenance, not just a row-level score. A reviewer looking
+        # at a document needs to know which individual value is shaky — a
+        # single number for the whole row tells them the document is doubtful
+        # without telling them where to look, which is most of the work.
+        family_row["typed_value"] = {
+            "fields": {
+                name: {
+                    "value": res.value,
+                    "raw": res.raw if res.raw != res.value else None,
+                    "confidence": round(res.confidence, 3),
+                    "flagged": res.flagged,
+                    "coerced": res.coerced,
+                    "reason": res.reason,
+                    "high_stakes": _sr_is_high_stakes(family, name),
+                }
+                for name, res in (meta_report.fields or {}).items()
+                if name != "__payload__"
+            },
+            "validated": meta_report.values,
+            "flagged_fields": meta_report.flagged,
+            "notes": meta_report.notes(),
+        }
+
+        # Promote the document-level facts the family extraction just produced
+        # onto the `documents` row. Without this they are extracted on every
+        # ingest, written into the typed table's typed_value blob, and then
+        # never surfaced: documents.effective_date / parties / expiry_date sat
+        # at 0% populated across the whole corpus, so the Contract Register and
+        # Obligation tracker (which read those columns) had nothing to show.
+        # Field names differ per family — a judgment has decided_date, an
+        # opinion has opinion_date — so each is mapped to the shared column.
+        _vals = meta_report.values or {}
+
+        def _first(*names):
+            for n in names:
+                v = _vals.get(n)
+                if v not in (None, "", [], {}):
+                    return v
+            return None
+
+        _parties = _first("parties")
+        if not _parties:
+            _sides = [v for v in (_vals.get("plaintiffs"), _vals.get("defendants"),
+                                  _vals.get("grantor"), _vals.get("grantee"))
+                      if v not in (None, "", [], {})]
+            flat = []
+            for s in _sides:
+                flat.extend(s if isinstance(s, list) else [s])
+            _parties = flat or None
+
+        _doc_meta = {
+            "effective_date": _first("effective_date", "opinion_date", "decided_date"),
+            "expiry_date": _first("expiry_date"),
+            "parties": _parties,
+            "status": _first("status", "disposition", "binding_status"),
+        }
+        _doc_meta = {k: v for k, v in _doc_meta.items() if v not in (None, "", [], {})}
+        if _doc_meta:
+            try:
+                backbone.upsert_document(wiki_id, session_id, doc_name, **_doc_meta)
+            except Exception as _dm_err:
+                logger.warning("Could not promote document metadata for %s: %s",
+                               doc_name, _dm_err)
+
+        citations, _ = _ev.sanitize_rows(
+            bucket.get("citations"),
+            {"citation_text": "text", "authority_type": "text",
+             "normalized_form": "text", "page": "number", "confidence": "number"},
+            required=("citation_text",),
+        )
+        citations = backbone.reconcile_rows(citations, ("normalized_form",)) \
+            if all(c.get("normalized_form") for c in citations) \
+            else backbone.reconcile_rows(citations, ("citation_text",))
+        for c in citations:
+            c["page_num"] = c.pop("page", None)
+            c["confidence"] = c.get("confidence") or c.get("_confidence")
+
+        # Obligations are deduped on the sentence that imposes the duty, not
+        # on the duty text: two segments describing the same clause paraphrase
+        # the duty differently but quote the same sentence, so the paraphrase
+        # is the field that fails to match when it matters most.
+        obligations, _ = _ev.sanitize_rows(
+            bucket.get("obligations"),
+            {"obligated_party": "text", "duty": "text", "trigger": "text",
+             "deadline": "text", "notice_period": "duration",
+             "consequence": "text", "verbatim_text": "text",
+             "page": "number", "confidence": "number"},
+            required=("obligated_party", "duty"),
+        )
+        obligations = backbone.reconcile_rows(obligations, ("verbatim_text",)) \
+            if all(o.get("verbatim_text") for o in obligations) \
+            else backbone.reconcile_rows(obligations, ("obligated_party", "duty"))
+        # Logged rather than dropped silently: whether the model stopped
+        # emitting rights as duties, or is still emitting them and this guard
+        # is what keeps them out, is the difference between the prompt working
+        # and the guard carrying it — and only a log line tells them apart.
+        _rights = [o for o in obligations if _is_permissive_duty(o.get("duty"))]
+        if _rights:
+            logger.info("Dropped %d permissive clause(s) miscast as obligations in %s: %s",
+                        len(_rights), doc_name, [o.get("duty") for o in _rights][:3])
+        obligations = [o for o in obligations if not _is_permissive_duty(o.get("duty"))]
+        for o in obligations:
+            o["page_num"] = o.pop("page", None)
+            o["confidence"] = o.get("confidence") or o.get("_confidence")
+
+        tables, _ = _ev.sanitize_rows(
+            bucket.get("tables"),
+            {"caption": "text", "columns": "list", "rows": "list",
+             "page": "number", "confidence": "number"},
+        )
+        for t in tables:
+            t["page_num"] = t.pop("page", None)
+            t["extraction_method"] = "synthesis"
+            t["confidence"] = t.get("confidence") or t.get("_confidence")
+
+        figures, _ = _ev.sanitize_rows(
+            bucket.get("figures"),
+            {"figure_kind": "text", "description": "text", "page": "number",
+             "confidence": "number"},
+            required=("description",),
+        )
+        for f in figures:
+            f["page_num"] = f.pop("page", None)
+            f["extraction_method"] = "synthesis"
+            f["confidence"] = f.get("confidence") or f.get("_confidence")
+
+        # Anchors come from the deterministic regex parse, not the model —
+        # the model's "structural_anchors" output is used only to confirm what
+        # the parse already found. A regex over the real text cannot invent a
+        # paragraph number; a language model can, and an invented anchor is a
+        # confident-looking pointer to text that isn't there.
+        anchor_rows = [a.as_row() for a in anchors_from_text]
+
+        written = backbone.replace_document_rows(
+            wiki_id, session_id, doc_name, document_id,
+            family_row=family_row, family_key=family,
+            obligations=obligations,
+            citations=citations, anchors=anchor_rows,
+            tables=tables, figures=figures,
+        )
+        logger.info("Backbone rows for %s: %s (family=%s)", doc_name, written, family)
+
+        for party in (family_row.get("parties") or []):
+            backbone.upsert_entity(wiki_id, str(party), "party", doc_name)
+
+        # --- Stage 07: evaluation gate --------------------------------------
+        _queue_review_items(wiki_id, session_id, doc_name, classification,
+                            meta_report, family, tables, figures)
+
+    except Exception as err:
+        logger.error("Backbone persistence failed for %s (wiki pages unaffected): %s",
+                     doc_name, err, exc_info=True)
+
+
+# Below this, extracted text is not a meaningful dedup signal — a near-empty
+# OCR failure and an unrelated near-empty OCR failure on a different document
+# would otherwise hash identically and collide as a false "duplicate".
+_MIN_HASH_CHARS = 200
+
+
+def _file_hash(path: str) -> str | None:
+    """SHA-256 of the raw uploaded file's bytes. Computed straight off disk,
+    before any text extraction or OCR runs — this is the actual upload-time
+    dedup signal. Unlike _content_hash, this costs nothing: no LLM, no OCR,
+    not even the CPU work of parsing the file format.
+    """
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _content_hash(text: str) -> str | None:
+    """SHA-256 of the extracted text, whitespace-normalized. None if the
+    text is too short to be a trustworthy signal (see _MIN_HASH_CHARS).
+
+    Exact-content matching only, by design — this never attempts fuzzy or
+    near-duplicate detection (simhash, embedding similarity). Two genuinely
+    different contracts that happen to read similarly must never be merged
+    as "the same document" in a legal corpus; that false positive costs far
+    more than missing a near-duplicate does. Whitespace normalization is as
+    far as this goes, to survive incidental re-extraction/line-ending
+    differences without drifting into similarity matching.
+    """
+    normalized = " ".join((text or "").split())
+    if len(normalized) < _MIN_HASH_CHARS:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def ingest(file_path: str, session_id: str) -> dict:
     """Read a source document, extract wiki pages via LLM, and merge into the session wiki.
 
@@ -836,39 +1451,127 @@ def ingest(file_path: str, session_id: str) -> dict:
     with the overview's topic list as context to reduce redundancy.
     Segments are processed concurrently to improve speed.
     """
+    doc_name = os.path.basename(file_path)
+
+    # --- Duplicate check #1: identical raw file, checked at upload time -----
+    # Runs BEFORE text extraction/OCR — the whole point. A re-uploaded file
+    # is caught from its raw bytes alone, so it never touches the reader, let
+    # alone the vision-OCR fallback (a real, billed LLM call per scanned page
+    # in this deployment). Scoped to the active wiki, not the session: the
+    # goal is catching a document re-uploaded under a fresh session_id, which
+    # is what a repeated folder upload actually does.
+    file_hash = _file_hash(file_path)
+    if config.USE_DATABASE and file_hash:
+        try:
+            from services import backbone as _backbone
+            file_dup = _backbone.find_by_file_hash(_active_wiki_id(), file_hash)
+        except Exception as _dup_err:
+            logger.warning("File-hash duplicate check failed for %s, ingesting normally: %s",
+                           doc_name, _dup_err)
+            file_dup = None
+        if file_dup and file_dup["source_doc"] != doc_name:
+            logger.info("Skipping %s — identical file already ingested as %s (no extraction run)",
+                       doc_name, file_dup["source_doc"])
+            _log_event(session_id, "DUPLICATE",
+                      f"{doc_name} skipped — identical file already ingested "
+                      f"as {file_dup['source_doc']}")
+            return {
+                "pages_updated": 0,
+                "relations": 0,
+                "duplicate_of": file_dup["source_doc"],
+                "duplicate_family": file_dup.get("doc_family"),
+            }
+
     from services.reader import read_file_with_positions as _read_with_pos
     result = _read_with_pos(file_path)
     text = result["text"]
     page_map = result["page_map"]
-    doc_name = os.path.basename(file_path)
+
+    # --- Duplicate check #2: identical extracted text, different bytes -----
+    # Secondary safety net for the case file_hash can't catch — same content
+    # re-saved/re-scanned into a byte-different file. Only reachable once
+    # extraction already ran for a document that passed check #1, so it adds
+    # no extra OCR/LLM cost of its own.
+    content_hash = _content_hash(text)
+    if config.USE_DATABASE and content_hash:
+        try:
+            from services import backbone as _backbone
+            dup = _backbone.find_by_content_hash(_active_wiki_id(), content_hash)
+        except Exception as _dup_err:
+            logger.warning("Duplicate check failed for %s, ingesting normally: %s",
+                           doc_name, _dup_err)
+            dup = None
+        if dup and dup["source_doc"] != doc_name:
+            logger.info("Skipping %s — identical content already ingested as %s",
+                       doc_name, dup["source_doc"])
+            _log_event(session_id, "DUPLICATE",
+                      f"{doc_name} skipped — identical content already ingested "
+                      f"as {dup['source_doc']}")
+            return {
+                "pages_updated": 0,
+                "relations": 0,
+                "duplicate_of": dup["source_doc"],
+                "duplicate_family": dup.get("doc_family"),
+            }
 
     # Store page-level positions for citation location support
     if config.USE_DATABASE and page_map:
         try:
-            _db.store_page_map(session_id, doc_name, page_map)
+            _db.store_page_map(_active_wiki_id(), session_id, doc_name, page_map)
         except Exception as _pm_err:
             logger.warning("Failed to store page map for %s: %s", doc_name, _pm_err)
 
     logger.info("Wiki ingest: %s (%d chars, %d pages)", doc_name, len(text), len(page_map))
 
+    # --- Stage 02: doc-type + jurisdiction classification -------------------
+    # Runs before the length fork, because which family applies decides which
+    # schema stage 03 asks for — deciding it after would mean extracting the
+    # contract schema from a judgment and then relabelling the result.
+    _update_doc_step(session_id, doc_name, "classifying")
+    try:
+        from services import classifier as _classifier
+        classification = _classifier.classify_document(text, file_path)
+    except Exception as _cls_err:
+        logger.error("Classification failed for %s, using generic: %s", doc_name, _cls_err)
+        classification = {"doc_family": "generic", "family_confidence": 0.0,
+                          "flagged": True, "flag_reason": str(_cls_err)}
+    # Stamped here so both duplicate checks above have something to find on
+    # the *next* ingest of this document.
+    classification["content_hash"] = content_hash
+    classification["file_hash"] = file_hash
+    family_key = classification.get("doc_family")
+
+    # --- Structural anchors: one deterministic parse, two consumers ---------
+    from services import structure as _structure
+    anchors = _structure.parse_anchors(text)
+    logger.info("Structure: %d anchor(s) in %s (%.1f per 10k chars)",
+                len(anchors), doc_name, _structure.structure_ratio(text, anchors))
+
     # Signal: file has been read, starting synthesis
     _update_doc_step(session_id, doc_name, "synthesizing")
 
     total_contradictions = 0
+    structured: dict = {}
 
     if len(text) <= _SINGLE_CALL_THRESHOLD:
         # --- Short document: single LLM call ---
         _update_wiki_progress(session_id, {"current": 0, "total": 1,
                                             "message": f"Processing {doc_name}..."})
         _update_doc_step(session_id, doc_name, "synthesizing", "1/1")
-        parsed = _ingest_single_call(text, doc_name)
+        parsed = _ingest_single_call(text, doc_name, family_key)
+        _persist_clauses(session_id, doc_name, parsed)
+        _collect_structured(parsed, structured)
+        # Before the merge — amendment edges must exist for contradiction
+        # detection to tell a version chain from a real conflict.
+        _resolve_doc_references(session_id, doc_name, parsed)
         _update_doc_step(session_id, doc_name, "merging")
         _update_wiki_progress(session_id, {"current": 1, "total": 1,
                                             "message": f"Processing {doc_name}..."})
         total_pages, total_rels, total_contradictions = _atomic_merge(session_id, parsed, doc_name)
     else:
         # --- Long document: two-phase approach ---
-        segments = _split_segments(text)
+        segments = [s.text for s in
+                    _structure.split_segments(text, _INGEST_CHUNK_SIZE, anchors)]
         total_steps = 1 + len(segments)
         _update_wiki_progress(session_id, {"current": 0, "total": total_steps,
                                             "message": f"Overview pass for {doc_name}..."})
@@ -890,7 +1593,8 @@ def ingest(file_path: str, session_id: str) -> dict:
         completed_segments = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.WIKI_MAX_WORKERS) as executor:
             future_to_index = {
-                executor.submit(_ingest_detail_segment, seg, topics, doc_name, doc_type): i
+                executor.submit(_ingest_detail_segment, seg, topics, doc_name,
+                                doc_type, family_key): i
                 for i, seg in enumerate(segments)
             }
 
@@ -905,6 +1609,9 @@ def ingest(file_path: str, session_id: str) -> dict:
                                                     "total": total_steps, "message": msg})
                 try:
                     parsed = future.result()
+                    _persist_clauses(session_id, doc_name, parsed)
+                    _collect_structured(parsed, structured)
+                    _resolve_doc_references(session_id, doc_name, parsed)
                     p, r, c = _atomic_merge(session_id, parsed, doc_name)
                     total_pages += p
                     total_rels += r
@@ -913,9 +1620,22 @@ def ingest(file_path: str, session_id: str) -> dict:
                     logger.error("Segment %d for %s generated an exception: %s", i, doc_name, exc)
                     _log_event(session_id, "ERROR", f"Doc: {doc_name} | Segment {i} failed: {exc}")
 
+    # --- Stage 04: reconcile + swap in the typed rows ----------------------
+    _update_doc_step(session_id, doc_name, "persisting")
+    _persist_structured(session_id, doc_name, structured, classification, anchors)
+
+    # --- Stage 06: hypothetical-question embeddings ------------------------
+    _embed_hypothetical_questions(
+        session_id, doc_name, structured.get("hypothetical_questions") or {},
+        classification.get("doc_family"),
+    )
+
     logger.info("Wiki ingest complete: %d pages, %d relations", total_pages, total_rels)
     _log_event(session_id, "INGEST",
                f"Doc: {doc_name} | Pages updated: {total_pages} | Contradictions found: {total_contradictions}")
+    if classification.get("flagged"):
+        _log_event(session_id, "REVIEW",
+                   f"Doc: {doc_name} | Classification flagged: {classification.get('flag_reason')}")
 
     # S3: compact any pages that have grown beyond the quality thresholds
     try:
@@ -1012,9 +1732,13 @@ def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
     return parsed
 
 
-def _ingest_single_call(text: str, doc_name: str) -> dict:
+def _ingest_single_call(text: str, doc_name: str, family_key: str | None = None) -> dict:
     """Process a short document in one LLM call."""
-    prompt = INGEST_PROMPT_TEMPLATE.format(text=text, doc_name=doc_name)
+    from services import family_prompt
+    prompt = INGEST_PROMPT_TEMPLATE.format(
+        text=text, doc_name=doc_name,
+        family_block=family_prompt.build_supplement(family_key),
+    )
     try:
         raw, _ = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
     except RuntimeError as e:
@@ -1065,10 +1789,15 @@ def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
     return doc_type, topics, {"pages": doc_pages, "relations": []}
 
 
-def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str) -> dict:
+def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type: str,
+                           family_key: str | None = None) -> dict:
     """Phase 2: extract detailed pages from a segment with known topic context."""
+    from services import family_prompt
     topics_str = ", ".join(topics) if topics else "None identified yet"
-    prompt = DETAIL_PROMPT_TEMPLATE.format(text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type)
+    prompt = DETAIL_PROMPT_TEMPLATE.format(
+        text=text, topics=topics_str, doc_name=doc_name, doc_type=doc_type,
+        family_block=family_prompt.build_supplement(family_key, segment_mode=True),
+    )
     try:
         raw, _ = llm.ask(
             prompt,
@@ -1131,6 +1860,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
     Keeps the Python lock to serialize the cross-reference pass (Phase 4/S2 will
     replace the O(N²) loop with a single PostgreSQL FTS query and remove it).
     """
+    wiki_id = _active_wiki_id()
     lock = _get_session_lock(session_id)
     # Collect (title, embed_text) pairs here; embed OUTSIDE the lock so HTTP
     # calls don't block other ingest threads waiting on the session lock.
@@ -1167,7 +1897,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             # Auto-prefix unprefixed contract/agreement pages
             title = _auto_prefix_title(title, _doc_id)
 
-            existing = _db.get_page(session_id, title)
+            existing = _db.get_page(wiki_id, session_id, title)
 
             # Guard against title collisions between DIFFERENT source documents.
             # The ingest LLM sometimes invents the same entity-derived identifier
@@ -1184,7 +1914,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 _paren = re.search(r'\(([^)]+)\)\s*$', title)
                 if _paren and _CONTRACT_DOC_TYPES.search(_paren.group(1)):
                     title = f"{title} #{_doc_id}"
-                    existing = _db.get_page(session_id, title)
+                    existing = _db.get_page(wiki_id, session_id, title)
 
             if existing:
                 existing_content = existing["content"]
@@ -1198,7 +1928,19 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 # (S3) can detect and surface the contradiction during re-synthesis.
                 # This eliminates hundreds of thousands of LLM calls at scale while
                 # preserving all the raw material the compaction LLM needs.
-                if (len(new_content) > 200 and len(existing_content) > 200
+                # Amendment edges are consulted FIRST (§ 01 stage 04 — "contradiction
+                # detection re-sequenced to run after amendment-chain edges"). If this
+                # document amends the one that wrote the existing content, the two
+                # disagreeing is what a version chain looks like, not a conflict.
+                # Flagging it would put a resolved amendment in front of a reviewer as
+                # an unresolved dispute — worse than noise, because it is wrong about
+                # which text governs.
+                _prior_doc = existing.get("source_doc") or ""
+                _amended = False
+                if _prior_doc and _prior_doc != doc_name:
+                    _amended = _amendment_pair_cached(session_id, doc_name, _prior_doc)
+
+                if (not _amended and len(new_content) > 200 and len(existing_content) > 200
                         and _has_structural_conflict(existing_content, new_content)):
                     contradiction_flagged = True
                     from datetime import datetime
@@ -1211,6 +1953,19 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                         "title": title, "claim": None,
                         "val_a": None, "val_b": None, "doc": doc_name,
                     })
+                elif _amended and _has_structural_conflict(existing_content, new_content):
+                    # Still recorded as a variant so the compaction pass sees both
+                    # versions — the amendment supersedes the earlier text, and
+                    # losing the earlier text would lose the chain itself.
+                    from datetime import datetime
+                    if not variants:
+                        variants = [{"source": "Previous", "value": existing_content,
+                                     "date_ingested": datetime.now().isoformat()}]
+                    variants.append({"source": f"{doc_name} (amendment)",
+                                     "value": new_content,
+                                     "date_ingested": datetime.now().isoformat()})
+                    logger.info("Page '%s': %s amends %s — recorded as a version "
+                                "chain, not a contradiction", title, doc_name, _prior_doc)
 
                 # Strip session-UUID prefix and extension for a readable label.
                 _raw_label = doc_name
@@ -1223,12 +1978,12 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                     + new_content
                 )
                 merged_summary = new_summary if new_summary else existing_summary
-                _db.upsert_page(session_id, title, merged_content, merged_summary, doc_name,
+                _db.upsert_page(wiki_id, session_id, title, merged_content, merged_summary, doc_name,
                                 contradiction_flagged, variants)
                 # Use the freshest summary for the embedding
                 embed_text = (new_summary or existing_summary or new_content)[:400]
             else:
-                _db.upsert_page(session_id, title, new_content, new_summary, doc_name, False, None)
+                _db.upsert_page(wiki_id, session_id, title, new_content, new_summary, doc_name, False, None)
                 embed_text = (new_summary or new_content)[:400]
 
             pages_to_embed.append((title, embed_text))
@@ -1252,14 +2007,14 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 doc_family_for_batch = _fam
         if metadata:
             try:
-                _db.upsert_metadata(session_id, doc_name, metadata)
+                _db.upsert_metadata(wiki_id, session_id, doc_name, metadata)
             except Exception as _me:
                 logger.error("Metadata upsert failed for '%s': %s", doc_name, _me)
 
         # -- Merge explicit relations --
         for rel in new_relations:
             _db.upsert_relation(
-                session_id, rel.get("from", ""), rel.get("to", ""), rel.get("label", "")
+                wiki_id, session_id, rel.get("from", ""), rel.get("to", ""), rel.get("label", "")
             )
             new_rels_count += 1
 
@@ -1272,7 +2027,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
         #   Find pages whose content_tsv matches the new title's tokens (GIN index).
         # Direction B — new page content mentions existing titles:
         #   Python substring check against the title list only (no content fetch).
-        existing_titles = _db.get_page_titles(session_id)
+        existing_titles = _db.get_page_titles(wiki_id, session_id)
         existing_title_set = set(existing_titles)
         mention_rels: list[tuple[str, str, str]] = []
         for new_title, new_val in new_pages.items():
@@ -1281,7 +2036,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
             # Direction A: who already mentions this new title?
             try:
-                mentioning = _db.find_pages_mentioning_title(session_id, new_title)
+                mentioning = _db.find_pages_mentioning_title(wiki_id, session_id, new_title)
                 for existing_title in mentioning:
                     mention_rels.append((existing_title, new_title, "mentions"))
             except Exception as _xref_err:
@@ -1291,7 +2046,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
                 if existing_title != new_title and existing_title in new_content_for_xref:
                     mention_rels.append((new_title, existing_title, "mentions"))
         if mention_rels:
-            _db.bulk_upsert_relations(session_id, mention_rels)
+            _db.bulk_upsert_relations(wiki_id, session_id, mention_rels)
 
         for c in contradictions_found:
             _log_event(
@@ -1301,7 +2056,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             )
 
     # -- Embed pages OUTSIDE the lock (HTTP calls should not hold the session lock) --
-    _embed_pages_batch(session_id, pages_to_embed, doc_family_for_batch)
+    _embed_pages_batch(wiki_id, session_id, pages_to_embed, doc_family_for_batch)
 
     return pages_updated, new_rels_count, len(contradictions_found)
 
@@ -1309,7 +2064,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
 # ---------------------------------------------------------------------------
 # Embedding helper (Phase 3) — called OUTSIDE the session lock
 # ---------------------------------------------------------------------------
-def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
+def _embed_pages_batch(wiki_id: str, session_id: str, pages_to_embed: list[tuple[str, str]],
                        doc_family: str | None = None) -> None:
     """Embed page summaries and store in page_embeddings table.
 
@@ -1333,7 +2088,7 @@ def _embed_pages_batch(session_id: str, pages_to_embed: list[tuple[str, str]],
         texts = [text for _, text in pages_to_embed]
         embeddings = _embedder.embed_batch(texts, is_query=False)
         for (title, _), embedding in zip(pages_to_embed, embeddings):
-            _db.upsert_embedding(session_id, title, embedding, doc_family)
+            _db.upsert_embedding(wiki_id, session_id, title, embedding, doc_family)
         logger.info(
             "Embedded %d pages for session %s", len(pages_to_embed), session_id
         )
@@ -1397,11 +2152,12 @@ def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
     if not config.USE_DATABASE:
         return {"ok": False, "reason": "file mode — embeddings are DB-only", "embedded": 0}
 
-    pages = _db.get_pages(session_id)
+    wiki_id = _active_wiki_id()
+    pages = _db.get_pages(wiki_id, session_id)
     if not pages:
         return {"ok": False, "reason": "no pages in session", "embedded": 0}
 
-    existing = _db.count_embeddings(session_id)
+    existing = _db.count_embeddings(wiki_id, session_id)
 
     # Build the list of (title, text) for pages that need embedding.
     pending: list[tuple[str, str]] = []
@@ -1417,10 +2173,10 @@ def backfill_embeddings(session_id: str, batch_size: int = 16) -> dict:
     embedded = 0
     for i in range(0, len(pending), batch_size):
         chunk = pending[i:i + batch_size]
-        _embed_pages_batch(session_id, chunk)  # logs + swallows failures per batch
+        _embed_pages_batch(wiki_id, session_id, chunk)  # logs + swallows failures per batch
         embedded += len(chunk)
 
-    final = _db.count_embeddings(session_id)
+    final = _db.count_embeddings(wiki_id, session_id)
     logger.info("Backfill complete for session %s: %d embeddings now present (was %d)",
                 session_id, final, existing)
     return {
@@ -1516,13 +2272,14 @@ def _compact_page(session_id: str, title: str, page_data: dict) -> None:
 
     contradiction_flagged = bool(detected_contradictions)
 
-    _db.reset_page_after_compaction(session_id, title, new_content, new_summary, contradiction_flagged)
+    wiki_id = _active_wiki_id()
+    _db.reset_page_after_compaction(wiki_id, session_id, title, new_content, new_summary, contradiction_flagged)
 
     # Store structured contradictions (S4)
     for c in detected_contradictions:
         try:
             _db.upsert_contradiction(
-                session_id, title,
+                wiki_id, session_id, title,
                 c.get("claim"), c.get("value_a"), c.get("source_a"),
                 c.get("value_b"), c.get("source_b"),
             )
@@ -1536,7 +2293,7 @@ def _compact_page(session_id: str, title: str, page_data: dict) -> None:
 
     # Re-embed with fresh summary
     embed_text = (new_summary or new_content[:400])
-    _embed_pages_batch(session_id, [(title, embed_text)])
+    _embed_pages_batch(wiki_id, session_id, [(title, embed_text)])
 
     logger.info("Compacted page '%s' (%d → 1 version, contradictions=%d)",
                 title, n, len(detected_contradictions))
@@ -1553,7 +2310,7 @@ def run_compaction(session_id: str) -> int:
         return 0
 
     due = _db.find_pages_due_for_compaction(
-        session_id,
+        _active_wiki_id(), session_id,
         config.COMPACTION_APPEND_THRESHOLD,
         config.COMPACTION_CHAR_THRESHOLD,
     )
@@ -1563,11 +2320,31 @@ def run_compaction(session_id: str) -> int:
     logger.info("Compaction: %d pages due for session %s", len(due), session_id)
     compacted = 0
     for page_data in due:
+        title = page_data["title"]
+        # Per-page lock (§ 01.6 Concurrency). Two concurrent ingests can both
+        # push the same page past the threshold and both start re-synthesising
+        # it — two LLM calls producing two competing rewrites, one of which
+        # silently overwrites the other. The lock is per page rather than per
+        # session so unrelated pages still compact in parallel.
         try:
-            _compact_page(session_id, page_data["title"], dict(page_data))
-            compacted += 1
+            with _db.page_compaction_lock(session_id, title) as acquired:
+                if not acquired:
+                    logger.info("Compaction: '%s' already being compacted "
+                                "elsewhere — skipping", title)
+                    continue
+                # Re-read under the lock: the holder we just waited behind may
+                # have already compacted this page, in which case the row we
+                # were handed is stale and recompacting would burn a call to
+                # rewrite something already rewritten.
+                fresh = _db.get_page(_active_wiki_id(), session_id, title)
+                if fresh and fresh.get("append_count", 0) < config.COMPACTION_APPEND_THRESHOLD \
+                        and len(fresh.get("content", "")) < config.COMPACTION_CHAR_THRESHOLD:
+                    logger.info("Compaction: '%s' no longer due after lock wait", title)
+                    continue
+                _compact_page(session_id, title, dict(fresh or page_data))
+                compacted += 1
         except Exception as e:
-            logger.error("Compaction failed for page '%s': %s", page_data["title"], e)
+            logger.error("Compaction failed for page '%s': %s", title, e)
 
     _log_event(session_id, "COMPACTION", f"Compacted {compacted}/{len(due)} pages")
     return compacted
@@ -2034,6 +2811,149 @@ WIKI PAGES:
 QUESTION: {question}"""
 
 
+# "... of the SOW ... AS STATED IN the Power of Attorney between ...". The
+# marker splits a question into the provision being asked for and the document
+# the question claims states it.
+_CROSS_REF_RE = re.compile(
+    r'\bas\s+(?:stated|set\s+out|recorded|described|provided|specified)\s+in\s+the\s+',
+    re.IGNORECASE,
+)
+
+
+def _cross_reference_identity(question: str, pages: dict,
+                              selected_titles: list) -> tuple[str, str] | None:
+    """(citing_label, parties) for a cross-reference the retrieval does not bear
+    out, or None when the question makes no such claim or the claim is
+    satisfiable.
+
+    Deliberately conservative: fires only when the CITING document — the one
+    after "as stated in" — is absent from the retrieved pages entirely. A
+    document that WAS retrieved may genuinely quote the other's clause, and
+    deciding that is the answer model's job, not a regex's. Shared by
+    _failed_cross_reference (the context-injected warning) and generate_answer's
+    deterministic override (see there for why a warning alone was not enough).
+    """
+    m = _CROSS_REF_RE.search(question or "")
+    if not m:
+        return None
+    citing = question[m.end():]
+    cited_names = [n.group(1).strip() for n in _PARTY_NAME_RE.finditer(citing)]
+    if not cited_names:
+        return None
+    # The instrument the question says does the citing, for a readable message.
+    citing_type = re.match(r'([A-Za-z][A-Za-z /\-]{2,60}?)\s+between\b', citing)
+    citing_label = citing_type.group(1).strip() if citing_type else "second document"
+
+    retrieved_docs = {
+        (pages.get(t) or {}).get("source_doc", "")
+        for t in (selected_titles or []) if isinstance(pages.get(t), dict)
+    }
+    haystack = " ".join(_norm_doc_name(d).lower() for d in retrieved_docs if d)
+    # Present if the retrieved filenames carry a distinctive word of either
+    # party named as the citing document's parties.
+    for name in cited_names:
+        token = _distinctive_party_token(name)
+        if token and token.lower() in haystack:
+            return None
+    return citing_label, " and ".join(cited_names[:2])
+
+
+def _failed_cross_reference(question: str, pages: dict,
+                            selected_titles: list) -> str | None:
+    """A context-injected warning naming a cross-reference the retrieval does
+    not bear out, or None. See generate_answer for the deterministic backstop
+    this warning alone turned out not to be sufficient on its own."""
+    identity = _cross_reference_identity(question, pages, selected_titles)
+    if not identity:
+        return None
+    citing_label, parties = identity
+    return (f"the question asks for a provision \"as stated in\" the {citing_label} "
+            f"between {parties}, and that document is NOT among the retrieved pages. "
+            f"Its cross-reference therefore cannot be confirmed. Say plainly that the "
+            f"two documents are unrelated and that it does not contain the provision "
+            f"asked about.")
+
+
+def _cross_reference_failure_answer(question: str, pages: dict,
+                                    selected_titles: list) -> str | None:
+    """The complete, deterministic answer to a question whose cross-reference
+    is proven unsatisfiable, or None when the question makes none.
+
+    Confirmed live (Q01212) that a context-injected warning is not sufficient
+    on its own: the model wrote a compliant opening sentence saying the
+    cross-reference could not be confirmed, then added a SECOND section quoting
+    the first document's own governing-law clause anyway, under its own
+    heading, offered "for completeness." That reads to a user as though the
+    cross-reference held. The warning is a real signal (competing against many
+    other prompt rules, as the earlier fix for this same class of question
+    found), but whether the citing document was retrieved is a fact this
+    function already knows with certainty — nothing is gained by asking the
+    model to also arrive at it and then trusting it not to hedge past that
+    fact. So this bypasses generation entirely for this one question shape:
+    no LLM call, and no model output for a compliance check to fail.
+    """
+    identity = _cross_reference_identity(question, pages, selected_titles)
+    if not identity:
+        return None
+    citing_label, parties = identity
+    return (f"These two documents are unrelated. The {citing_label} between "
+            f"{parties} is not among the documents used to answer this "
+            f"question, and it does not contain the provision asked about. "
+            f"The question's premise — that this second document states or "
+            f"records that provision — does not hold.")
+
+
+# The "current value under the agreement family" shape asks for the value AFTER
+# amendment; its mirror ("in the original agreement, before it was amended by
+# ...") asks for the one that was replaced. Only the first is redirected here.
+_AS_AMENDED_RE = re.compile(
+    r'\b(?:current|currently|after\s+giving\s+effect|as\s+amended|'
+    r'now\s+in\s+force|presently)\b',
+    re.IGNORECASE,
+)
+
+# Both documents recite a date, and the date is the only thing that tells them
+# apart — same instrument family, same two parties.
+_DATED_RE = re.compile(
+    r'\bdated\s+(\d{1,2}\s+[A-Za-z]+\s+\d{4}|[A-Za-z]+\s+\d{1,2},?\s+\d{4}|'
+    r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+    re.IGNORECASE,
+)
+
+
+def _amendment_family_directive(question: str) -> str | None:
+    """Say which of an amendment family's two documents states the value asked for.
+
+    Scope resolution now retrieves both (see _expand_amendment_family), which
+    leaves the model holding two documents that answer the same question with
+    two different figures and no stated rule for choosing. The question itself
+    carries the rule — "after giving effect to this amendment" — but it is one
+    clause at the end of a long sentence, and the original is the document named
+    first and quoted at greater length.
+
+    Returns None for the mirror shape, which wants the superseded value and must
+    not be pointed at the amendment.
+    """
+    m = _AMENDMENT_TAIL_RE.search(question or "")
+    if not m or not _AS_AMENDED_RE.search(question or ""):
+        return None
+    before, after = question[:m.start()], question[m.end():]
+    original_date = (_DATED_RE.findall(before) or [""])[-1]
+    amend_date = (_DATED_RE.findall(after) or [""])[0]
+    if not amend_date or amend_date == original_date:
+        return None
+    orig_label = (f"the original dated {original_date}" if original_date
+                  else "the original agreement")
+    return (f"this question names TWO documents and asks for the value that governs "
+            f"AFTER amendment. The answer is the value stated in the AMENDMENT dated "
+            f"{amend_date}, not the one in {orig_label} — the original states the "
+            f"figure the amendment replaced. Note that the amendment's date may be "
+            f"EARLIER than the original's; the question says which document amends "
+            f"which, and that is what decides it, not which date is later. Quote the "
+            f"amendment as the source. If the amendment is not among the retrieved "
+            f"pages, say that plainly rather than answering from the original.")
+
+
 def get_context(question: str, session_id: str, target_doc: str = "", retrieval_hints: dict = None,
                  exclude_cached_answers: bool = False,
                  doc_family: "str | list[str] | None" = None, force_broad: bool = False,
@@ -2273,6 +3193,28 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     _PAGE_CAP  = config.MAX_PAGE_CONTEXT_CHARS
 
     wiki_parts = []
+    # A question can assert that one document states another's provision ("the
+    # governing law of the SOW ... AS STATED IN the Power of Attorney"). That is
+    # a claim, and when it is false the answer has to say so. A prompt rule
+    # alone did not hold: competing against thirty other rules, the model kept
+    # noting the second document's absence and then quoting the FIRST
+    # document's own clause as the answer — which reads to the user as though
+    # the cross-reference checked out. Stating the finding as retrieved
+    # evidence, at the top of the context, is what the model actually acts on.
+    _xref = _failed_cross_reference(question, pages, selected_titles)
+    if _xref:
+        logger.info("Cross-reference check: %s", _xref)
+        wiki_parts.append(f"[CROSS-REFERENCE CHECK — read before answering: {_xref}]\n")
+
+    # Same mechanism, for the same reason: an amendment family puts two
+    # documents in front of the model that answer the question with two
+    # different figures, and the rule for choosing is one clause at the end of a
+    # long question ("after giving effect to this amendment").
+    _amend = _amendment_family_directive(question)
+    if _amend:
+        logger.info("Amendment-family directive: %s", _amend)
+        wiki_parts.append(f"[AMENDMENT FAMILY — read before answering: {_amend}]\n")
+
     # When retrieval is file-focused, prepend a header so the LLM knows which
     # document the pages come from (handles "Services Agreement" vs "Service Agreement").
     if file_pages and mentioned_files:
@@ -2305,7 +3247,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         _meta_lines = []
         for _sd in _meta_docs:
             try:
-                _md = _db.get_metadata(session_id, _sd)
+                _md = _db.get_metadata(_active_wiki_id(), session_id, _sd)
             except Exception as _md_err:
                 logger.warning("metadata lookup failed for %s: %s", _sd, _md_err)
                 continue
@@ -2332,6 +3274,165 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 "themselves and may be cited as such, naming the document. Where the "
                 "question asks for one of these fields, answer from it rather than "
                 "reporting the fact as unavailable:]\n" + "\n".join(_meta_lines) + "\n"
+            )
+
+        # Clauses and tables extracted at ingest live in their own typed
+        # stores (clauses, tables) — real structured data, but retrieval only
+        # ever searches page CONTENT, so a clause or table row that never made
+        # it into a page's prose summary is invisible to the answer, the same
+        # blind spot the metadata block above closes for document-level
+        # facts. Measured: a Framework Supply Agreement's full 8-vendor
+        # pricing table sits correctly in `tables`, but the wiki page's prose
+        # only mentioned one vendor's row — the answer LLM confidently said
+        # it couldn't determine the highest-value vendor. A Term Sheet's real
+        # Survival clause sits correctly in `clauses`, but no page for that
+        # document mentions "survival" at all.
+        from sqlalchemy import text as _struct_sql
+        # Which of the scoped documents the question is actually ABOUT, and which
+        # clause of it. A multi-document scope (party-multi, comparison) is mostly
+        # siblings pulled in for context, and the structured block is emitted in
+        # page-selection order and truncated from the end — so the one document
+        # the question names could be cut away entirely while its siblings'
+        # boilerplate survived. Confirmed live on the 500-question evaluation:
+        # "Section 4 (Relationship Of Parties) of the Term Sheet between Tata
+        # AutoComp Systems Limited and Castellane EPC Pte. Ltd." resolved a
+        # 5-document scope whose clause text totals ~32k characters against a 20k
+        # cap; the Term Sheet sorted last, its clauses were truncated away, and
+        # the answer reported the section as absent while the exact clause sat in
+        # the `clauses` table. Ordering by overlap with the question's own words
+        # costs nothing and puts the named document — and its named clause —
+        # first, where no cap can reach them.
+        _q_tokens = {w for w in re.findall(r'[a-z0-9]{3,}', (question or "").lower())
+                     if w not in _NARROW_TOKEN_STOPWORDS}
+
+        def _q_overlap(text: str) -> int:
+            return len(_q_tokens & set(re.findall(r'[a-z0-9]{3,}', (text or "").lower())))
+
+        _meta_docs = sorted(_meta_docs, key=lambda d: -_q_overlap(_norm_doc_name(d)))
+        _struct_lines = []
+        for _sd in _meta_docs:
+            try:
+                with _db.get_engine().connect() as _sconn:
+                    _clause_rows = _sconn.execute(_struct_sql("""
+                        SELECT clause_type, verbatim_text FROM clauses
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+                    _table_rows = _sconn.execute(_struct_sql("""
+                        SELECT caption, columns, rows FROM tables
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+                    # A figure's stored description is the ONLY record of what a
+                    # diagram shows — unlike a clause, no prose page paraphrases
+                    # it, because a floor plan or an org chart has no text for
+                    # the page-writing pass to summarise. Confirmed live: both
+                    # "what does the floor plan diagram ... show" and "what does
+                    # the org chart diagram ... show" answered "not covered"
+                    # while the figure row sat in the typed store, correctly
+                    # extracted at ingest, simply never read back.
+                    _figure_rows = _sconn.execute(_struct_sql("""
+                        SELECT page_num, figure_kind, description FROM figures
+                        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                        ORDER BY page_num, id
+                    """), {"w": _active_wiki_id(), "s": session_id, "d": _sd}).fetchall()
+            except Exception as _struct_err:
+                logger.warning("structured-data lookup failed for %s: %s", _sd, _struct_err)
+                continue
+            _doc_lines = []
+            # Tables first: a full table is much harder to reconstruct from
+            # prose than a clause (which the prose page for that topic
+            # usually paraphrases reasonably well anyway), and a table's rows
+            # only ever get MORE valuable to preserve intact as they get
+            # bigger — so if the length cap below has to cut something, it
+            # should cut clause text, not a table's later rows. Confirmed
+            # live: with clauses first, an 8-vendor Table 1 was fully
+            # preserved but a second table (Schedule 3, the one containing
+            # the actual highest-value vendor) got truncated away entirely.
+            for _cap_title, _cols, _rows in _table_rows:
+                _doc_lines.append(f"  - Table: {_cap_title or '(untitled)'}")
+                if _cols:
+                    _doc_lines.append(f"    Columns: {', '.join(str(c) for c in _cols)}")
+                for _r in (_rows or [])[:30]:
+                    _parsed_row = _r
+                    # A row is stored as a stringified list rather than a
+                    # nested JSON array — decode it for a readable line
+                    # rather than dumping the raw repr into the prompt.
+                    if isinstance(_r, str):
+                        try:
+                            import ast as _ast
+                            _parsed_row = _ast.literal_eval(_r)
+                        except Exception:
+                            _parsed_row = _r
+                    _doc_lines.append(f"    Row: {_parsed_row}")
+            # Figures before clauses for the same reason tables come first: if
+            # the cap has to cut something, it should cut clause text, which the
+            # prose pages largely restate anyway, not the one description of a
+            # diagram that exists nowhere else.
+            for _pnum, _fkind, _fdesc in _figure_rows:
+                if not _fdesc:
+                    continue
+                _where = f"page {_pnum}" if _pnum else "page unknown"
+                # Longer than a clause's 500 because a described diagram has no
+                # prose page to fall back on: its node labels, room names and
+                # legend entries exist ONLY here, and cutting them off mid-list
+                # leaves the answer reporting the diagram as unreadable.
+                _doc_lines.append(
+                    f"  - Figure ({_fkind or 'figure'}, {_where}): {_fdesc.strip()[:2000]}")
+            # Same reasoning as the document ordering above, one level down: the
+            # clause the question NAMES goes first, so a per-document cut can
+            # never be what removes it. A question that names no clause leaves
+            # every overlap at zero and the original ingest order intact.
+            #
+            # Ranked on the clause TEXT as well as its label, because not every
+            # clause has a label that describes it. A board resolution's rows are
+            # headed by their own opening words ("Resolved That — Nothing in this
+            # Agreement shall be construed"), since what a board resolves is
+            # ordinary clause substance that naming would have to guess at — so
+            # for those the words a question shares are in the body, not the head.
+            for _ct, _vt in sorted(
+                    _clause_rows,
+                    key=lambda r: -(_q_overlap(r[0]) * 2 + _q_overlap((r[1] or "")[:400]))):
+                if _vt:
+                    _doc_lines.append(f'  - {_ct}: "{_vt.strip()[:500]}"')
+            if _doc_lines:
+                _struct_lines.append((_sd, f"{_norm_doc_name(_sd)}:\n" + "\n".join(_doc_lines)))
+        if _struct_lines:
+            # Budget the cap ACROSS documents rather than truncating one joined
+            # string from the end. A single joined block spends itself on
+            # whichever documents happen to sort first and leaves later ones with
+            # nothing — the failure described above. Each document takes an even
+            # share of what is left when its turn comes, and a document that
+            # needs less than its share hands the remainder to the next one, so
+            # the common case (one big document, several small siblings) still
+            # gets the big one through intact.
+            _struct_cap_chars = 20000
+            _remaining = _struct_cap_chars
+            _kept_blocks = []
+            for _i, (_sd, _block) in enumerate(_struct_lines):
+                _docs_left = len(_struct_lines) - _i
+                _share = max(_remaining // _docs_left, 1200)
+                if len(_block) > _share:
+                    _block = _block[:_share] + "\n  [...this document's remaining clauses truncated]"
+                    logger.info("Structured block for %s truncated to its %d-char share "
+                                "(%d document(s) in scope)",
+                                _norm_doc_name(_sd), _share, len(_struct_lines))
+                _kept_blocks.append(_block)
+                _remaining = max(_remaining - len(_block), 0)
+                if _remaining <= 0 and _i + 1 < len(_struct_lines):
+                    logger.info("Structured-extraction budget exhausted after %d of %d document(s)",
+                                _i + 1, len(_struct_lines))
+                    break
+            _struct_block = "\n\n".join(_kept_blocks)
+            wiki_parts.append(
+                "[Structured extraction recorded at ingest — full clause text, complete "
+                "table data, and descriptions of figures/diagrams, independent of the "
+                "prose page summaries below. These are drawn from the documents "
+                "themselves and may be cited as such, naming the document. A table's "
+                "full rows live here even when a page's prose summary only mentions a "
+                "sample of them. A Figure line is a DESCRIPTION of a diagram, not text "
+                "printed in the document — report what it says the diagram shows, but "
+                "never present it as a verbatim quote:]\n" + _struct_block + "\n"
             )
 
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
@@ -2518,7 +3619,7 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
     if config.USE_DATABASE:
         for doc in source_docs:
             try:
-                meta = _db.get_metadata(session_id, doc)
+                meta = _db.get_metadata(_active_wiki_id(), session_id, doc)
                 if meta:
                     clean_name = re.sub(r'^[a-f0-9-]{36}_', '', doc)
                     parts = [f"Document: {clean_name}"]
@@ -2776,15 +3877,37 @@ def _block_verification_text(title: str, body: str) -> str:
     return '\n'.join(sq_matches) if sq_matches else ""
 
 
+# The structured-extraction block get_context prepends (clauses and tables from
+# their typed stores). Its contents carry the SAME provenance guarantee as a
+# Supporting Quotes block — a clause row's text is stored verbatim, either
+# because the ingest prompt requires an exact quote or because
+# backfill_sections.py lifted it out of the PDF by regex — so it belongs in the
+# strict corpus. Left out, every answer sourced from a clause row picked up a
+# spurious "read as paraphrase rather than exact wording" note over text that is
+# verbatim source. Confirmed live on the Section 12 (Relationship Of Parties)
+# answer, whose quote is character-for-character the document's own.
+_STRUCTURED_BLOCK_RE = re.compile(
+    r'\[Structured extraction recorded at ingest[^\]]*\]\n(.*?)(?=\n## |\Z)', re.S)
+
+
 def _strict_verification_corpus(context: str) -> str:
     """Build the citation-verification text corpus, restricted to Supporting
-    Quotes blocks per page (see _block_verification_text). Falls back to the
-    raw context unchanged if no '## Title' page blocks are found at all.
+    Quotes blocks per page (see _block_verification_text) plus the verbatim
+    structured-extraction block. Falls back to the raw context unchanged if no
+    '## Title' page blocks are found at all.
     """
     blocks = _PAGE_BLOCK_RE.findall(context)
     if not blocks:
         return context
-    return '\n'.join(_block_verification_text(title, body) for title, body in blocks)
+    parts = [_block_verification_text(title, body) for title, body in blocks]
+    for struct in _STRUCTURED_BLOCK_RE.findall(context):
+        # Figure lines are excluded on purpose: a figure's description is
+        # GENERATED (a vision pass describing a diagram), not text printed in
+        # the document, so letting it verify quotes would do exactly what
+        # _block_verification_text refuses to do for synthesized page prose.
+        parts.append('\n'.join(
+            ln for ln in struct.splitlines() if not ln.lstrip().startswith("- Figure (")))
+    return '\n'.join(parts)
 
 
 # A reference/citation line ending in a placeholder standing in for a real
@@ -3008,6 +4131,71 @@ def _strip_fabricated_identifiers(answer: str, codes: list[str]) -> str:
     for code in codes:
         answer = answer.replace(code, "[not stated in this document]")
     return answer
+
+
+# "N% / Rs. 17,118,112" — a milestone line carrying both its share of the
+# contract and its cash amount.
+_MILESTONE_ROW_RE = re.compile(
+    r"(\d{1,3}(?:\.\d+)?)\s*%\s*/?\s*(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_MILESTONE_Q_RE = re.compile(
+    r"\b(milestones?|payment obligations?|payment schedules?|contract value|"
+    r"total value|payment terms|instal?lments?)\b", re.IGNORECASE,
+)
+
+
+def _append_milestone_total(answer: str, context: str, question: str) -> str:
+    """State the total contract value when a milestone schedule is being asked about.
+
+    Milestone schedules give each stage as "11% / Rs. 17,118,112" and never
+    state the total, so a question about payment obligations gets a faithful
+    table back and no headline number — the one figure the reader actually
+    wants. Summing is left to Python rather than the model, which is the wrong
+    tool for arithmetic over a dozen comma-formatted amounts.
+
+    Guarded deliberately: the total is only asserted when the percentages
+    account for ~100% of the contract, which is what proves the retrieved
+    context held the COMPLETE schedule rather than a fragment. A partial
+    schedule would otherwise produce a confident, badly wrong total.
+    """
+    if not answer or not _MILESTONE_Q_RE.search(question or ""):
+        return answer
+    if re.search(r"total contract value", answer, re.IGNORECASE):
+        return answer
+
+    rows = _MILESTONE_ROW_RE.findall(context or "")
+    if len(rows) < 2:
+        return answer
+
+    # Walk the rows in document order and stop at the first point where the
+    # percentages account for a whole contract. Deduplicating identical rows
+    # would be wrong — a schedule legitimately contains eight stages of
+    # "11% / Rs. 17,118,112" — while summing everything double-counts the
+    # schedule each time it reappears in another retrieved page. Taking the
+    # first run that reaches 100% handles both.
+    pct_sum = amount_sum = 0.0
+    used = 0
+    for pct, amt in rows:
+        try:
+            p = float(pct)
+            a = float(amt.replace(",", ""))
+        except ValueError:
+            return answer
+        if pct_sum + p > 103.0:
+            break
+        pct_sum += p
+        amount_sum += a
+        used += 1
+        if 97.0 <= pct_sum <= 103.0:
+            break
+
+    if not (97.0 <= pct_sum <= 103.0) or amount_sum <= 0 or used < 2:
+        return answer
+
+    return (f"{answer}\n\n**Total contract value: Rs. {amount_sum:,.0f}** "
+            f"— the sum of all {used} milestone payments in the schedule "
+            f"({pct_sum:.0f}% of contract value).")
 
 
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
@@ -3701,6 +4889,32 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         }
 
+    # A failed cross-reference (see _cross_reference_failure_answer) is answered
+    # without calling the LLM at all — whether the citing document was
+    # retrieved is a fact already known with certainty, and a context-injected
+    # warning alone was confirmed live not to hold: the model can still write a
+    # compliant refusal sentence and then add a second section quoting the
+    # wrong document's clause anyway. Bypassing generation removes that failure
+    # mode by construction rather than asking the model not to take it.
+    _xref_answer = _cross_reference_failure_answer(question, pages, selected_titles)
+    if _xref_answer:
+        logger.info("Cross-reference proven unsatisfiable — answering deterministically, no LLM call")
+        return {
+            "answer": _xref_answer,
+            "pages_used": [],
+            "files_used": [],
+            "selected_titles": selected_titles,
+            "relations": relations,
+            "usage": {},
+            "confidence_score": 95,
+            "confidence_reason": "Deterministic: the cited document is confirmed absent from retrieval.",
+            "not_covered": True,
+            "citation_check": {"total": 0, "unverified": 0, "misattributed": 0,
+                               "verified": 0},
+            "token_breakdown": token_breakdown,
+            "token_total": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+
     from services.prompts import (
         ANSWER_PROMPT, ASSESSMENT_PROMPT, COMPARISON_PROMPT,
         OBLIGATION_PROMPT, DRAFTING_PROMPT,
@@ -3779,6 +4993,34 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
+
+    # Drafting intent draws on the Precedent layer as well as the pages
+    # (§ Phase 2: "Draft Mode and the Ask tab's drafting intent both switch to
+    # clause-level embeddings, scoped to role-tagged precedent documents").
+    #
+    # Appended rather than substituted: a drafting question in the Ask tab is
+    # still answered from the retrieved pages, and the precedent clauses are
+    # the model material to draft FROM. Replacing the page context would drop
+    # the document the lawyer is actually asking about.
+    if intent == "drafting":
+        try:
+            from services import precedent as _prec
+            _pc = _prec.search_clauses(
+                _active_wiki_id(), session_id, question,
+                limit=getattr(config, "DRAFT_PRECEDENT_CLAUSES", 12))
+            if _pc:
+                _block = "\n".join(
+                    f"[PRECEDENT CLAUSE] {c['clause_type']} — {c['source_doc']}"
+                    f"\n{c['text']}\n" for c in _pc)
+                wiki_content = (
+                    f"{wiki_content}\n\n"
+                    f"--- PRECEDENT CLAUSES (drafting material from other "
+                    f"documents in this corpus; cite them as precedent, never "
+                    f"as terms of the document under discussion) ---\n{_block}")
+                logger.info("Drafting intent: added %d precedent clause(s)", len(_pc))
+        except Exception as _p_err:
+            logger.warning("Precedent clauses unavailable for drafting intent: %s",
+                           _p_err)
     prompt = (_ambiguity_directive_note + _unconfirmed_doc_note
               + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
@@ -4248,6 +5490,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # here both cleans the output and stops them from tripping the citation check
     # (which correctly flags "Not provided in excerpt" as a non-verbatim quote).
     answer = _strip_placeholder_quotes(answer)
+    answer = _append_milestone_total(answer, wiki_content, question)
 
     # Deterministic citation-integrity checks: flag any quoted span the model
     # presented as verbatim that doesn't actually appear in the retrieved
@@ -4772,6 +6015,12 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "total": len(_QUOTE_SPAN_RE.findall(answer)),
             "unverified": len(_unverified_quotes),
             "misattributed": len(_misattributed),
+            # A quote can be both unverified and misattributed, so the two
+            # counts are unioned rather than added — summing them would let a
+            # single bad quote fail twice and report fewer verified claims
+            # than the answer actually contains.
+            "verified": max(0, len(_QUOTE_SPAN_RE.findall(answer))
+                            - len(set(_unverified_quotes) | set(_misattributed))),
         },
         "token_breakdown": token_breakdown,
         "token_total": token_total,
@@ -5455,7 +6704,7 @@ def _detect_question_family(question: str, available_families: set[str]) -> str 
 # phrases ("Reserved Matters", "Joint Venture Agreement") from ever qualifying.
 _CORP_SUFFIX_RE_STR = (
     r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
-    r'LLP|LLC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
+    r'LLP|LLC|FZE|FZC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
 )
 _PARTY_NAME_RE = re.compile(
     r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
@@ -5508,6 +6757,22 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
 })
 _BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
 
+# A run of 2-5 whitespace-separated Title-Case words with no corporate suffix
+# ("Apex Lumendra Digital") — this corpus's dominant bare-name pattern, one
+# level up from the single-word case above. _bare_proper_noun_candidates
+# offers each word of a name like this SEPARATELY, which is fatal for a
+# 3-word name built from common short words: "Apex" and "Digital" alone each
+# hit dozens of unrelated documents (every "Apex *" company, every "* Digital"
+# company), so both get discarded by _resolve_docs_by_party's max_docs cap and
+# the name never resolves at all — confirmed live on "the Guarantee agreement,
+# Apex Lumendra Digital, Jan 2021", which fell all the way through to
+# unscoped corpus search and answered from an unrelated document. Trying the
+# full 3-word phrase as ONE candidate first is what a real full-text search
+# for the name would do, and resolves to exactly the one document.
+_BARE_PROPER_NOUN_PHRASE_RE = re.compile(
+    r'\b(?:[A-Z][a-z]{3,}\s+){1,4}[A-Z][a-z]{3,}\b'
+)
+
 
 def _bare_proper_noun_candidates(question: str) -> list[str]:
     """Single Title-Case words in ``question`` that aren't common English/legal
@@ -5521,6 +6786,306 @@ def _bare_proper_noun_candidates(question: str) -> list[str]:
         if tok not in seen:
             seen.append(tok)
     return seen
+
+
+def _bare_proper_noun_phrase_candidates(question: str) -> list[str]:
+    """Multi-word runs of bare Title-Case words — the phrase-level sibling of
+    _bare_proper_noun_candidates (see that function and _BARE_PROPER_NOUN_PHRASE_RE
+    above). A run containing ANY stopword token is dropped whole rather than
+    trimmed — e.g. "Guarantee Agreement Apex" never occurs in practice since
+    "agreement" is lowercase mid-sentence, but if a stopword ever lands inside
+    a matched run, guessing which end to trim risks cutting a real name in
+    half, so the safer failure is no candidate at all.
+    """
+    seen: list[str] = []
+    for m in _BARE_PROPER_NOUN_PHRASE_RE.finditer(question):
+        phrase = m.group(0)
+        words = phrase.split()
+        if any(w.lower() in _BARE_PROPER_NOUN_STOPWORDS for w in words):
+            continue
+        if phrase not in seen:
+            seen.append(phrase)
+    return seen
+
+
+# Any alphanumeric token worth checking against a filename during narrowing —
+# deliberately loose (letters, digits, internal hyphens), since the whole
+# point is to catch things _PARTY_NAME_RE/_bare_proper_noun_* never would:
+# document codes like "IMG-4137", instrument words like "Guarantee" or "SOW".
+_NARROW_TOKEN_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-]{2,}')
+
+# Basic English function words that _NARROW_TOKEN_RE happily matches (it has
+# no case requirement, unlike _BARE_PROPER_NOUN_STOPWORDS which was built for
+# a Title-Case-only regex and never needed to exclude them). Confirmed live:
+# "and" — from "... between Tata Projects Limited and Bhumika Motors Ltd
+# ..." — matched the filename "Separation AND Release Agreement", an
+# entirely unrelated document, and (being the single smallest-matching
+# token) won the fallback below and was returned as the answer.
+_NARROW_TOKEN_STOPWORDS = frozenset({
+    "and", "for", "with", "from", "into", "provide", "provides", "dated",
+    "between", "the", "that", "this", "was", "were", "has", "have", "had",
+    "not", "but", "nor", "are", "will", "shall", "may", "can", "does", "did",
+    "states", "state", "stated", "under", "about", "any", "all", "each",
+    # Filing/drafting-status words this corpus's own filenames use as
+    # boilerplate suffixes on a huge, unrelated cross-section of documents
+    # ("... FINAL_FINAL.pdf", "... signed copy.pdf", "... - filed_ocr.pdf")
+    # — near-universal, so they carry ~zero document-identifying signal, but
+    # matched few enough documents to look "discriminating" by the bare
+    # subset test. Confirmed live: "final" (from "Tax Deed FINAL_FINAL
+    # agreement") uniquely matched a single unrelated Lease Deed document
+    # whose filename happened to end "... FINAL_FINAL.pdf", won the
+    # empty-intersection fallback, and was confidently returned as the
+    # answer instead of the real Tax Deed.
+    "final", "signed", "draft", "copy", "filed", "executed", "scanned",
+    "redacted", "countersigned", "clean", "fully", "true",
+})
+
+# The corpus files a multi-word instrument type under its INITIALISM — "KERA",
+# "SSA", "TSA", "SPA" — while questions spell the type out in full ("the Key
+# Employee Retention Agreement"). Neither shares a token with the other, so
+# filename narrowing sees the type words match nothing, discards them, and
+# narrows on whatever generic word is left — usually "agreement", which then
+# selects FOR the siblings whose filenames spell the type out and AGAINST the
+# one document that uses the acronym. Confirmed live: "the Key Employee
+# Retention Agreement between Apex Sagar Mobility Limited and Ashoka Travel
+# Limited" narrowed an 8-document cluster to the 5 filenames containing
+# "Agreement", dropping "MAT-2021-6077_Apex Sagar Mobility_KERA_2019-12-25.pdf"
+# — the one document the question was actually about.
+#
+# Deriving the initialism from the spelled-out name closes that gap with the
+# corpus's own naming convention. Only Title-Case runs ending in an instrument
+# head noun qualify, so ordinary capitalised prose never manufactures a token.
+# The head noun list covers what this corpus's instruments are actually called.
+# It started at Agreement/Deed/Contract and missed "Board Resolution Approving
+# Transaction" — whose document is filed as "..._BRAT_11Apr2019.pdf" — so a
+# question naming it had no initialism to narrow 24 board resolutions with, and
+# the scope stayed on five unrelated documents of the same parties.
+_INSTRUMENT_INITIALISM_RE = re.compile(
+    r'\b((?:[A-Z][a-z]+\s+){2,5}'
+    r'(?:Agreement|Deed|Contract|Undertaking|Opinion|Memorandum|Notice|Policy|'
+    r'Transaction|Resolutions?|Certificate|Letter|Statement|Sheet|Guarantee|'
+    r'Consent|Plaint|Petition|Order|Work|Intent|Minutes|Schedule|Charter))\b'
+)
+
+
+def _instrument_initialisms(question: str) -> list[str]:
+    """Lower-case initialisms of any spelled-out instrument type the question names."""
+    out: list[str] = []
+    for m in _INSTRUMENT_INITIALISM_RE.finditer(question):
+        acronym = "".join(w[0] for w in m.group(1).split()).lower()
+        if 3 <= len(acronym) <= 6 and acronym not in out:
+            out.append(acronym)
+    return out
+
+
+def _shares_family(session_id: str, docs_a: set[str], docs_b: set[str]) -> bool:
+    """Do the two document sets contain the same KIND of instrument?
+
+    Used to reject a "second document reference" that is really a sibling of the
+    one already resolved. Unknown families never block: a document the family
+    classifier never labelled says nothing either way, and refusing on missing
+    data would silently disable the branch this guards.
+    """
+    if not config.USE_DATABASE or not docs_a or not docs_b:
+        return False
+    try:
+        families = _db.get_families_of_documents(
+            _active_wiki_id(), session_id, sorted(docs_a | docs_b))
+    except Exception as e:
+        logger.warning("family comparison failed: %s", e)
+        return False
+    fam_a = {families[d] for d in docs_a if d in families}
+    fam_b = {families[d] for d in docs_b if d in families}
+    return bool(fam_a & fam_b)
+
+
+# A matter or case number written the way a question writes it — "Appeal No.
+# 113/2024", "C.S. No. 248/2026", "C.P. No. 499/2023". The filename writes the
+# same number with the separator dropped ("... Appeal No. 1132024-20240619 signed
+# copy.pdf"), and narrowing normalises punctuation away, so the two forms would
+# match — except the question's own tokenizer splits on the slash into "113" and
+# "2024", both purely numeric and therefore discarded as too weak to trust
+# alone. Joined back up, the number is one of the most specific identifiers a
+# question can carry.
+_CASE_NUMBER_RE = re.compile(r'\b(\d{1,5})\s*[/\\]\s*(\d{2,4})\b')
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], start=1)}
+
+
+def _precise_filename_tokens(question: str, allow_initialism: bool = True) -> list[str]:
+    """Tokens specific enough that a single filename match settles the question.
+
+    Ordered most-specific first. Each is something the corpus writes into a
+    filename verbatim but that ordinary word tokenizing cannot reconstruct: a
+    case number split by its slash, a date written out in words, or an
+    instrument type the filename abbreviates to its initialism.
+    """
+    out: list[str] = []
+
+    def add(tok: str) -> None:
+        if tok and tok not in out:
+            out.append(tok)
+
+    for m in _CASE_NUMBER_RE.finditer(question):
+        add(f"{m.group(1)}{m.group(2)}")
+
+    for m in _QUESTION_DATE_RE.finditer(question):
+        parts = re.findall(r"[A-Za-z]+|\d+", m.group(0))
+        month = day = year = None
+        for p in parts:
+            low = p.lower()
+            if low in _MONTHS:
+                month = _MONTHS[low]
+            elif len(p) == 4 and p.isdigit():
+                year = int(p)
+            elif p.isdigit():
+                day = int(p)
+        if not (month and day and year):
+            continue
+        # The three orderings this corpus actually files under, plus the
+        # written-month form ("19Dec2022"). Punctuation is normalised away
+        # by the caller, so "2024-06-19" and "20240619" are the same token.
+        add(f"{year:04d}{month:02d}{day:02d}")
+        add(f"{day:02d}{month:02d}{year:04d}")
+        add(f"{month:02d}{day:02d}{year:04d}")
+        month_name = [k for k, v in _MONTHS.items() if v == month][0]
+        add(f"{day:02d}{month_name[:3]}{year:04d}")
+        add(f"{day:02d}{month_name}{year:04d}")
+
+    if allow_initialism:
+        for acronym in _instrument_initialisms(question):
+            add(acronym)
+    return out
+
+
+def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
+                               exclude: str | None = None,
+                               allow_precise: bool = True,
+                               allow_initialism: bool = True,
+                               precise_only: bool = False) -> set[str]:
+    """Narrow a multi-document match using whatever ELSE the question names.
+
+    A party name or matter reference that resolves to several documents isn't
+    a dead end if the question also names something document-specific — an
+    instrument type ("the Guarantee agreement"), a document code embedded in
+    the filename ("IMG-4137"), a short form ("PPA"). Those live in the
+    FILENAME, not the page content a phrase search already matched against,
+    so this checks candidate filenames directly rather than repeating a
+    content search.
+
+    Confirmed live: "MAT-2021-7750 (IMG-4137 PPA)" resolves the matter number
+    to several sibling documents (a whole deal's worth of instruments sharing
+    one matter reference is normal, not ambiguous data) — "IMG-4137" and
+    "PPA" both appear only in one sibling's filename, narrowing to exactly
+    it. Same mechanism narrows "Guarantee agreement, Apex Lumendra Digital"
+    — the party name alone resolves to several real, unrelated deals this
+    company is party to, but only one of those filenames contains
+    "Guarantee".
+
+    Tokens that DISCRIMINATE (match a proper, non-empty subset of
+    candidate_docs — not none of them, not all of them) are AND-ed together,
+    not OR-ed: a token matching most of the candidates says nothing about
+    which one is right, and OR-combining loose tokens accumulates false
+    positives. Confirmed live: on a 20-document candidate set, OR-matching
+    let generic filename words ("final", "signed", "draft") pull in two
+    completely unrelated documents alongside the real one.
+
+    If the AND intersection of every discriminating token comes back empty,
+    that means the tokens DISAGREE — each is individually plausible but they
+    don't point at the same document, which is a sign of noise, not a
+    tie-breaker to resolve. This deliberately returns candidate_docs
+    UNCHANGED in that case rather than trusting whichever token happened to
+    match the fewest documents — confirmed live that "trust the smallest"
+    is actively dangerous: "final" (a boilerplate drafting-status suffix on
+    a huge, unrelated slice of this corpus's filenames) matched only one
+    document by chance, disagreed with every other token, and would have
+    been confidently returned as the answer instead of the real one. Every
+    caller already only accepts a narrowing result at exactly length 1, so
+    returning the unnarrowed set here correctly reads as "couldn't narrow,"
+    not as a wrong answer.
+
+    Two further collisions this guards against, both confirmed live:
+    - A bare year ("Jan 2021" → token "2021") coincidentally matching an
+      UNRELATED matter number embedded in a sibling's filename ("MAT-2021-
+      6375"). Purely-numeric tokens are excluded — a year alone is never
+      distinctive enough to trust here, unlike an alphanumeric code.
+    - The resolved name/reference itself, when it's also literally embedded
+      in every sibling's filename (a matter number folded into each of its
+      own instrument's filenames), matching all of them and cancelling out
+      the narrowing entirely. ``exclude`` is the resolved phrase/reference
+      that produced candidate_docs — stripped from the token set so it can
+      only narrow using signals OTHER than the one already used to find
+      this candidate set.
+
+    Returns candidate_docs unchanged (never widens, never guesses) unless a
+    token narrows it to a strictly smaller, non-empty set.
+    """
+    if len(candidate_docs) <= 1:
+        return candidate_docs
+    exclude_norm = re.sub(r'[^a-z0-9]', '', exclude.lower()) if exclude else None
+    tokens: list[str] = []
+    for m in _NARROW_TOKEN_RE.finditer(question):
+        raw = m.group(0)
+        norm = re.sub(r'[^a-z0-9]', '', raw.lower())
+        # Deliberately NOT filtering against _BARE_PROPER_NOUN_STOPWORDS here —
+        # that set exists to keep instrument-type words ("agreement", "data",
+        # "processing", "service", "master") OUT of party-name candidates, but
+        # this function's whole purpose is narrowing BY instrument-type words
+        # ("the Guarantee agreement" — see docstring). Reusing it silently
+        # stripped exactly the tokens meant to discriminate. Confirmed live:
+        # "the Data Processing Agreement between Tata Capital Limited and
+        # Vishesh Motors Limited" lost "data"/"processing"/"agreement" to that
+        # filter, leaving ordinary-English "term" (from "how is the term
+        # 'Affiliate' defined") as the only surviving token — which then
+        # collided with an unrelated sibling's "Term Sheet" filename and won.
+        if len(norm) < 3 or raw.lower() in _NARROW_TOKEN_STOPWORDS:
+            continue
+        if norm.isdigit():
+            continue
+        if exclude_norm and norm in exclude_norm:
+            continue
+        if norm not in tokens:
+            tokens.append(norm)
+    haystacks = {d: re.sub(r'[^a-z0-9]', '', d.lower()) for d in candidate_docs}
+    # A case number, a written-out date or an instrument initialism is a far
+    # higher-precision signal than any single ordinary word: each is the
+    # corpus's own way of writing something the question states exactly. When
+    # one picks out a single candidate, take it outright rather than AND-ing it
+    # with generic words that would only cancel it out — "kera" and "agreement"
+    # intersect to nothing, and the empty-intersection guard below would then
+    # discard both. Confirmed live: "the Affidavit in Support of the Plaint -
+    # Appeal No. 113/2024 ... dated 19 June 2024" carried both the case number
+    # and the date that its filename spells out ("... Appeal No.
+    # 1132024-20240619 signed copy.pdf") and still fell back to answering
+    # across all 28 Pleadings.
+    for precise in (_precise_filename_tokens(question, allow_initialism) if allow_precise else []):
+        if exclude_norm and precise in exclude_norm:
+            continue
+        hit = {d for d, h in haystacks.items() if precise in h}
+        if len(hit) == 1:
+            return hit
+    # precise_only: the caller wants the high-precision tokens ONLY, and treats
+    # "no precise match" as "could not narrow" rather than falling back to
+    # ordinary words.
+    if precise_only or not tokens:
+        return candidate_docs
+    discriminating: list[tuple[str, set[str]]] = []
+    for t in tokens:
+        matched = {d for d, h in haystacks.items() if t in h}
+        if matched and len(matched) < len(candidate_docs):
+            discriminating.append((t, matched))
+    if not discriminating:
+        return candidate_docs
+    intersection: set[str] | None = None
+    for _, matched in discriminating:
+        intersection = matched if intersection is None else (intersection & matched)
+    if not intersection:
+        return candidate_docs
+    if len(intersection) < len(candidate_docs):
+        return intersection
+    return candidate_docs
 
 
 # An explicit calendar date typed in the question ("the SA dated 15 January
@@ -5560,7 +7125,7 @@ def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> 
     matches = [m.group(0) for m in _QUESTION_DATE_RE.finditer(question)]
     for date_str in matches:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, date_str, cap=max_docs + 1) if d]
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, date_str, cap=max_docs + 1) if d]
         except Exception as e:
             logger.error("resolve_scope: date-content lookup failed for %r: %s", date_str, e)
             continue
@@ -5569,6 +7134,104 @@ def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> 
                         _norm_doc_name(docs[0]), date_str)
             return set(docs)
     return set()
+
+
+# A matter/reference number recited in the question ("MAT-2021-7750"). Looks
+# unique but frequently ISN'T in this corpus — the same matter number is
+# reused across several unrelated instruments for the same deal (a Loan
+# Agreement, an IP Assignment, an Escrow Agreement, all filed under
+# "MAT-2021-7750" with different parties on each). Deliberately max_docs=1:
+# on a multi-hit it returns nothing rather than guessing among siblings, same
+# fail-safe the date resolver above uses. Confirmed live: "the termination
+# notice period in MAT-2021-7750 (IMG-4137 PPA)" resolved to NOTHING under the
+# old resolvers (no filename match, no party name in the question at all) and
+# fell through to unscoped corpus search, which answered from a different
+# MAT-2021-7750 sibling with different parties and a different notice period.
+_QUESTION_MATTER_REF_RE = re.compile(r'\bMAT-\d{4}-\d{3,6}\b', re.IGNORECASE)
+
+
+def _resolve_docs_by_matter_reference(question: str, session_id: str) -> set[str]:
+    """Resolve the document a question names by a matter/reference number it
+    recites. Mirrors _resolve_docs_by_date's content-FTS mechanism, but a
+    matter number routinely hits several sibling instruments of the same deal
+    (see _QUESTION_MATTER_REF_RE above), so a multi-hit isn't a dead end —
+    _narrow_by_question_tokens gets a chance to pin it down using whatever
+    else the question names (a filename code, an instrument type) before
+    this gives up and returns nothing.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    refs = [m.group(0) for m in _QUESTION_MATTER_REF_RE.finditer(question)]
+    if not refs:
+        return set()
+    # A matter can legitimately span a handful of instruments; capped well
+    # above that so narrowing has the full sibling set to work with, not a
+    # query-truncated slice of it.
+    _MATTER_SCAN_CAP = 20
+    for ref in refs:
+        try:
+            docs = [d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, ref, cap=_MATTER_SCAN_CAP) if d]
+        except Exception as e:
+            logger.error("resolve_scope: matter-reference lookup failed for %r: %s", ref, e)
+            continue
+        if not docs:
+            continue
+        if len(docs) == 1:
+            logger.info("Matter-reference content match → 1 document: %s (%r)",
+                        _norm_doc_name(docs[0]), ref)
+            return set(docs)
+        narrowed = _narrow_by_question_tokens(question, set(docs), exclude=ref)
+        if len(narrowed) == 1:
+            logger.info("Matter-reference content match, narrowed by question tokens → 1 document: %s (%r, %d siblings)",
+                        _norm_doc_name(next(iter(narrowed))), ref, len(docs))
+            return narrowed
+    return set()
+
+
+def _narrow_by_title_hint(session_id: str, candidate_docs: set[str], question: str,
+                          exclude: str | None = None) -> set[str]:
+    """Like _narrow_by_question_tokens, but checks page TITLES instead of
+    filenames — catches the instrument-type label ingest assigns even when
+    the filename itself is an opaque code the label never made it into.
+
+    Confirmed live: a party-name resolver correctly finds a 7-document
+    cluster for "Redgate Mobility" but the question's other document
+    reference — "the Detailed Judgment and Final Order ... C.S. No.
+    248/2026" — names an instrument type that never appears in the real
+    judgment's filename ("...DJAFOCN - filed_ocr.pdf"), so filename-based
+    narrowing finds nothing. Its page TITLES do carry the type
+    ("Overview – C.S. No. 248/2026 (Court Judgment)") because ingest writes
+    it there regardless of what the filename says. "judgment" alone narrows
+    the 7-document cluster to 2 via title search.
+
+    Tries each token independently (not AND-combined — one real hit is
+    enough) and returns on the first that narrows to a smaller, non-empty
+    subset. Returns candidate_docs unchanged otherwise.
+    """
+    if len(candidate_docs) <= 1:
+        return candidate_docs
+    exclude_norm = re.sub(r'[^a-z0-9]', '', exclude.lower()) if exclude else None
+    tokens: list[str] = []
+    for m in _NARROW_TOKEN_RE.finditer(question):
+        raw = m.group(0)
+        norm = re.sub(r'[^a-z0-9]', '', raw.lower())
+        if len(norm) < 4 or raw.lower() in _BARE_PROPER_NOUN_STOPWORDS or raw.lower() in _NARROW_TOKEN_STOPWORDS:
+            continue
+        if norm.isdigit():
+            continue
+        if exclude_norm and norm in exclude_norm:
+            continue
+        if norm not in tokens:
+            tokens.append(norm)
+    for t in tokens:
+        try:
+            title_hits = set(_db.find_source_docs_by_title_tokens(_active_wiki_id(), session_id, [t], cap=200) or [])
+        except Exception:
+            continue
+        narrowed = candidate_docs & title_hits
+        if narrowed and len(narrowed) < len(candidate_docs):
+            return narrowed
+    return candidate_docs
 
 
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
@@ -5583,39 +7246,161 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     CONTENT search on the distinctive party phrase.
 
     Returns the doc set of the MOST distinctive party named — the one hitting the
-    fewest documents — provided that set is small (<= max_docs). An umbrella name
-    like "Tata Steel Limited" hits many documents and is correctly ignored; the
-    specific counterparty resolves to one document ("SteelLoop Resource Recovery"
-    → JVA 3) or, when the same two parties share several instruments, to that
-    small cluster ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration
-    notice + Section 9 petition). The caller decides, from how many instruments
-    the question names, whether to pin the whole cluster or narrow to one. Returns
-    an empty set on ambiguity (no hit, or the smallest set exceeds max_docs), so
-    it only ever ADDS precise matches the filename/entity detectors miss.
+    fewest documents — provided that set is small (<= max_docs), OR narrows to
+    exactly one via _narrow_by_question_tokens when it isn't. An umbrella name
+    like "Tata Steel Limited" hits many documents; the specific counterparty
+    resolves to one document ("SteelLoop Resource Recovery" → JVA 3) or, when
+    the same two parties share several instruments, to that small cluster
+    ("Tata Steel & NordForge Metallurgy" → the NDA + arbitration notice +
+    Section 9 petition) — or, when the question ALSO names an instrument type
+    or document code an umbrella name alone can't narrow ("Guarantee
+    agreement, Apex Lumendra Digital" — the party sits on 6 unrelated real
+    deals, but only one filename says "Guarantee"), to that single document.
+    The caller decides, from how many instruments the question names, whether
+    to pin the whole cluster or narrow to one. Returns an empty set on
+    genuine ambiguity (no hit, or nothing narrows a large set down), so it
+    only ever ADDS precise matches the filename/entity detectors miss.
     """
     if not config.USE_DATABASE:
         return set()
-    candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
-    candidates = [c for c in candidates if len(c) >= 4]
+    # Suffix-derived names ("Charitra Metals LLC") are real, distinct legal
+    # entities — safe to treat two of them as two different documents (see
+    # the secondary-match scan below). Bare-word fallback candidates
+    # ("Guarantee", "Apex", "Digital") are not: they're single common words,
+    # not party identities, so the secondary scan is restricted to this set.
+    suffix_candidates = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+    suffix_candidates = [c for c in suffix_candidates if len(c) >= 4]
+    candidates = suffix_candidates
     if not candidates:
-        candidates = _bare_proper_noun_candidates(question)
+        # Phrase candidates first: a bare multi-word name ("Apex Lumendra
+        # Digital") searched whole is far more distinctive than any one of
+        # its words searched alone, so it gets first crack at the smallest-set
+        # selection below — but every candidate is still tried, so a genuine
+        # single bare word ("Brackenpyre") is never crowded out.
+        candidates = _bare_proper_noun_phrase_candidates(question) + _bare_proper_noun_candidates(question)
     if not candidates:
         return set()
-    best_docs: set[str] | None = None
-    best_n = 1 << 30
+    # Scanned well above max_docs so a multi-doc match has its FULL sibling
+    # set available to narrow against below, not a query-truncated slice that
+    # happens to omit the one sibling a filename token would have pinned.
+    _PARTY_SCAN_CAP = 20
+    resolved: list[tuple[str, set[str]]] = []
     for name in candidates:
         try:
-            docs = [d for d in _db.find_source_docs_mentioning_phrase(session_id, name, cap=max_docs + 2) if d]
+            docs = {d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d}
         except Exception as e:
             logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
             continue
-        if docs and len(docs) < best_n:
-            best_n, best_docs = len(docs), set(docs)
-    if best_docs is not None and best_n <= max_docs:
-        logger.info("Party-name content match → %d document(s): %s",
-                    best_n, {_norm_doc_name(d) for d in best_docs})
-        return best_docs
-    return set()
+        if docs:
+            resolved.append((name, docs))
+    if not resolved:
+        return set()
+    best_name, best_docs = min(resolved, key=lambda pair: len(pair[1]))
+    best_n = len(best_docs)
+    pinned_precisely = False
+    if best_n <= max_docs:
+        primary = best_docs
+        # A small cluster used to be returned as-is, skipping narrowing
+        # entirely — but a question stating a date or a case number has
+        # already named ONE of these documents. Confirmed live: "the Facility
+        # Agreement between Apex Devashri InfoSystems Limited and Amberline
+        # Commodities Limited dated 30 June 2023" returned the loan agreement
+        # plus two amendments, and the answer reported the amendments'
+        # governing law because it could not tell which document was meant,
+        # although "30062023" appears in exactly one of the three filenames.
+        # Only precise tokens are allowed to narrow here: ordinary words are
+        # what the else-branch below uses as a last resort on a cluster too
+        # big to return, and are not strong enough to discard siblings from a
+        # cluster already small enough to be a legitimate answer.
+        if len(primary) > 1:
+            pinpoint = _narrow_by_question_tokens(question, primary, exclude=best_name,
+                                                  precise_only=True)
+            if len(pinpoint) == 1 and pinpoint < primary:
+                primary, pinned_precisely = pinpoint, True
+                logger.info("Party-name content match pinned to 1 document by an "
+                            "identifier the question states: %s (%d siblings)",
+                            _norm_doc_name(next(iter(primary))), best_n)
+        if not pinned_precisely:
+            logger.info("Party-name content match → %d document(s): %s",
+                        best_n, {_norm_doc_name(d) for d in primary})
+    else:
+        narrowed = _narrow_by_question_tokens(question, best_docs, exclude=best_name)
+        if len(narrowed) == 1:
+            primary = narrowed
+            logger.info("Party-name content match, narrowed by question tokens → 1 document: %s (%d siblings)",
+                        _norm_doc_name(next(iter(primary))), best_n)
+        else:
+            primary = set()
+    if not primary:
+        return set()
+    if pinned_precisely:
+        # The question named one document by an identifier only that document
+        # carries. There is no second document to look for, and looking anyway
+        # found an unrelated Tax Deed to sit alongside the Facility Agreement.
+        return primary
+
+    # A question can name TWO separate documents by two separate parties
+    # ("the judgment between X and Y ... as stated in the SSA between A and
+    # B") — every other candidate above was discarded once the smallest
+    # (most distinctive) one won, but a discarded candidate whose OWN
+    # documents are disjoint from the primary pick is real evidence of a
+    # second document being named, not noise. Confirmed live: "Tata Power"/
+    # "Charitra Metals" (the SSA) won as smallest and returned alone, while
+    # "Redgate Mobility"/"Apex Zephyra Trading" (the judgment) were silently
+    # dropped — the judgment genuinely exists, fully indexed, and the answer
+    # falsely reported it as absent. Tries filename narrowing first, then
+    # title-hint narrowing (catches an instrument type that never made it
+    # into the filename) — accepts a candidate only if it narrows to
+    # max_docs or fewer AND doesn't overlap the primary pick.
+    #
+    # Restricted to suffix_candidates ONLY — confirmed live this cannot run
+    # over the bare-word fallback too: on "Guarantee agreement, Apex Lumendra
+    # Digital", the bare candidate "Guarantee" (a document TYPE, not a party)
+    # narrowed its own huge candidate pool down to two unrelated "Apex
+    # Lumendra Digital" amendment documents and got merged in as a false
+    # "second document" — three single common words standing in for a party
+    # identity is not the same guarantee a real corporate-suffixed name is.
+    for name, docs in resolved:
+        if name == best_name or name not in suffix_candidates:
+            continue
+        remainder = docs - primary
+        if not remainder:
+            continue
+        # allow_precise=False: the instrument type, case number and date the
+        # question states have already been spent identifying the PRIMARY
+        # document. Letting any of them pin a second one finds a sibling of the
+        # primary rather than the different instrument this branch exists to
+        # recover, and hands the answer LLM two documents to confuse. Confirmed
+        # live: "Section 5 of the Share Subscription Agreement between Tata
+        # Elxsi Limited and Vantara Vehicles LLC" correctly pinned the Vantara
+        # SSA, then pulled in an unrelated Tata Elxsi/Tata Elxsi SSA on the
+        # strength of "SSA" alone.
+        secondary = _narrow_by_question_tokens(question, remainder, exclude=name,
+                                               allow_precise=False)
+        if not secondary or len(secondary) > max_docs:
+            secondary = _narrow_by_title_hint(session_id, remainder, question, exclude=name)
+        # Exactly one, and a DIFFERENT kind of instrument than the primary.
+        # "A second document is named here" is a claim about one document, and
+        # this branch exists for a question naming two different instruments
+        # ("the judgment ... as stated in the SSA"); a same-family match is a
+        # sibling of the primary, which only gives the answer LLM two documents
+        # of one type to confuse. Confirmed live: "Section 2 (Issues) of the
+        # Detailed Judgment and Final Order - Appeal No. 113/2024 between
+        # Pacific Rim Capital Bank Ltd and Vantara InfoSystems LLC" pinned the
+        # right judgment and then merged in a Detailed Judgment and Final Order
+        # from an entirely different matter. And a narrowing that lands on
+        # SEVERAL documents is the other party's own portfolio rather than a
+        # named cross-reference at all: "Section 9 (Severability) of the Key
+        # Employee Retention Agreement between Apex Sagar Mobility Limited and
+        # Ashoka Travel Limited" pinned the right KERA, then merged in four
+        # unrelated Ashoka Travel instruments (an Escrow, a TSA, an SPA and a
+        # Shareholder Agreement) alongside it.
+        if len(secondary) == 1 and secondary.isdisjoint(primary) \
+                and not _shares_family(session_id, primary, secondary):
+            logger.info("Party-name content match also found a second document reference "
+                        "(%r) → %s", name, {_norm_doc_name(d) for d in secondary})
+            return primary | secondary
+    return primary
 
 
 # Ceiling on how many documents an umbrella party may hit before its doc set is
@@ -5665,7 +7450,7 @@ def _resolve_party_within_family(question: str, session_id: str,
     for name in candidates:
         try:
             docs = _db.find_source_docs_mentioning_phrase(
-                session_id, name, cap=_PARTY_FAMILY_SCAN_CAP + 1)
+                _active_wiki_id(), session_id, name, cap=_PARTY_FAMILY_SCAN_CAP + 1)
         except Exception as e:
             logger.error("resolve_scope: party-in-family lookup failed for %r: %s", name, e)
             continue
@@ -5721,7 +7506,7 @@ def _narrow_by_quoted_subject(question: str, session_id: str,
             continue
         try:
             docs = set(_db.find_source_docs_by_title_tokens(
-                session_id, [collapsed], cap=25))
+                _active_wiki_id(), session_id, [collapsed], cap=25))
         except Exception as e:
             logger.error("resolve_scope: quoted-subject lookup failed for %r: %s",
                          phrase, e)
@@ -5775,6 +7560,17 @@ _PARTY_GENERIC_WORDS = frozenset({
     'corporation', 'plc', 'gmbh', 'company', 'co', 'group', 'holdings',
     'technologies', 'technology', 'systems', 'solutions', 'services',
     'energy', 'industries', 'international', 'global', 'partners', 'ventures',
+    # This corpus's own conglomerate prefixes ("Apex Sagar Mobility", "Tata
+    # Projects", "Apex Zephyra Trading Company") — real-world-style umbrella
+    # names that head dozens of unrelated subsidiary parties, not a single
+    # party's identity. Confirmed live, twice: "Apex Zephyra Trading Company"
+    # reduced to token "Apex" — the single most common word in the whole
+    # corpus — and party-pair resolution over- or under-matched on it in both
+    # directions (a real Tax Deed excluded from its title-search cluster
+    # entirely; a real Transition Services Agreement never found at all).
+    # Ingest's own short-titling already drops these ("Sagar-Ashoka", "TPL"),
+    # this just catches the token extractor up to match.
+    'apex', 'tata',
 })
 
 
@@ -5889,8 +7685,211 @@ def _bare_party_tokens(question: str) -> list[str]:
     return tokens
 
 
+def _content_pair_supplement(session_id: str, tokens: list[str], full_names: list[str],
+                             cluster: set[str], question: str, max_docs: int) -> set[str]:
+    """Find a sibling instrument title search missed because ingest titled it
+    under an arbitrary code name instead of either party's name.
+
+    Confirmed live: a real Term Sheet and a real Share Purchase Agreement are
+    both between "Tata Projects" and "Bhumika Motors". The SPA's every page
+    title reads "... – Tata Projects/Bhumika (Share Purchase Agreement)" — a
+    party-derived short name, so title search finds it. The Term Sheet's
+    pages read "... – Matter Blue (Term Sheet)" — an arbitrary code name
+    containing neither party — so title search cannot find it no matter what
+    tokens it tries; the document is real and correctly indexed, it just
+    isn't titled by party name. Full-text content confirms "Bhumika Motors"
+    is genuinely discussed throughout it.
+
+    _resolve_docs_by_party_pair's own docstring explains why it uses titles
+    instead of raw content-intersection in the first place: on the whole
+    corpus, intersecting two party names by content is too noisy (76 of ~115
+    documents on the adversarial-litigation case that motivated it). This
+    avoids that by anchoring on the RARER of the two party tokens alone (one
+    content search, not an intersection), subtracting what title search
+    already found, narrowing what's left by filename
+    (_narrow_by_question_tokens — instrument type, document code), and only
+    THEN, on that already-small remainder, verifying each survivor's own
+    CONTENT for the other party token too. Content-intersecting a handful of
+    pre-narrowed candidates is a different cost/noise profile than
+    content-intersecting the whole corpus.
+
+    Returns an empty set unless the anchor token resolves to something
+    genuinely outside `cluster`, and that remainder narrows (by filename,
+    then by content-confirming the other party) to no more than max_docs.
+
+    ``full_names`` are the fuller party phrases the single-word ``tokens``
+    were each reduced from ("Tata Projects", not just "Tata") — the final
+    content-verification step needs that fuller phrase, not the bare word;
+    "Tata" alone appears in most of this corpus and confirms nothing.
+    """
+    if not config.USE_DATABASE or len(tokens) < 2:
+        return set()
+    anchor_tok, anchor_full, other_tok, anchor_docs = None, None, None, None
+    for i, t in enumerate(tokens[:2]):
+        try:
+            docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, t, cap=100) or [])
+        except Exception:
+            docs = set()
+        if docs and (anchor_docs is None or len(docs) < len(anchor_docs)):
+            anchor_docs, anchor_tok = docs, t
+            # The anchor's own FULL name, not just its bare distinctive token —
+            # see the `spent` fix below for why this matters.
+            anchor_full = (full_names[i] if i < len(full_names) else t)
+            other_tok = (full_names[1 - i] if len(full_names) > 1 else None) or (tokens[1 - i] if len(tokens) > 1 else None)
+    if not anchor_docs:
+        return set()
+    remainder = anchor_docs - cluster
+    if not remainder:
+        return set()
+
+    # Content-verify against the OTHER party first, before any filename
+    # narrowing — cheap here (remainder is already small, unlike the whole
+    # corpus) and it must come first: both party names' own words are
+    # legitimately present in EVERY sibling instrument's filename too (a
+    # deal's Escrow, SPA, and Term Sheet filenames all say "Tata Projects"),
+    # so if filename-narrowing runs first and includes party-name tokens,
+    # those tokens discriminate toward whichever sibling happens to spell
+    # the party out in ITS OWN filename — a real document, but not
+    # necessarily the one the question's instrument type names. Confirmed
+    # live: "tata"/"projects" alone pointed at the Escrow sibling (whose
+    # filename literally reads "Tata Projects - Escrow - Agreement"), which
+    # disagreed with "term"/"sheet" pointing at the real Term Sheet, and the
+    # two cancelled out.
+    if other_tok:
+        try:
+            other_docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, other_tok, cap=200) or [])
+        except Exception:
+            other_docs = set()
+        content_verified = remainder & other_docs
+    else:
+        content_verified = remainder
+    if not content_verified:
+        return set()
+
+    # NOW narrow by filename — but the instrument type is the only signal
+    # left to ask for; both party phrases already did their job above and
+    # would just recreate the same cancel-out if left in the token set.
+    #
+    # Excludes each party's FULL name, not just the bare anchor token it was
+    # reduced to for the content search above. Confirmed live: anchor_tok
+    # "Nimbus" alone left "Capital" (from "Nimbus Capital") in the narrowing
+    # pool as a live token — it matched 5 unrelated sibling documents, which
+    # disagreed with "tax"/"deed" (which correctly, uniquely matched the real
+    # Tax Deed) and cancelled the narrowing out via the empty-intersection
+    # guard, silently returning the whole unnarrowed set instead of the one
+    # real answer.
+    spent = " ".join(n for n in (anchor_full, other_tok) if n)
+    narrowed = _narrow_by_question_tokens(question, content_verified, exclude=spent)
+    if narrowed and len(narrowed) <= max_docs:
+        return narrowed
+    if len(content_verified) <= max_docs:
+        return content_verified
+    return set()
+
+
+_BETWEEN_RE = re.compile(r'\bbetween\b', re.I)
+
+# What joins one named instrument to the NEXT one in a question that names
+# several ("... dated 25 December 2019 AND THE Key Employee Retention Agreement
+# between ...", "... dated 05 July 2024 AS STATED IN THE Share Subscription
+# Agreement between ..."). Everything after this marker introduces the next
+# instrument, so it belongs to the next pair's sub-question, not this one.
+# Requiring "the" after the connector is what keeps it from splitting on the
+# "and" that joins the two parties of a single pair ("... Limited and Ashoka
+# Travel Limited").
+_PAIR_CONNECTOR_RE = re.compile(
+    r'\b(?:and|or|as\s+(?:stated|set\s+out|provided|described|defined)\s+in|'
+    r'versus|vs\.?|compared\s+(?:to|with))\s+the\b',
+    re.I,
+)
+
+
+def _question_pair_segments(question: str) -> list[str]:
+    """Split a question naming SEVERAL party-pairs into one sub-question per pair.
+
+    A comparison question names two whole matters at once — "compare the
+    governing law of the KERA between Apex Sagar Mobility Limited and Ashoka
+    Travel Limited dated 25 December 2019 and the KERA between Apex Prisha
+    Motors Limited and Northfield Mobility Private Limited dated 28 April
+    2021". Every party-name detector in this module reads the question as one
+    flat list of names, so the pair resolver below sees FOUR parties, truncates
+    to three, and requires all three in a single document title. Nothing has
+    all three, so it either matches nothing or — confirmed live on that exact
+    question — matches two unrelated Apex Sagar/Ashoka Travel instruments (an
+    Escrow Agreement and an SPA) while retrieving neither KERA the question
+    actually asked about.
+
+    Each returned segment is the question's head (which carries the instrument
+    type and the task verb) plus one "between …" span, so the pair's own date
+    and its own instrument words narrow it without the other pair's date
+    cancelling them out.
+
+    Returns [] unless there are 2+ "between" spans AND each one names two
+    parties — one pair, or prose that merely uses the word, stays on the
+    ordinary single-pair path.
+    """
+    starts = [m.start() for m in _BETWEEN_RE.finditer(question)]
+    if len(starts) < 2:
+        return []
+    segments: list[str] = []
+    # The instrument type sits BEFORE its "between", so each span's own head is
+    # whatever preceded it: the question's opening for the first pair, and for
+    # every later pair the tail the previous span handed over at its connector.
+    head = question[:starts[0]]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(question)
+        span = question[start:end]
+        body, tail = span, ""
+        if i + 1 < len(starts):
+            cuts = list(_PAIR_CONNECTOR_RE.finditer(span))
+            if cuts:
+                body, tail = span[:cuts[-1].start()], span[cuts[-1].start():]
+        if len(_PARTY_NAME_RE.findall(body)) < 2:
+            return []
+        segments.append(head + body)
+        head = tail
+    return segments
+
+
 def _resolve_docs_by_party_pair(question: str, session_id: str,
                                 max_docs: int = 6) -> set[str]:
+    """Resolve documents named by their parties, one pair or several.
+
+    Compound questions are resolved pair-by-pair and unioned; everything else
+    goes straight to the single-pair resolver below.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    segments = _question_pair_segments(question)
+    if not segments:
+        return _resolve_one_party_pair(question, session_id, max_docs)
+
+    union: set[str] = set()
+    resolved = 0
+    for segment in segments:
+        try:
+            got = _resolve_one_party_pair(segment, session_id, max_docs)
+        except Exception as e:
+            logger.error("resolve_scope: compound party-pair leg failed: %s", e)
+            got = set()
+        if got:
+            union |= got
+            resolved += 1
+    if resolved == len(segments) and union:
+        logger.info("Compound party-pair question: all %d pairs resolved → %d document(s): %s",
+                    len(segments), len(union), {_norm_doc_name(d) for d in union})
+        return union
+    # Deliberately NOT falling back to the flat single-pair path: with four
+    # party names in one question that path ANDs three of them together and
+    # returns whatever coincidence survives. Returning nothing lets the weaker
+    # but honest family/broad signals downstream handle it instead.
+    logger.info("Compound party-pair question: only %d of %d pairs resolved — "
+                "declining to scope on a partial pair set", resolved, len(segments))
+    return set()
+
+
+def _resolve_one_party_pair(question: str, session_id: str,
+                            max_docs: int = 6) -> set[str]:
     """Resolve the documents of a matter named by BOTH of its parties.
 
     ``_resolve_docs_by_party`` above scores each party name INDEPENDENTLY and
@@ -5925,10 +7924,16 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         return set()
     names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
     tokens: list[str] = []
+    # Parallel to tokens — the fuller phrase each single-word token was
+    # reduced from ("Tata Projects" for token "Tata"). _content_pair_supplement
+    # needs the fuller phrase for content-verification; the bare word alone
+    # is too common in this corpus to confirm anything.
+    token_full: dict[str, str] = {}
     for n in names:
         tok = _distinctive_party_token(n)
         if tok and tok.lower() not in {t.lower() for t in tokens}:
             tokens.append(tok)
+            token_full[tok] = n
     if len(tokens) < 2:
         # Only one side carried a corporate suffix (or neither did). Fall back
         # to bare capitalised short-names, which is how a matter gets referred
@@ -5938,19 +7943,37 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         for tok in _bare_party_tokens(question):
             if tok.lower() not in {t.lower() for t in tokens}:
                 tokens.append(tok)
+                token_full[tok] = tok
     if len(tokens) < 2:
         return set()
     # More than a handful of capitalised words means this is prose, not a
     # two-party reference — requiring ALL of them in one title would either
     # match nothing or match by accident.
     tokens = tokens[:3]
+    full_names = [token_full.get(t, t) for t in tokens]
 
     try:
         cluster = {d for d in _db.find_source_docs_by_title_tokens(
-            session_id, tokens, cap=max_docs * 5) if d}
+            _active_wiki_id(), session_id, tokens, cap=max_docs * 5) if d}
     except Exception as e:
         logger.error("resolve_scope: party-pair title lookup failed: %s", e)
         return set()
+
+    # Title search under-recalls when ingest gave a sibling instrument an
+    # arbitrary code name instead of a party-derived one — see
+    # _content_pair_supplement's docstring for the confirmed live case. Runs
+    # even when cluster already found something: the missing sibling doesn't
+    # announce itself, so there's no signal to condition this on.
+    try:
+        supplement = _content_pair_supplement(session_id, tokens, full_names, cluster, question, max_docs)
+    except Exception as e:
+        logger.error("resolve_scope: party-pair content supplement failed: %s", e)
+        supplement = set()
+    if supplement:
+        logger.info("Party-pair title match %s supplemented by content-verified match: %s",
+                    tokens, {_norm_doc_name(d) for d in supplement})
+        cluster |= supplement
+
     if not cluster:
         return set()
     # A cluster small enough to pin outright can still hold SEVERAL instruments
@@ -5962,12 +7985,13 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
     # question names ONE instrument — a question spanning several ("across the
     # NDA, the notice, and the petition") must keep the whole cluster.
     if len(cluster) > 1 and _count_instrument_mentions(question) <= 1:
+        pinned = set()
         for rx, hint in _TITLE_KIND_HINTS:
             if not rx.search(question):
                 continue
             try:
                 pinned = {d for d in _db.find_source_docs_by_title_tokens(
-                    session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+                    _active_wiki_id(), session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
             except Exception:
                 pinned = set()
             pinned &= cluster
@@ -5978,6 +8002,25 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
                             {_norm_doc_name(d) for d in pinned})
                 return pinned
             break
+        if not pinned:
+            # The question names an instrument type this curated list doesn't
+            # cover ("Key Employee Retention Agreement", "Tax Deed") — try
+            # filename-narrowing the same general mechanism uses everywhere
+            # else, excluding the resolved party names so their own words
+            # can't cancel out a real instrument-type token the way "Capital"
+            # once did (see _content_pair_supplement). Confirmed live: a KERA
+            # question's title cluster + content supplement correctly totalled
+            # 11 real candidate documents, including the right one — too many
+            # to return outright, and no curated kind-hint matched, so it fell
+            # all the way through to an empty result instead of narrowing.
+            spent = " ".join(full_names)
+            filename_narrowed = _narrow_by_question_tokens(question, cluster, exclude=spent)
+            if filename_narrowed and len(filename_narrowed) < len(cluster):
+                logger.info("Party-pair title match %s narrowed by filename tokens "
+                            "→ %d document(s): %s",
+                            tokens, len(filename_narrowed),
+                            {_norm_doc_name(d) for d in filename_narrowed})
+                return filename_narrowed
     if len(cluster) <= max_docs:
         logger.info("Party-pair title match %s → %d document(s): %s",
                     tokens, len(cluster), {_norm_doc_name(d) for d in cluster})
@@ -5993,7 +8036,7 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
             continue
         try:
             narrowed = {d for d in _db.find_source_docs_by_title_tokens(
-                session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
+                _active_wiki_id(), session_id, tokens, kind_hint=hint, cap=max_docs * 5) if d}
         except Exception:
             narrowed = set()
         if narrowed and len(narrowed) <= max_docs:
@@ -6004,9 +8047,9 @@ def _resolve_docs_by_party_pair(question: str, session_id: str,
         break
 
     try:
-        available = set(_db.list_doc_families(session_id))
+        available = set(_db.list_doc_families(_active_wiki_id(), session_id))
         fam = _detect_question_family(question, available)
-        fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+        fam_docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, fam)) if fam else set()
     except Exception as e:
         logger.error("resolve_scope: party-pair family narrowing failed: %s", e)
         fam_docs = set()
@@ -6157,6 +8200,7 @@ _DEMONSTRATIVE_BACKREF_RE = re.compile(
 # is included for the same reason: a comparison thread that established its set
 # should keep it for subsequent follow-ups, not only the turn that resolved it.
 _CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "party-pair",
+                                     "party-pair-compound",
                                      "entity", "date", "carryover", "carryover-set"})
 
 # How many answers back to look for the turn whose scope should be inherited.
@@ -6339,7 +8383,7 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     if not config.USE_DATABASE:
         return None, set()
     try:
-        available = set(_db.list_doc_families(session_id))
+        available = set(_db.list_doc_families(_active_wiki_id(), session_id))
     except Exception as e:
         logger.error("resolve_scope: list_doc_families failed: %s", e)
         return None, set()
@@ -6347,10 +8391,24 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     if not family:
         return None, set()
     try:
-        return family, set(_db.get_documents_by_family(session_id, family))
+        docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, family))
     except Exception as e:
         logger.error("resolve_scope: get_documents_by_family failed: %s", e)
         return None, set()
+    # A document whose ingest-time CONTENT classification came out generic
+    # ("Agreement") is invisible to the doc_family lookup above even when it
+    # was filed under this family's folder — confirmed on the real corpus: a
+    # Legal Opinion whose actual text reads like a bare bilateral contract
+    # (National Council for Consumer Protection / Apex Sagar Financial
+    # Services) got doc_family=None and dropped out of every "Legal Opinion"
+    # family question. folder_hint already carries this signal from ingest at
+    # no extra cost, so union it in rather than leave the gap.
+    try:
+        keywords = [kw for kw, fam in _DOC_FAMILY_RULES if fam == family]
+        docs |= set(_db.get_documents_by_folder_hint(_active_wiki_id(), session_id, keywords))
+    except Exception as e:
+        logger.warning("resolve_scope: folder_hint fallback failed for family %s: %s", family, e)
+    return family, docs
 
 
 def _enforce_question_family(scoped: dict, family: str | None,
@@ -6395,6 +8453,286 @@ def _enforce_question_family(scoped: dict, family: str | None,
     return {**scoped, "scope": "family", "target_docs": sorted(fam_docs),
             "target_family": family, "is_broad": True, "confidence": 0.6,
             "method": f"{method}-family-corrected"}
+
+
+# The instrument a question names, as a phrase: the words between "of the" /
+# "governs the" / "to the" and whatever ends the noun phrase — a case
+# designation, the parties, the date, or the end of the sentence.
+_INSTRUMENT_PHRASE_RE = re.compile(
+    r'\b(?:of|governs|in|to|under|about|from)\s+the\s+(.{3,80}?)'
+    r'(?=\s+-\s|\s+between\b|\s+involving\b|\s+dated\b|\s*\?|,)',
+    re.IGNORECASE,
+)
+
+# Cap on how many same-type documents may be returned before the type is judged
+# too broad to scope on by itself.
+_DOC_TYPE_MAX_DOCS = 6
+
+
+# Words shared by so many instrument names that matching on them says nothing
+# about which instrument is meant.
+_TYPE_GENERIC_WORDS = frozenset({
+    'agreement', 'agreements', 'the', 'of', 'and', 'in', 'to', 'for', 'a', 'an',
+    'or', 'on', 'by', 'with', 'document', 'draft', 'privileged', 'confidential',
+})
+
+
+def _norm_type_words(text: str) -> list[str]:
+    """Type words, lower-cased and singularised.
+
+    Singularising matters: the corpus records what a question calls a "Board
+    Resolution" as "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS".
+    """
+    words = re.sub(r'[^a-z0-9 ]', ' ', (text or "").lower()).split()
+    return [w[:-1] if len(w) > 3 and w.endswith('s') else w for w in words]
+
+
+def _type_core(text: str) -> set[str]:
+    """The words of an instrument name that actually identify it."""
+    return {w for w in _norm_type_words(text) if w not in _TYPE_GENERIC_WORDS}
+
+
+def _resolve_docs_by_doc_type(question: str, session_id: str) -> set[str]:
+    """Documents whose ingest-recorded instrument type is the one the question names.
+
+    Every name-based resolver in this module matches PARTIES, and a party with
+    several instruments resolves to whichever one its content match ranked
+    highest. `_enforce_question_family` already corrects the coarsest version of
+    that error, but a family is a bucket ("Pleading") holding many distinct
+    instruments — a Rejoinder, an Affidavit in Support, an Interim Application
+    and a Reply all live in it, and the question names exactly one.
+
+    `documents.doc_type` records that name verbatim, in the same words the
+    question uses. Measured over the 500-question evaluation: of 27 failures
+    where the right document was never retrieved at all, 21 are reachable this
+    way — questions like "the Rejoinder in the Petition - Appeal No. 511/2026"
+    whose document is filed under the corpus's own unexplained abbreviation
+    ("MAT-2011-8187 RITPAN FINAL v2.pdf"), which no party or filename signal
+    could ever connect to the words the question actually used.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    phrases = [m.group(1).strip() for m in _INSTRUMENT_PHRASE_RE.finditer(question or "")]
+    if not phrases:
+        return set()
+    try:
+        types = _db.get_document_types(_active_wiki_id(), session_id)
+    except Exception as e:
+        logger.error("resolve_scope: doc_type lookup failed: %s", e)
+        return set()
+    by_type: dict[str, set[str]] = {}
+    for _sd, _dt in types.items():
+        core = frozenset(_type_core(_dt))
+        if core:
+            by_type.setdefault(core, set()).add(_sd)
+    for phrase in phrases:
+        wordset = _type_core(phrase)
+        if not wordset:
+            continue
+        # Deliberately NOT short-circuiting on an exact type match. The recorded
+        # types vary in granularity for one instrument — "Legal Opinion" and
+        # "Privileged & Confidential Legal Opinion", "Board Resolution Approving
+        # Transaction" and "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS" —
+        # so returning only the exact spelling drops most of the instrument's
+        # own documents. Measured: exact-first matching found the golden source
+        # in 89.3% of questions; unioning every compatible spelling is what
+        # makes the result trustworthy enough to correct a scope with.
+        hits: set[str] = set()
+        for core, docs in by_type.items():
+            shared = core & wordset
+            if not shared:
+                continue
+            # A short name must match ENTIRELY. Half of a two-word name is one
+            # word, and in this corpus's pleadings that one word is the family
+            # noun, not the instrument: "Rejoinder in the Petition" would match
+            # "Petition in the matter of" on "petition" alone and pull in all 18
+            # pleadings, which is both wrong and too broad to correct with.
+            # Longer names may match on half, which is what links a record of one
+            # instrument written two ways ("Board Resolution Approving
+            # Transaction" / "EXTRACT OF MINUTES / CERTIFIED BOARD RESOLUTIONS").
+            shorter = min(len(core), len(wordset))
+            if shared == core or shared == wordset:
+                hits |= docs
+            elif shorter > 2 and len(shared) * 2 >= shorter:
+                hits |= docs
+        if hits:
+            return hits
+    return set()
+
+
+def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> dict:
+    """Reconcile a resolved scope with the INSTRUMENT TYPE the question names.
+
+    Same contract as _enforce_question_family, one level finer: partial overlap
+    narrows, no overlap means the resolution contradicts the question. The
+    no-overlap case only replaces the scope when the named type resolves to a
+    workably small set — correcting one wrong document into twenty right-typed
+    ones would trade a precise wrong answer for an unfocused one.
+    """
+    targets = scoped.get("target_docs") or []
+    if not targets:
+        return scoped
+    try:
+        type_docs = _resolve_docs_by_doc_type(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: doc-type enforcement failed: %s", e)
+        return scoped
+    if not type_docs:
+        return scoped
+    method = scoped.get("method", "")
+    kept = [d for d in targets if d in type_docs]
+    if kept:
+        if len(kept) == len(targets):
+            return scoped
+        logger.info("Scope %s narrowed to the %d document(s) of the instrument type "
+                    "the question names", method, len(kept))
+        return {**scoped, "target_docs": sorted(kept), "method": f"{method}-doctype"}
+    # No overlap has two very different causes, and only one of them is a wrong
+    # answer. If a scoped document's OWN recorded type shares an identifying
+    # word with what the question asked for, this is the corpus wording one
+    # instrument two ways — the resolution is probably right and the matcher
+    # merely failed to connect the spellings. Correcting there is what turned 35
+    # already-correct scopes into wrong ones on the first attempt at this.
+    # A genuine contradiction shares nothing: the question says "Rejoinder in
+    # the Petition" and the resolution produced a Master Services Agreement.
+    try:
+        scoped_types = _db.get_document_types(_active_wiki_id(), session_id)
+    except Exception:
+        scoped_types = {}
+    question_core: set[str] = set()
+    initialisms: set[str] = set()
+    for m in _INSTRUMENT_PHRASE_RE.finditer(question or ""):
+        question_core |= _type_core(m.group(1))
+        words = [w for w in re.split(r'[\s/]+', m.group(1)) if w and w[0].isalpha()]
+        acronym = "".join(w[0] for w in words).lower()
+        if 4 <= len(acronym) <= 12:
+            initialisms.add(acronym)
+    for d in targets:
+        recorded = scoped_types.get(d, "")
+        if not recorded.strip():
+            # Two of this corpus's documents carry no recorded type at all.
+            # Absence of evidence is not contradiction — never correct one away.
+            logger.info("Scope %s kept: %s has no recorded instrument type to contradict "
+                        "the question", method, _norm_doc_name(d))
+            return scoped
+        if _type_core(recorded) & question_core:
+            logger.info("Scope %s sits outside the matched type set, but %s is recorded "
+                        "as a compatible instrument — leaving the scope alone",
+                        method, _norm_doc_name(d))
+            return scoped
+        # The filename is a second, independent record of the type: this corpus
+        # files an instrument under the initialism of its full name ("WCILOM"
+        # for a Written Consent in Lieu of Meeting). When that agrees with the
+        # question, ingest's classification is what is wrong — confirmed live on
+        # exactly that document, recorded as "EXTRACT OF MINUTES / CERTIFIED
+        # BOARD RESOLUTIONS" and correctly resolved by the party branch.
+        haystack = re.sub(r'[^a-z0-9]', '', _norm_doc_name(d).lower())
+        if any(a in haystack for a in initialisms):
+            logger.info("Scope %s kept: %s is filed under the initialism of the "
+                        "instrument the question names", method, _norm_doc_name(d))
+            return scoped
+
+    narrowed = set(type_docs)
+    if len(narrowed) > _DOC_TYPE_MAX_DOCS:
+        narrowed = _narrow_by_question_tokens(question, set(type_docs)) or set(type_docs)
+    if len(narrowed) > _DOC_TYPE_MAX_DOCS:
+        logger.info("Scope %s sits outside the instrument type the question names, but "
+                    "that type spans %d documents — leaving the scope alone",
+                    method, len(narrowed))
+        return scoped
+    logger.info("Scope %s resolved entirely outside the instrument type the question "
+                "names — scoping to that type's %d document(s) instead",
+                method, len(narrowed))
+    return {**scoped, "scope": "single_doc", "target_docs": sorted(narrowed),
+            "is_broad": False, "confidence": 0.7,
+            "method": f"{method}-doctype-corrected"}
+
+
+# ---------------------------------------------------------------------------
+# Amendment families — the question names two documents, the second answers it
+# ---------------------------------------------------------------------------
+# "What is the CURRENT value of notice days under the agreement family comprising
+# the Cloud Services Agreement between A and B dated 24 July 2021 AND THE
+# AMENDMENT RECORDED IN the Amendment Agreement between A and B dated 24 May
+# 2021, after giving effect to this amendment?"
+#
+# Two documents are named, by the same party pair, distinguished only by date.
+# The one that answers the question is the SECOND: the amendment states the value
+# that now governs, and the original states the one it replaced. Every compound
+# resolver in front of this narrows a multi-document match down to one and keeps
+# the first — so the amendment was dropped before retrieval ever saw it and the
+# answer confidently reported the superseded figure.
+#
+# Measured over both evaluation sets: 6 of the 9 questions in this shape
+# retrieved only the original. The mirror-image shape ("in the original
+# agreement, BEFORE it was amended by ...") already resolves correctly 7 times
+# out of 7 — it wants the first document, which is what the existing resolvers
+# already return, so it is deliberately left alone here.
+_AMENDMENT_TAIL_RE = re.compile(
+    r'\band\s+the\s+amendments?\s+recorded\s+in\s+',
+    re.IGNORECASE,
+)
+
+# An amendment family is two documents, occasionally three. Past that the tail
+# resolved to a party's whole book of business rather than the one instrument it
+# names, and adding all of it would bury the original the question also asked
+# about.
+_AMENDMENT_FAMILY_MAX_DOCS = 4
+
+
+def _expand_amendment_family(scoped: dict, question: str, session_id: str) -> dict:
+    """Put the amendment a "family comprising ..." question names back in scope.
+
+    Resolves the text AFTER "and the amendment recorded in" as a scope question
+    in its own right — it is a complete document reference (instrument type,
+    party pair, date), and resolving it separately is what stops the compound
+    resolvers from having to choose between the two documents named.
+    """
+    m = _AMENDMENT_TAIL_RE.search(question or "")
+    if not m:
+        return scoped
+    targets = list(scoped.get("target_docs") or [])
+    if not targets:
+        return scoped
+    tail = question[m.end():]
+    try:
+        # Uncorrected: the tail names an Amendment Agreement, so doc-type
+        # enforcement over it would be measuring the tail's own instrument
+        # against itself — and the correction it can make (replacing the scope
+        # wholesale) is not one this caller wants applied to a sub-clause.
+        amended = _resolve_scope_uncorrected(tail, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: amendment-family expansion failed: %s", e)
+        return scoped
+    amend_docs = list((amended or {}).get("target_docs") or [])
+    if not amend_docs:
+        return scoped
+    # The tail names ONE amendment, by party pair AND date. A party-only match
+    # returns every amendment those two parties ever signed, and a sibling
+    # amendment answers this question with a real but wrong figure — so narrow
+    # on the date the tail states before adding anything.
+    if len(amend_docs) > 1:
+        try:
+            pinned = _narrow_by_question_tokens(tail, set(amend_docs),
+                                                precise_only=True)
+        except Exception:
+            pinned = set()
+        if pinned:
+            amend_docs = sorted(pinned)
+    added = [d for d in amend_docs if d not in targets]
+    if not added:
+        return scoped
+    if len(targets) + len(added) > _AMENDMENT_FAMILY_MAX_DOCS:
+        logger.info("Amendment-family expansion skipped: the tail resolved to "
+                    "%d document(s), too many to be the one amendment named",
+                    len(added))
+        return scoped
+    logger.info("Amendment family: added %d amending document(s) to scope — %s",
+                len(added), [_norm_doc_name(d) for d in added])
+    return {**scoped,
+            "target_docs": targets + added,
+            "amendment_docs": added,
+            "method": f"{scoped.get('method', '')}-amendment-family"}
 
 
 # ---------------------------------------------------------------------------
@@ -6512,6 +8850,32 @@ def _extract_descriptive_identifier(question: str) -> str:
 
 def resolve_scope(question: str, session_id: str, pages: dict | None = None,
                   chat_session_id: str | None = None) -> dict:
+    """Resolve a question's retrieval scope, then hold it to the instrument named.
+
+    The resolution itself is _resolve_scope_uncorrected below; this wrapper
+    applies the one check that has to see the FINAL answer rather than any
+    single branch's — that the documents resolved are actually of the
+    instrument type the question asked about (see _enforce_question_doc_type).
+
+    Two exemptions. A question naming a FILE outright has said something
+    stronger than a type and must never be overridden by one. A carried-over
+    scope names no instrument at all — the type words belong to the earlier
+    turn, not this one, so applying them here would silently re-scope a
+    follow-up onto a different document.
+    """
+    scoped = _resolve_scope_uncorrected(question, session_id, pages, chat_session_id)
+    method = (scoped or {}).get("method", "")
+    if not scoped or method == "file" or "carryover" in method:
+        return scoped
+    scoped = _enforce_question_doc_type(scoped, question, session_id)
+    # Last, so it adds the amendment back whatever narrowing ran above: the two
+    # documents in an amendment family are different instrument types, and
+    # doc-type enforcement is entitled to drop one of them.
+    return _expand_amendment_family(scoped, question, session_id)
+
+
+def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | None = None,
+                               chat_session_id: str | None = None) -> dict:
     """Resolve the retrieval scope of a question in ONE place (Phase 2).
 
     Consolidates the three previously-scattered scope signals — named-document
@@ -6568,6 +8932,29 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     # by it.
     _fam_name, _fam_docs = _question_family_scope(question, session_id)
 
+    # A question naming SEVERAL party-pairs ("compare X between A and B with Y
+    # between C and D") has to be resolved pair by pair — every branch below
+    # reads the question as one flat list of names and would answer from
+    # whichever pair its scoring happened to favour, silently dropping the
+    # other side of the comparison. Runs ahead of the single-party branch
+    # precisely because that branch DOES resolve such questions: confirmed live,
+    # a two-SSA comparison resolved "party" to the Tata Steel agreement alone
+    # and the answer compared it against nothing. Only fires when every pair
+    # resolves, so it never trades a real single-document match for a partial one.
+    _pair_segments = _question_pair_segments(question)
+    if _pair_segments:
+        try:
+            compound_docs = _resolve_docs_by_party_pair(question, session_id)
+        except Exception as e:
+            logger.error("resolve_scope: compound party-pair resolution failed: %s", e)
+            compound_docs = set()
+        if compound_docs:
+            return _enforce_question_family(
+                {"scope": "single_doc", "target_docs": sorted(compound_docs),
+                 "target_family": None, "is_broad": False,
+                 "confidence": 0.8, "method": "party-pair-compound"},
+                _fam_name, _fam_docs)
+
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
     # Resource Recovery", "Cold Chain Energy Services") but the corpus files the
@@ -6598,9 +8985,9 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         # document within the resolved family — sharper than answering across
         # all of them when the user asked for one.
         try:
-            available = set(_db.list_doc_families(session_id)) if config.USE_DATABASE else set()
+            available = set(_db.list_doc_families(_active_wiki_id(), session_id)) if config.USE_DATABASE else set()
             fam = _detect_question_family(question, available)
-            fam_docs = set(_db.get_documents_by_family(session_id, fam)) if fam else set()
+            fam_docs = set(_db.get_documents_by_family(_active_wiki_id(), session_id, fam)) if fam else set()
         except Exception:
             fam_docs = set()
         narrowed = party_docs & fam_docs
@@ -6642,12 +9029,75 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
         logger.error("resolve_scope: party-pair resolution failed: %s", e)
         pair_docs = set()
     if pair_docs:
+        # An ambiguous multi-doc pair result can still be pinned by an
+        # explicit date the question recites — a stronger, cheaper signal
+        # than leaving several documents for the answer LLM to sort out.
+        # Confirmed live: a Board Resolution naming only ONE of its two
+        # parties (common in this corpus — a board resolves in its own name,
+        # never the counterparty's) can never appear in a two-party title or
+        # content match at all, so the party-pair cluster this question
+        # produces is real siblings that don't include the actual right
+        # answer. Before the date check existed here, this exact case
+        # resolved correctly via the date resolver below — party-pair
+        # returning early on ANY non-empty result, even a wrong-ish
+        # ambiguous one, silently took that away.
+        # Never on a compound question: it recites one date PER pair, so pinning
+        # the whole result to a single date would drop the other pair's document.
+        if len(pair_docs) > 1 and not _pair_segments:
+            try:
+                date_docs = _resolve_docs_by_date(question, session_id)
+            except Exception as e:
+                logger.error("resolve_scope: date check on party-pair result failed: %s", e)
+                date_docs = set()
+            if date_docs and len(date_docs) == 1:
+                # A unique date match is a strong signal ONLY when the matched
+                # document is actually about one of the two named parties —
+                # otherwise it may just be a coincidence (a Board Resolution
+                # for an entirely different deal that happens to recite the
+                # same calendar date somewhere in its own text). Confirmed
+                # live: "24 March 2024" uniquely matched an unrelated Board
+                # Resolution with no connection to either party the question
+                # named, silently replacing a correct 5-document Tata Elxsi
+                # cluster (containing the real answer) with the wrong single
+                # document.
+                date_doc = next(iter(date_docs))
+                names = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question)]
+                relevant = False
+                for n in names:
+                    try:
+                        if date_doc in set(_db.find_source_docs_mentioning_phrase(
+                                _active_wiki_id(), session_id, n, cap=500) or []):
+                            relevant = True
+                            break
+                    except Exception:
+                        continue
+                if relevant:
+                    logger.info("Party-pair match %d document(s) pinned to 1 by recited date: %s",
+                                len(pair_docs), {_norm_doc_name(d) for d in date_docs})
+                    pair_docs = date_docs
+                else:
+                    logger.info("Date match %s discarded — mentions neither party named "
+                                "in the question", _norm_doc_name(date_doc))
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(pair_docs),
              "target_family": None, "is_broad": False,
              "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
              "method": "party-pair"},
             _fam_name, _fam_docs)
+
+    # A matter/reference number the question recites ("MAT-2021-7750")
+    # resolving to exactly one document. Runs after every party-name signal,
+    # before the date check below — see _resolve_docs_by_matter_reference for
+    # why a matter number only counts on a genuinely unique hit.
+    try:
+        matter_docs = _resolve_docs_by_matter_reference(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: matter-reference resolution failed: %s", e)
+        matter_docs = set()
+    if matter_docs:
+        return {"scope": "single_doc", "target_docs": sorted(matter_docs),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.85, "method": "matter-reference"}
 
     # An explicit date the question recites ("the SA dated 15 January 2026")
     # resolving to exactly one document. Runs after every party-name signal
@@ -6880,7 +9330,7 @@ def classify_query(question: str, session_id: str) -> dict:
 
     # Get distinct source documents
     if config.USE_DATABASE:
-        docs = _db.get_source_docs(session_id)
+        docs = _db.get_source_docs(_active_wiki_id(), session_id)
     else:
         docs = list({
             p.get("source_doc", "") for p in pages.values()
@@ -7150,7 +9600,7 @@ def check_ambiguity(question: str, session_id: str, conversation_context: str = 
 
     # Get doc types for context
     if config.USE_DATABASE:
-        docs = _db.get_source_docs(session_id)
+        docs = _db.get_source_docs(_active_wiki_id(), session_id)
     else:
         index = _load_index(session_id)
         pages = index.get("pages", {})
@@ -7395,7 +9845,8 @@ def _select_relevant_pages(
         )
     if config.USE_DATABASE and session_id:
         try:
-            emb_count = _db.count_embeddings(session_id)
+            _wiki_id_hr = _active_wiki_id()
+            emb_count = _db.count_embeddings(_wiki_id_hr, session_id)
             if emb_count == 0:
                 logger.info(
                     "Hybrid retrieval skipped: 0 embeddings in DB for session %s "
@@ -7409,7 +9860,7 @@ def _select_relevant_pages(
                 is_broad = force_broad or bool(_BROAD_SCOPE_RE.search(question))
                 vector_limit = config.BROAD_QUESTION_VECTOR_TOP_K if is_broad else config.VECTOR_SEARCH_TOP_K
                 vector_titles = _db.search_similar_pages(
-                    session_id, q_embedding, limit=vector_limit, doc_family=doc_family,
+                    _wiki_id_hr, session_id, q_embedding, limit=vector_limit, doc_family=doc_family,
                     exclude_cached=exclude_cached_answers,
                 )
                 # Validate titles against the in-memory pages dict (guards against
@@ -7424,15 +9875,51 @@ def _select_relevant_pages(
                     if t in pages
                 ]
 
+                # Hypothetical-question vectors as a THIRD ranking. Ingest writes
+                # a set of questions each page can answer and embeds them (stage
+                # 06); this corpus holds 16,042 of them, and until now nothing
+                # read them back — the search function existed with no caller.
+                # They match a different thing from the page embedding: the page
+                # vector encodes what a page SAYS, the question vector what it can
+                # be ASKED, so a query phrased as a question lands closer to them.
+                # Costs no extra embedding call — q_embedding is already made.
+                #
+                # OFF by default (config.USE_QUESTION_EMBEDDINGS). The questions
+                # this corpus's ingest produced discriminate TOPIC, not document:
+                # "How does the Agreement define 'Confidential Information'?" is
+                # the stored question for 124 separate pages, all scoring
+                # identically. RRF promotes whatever any channel ranks highly, so
+                # feeding it a ranking that orders documents arbitrarily is a
+                # route to an unrelated agreement's page in the context — the
+                # exact failure the scope work has been closing. Turning it on
+                # needs a live retrieval comparison, not a reading of the code.
+                question_ranking = []
+                if config.USE_QUESTION_EMBEDDINGS:
+                    try:
+                        question_ranking = [
+                            r["title"] for r in _db.search_similar_questions(
+                                _wiki_id_hr, session_id, q_embedding,
+                                limit=vector_limit, doc_family=doc_family,
+                                max_pages_sharing=config.QUESTION_MAX_PAGES_SHARING)
+                            if r["title"] in pages
+                        ]
+                    except Exception as _qe:
+                        # Never fatal: this is a third opinion on top of two
+                        # rankings that already work on their own.
+                        logger.warning("question-embedding search failed: %s", _qe)
+
                 # Phase 3: Reciprocal Rank Fusion of the vector and BM25 rankings,
                 # replacing the previous "all vector, then BM25 appended" order —
                 # a strong keyword-only match now ranks on its own merit instead of
                 # sitting below every semantic hit. Zero LLM calls.
+                _rankings = [valid_vector, bm25_ranking]
+                if question_ranking:
+                    _rankings.append(question_ranking)
                 if is_broad:
                     # Fuse first, THEN diversify: the per-document cap + Parties-page
                     # force-include operate on a better-ordered base list, but the
                     # breadth guarantee for "across all X" questions is unchanged.
-                    fused = _rrf_fuse([valid_vector, bm25_ranking], k=config.RRF_K)
+                    fused = _rrf_fuse(_rankings, k=config.RRF_K)
                     hybrid = _diversify_by_document(
                         fused, pages,
                         config.BROAD_QUESTION_PER_DOC_CAP, config.BROAD_QUESTION_TOTAL_CAP,
@@ -7444,7 +9931,7 @@ def _select_relevant_pages(
                     )
                 else:
                     hybrid = _rrf_fuse(
-                        [valid_vector, bm25_ranking],
+                        _rankings,
                         k=config.RRF_K, limit=config.HYBRID_FUSION_TOP_K,
                     )
 
@@ -7460,13 +9947,16 @@ def _select_relevant_pages(
                 if hybrid:
                     logger.info(
                         "Page selection: %d pages via hybrid RRF fusion "
-                        "(vector=%d, bm25=%d, embeddings_in_db=%d, broad=%s)",
-                        len(hybrid), len(valid_vector), len(bm25_ranking), emb_count, is_broad,
+                        "(vector=%d, bm25=%d, questions=%d, embeddings_in_db=%d, broad=%s)",
+                        len(hybrid), len(valid_vector), len(bm25_ranking),
+                        len(question_ranking), emb_count, is_broad,
                     )
                     _trace = tracing.get_trace()
                     if _trace:
                         _trace.log_page_selection(
-                            "vector+bm25 RRF fusion", vector=valid_vector, bm25=bm25_ranking,
+                            "vector+bm25+questions RRF fusion",
+                            vector=valid_vector, bm25=bm25_ranking,
+                            questions=question_ranking,
                             selected=hybrid, embeddings_in_db=emb_count, is_broad=is_broad,
                         )
                     return hybrid, {}

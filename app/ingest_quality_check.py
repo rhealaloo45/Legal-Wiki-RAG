@@ -46,7 +46,20 @@ _CONTENT_FIELDS = [
 ]
 
 
-def _page_counts_by_doc(session_id: str) -> dict[str, int]:
+def _session_wiki_id(session_id: str) -> str:
+    """A session never spans two wikis (see services/wikis.py) — any one
+    row's wiki_id is the session's value."""
+    from sqlalchemy import text
+    engine = db.get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT wiki_id FROM pages WHERE session_id = :sid LIMIT 1"),
+            {"sid": session_id},
+        ).first()
+    return row[0] if row and row[0] else db.DEFAULT_WIKI_ID
+
+
+def _page_counts_by_doc(wiki_id: str, session_id: str) -> dict[str, int]:
     from sqlalchemy import text
     engine = db.get_engine()
     with engine.connect() as conn:
@@ -54,17 +67,18 @@ def _page_counts_by_doc(session_id: str) -> dict[str, int]:
             text("""
                 SELECT source_doc, COUNT(*) AS n
                 FROM pages
-                WHERE session_id = :sid AND source_doc <> ''
+                WHERE wiki_id = :w AND session_id = :sid AND source_doc <> ''
                 GROUP BY source_doc
             """),
-            {"sid": session_id},
+            {"w": wiki_id, "sid": session_id},
         )
         return {row.source_doc: row.n for row in rows}
 
 
 def run(session_id: str, min_fields: int, min_pages: int) -> list[dict]:
-    docs = db.get_source_docs(session_id)
-    page_counts = _page_counts_by_doc(session_id)
+    wiki_id = _session_wiki_id(session_id)
+    docs = db.get_source_docs(wiki_id, session_id)
+    page_counts = _page_counts_by_doc(wiki_id, session_id)
 
     if not docs:
         print(f"No documents found for session '{session_id}'.")
@@ -76,7 +90,7 @@ def run(session_id: str, min_fields: int, min_pages: int) -> list[dict]:
     print(f"{'Document':<70} {'Pages':>6} {'Fields':>7}  Flag")
     print("-" * 95)
     for doc in sorted(docs):
-        meta = db.get_metadata(session_id, doc)
+        meta = db.get_metadata(wiki_id, session_id, doc)
         field_count = sum(1 for f in _CONTENT_FIELDS if meta.get(f))
         pages = page_counts.get(doc, 0)
 

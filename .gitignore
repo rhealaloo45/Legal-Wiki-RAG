@@ -222,6 +222,8 @@ __marimo__/
 # Local project data
 app/data/
 app/.env
+app/.env.optimize
+app/.env.v2
 app/sessions.json
 app/build_ui.py
 

@@ -146,7 +146,18 @@ def _q(s: str) -> str:
     return "'" + str(s).replace("'", "''") + "'"
 
 
-def _emit_sql(session_id: str, inserts: list[dict]) -> list[str]:
+def _session_wiki_id(session_id: str) -> str:
+    """A session never spans two wikis (see services/wikis.py) — any one
+    page's wiki_id is the session's value."""
+    engine = db.get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text(
+            "SELECT wiki_id FROM pages WHERE session_id = :s LIMIT 1"),
+            {"s": session_id}).first()
+    return row[0] if row and row[0] else db.DEFAULT_WIKI_ID
+
+
+def _emit_sql(session_id: str, wiki_id: str, inserts: list[dict]) -> list[str]:
     """INSERT statements guarded on the target DB actually having the page.
 
     Written this way rather than as bare INSERTs because the rows are computed
@@ -168,8 +179,8 @@ def _emit_sql(session_id: str, inserts: list[dict]) -> list[str]:
     ]
     for r in inserts:
         out.append(
-            "INSERT INTO clause_map (session_id, source_doc, clause_num, heading, page_title)\n"
-            f"SELECT {_q(r['sid'])}, {_q(r['src'])}, {_q(r['num'])}, {_q(r['head'])}, {_q(r['pt'])}\n"
+            "INSERT INTO clause_map (wiki_id, session_id, source_doc, clause_num, heading, page_title)\n"
+            f"SELECT {_q(wiki_id)}, {_q(r['sid'])}, {_q(r['src'])}, {_q(r['num'])}, {_q(r['head'])}, {_q(r['pt'])}\n"
             f"WHERE EXISTS (SELECT 1 FROM pages WHERE session_id = {_q(r['sid'])} "
             f"AND title = {_q(r['pt'])})\n"
             "ON CONFLICT DO NOTHING;"
@@ -188,6 +199,7 @@ def _emit_sql(session_id: str, inserts: list[dict]) -> list[str]:
 
 
 def backfill_session(session_id: str, dry: bool, sql_out: list | None = None) -> None:
+    wiki_id = _session_wiki_id(session_id)
     engine = db.get_engine()
     with engine.connect() as conn:
         rows = conn.execute(text(
@@ -247,18 +259,20 @@ def backfill_session(session_id: str, dry: bool, sql_out: list | None = None) ->
     print(f"  rows to insert               : {len(inserts)}")
 
     if sql_out is not None and inserts:
-        sql_out.extend(_emit_sql(session_id, inserts))
+        sql_out.extend(_emit_sql(session_id, wiki_id, inserts))
         print(f"  -> {len(inserts)} rows staged for SQL output")
         return
 
     if dry or not inserts:
         print("  (dry run — nothing written)" if dry else "  (nothing to write)")
         return
+    for r in inserts:
+        r["wid"] = wiki_id
     with engine.begin() as conn:
         conn.execute(text("DELETE FROM clause_map WHERE session_id=:s"), {"s": session_id})
         conn.execute(text(
-            "INSERT INTO clause_map (session_id, source_doc, clause_num, heading, page_title) "
-            "VALUES (:sid, :src, :num, :head, :pt) ON CONFLICT DO NOTHING"), inserts)
+            "INSERT INTO clause_map (wiki_id, session_id, source_doc, clause_num, heading, page_title) "
+            "VALUES (:wid, :sid, :src, :num, :head, :pt) ON CONFLICT DO NOTHING"), inserts)
     print(f"  WROTE {len(inserts)} rows")
 
 
