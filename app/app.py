@@ -1348,6 +1348,7 @@ def _session_document_paths(session_id: str) -> dict[str, str]:
             logger.warning("Could not fetch indexed docs for document listing: %s", _idx_err)
 
     paths: dict[str, str] = {}  # relative_path -> source_doc key
+    covered: set[str] = set()  # source_doc keys already placed via file_paths
 
     # 1. Try to read from session metadata first
     if session_id in sessions and "file_paths" in sessions[session_id]:
@@ -1356,35 +1357,46 @@ def _session_document_paths(session_id: str) -> dict[str, str]:
             if indexed_docs and flat_key not in indexed_docs:
                 continue
             paths[p.replace("\\", "/")] = flat_key
-    else:
-        # 2. Fallback: Scan config.UPLOAD_PATH and reconstruct original paths
+            covered.add(flat_key)
+
+    # 2. Reconstruct from disk anything indexed that file_paths never recorded
+    # (or the whole set, when there was no file_paths entry at all). A bulk
+    # ingest or admin re-ingest writes straight to the DB and UPLOAD_PATH
+    # without appending to sessions.json's file_paths list, so trusting that
+    # list exclusively silently drops every document added that way from
+    # both /files and /document/list — confirmed live: 805 of 1,377 real,
+    # indexed, chat-answerable documents in one wiki were missing from it
+    # entirely, undercounting the file browser at 572.
+    remaining = (indexed_docs - covered) if indexed_docs else set()
+    if remaining or not paths:
         prefix = f"{session_id}_"
         for fname in os.listdir(config.UPLOAD_PATH):
-            if fname.startswith(prefix):
-                if indexed_docs and fname not in indexed_docs:
-                    continue
-                rel_name = fname[len(prefix):]
+            if not fname.startswith(prefix) or fname in covered:
+                continue
+            if indexed_docs and fname not in indexed_docs:
+                continue
+            rel_name = fname[len(prefix):]
 
-                # Reconstruct "<top folder>/<doc-type folder>/<filename>"
-                # by locating the doc-type segment wherever it falls —
-                # works for any top-level folder name, not just one
-                # hardcoded string. Underscores are the flattening
-                # separator only at the boundary right around that match;
-                # trimming just there (not a blind split on every "_")
-                # keeps underscores that are part of the filename itself
-                # intact (e.g. "Test_CCD_01.txt").
-                reconstructed = False
-                m = _DOC_TYPE_FOLDER_RE.search(rel_name)
-                if m:
-                    top = rel_name[:m.start()].rstrip('_')
-                    type_folder = m.group(0)
-                    file_part = rel_name[m.end():].lstrip('_')
-                    if top and file_part:
-                        paths[f"{top}/{type_folder}/{file_part}"] = fname
-                        reconstructed = True
+            # Reconstruct "<top folder>/<doc-type folder>/<filename>"
+            # by locating the doc-type segment wherever it falls —
+            # works for any top-level folder name, not just one
+            # hardcoded string. Underscores are the flattening
+            # separator only at the boundary right around that match;
+            # trimming just there (not a blind split on every "_")
+            # keeps underscores that are part of the filename itself
+            # intact (e.g. "Test_CCD_01.txt").
+            reconstructed = False
+            m = _DOC_TYPE_FOLDER_RE.search(rel_name)
+            if m:
+                top = rel_name[:m.start()].rstrip('_')
+                type_folder = m.group(0)
+                file_part = rel_name[m.end():].lstrip('_')
+                if top and file_part:
+                    paths[f"{top}/{type_folder}/{file_part}"] = fname
+                    reconstructed = True
 
-                if not reconstructed:
-                    paths[rel_name.replace("\\", "/")] = fname
+            if not reconstructed:
+                paths[rel_name.replace("\\", "/")] = fname
 
     return paths
 
