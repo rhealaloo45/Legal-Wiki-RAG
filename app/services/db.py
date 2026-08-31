@@ -3843,6 +3843,52 @@ def get_documents_by_family(wiki_id: str, session_id: str, doc_family: str) -> l
         return [row.title for row in rows]
 
 
+def find_docs_sharing_parties(wiki_id: str, session_id: str, source_doc: str,
+                              type_hint: str, exclude: str | None = None,
+                              cap: int = 4) -> list[str]:
+    """Documents naming at least one of ``source_doc``'s own parties, filtered
+    to a doc_type matching ``type_hint``.
+
+    Built for "the original X agreement" referenced alongside an amendment
+    the question names by party ("the Apex Meridian amendment") — the
+    amendment resolves via the party detector, but the original it amends
+    often carries no party name of its own in the question at all. Ingest's
+    own cross-reference resolution frequently can't pin the specific document
+    either (an amendment stating "the agreement dated as referenced in the
+    recitals below" names no filename or date inline for the resolver to
+    match), leaving ``document_relations`` with an unresolved edge. The
+    ``documents.parties`` column is populated independently of that
+    resolution, from the same extraction that reads the amendment's own
+    signature block — so two documents between the same named parties are
+    findable by that alone, without depending on the cross-reference having
+    resolved.
+
+    Returns [] rather than guessing when the amendment document itself has
+    no recorded parties, or when the JOIN would be unbounded (no type_hint).
+    """
+    if not type_hint:
+        return []
+    from sqlalchemy import text
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT d2.source_doc
+            FROM documents d1
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d1.parties, '[]'::jsonb)) AS p1(party)
+            JOIN documents d2
+              ON d2.wiki_id = d1.wiki_id
+             AND d2.source_doc <> d1.source_doc
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(d2.parties, '[]'::jsonb)) AS p2(party)
+            WHERE d1.wiki_id = :w AND d1.session_id = :sid AND d1.source_doc = :d
+              AND p1.party = p2.party
+              AND d2.doc_type ILIKE :hint
+              AND d2.source_doc <> :excl
+            LIMIT :cap
+        """), {"w": wiki_id, "sid": session_id, "d": source_doc,
+               "hint": f"%{type_hint}%", "excl": exclude or source_doc, "cap": cap}).fetchall()
+        return [r[0] for r in rows]
+
+
 def get_families_of_documents(wiki_id: str, session_id: str,
                               documents: list[str]) -> dict[str, str]:
     """Map each named document to its doc_family (documents with none are omitted).
