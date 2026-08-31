@@ -38,6 +38,8 @@ OK = "parsed"
 UNPARSED = "unparsed"        # a value is present but this parser could not read it
 ABSENT = "absent"            # the source field was genuinely empty
 REFERENCE = "reference"      # the value points elsewhere ("as set out in Schedule IV")
+FORMULA = "formula"          # a real cap expressed as a rule, not a figure
+                             # ("5% of the Contract Price", "12 months' fees")
 
 _CURRENCY_WORDS = {
     "rs": "INR", "rs.": "INR", "inr": "INR", "rupees": "INR", "₹": "INR",
@@ -62,6 +64,23 @@ _RX_REFERENCE = re.compile(
     r"[^.]{0,80}?"
     r"\b(?:schedule|annexure|annex|appendix|exhibit|sow|statement\s+of\s+work|"
     r"commercial\s+schedule|order\s+form)\b",
+    re.IGNORECASE,
+)
+
+# "5% of the Contract Price", "150% of fees paid in the preceding 12 months"
+_RX_PERCENT_CAP = re.compile(r"\d+(?:\.\d+)?\s*(?:%|per\s*cent|percent)", re.IGNORECASE)
+# "12 months' fees", "twice the annual charges", "2x the fees paid"
+_RX_MULTIPLE_CAP = re.compile(
+    r"\b(?:\d+\s*(?:x|times)|twice|thrice|double|treble)\b|"
+    r"\b(?:\d+|twelve|six|three)\s*\(?\d*\)?\s*months?['’]?\s*(?:of\s+)?(?:fees|charges|"
+    r"payments?|revenue)\b|"
+    r"\bfees\s+paid\s+(?:or\s+payable\s+)?(?:under|in|during)\b",
+    re.IGNORECASE,
+)
+# "Clause 10", "Section 12.3", "Article IV", "paragraph 7" — pointers, not values.
+_RX_CLAUSE_REF = re.compile(
+    r"\b(?:clause|section|article|paragraph|para|schedule|annexure|annex|appendix|exhibit)\s+"
+    r"[\dIVXLC]+(?:\.\d+)*\b",
     re.IGNORECASE,
 )
 
@@ -124,7 +143,21 @@ def parse_money(raw) -> dict:
     if _RX_REFERENCE.search(s):
         return {"status": REFERENCE, "amount": None, "currency": None, "raw": s}
 
-    m = _RX_AMOUNT.search(s)
+    # A cap stated as a rule rather than a figure. "5% of the Contract Price"
+    # and "12 months' fees" are real caps, but they are not amounts, and
+    # reading the first number out of them produced a cap of 5 rupees on 20
+    # contracts in this corpus before this check existed. FORMULA keeps them
+    # distinguishable from both a figure and a parse failure — a Calculation
+    # Agent can resolve them later given the base value; a SUM must skip them.
+    if _RX_PERCENT_CAP.search(s) or _RX_MULTIPLE_CAP.search(s):
+        return {"status": FORMULA, "amount": None, "currency": None, "raw": s}
+
+    # Strip clause/section cross-references before looking for a figure, or
+    # "subject to the limitations in Clause 10 of the MSA" parses as ten
+    # rupees. These are pointers, not values.
+    probe = _RX_CLAUSE_REF.sub(" ", s)
+
+    m = _RX_AMOUNT.search(probe)
     if not m:
         return {"status": UNPARSED, "amount": None, "currency": None, "raw": s}
     try:
