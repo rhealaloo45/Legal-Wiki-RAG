@@ -513,6 +513,7 @@
           <li><span class="badge new">new</span>&nbsp; Admin document lifecycle — add / archive-or-delete / re-ingest on logic change</li>
           <li><span class="badge new">new</span>&nbsp; Wikis — isolated, admin-switchable corpora for client/test data separation (see <a href="#wikis" style="color:var(--gold);">Wikis</a>)</li>
           <li><span class="badge new">new</span>&nbsp; Production hardening — concurrency locks, LLM-output validation, upload/login/encryption hygiene, cost pre-flight gate (see <a href="#hardening" style="color:var(--gold);">Production Hardening</a>)</li>
+          <li><span class="badge new">new</span>&nbsp; Query decomposition, defined-term cross-reference, Document QA warning, clause sub-attributes, bounded-hop relation functions, Calculation/Date-Deadline Agents — Phase 4/5, see § 07</li>
           <li><span class="badge flag">flagged</span>&nbsp; Prompt-injection defense on ingested content — added to plan, placement still open (see <a href="#online" style="color:var(--flag);">§ 04</a>)</li>
         </ul>
 
@@ -590,6 +591,9 @@
           <div class="callout-label">Open simplification — not urgent</div>
           <p>Once family-specific typed tables (<code>documents</code>, <code>contracts</code>, <code>litigation_facts</code>, <code>authorizations</code>, <code>opinions</code>) hold typed values populated at ingest, <code>page_metadata</code> may be a redundant middle layer rather than a needed one. Worth deciding later: keep it as a denormalized fast-read cache, or drop it and read the family tables directly.</p>
         </div>
+
+        <h3 class="sub-title" style="margin-top:36px;">Clause sub-attributes <span class="badge new">new</span></h3>
+        <p>A clause today is typed at the row level — <code>clause_type</code>, verbatim text, one typed value. For the clause types Playbooks/Review/Compare/Risk care about most, that single typed value flattens what's actually a small structured object. A limitation-of-liability clause isn't just "text + one number" — it's <code>cap_present</code>, <code>cap_type</code> (fees-paid / fixed-amount / multiple), <code>cap_period</code>, and an <code>uncapped_exceptions[]</code> list (fraud, confidentiality breaches, etc. are commonly carved out). Extracting that shape once, at ingest, means Playbooks/Review/Compare/Risk all read the same structured object instead of each re-interpreting the same clause text independently — the same "extract once, reuse everywhere" discipline already applied to clauses generally, one level more granular for the highest-value clause types. Scoped as an addition to specific clause types in the schema registry (starting with liability cap, termination, indemnity), not a rewrite of clause extraction generally.</p>
       </section>
 
       <!-- ================= 01 INGESTION ================= -->
@@ -613,6 +617,7 @@
           <div class="stage-card-head"><span class="num">01</span><h4>File read + OCR</h4><span class="badge ext">extended</span></div>
           <p>pypdf first, OCR fallback under 50 chars/page — unchanged. A confidence classifier still decides whether Tesseract's output is good enough before ever calling Azure Vision, so the expensive vision model only sees genuinely difficult pages.</p>
           <p><strong style="color:var(--gold);">New in this revision:</strong> the page classifier gains two more classes beyond text / scanned — <strong>table-bearing</strong> and <strong>image/chart-bearing</strong>. Today, a table that extracts "successfully" by char-count still has its row/column structure silently flattened, and a chart on a page with &gt;50 surrounding characters never triggers OCR at all — zero extraction of the visual content. Azure Vision also gains a second prompt mode: <em>description</em>, not just transcription, for chart/diagram pages — the existing strict-transcription prompt stays for scanned text.</p>
+          <p><strong style="color:var(--gold);">Also new</strong> (planned, not present — the only per-page quality signal in the schema today is <code>pages.char_count</code>): each page persists its own quality provenance — OCR engine used, OCR confidence, character count, rotation/skew flag, detected language, table-detected flag — alongside the extracted text, not just a pass/fail signal. This is what makes a <strong>Document QA warning</strong> possible: a document with one or more pages below the confidence floor surfaces a plain-language flag to the lawyer at read time — "page 27 could not be reliably interpreted; analysis on this document may be incomplete" — rather than the gap staying invisible inside an internal confidence score nobody outside ingestion ever sees. Same non-blocking posture as everything else in Review Queue — a warning, not a block.</p>
         </div>
 
         <div class="stage-card">
@@ -707,6 +712,10 @@
             <div class="db-name">references-<br>unresolved</div>
             <div class="db-desc">An in-text document reference that couldn't be fuzzy-matched to anything in the <code>documents</code> registry — written explicitly rather than silently dropped, since "the referenced document isn't even in our system" is itself useful for a lawyer to know.</div>
           </div>
+          <div class="db-row">
+            <div class="db-name">defines /<br>references-term <span class="badge new" style="margin-left:4px;">new</span></div>
+            <div class="db-desc">Defined-term cross-reference — genuinely absent today. A clause defining "Affiliate" in §1.2 and every clause that later relies on that term (§4.3, §8.2, §12.1) are structurally unlinked right now; the term is just prose. Written at the same synthesis call as other relations: the definition clause gets a <code>defines</code> edge to the term, and each subsequent clause using a capitalized defined term gets a <code>references-term</code> edge back to its definition. Answers "where else does this contract rely on how we defined X" and "is this term actually defined anywhere in this document" — the second one currently answerable only by an LLM re-reading the whole document.</div>
+          </div>
         </div>
 
         <p>Entity-based aggregation ("every contract with Acme Corp") is already handled by <code>entities</code>/<code>entity_aliases</code> canonicalization — no new relation type needed there, just reaffirming it as the answer to that shape of question.</p>
@@ -716,7 +725,12 @@
           <p>Structured cross-doc questions ("show me every amendment to this MSA," "what else is part of this transaction") resolve via a SQL join over <code>relations</code>/<code>entities</code> — same fast-path tier as a clause lookup, not the broad-retrieval fallback (80 candidates, per-doc cap 4). Broad retrieval stays the fallback only for cross-doc questions the relation graph doesn't structurally cover.</p>
         </div>
 
-        <p class="dim" style="font-size:13.5px;">Cost: no new category — rides inside the existing <code>relationships[]</code> extraction, same call, wider edge-type vocabulary. Doc-reference fuzzy-match is the same cheap class as entity canonicalization.</p>
+        <div class="callout">
+          <div class="callout-label">Named, bounded-hop functions <span class="badge new" style="margin-left:6px;">new</span></div>
+          <p style="margin-bottom:0;">The relation fast path should be a set of typed, named operations — <code>find_agreements_by_party()</code>, <code>find_change_of_control_terms()</code>, <code>find_expiring_contracts()</code> — rather than open-ended joins assembled per question. Each caps its own traversal depth: 0 hops for a direct lookup, 1 for a basic relationship, 2 for the common multi-hop cases (amendment chain, transaction cluster), 3 as a hard ceiling for rare compound cases. Cheap governance on something already built — bounds worst-case query cost and keeps every relation query auditable as one of a known, finite set rather than an arbitrary graph traversal.</p>
+        </div>
+
+        <p class="dim" style="font-size:13.5px;">Cost: no new category — rides inside the existing <code>relationships[]</code> extraction, same call, wider edge-type vocabulary. Doc-reference fuzzy-match is the same cheap class as entity canonicalization. Defined-term edges are the same pattern again — one more edge type in the same call, not a new extraction pass.</p>
       </section>
 
       <!-- ================= RETRIEVAL ENHANCEMENTS ================= -->
@@ -1016,6 +1030,11 @@
           <p>Cross-document relation questions — "every amendment to this MSA," "what's part of this transaction" — resolve via SQL join over <code>relations</code>/<code>entities</code>, same tier as a clause lookup, not the broad-retrieval fallback.</p>
         </div>
 
+        <div class="callout">
+          <div class="callout-label">Query decomposition <span class="badge new" style="margin-left:6px;">new</span></div>
+          <p style="margin-bottom:0;">The router gap named earlier in this doc — "each fast-path branch has its own detector, no unified mechanism" — gets sharper on a compound question: <em>"which supplier contracts allow termination after a change of control and have less than 30 days notice"</em> is a comparison-to-standard clause, a relation, and a filtered exhaustive-set query stacked together, and no single branch above answers it whole. Decomposition breaks a compound question into sub-tasks before routing — identify the relevant clause type, find the relation, filter by the numeric threshold — and sends each sub-task to the cheapest capable path (structured lookup where one exists) rather than handing the whole compound question to a single expensive LLM call. This is the mechanism that makes Phase 4's new archetypes (§ 05) actually compose with each other on a real multi-part question, not just answer in isolation — worth building alongside Phase 4 rather than after it.</p>
+        </div>
+
         <div class="callout flag">
           <div class="callout-label">Open design item</div>
           <p>Prompt-injection screening on ingested content needs a home somewhere in this diagram — not yet placed. Most likely a check between ingestion and any point where document content reaches system-prompt or answer-LLM context. Flagged in the plan, location not yet decided.</p>
@@ -1100,6 +1119,60 @@
           <div class="row"><div class="k">Today</div><div class="v">Dump-then-truncate context gathering with a documented history of silently losing wiki grounding.</div></div>
           <div class="row"><div class="k">Target</div><div class="v">Reads from clause-level embeddings, scoped to role-tagged precedent documents, ranked by relevance — never a page dump.</div></div>
           <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.10/draft → ~₹0.11/draft — the win is reliability, not price</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Calculation Agent <span class="badge new">phase 5</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "what's the actual liability cap in rupees" (cap = 12 months of fees × stated rate) has to be reasoned by an LLM doing arithmetic in-context, which is exactly where a confident wrong number is hardest to catch.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Retrieve the formula and the values it depends on (already typed and extracted), pass to a deterministic Python calculation tool, return the result with the formula and source citations shown alongside it. Never LLM arithmetic when a calculator can do it. Distinct from Phase 4's Aggregation card — that sums stored numbers; this computes a derived value from a stated formula.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → near-₹0 (one retrieval + a deterministic function call, no reasoning-heavy call)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Date / Deadline Agent <span class="badge new">phase 5</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "when does the notice period actually end, accounting for business days" is reasoned by an LLM rather than computed, and date arithmetic is another place a confident LLM answer is hard to catch when wrong.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Deterministic date-math tool — business-day offsets, grace periods, notice windows — layered on top of the Obligation tracker's stored dates rather than replacing them. Obligation tracker holds the stated dates; this computes derived dates from them.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → near-₹0 (deterministic function call)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Aggregation / computation <span class="badge new">phase 4</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "total contract value across vendor agreements" has to be reasoned by an LLM over retrieved text, not computed.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">SUM/AVG/COUNT over the same typed numeric fields exhaustive-set already reads — not new data, a new query shape on data already there.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0 (pure DB aggregation)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Gap / absence detection <span class="badge new">phase 4</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "which vendor contracts are missing a DPA" relies on an LLM noticing an absence in retrieved text, unreliably.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Mirror of exhaustive set — NOT EXISTS / NULL check over the same typed tables, finding what's absent instead of what's present.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0 (pure DB read)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Precedent / similarity lookup, read-only <span class="badge new">phase 4</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Precedent layer's retrieval exists but only surfaces inside Draft Mode, folded into drafting — not answerable as its own question.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">"Have we agreed to this kind of term before, what did we do" — shows precedent clauses directly, no drafting step. Same retrieval mechanism, new entry point.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">~₹0.10/draft-equivalent → similar, minus the drafting call itself</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Trend / statistical over time <span class="badge new">phase 4</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist — "has our average termination notice shortened over 2 years" has no query shape today.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">Temporal + aggregation combined — date-bucketed aggregate queries over typed fields. Distinct shape from either archetype alone.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">n/a → ~₹0 (pure DB aggregation, date-bucketed)</div></div>
+        </div>
+
+        <div class="qmode newrow">
+          <h4>Unsupervised batch risk-scan <span class="badge flag">phase 4 — aspirational</span></h4>
+          <div class="row"><div class="k">Today</div><div class="v">Doesn't exist. Closest relative is Playbooks, but Playbooks check deviation from a <em>known</em> rule — this has no rule to check against.</div></div>
+          <div class="row"><div class="k">Target</div><div class="v">"What's unusual across these 50 contracts," no predefined standard. Closer to Open Discovery's territory — LLM-heavy, no cheap structured path — scoped to a batch rather than one question. Hardest of the five; flagged as aspirational, not a near-term build item.</div></div>
+          <div class="row cost"><div class="k">Cost</div><div class="v">Unestimated — genuinely open-ended LLM reasoning over a batch, no typed shortcut available</div></div>
+        </div>
+
+        <div class="callout flag">
+          <div class="callout-label">Considered, held out of Phase 4</div>
+          <p style="margin-bottom:0;"><strong style="color:var(--text)">External regulatory compliance</strong> — "does this comply with the DPDP Act." Different from Playbooks: Playbooks compare a clause against <em>house</em> rules; this compares against <em>external law text</em>. <code>citations</code> knows a clause <em>cites</em> a statute, it doesn't hold the statute's actual text to check compliance against — this needs an external legal-text source the corpus doesn't currently include. A real scope decision, not a wiring task — deliberately on hold, not forgotten.</p>
         </div>
       </section>
 
@@ -1211,6 +1284,37 @@
             <p class="phase-desc">Merged into <code>optimize</code> as a clean fast-forward (zero commits on <code>optimize</code> not already on this branch) and <code>app/.env</code> repointed at <code>legalwiki_v2</code> — the real, repaired corpus — rather than the smaller database <code>optimize</code> had been running against. A full click-through of every admin tab, cross-checked against the database directly rather than trusted at face value, caught four real bugs the phase work above didn't: the admin sidebar clipped new nav items instead of scrolling; Jinja2 silently evaluated literal <code>{{placeholder}}</code> text throughout the Prompt Library UI as an undefined template variable; the Wikis panel showed the bare word "active" for a non-selected wiki, indistinguishable from the one actually in use; and <code>/files</code> plus the admin Documents view undercounted the real corpus at 572 of 1,377 documents, because both share a function that trusted a session's upload-tracking list exclusively whenever present, silently dropping every document a later bulk or admin re-ingest added straight to the database without updating that list. All four fixed and verified live. Collections, Playbooks, and the Precedent layer were then exercised with real content for the first time past their own build-verification: a 144-document "Joint Venture Agreements" collection, a 3-rule playbook run to completion (187 real clause classifications, 464 findings), and a Precedent search — all inspected by hand, including several individual findings read against their actual source clause text to confirm the verdicts were reasoned, not just structurally present.</p>
           </div>
         </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 3.5<span class="sub">Normalization — blocks most of Phase 4/5</span> <span class="badge flag">prerequisite</span></div>
+          <div>
+            <div class="phase-items">Canonical clause vocabulary · Normalized value columns · Ingest-side duplicate detection · Accuracy regression suite</div>
+            <p class="phase-desc">Phase 4 and Phase 5 are written on the premise that the numbers, dates and clause types they need are "already typed and shipped." <strong style="color:var(--text)">Measured against the live 1,383-document corpus, that premise does not hold yet</strong> — and this phase is what makes it true. Four findings, each checked directly against <code>legalwiki_v2</code>:</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">1. <code>clause_type</code> is free text, not a vocabulary.</strong> 5,956 distinct values across 31,457 clause rows — roughly one new type per five clauses. <em>Definitions</em>, <em>Definition</em>, <em>Definition - Affiliate</em>, <em>Liability Cap</em>, <em>Liability cap</em>, <em>Aggregate Liability Cap</em>, <em>Exclusions from Liability Cap</em> all coexist as distinct types. Playbooks already compensates with keyword matching rather than equality (<code>services/playbooks.py:clauses_for_rule</code>) — which means a "Liability Cap" rule reduces to the single keyword <code>liability</code> and then assesses <em>Exclusions from Liability Cap</em>, <em>General Liability Exclusion</em> and <em>Continued Liability for Subcontracted Work</em> against a cap standard they were never meant to be judged by. That is a confident wrong finding produced by design, not by a bad model. A canonical type per clause (raw LLM label preserved alongside as a subtype, never discarded) fixes this, and is the same field Phase 4's gap-detection and the clause sub-attribute schema both have to key off.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">2. The typed values are not queryable.</strong> <code>clauses.typed_value</code> is populated on 8,620 of 31,457 rows (27%), and its shape is LLM-invented per row — <code>{'notice_period': '60 days'}</code>, <code>{'basis': …, 'duration': 'two (2) years'}</code>, <code>{'steps': [...]}</code> — no shared key set to query. <code>contracts.liability_cap</code> (387 of 951 rows) mixes structured JSON <code>{"amount": 25529937.0, "currency": "INR"}</code> with whole prose sentences and with <em>"the cap agreed in Schedule IV"</em>, in the same column. <code>obligations.deadline</code> is prose — <em>"not less than 90 days' prior written notice"</em>, <em>"within 72 hours"</em>, <em>"prior to commencing work"</em> — and <code>obligations.notice_period</code> is populated on 87 of 4,730 rows (1.8%). SUM/AVG over liability caps, NOT-EXISTS gap detection, date-bucketed trend queries and both Phase 5 agents all assume columns that can be compared and arithmetic'd. Normalizing money, duration and date into real typed columns <em>beside</em> the raw text — never replacing it, the raw string stays the citable source — converts every one of those from blocked to trivial.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">3. Duplicate documents are ingested silently.</strong> <code>documents.file_hash</code> is computed but not enforced: four byte-identical pairs are live in the corpus right now, each a plain PDF and its separately-run <code>_ocr.pdf</code> twin under both filenames. A fifth pair was found and removed by hand while fixing the amendment-scope resolution — and removing it exposed that the whole-document delete path had never been updated past its original table set, orphaning rows in nineteen tables including the <code>documents</code> row itself (since fixed). Duplicates double-count in every aggregate this roadmap proposes and can return the same clause twice as if it were corroborating evidence from two documents.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">4. Nothing measures whether answers got better.</strong> Every phase so far has been verified by building the thing and checking it works — not by measuring the answer quality it was meant to improve. The stated goal is that bad answers become rare; that is currently an assertion, not a number. A held-out question set with verified expected answers, scored on a fixed rubric and re-run after each change, is what turns it into one — and it is the only item here that tells you whether the rest of this roadmap actually paid off.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 4<span class="sub">New archetypes — not started</span> <span class="badge new">planned</span></div>
+          <div>
+            <div class="phase-items">Aggregation/computation · Gap/absence detection · Precedent lookup (read-only) · Trend/statistical over time <span style="color:var(--flag);">· Unsupervised batch risk-scan (aspirational)</span></div>
+            <p class="phase-desc">Surfaced by asking, from a lawyer's perspective, what question shapes the shipped seven archetypes still don't cover. Four are cheap given what's already typed and shipped — aggregation and gap-detection are just SUM/NOT-EXISTS queries over tables that already hold the data; trend is temporal + aggregation combined; precedent lookup exposes the Precedent layer's existing retrieval as its own answerable question instead of folding it into Draft Mode only. Unsupervised risk-scan is the one genuinely hard item — no predefined standard to check against, closer to Open Discovery's expensive LLM-heavy territory than to any structured fast path, scoped to a batch. <strong style="color:var(--text)">External regulatory compliance was considered and explicitly held out</strong> — a real scope decision (the corpus doesn't hold external statute text to check against), not a wiring task, not forgotten. See § 05 for the individual query-mode cards.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">Backbone-level additions folding into this phase, from a second brainstorm pass:</strong> query decomposition (§ 04) — the router mechanism that lets a compound question actually use Phase 4's pieces together, not just in isolation, worth building alongside rather than after; defined-term cross-reference edges (§ Cross-Document Relations); a user-facing Document QA warning plus richer per-page OCR provenance (§ 01, stage 01); clause sub-attribute schema for high-value clause types (§ Document Families); and named, bounded-hop relation functions (§ Cross-Document Relations) as a governance refinement on the already-shipped relation fast path.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--flag);">Correction, measured against the live corpus:</strong> the claim above that aggregation, gap-detection and trend are "just SUM/NOT-EXISTS queries over tables that already hold the data" is <em>half</em> true — the data is extracted and stored, but not in a shape those queries can read. Liability caps are stored as a mix of JSON, prose sentences and cross-references to a schedule, in one column; obligation deadlines are prose; clause types are 5,956 free-text strings. These four archetypes are cheap <strong style="color:var(--text)">only after Phase 3.5 normalizes those values into comparable columns</strong> — before it, they are not cheap, they are not possible. Precedent lookup (read-only) is the one item here genuinely unblocked today: its retrieval already exists and needs only a second entry point. Two of the second-pass additions are likewise independent of normalization and can start immediately — Document QA warning / OCR provenance, and defined-term edges. Clause sub-attributes and named bounded-hop functions both key off the canonical clause vocabulary and follow it.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 5<span class="sub">Specialist deterministic tools</span> <span class="badge new">planned</span></div>
+          <div>
+            <div class="phase-items">Calculation Agent · Date/Deadline Agent</div>
+            <p class="phase-desc">Two deterministic tools, not new RAG pipelines — both read from the same backbone everything else does. Calculation Agent computes a derived value (liability cap in rupees, prorated fee, penalty amount) from a stated formula plus already-typed values, via a Python calculation tool rather than LLM arithmetic in-context — distinct from Phase 4's Aggregation, which sums stored numbers rather than computing a derived one. Date/Deadline Agent does the equivalent for dates — business-day offsets, notice-window math — layered on top of the Obligation tracker's stored dates rather than replacing them. Both are the same shape of fix as the rest of this document: never spend an LLM call on work a deterministic system can do exactly right.</p>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--flag);">Both are gated on Phase 3.5.</strong> The principle is right and worth keeping — a calculator is exactly the correct answer to LLM arithmetic, which is the single hardest error class for a reader to catch. But "already-typed values" and "the Obligation tracker's stored dates" describe a state the corpus has not reached: <code>obligations.deadline</code> holds <em>"not less than 90 days' prior written notice"</em> and <em>"prior to commencing work"</em>, and <code>notice_period</code> is populated on 1.8% of rows. A date tool has nothing to offset from until those are parsed into real date and duration columns. Build the normalization first and these two become small; build them first and they inherit the ambiguity they were meant to eliminate.</p>
+          </div>
+        </div>
       </section>
 
       <!-- ================= 08 NET EFFECT ================= -->
@@ -1227,6 +1331,18 @@
         <p><strong style="color:var(--text)">Review and Compare Mode stop scaling with (documents × columns).</strong> Once standard columns resolve from <code>clauses</code>/<code>obligations</code> and Compare Mode gets the same cache check, only genuinely novel columns still cost a call — bounded by how many a lawyer types in, not by corpus size.</p>
 
         <p>At the real operating scale — 20 documents per run — the numbers stay trivial. Worst case: <strong>~₹10</strong> on gpt-5-nano, <strong>~₹26</strong> on gpt-4o-mini. A realistic run: <strong>~₹0.60</strong> on gpt-5-nano, <strong>~₹1.50</strong> on gpt-4o-mini.</p>
+
+        <h3 class="sub-title" style="margin-top:32px;">Latency targets, by query type <span class="badge new" style="margin-left:6px;">new</span></h3>
+        <p class="dim">Explicit targets to instrument against — the vector/BM25/RRF layer itself is already fast; today's 20–30s comes from LLM/orchestration overhead, not database search, so the structured fast path is where these targets come from.</p>
+        <div class="db-table">
+          <div class="db-row"><div class="db-name">Simple fact / point lookup</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~1–3s</strong> target</div></div>
+          <div class="db-row"><div class="db-name">Exact clause / structural</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~1.5–4s</strong> target</div></div>
+          <div class="db-row"><div class="db-name">Structured cross-document</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~2–5s</strong> target</div></div>
+          <div class="db-row"><div class="db-name">Comparison</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~4–8s</strong> target</div></div>
+          <div class="db-row"><div class="db-name">Multi-hop relational</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~5–12s</strong> target</div></div>
+          <div class="db-row"><div class="db-name">Complex legal reasoning</div><div class="db-desc">20–30s today → <strong style="color:var(--gold)">~8–20s</strong> target</div></div>
+        </div>
+        <p class="dim" style="font-size:13.5px; margin-top:8px;">Targets, not measured results — same directional caveat as the cost figures above. The point is having a concrete number to check real instrumentation against, not a guarantee.</p>
 
         <div class="callout">
           <div class="callout-label">Standing caveat — carried forward</div>
@@ -1343,6 +1459,50 @@
               <li><span style="color:var(--done);">Prompt library.</span> <span class="badge done">shipped</span> The spec names this under "Also fixing" with no further detail — a smaller item than the seven locked-in features — so scope was kept correspondingly narrow rather than invented: named, wiki-scoped templates carrying <code>{{placeholder}}</code> variables, CRUD, and a render endpoint. Distinct from the existing House Rules (<code>services/rules.py</code>), which are global answer-style instructions silently appended to <em>every</em> prompt — this is a library a person picks <em>from</em> for one specific request, so it lives per wiki rather than in one shared global file. Rendering never blanks a missing variable: an unfilled <code>{{placeholder}}</code> is left literal in the output and named in a <code>missing</code> list, because a half-filled template that still shows what is missing is safer to hand someone than one with a silent gap where a name should be.</li>
             </ul>
             <p class="phase-desc" style="margin-top:.6rem;">118 tests across both features, zero LLM calls — the Deviation Dashboard is a pure read over existing rows and the Prompt library is CRUD plus string substitution, so nothing here needed inference to verify. Each piece shipped as its own commit — service, then routes, then UI — tested clean before the next.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 3.5<span class="sub">Normalization — gates most of Phase 4/5</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li><strong>Canonical clause vocabulary.</strong> A controlled <code>clause_type</code> set with the raw LLM label preserved beside it as a subtype — never discarded, since the raw string is often more specific than the canon and is what a reviewer recognises. Today: 5,956 distinct free-text types over 31,457 clause rows. Map at ingest (cheap string/embedding match against the canon, no extra LLM call), backfill existing rows in one pass. <strong>Immediate payoff independent of Phase 4:</strong> Playbooks stops keyword-matching. Right now <code>clauses_for_rule</code> reduces a "Liability Cap" rule to the keyword <code>liability</code> and assesses <em>Exclusions from Liability Cap</em> and <em>General Liability Exclusion</em> against a cap standard — a wrong finding the model never had a chance to get right.</li>
+              <li><strong>Normalized value columns.</strong> Parse the already-extracted strings into comparable columns beside the raw text: money into <code>amount</code>/<code>currency</code>, durations into a day count, deadlines into a date or a typed offset (<code>{n_days, basis, business_days}</code>). Raw text always stays — it is the citable source and the fallback when parsing declines. Deterministic parsing, no LLM call. Today <code>contracts.liability_cap</code> mixes JSON, prose and <em>"the cap agreed in Schedule IV"</em> in one column; <code>obligations.deadline</code> is prose; <code>clauses.typed_value</code> is 27% populated with per-row invented key shapes. Parse failures must record as explicit unparsed, not as NULL — a NULL is indistinguishable from "no cap exists", which is exactly the wrong answer for gap detection to return.</li>
+              <li><strong>Ingest-side duplicate detection.</strong> <code>documents.file_hash</code> is already computed and already unenforced — four byte-identical plain/<code>_ocr</code> pairs are live in the corpus now. Reject or merge on hash collision at upload. Duplicates double-count in every aggregate this phase enables and can surface one clause twice as if two documents agreed.</li>
+              <li><strong>Accuracy regression suite.</strong> A held-out question set with corpus-verified expected answers, scored on a fixed rubric (relevance / hallucination / accuracy) and re-run after each change. Covers the archetypes and the known-hard cases — compound party-pair scope, bare-nickname documents, amendment chains, and the abstention cases where the right answer is "not established in these documents." Costs real LLM calls per run, so it runs per milestone rather than per commit. This is the only item in the roadmap that answers whether any of the rest of it worked.</li>
+            </ul>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">Why this exists as its own phase:</strong> it was not in the original plan and was not surfaced by brainstorming — it came out of measuring the live corpus while fixing an unrelated retrieval bug. Every numeric and gap-shaped item in Phases 4 and 5 reads as cheap on paper because the data is described as "already typed"; it is already <em>extracted</em>, which is not the same thing. This phase is the difference between the two, and it is mostly deterministic parsing rather than new model work.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 4<span class="sub">New archetypes — not started</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li><strong>Aggregation / computation</strong> — SUM/AVG/COUNT over the typed numeric fields exhaustive-set queries already read. Route as a new Structured Lookup branch (Fig. 2), same mechanism as the existing fast-path checks. <span style="color:var(--flag);">Gated on Phase 3.5 — the columns are not comparable today.</span></li>
+              <li><strong>Gap / absence detection</strong> — NOT EXISTS / NULL check over the same typed tables, mirror of exhaustive set in the opposite direction. <span style="color:var(--flag);">Gated on Phase 3.5 — and specifically on unparsed values recording as unparsed rather than NULL, or "we could not read this cap" returns as "this contract has no cap."</span></li>
+              <li><strong>Precedent / similarity lookup, read-only</strong> — expose the Precedent layer's existing retrieval as its own answerable question, separate entry point from Draft Mode, no drafting step. <span style="color:var(--done);">Unblocked today — start here.</span></li>
+              <li><strong>Trend / statistical over time</strong> — date-bucketed aggregation, combining the temporal and aggregation query shapes. <span style="color:var(--flag);">Gated on Phase 3.5.</span></li>
+              <li><strong style="color:var(--flag)">Unsupervised batch risk-scan</strong> — aspirational, not scoped for a build estimate yet. No predefined standard to check against; closer to Open Discovery's LLM-heavy territory, scoped to a batch rather than a single question. Needs its own design pass before a checklist item is meaningful.</li>
+              <li><strong>Query decomposition</strong> — break a compound question into sub-tasks before routing, send each to the cheapest capable path. What makes the archetypes above actually compose on a real multi-part question rather than answer in isolation.</li>
+              <li><strong>Defined-term cross-reference</strong> — <code>defines</code>/<code>references-term</code> edges, same synthesis call as other relations.</li>
+              <li><strong>Document QA warning</strong> — surface low-confidence pages to the lawyer directly ("page 27 could not be reliably interpreted"), backed by richer per-page OCR provenance (engine, confidence, skew, language). <span style="color:var(--done);">Unblocked today — start here.</span> <span style="color:var(--flag);">Correction: this provenance is <em>not</em> "already being stored at ingest" — the only per-page quality signal in the schema is <code>pages.char_count</code>; there is no OCR engine, confidence, skew or language column anywhere. The columns are new work, and this is the highest-value accuracy item on the list because the failure it catches is already known to have happened silently on real documents in this corpus — several scanned PDFs extracted 0–2 usable pages and were answered against anyway, with nothing telling the reader the document was effectively unreadable.</span></li>
+              <li><strong>Clause sub-attributes</strong> — structured fields per high-value clause type (liability cap → <code>cap_present</code>/<code>cap_type</code>/<code>uncapped_exceptions[]</code>), reused by Playbooks/Review/Compare/Risk instead of each re-interpreting clause text independently. <span style="color:var(--flag);">Gated on Phase 3.5's canonical vocabulary — there is no stable <code>clause_type</code> to key a per-type schema off today. Note the <code>uncapped_exceptions[]</code> field is doing double duty: it is also the direct fix for the Playbooks keyword-overreach problem, since "Exclusions from Liability Cap" stops being a separate mis-assessed clause and becomes a field on the cap itself.</span></li>
+              <li><strong>Named, bounded-hop relation functions</strong> — replace open joins on the relation fast path with typed operations (<code>find_change_of_control_terms()</code> etc.), hop-capped at 3. <span class="dim">Governance rather than accuracy — worth doing, lowest urgency on this list.</span></li>
+              <li><strong>Explicit latency targets</strong> — added to § 08 as a companion to the existing cost figures, for the still-outstanding pipeline instrumentation to check against.</li>
+            </ul>
+            <p class="phase-desc" style="margin-top:.6rem;"><strong style="color:var(--gold);">Note:</strong> the first four are query-router additions on top of the existing backbone — no new tables, no new ingestion work, same class of change as wiring temporal/comparison-to-standard into Ask mode (§ 05). The six items below them, from a second brainstorm pass, are a mix of router (decomposition), extraction (defined-term, clause sub-attributes), and ingestion (Document QA, OCR provenance) work — each scoped to extend something already shipped, not a new subsystem. External regulatory compliance was considered for this phase and explicitly held out — see the callout at the end of § 05.</p>
+          </div>
+        </div>
+
+        <div class="phase">
+          <div class="phase-label">Phase 5<span class="sub">Specialist deterministic tools — not started</span></div>
+          <div>
+            <ul style="margin-bottom:0;">
+              <li><strong>Calculation Agent</strong> — deterministic Python tool for derived legal-math values (liability cap in currency, prorated fees, penalties) from a stated formula plus already-typed values. Never LLM arithmetic when a calculator can do it exactly.</li>
+              <li><strong>Date/Deadline Agent</strong> — deterministic date-math tool (business-day offsets, notice-window calculations), layered on the Obligation tracker's stored dates.</li>
+            </ul>
+            <p class="phase-desc" style="margin-top:.6rem;">Both are tools the router calls, not new retrieval pipelines of their own — same backbone, same principle as everything shipped so far: precompute and compute deterministically wherever possible, reserve the LLM for what genuinely needs reasoning.</p>
           </div>
         </div>
 
