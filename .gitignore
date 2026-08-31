@@ -276,6 +276,8 @@ checklist.md
 implementation_list.md
 phases.md
 questions.txt
+MERGE_V2_INTO_OPTIMIZE.md
+SYSTEM_DOCUMENTATION.md
 
 # RAG accuracy/retest/review reports — generated audit output, not source.
 # Regenerated per evaluation run, quote long stretches of corpus text, and go
