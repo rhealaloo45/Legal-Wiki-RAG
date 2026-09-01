@@ -7761,6 +7761,34 @@ _TITLE_KIND_HINTS: list[tuple[re.Pattern, str]] = [
     (re.compile(r'\bcomplaint\b', re.I),                        'Complaint'),
 ]
 
+# A question can describe a clause by SUBJECT MATTER instead of naming the
+# instrument that carries it ("the security incident notification
+# obligations", never "the NDA"). _TITLE_KIND_HINTS only ever matches an
+# instrument named outright, so it has nothing to fire on here — and a real
+# M&A-style deal file can run to 15+ documents between the same two parties
+# (NDA, Term Sheet, SPA, Disclosure Letter, KERA, TSA, IP Assignment, Escrow,
+# Tax Deed, ...), too many for any resolver to return outright or narrow by
+# filename tokens alone. Used only as a last-resort narrower in
+# ``_content_pair_supplement`` when its own candidate pool is too large to
+# return, and only in the SAME ILIKE-against-title-or-filename way
+# ``kind_hint`` already narrows an explicit instrument mention — so a
+# document ingest happened to title only by one party's name (confirmed
+# live: an NDA's own page titles all read "NDA-Apex Zephyra", never
+# "Nimbus", because ingest's short-naming picked one party) is still found,
+# since the instrument-type word survives in that title regardless of which
+# party's name it carries.
+_SUBJECT_KIND_HINTS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r'security\s+incident|data\s+breach|confidential(?:ity|\s+information)|'
+                r'non[-\s]?disclosure', re.I),                          'NDA'),
+    (re.compile(r'key\s+employee|retention\s+(?:bonus|payment|agreement)', re.I), 'KERA'),
+    (re.compile(r'\bescrow\b', re.I),                                   'Escrow'),
+    (re.compile(r'transition\s+services?', re.I),                       'TSA'),
+    (re.compile(r'intellectual\s+property\s+assign|\bip\s+assign', re.I), 'IP Assign'),
+    (re.compile(r'closing\s+certificate', re.I),                        'ClosCert'),
+    (re.compile(r'disclosure\s+letter', re.I),                          'Disclosure'),
+    (re.compile(r'conditions?\s+precedent', re.I),                      'Conditions Precedent'),
+]
+
 # Corporate-form and generic descriptor words that are NOT the distinctive part
 # of a party name. Ingest coins its matter short-name from the first
 # distinctive word ("Aether Technologies Inc." → "Aether"), so stripping these
@@ -7837,6 +7865,19 @@ _BETWEEN_AND_RE = re.compile(
     r'\bbetween\s+([A-Z][A-Za-z0-9&.\-]{2,})(?:[^.?!]{0,60}?)\s+and\s+([A-Z][A-Za-z0-9&.\-]{2,})'
 )
 
+# A directional obligation named "of X to Y" — "the notification obligations
+# of Nidra Bhandari to Apex Suvarna...". Only the first (usually unsuffixed)
+# party needs recovering here: the second routinely carries a corporate
+# suffix and is already caught by _PARTY_NAME_RE. Confirmed live: a natural
+# person named only this way ("Nidra Bhandari", no corporate suffix) left a
+# 4-party compound comparison with just 3 _PARTY_NAME_RE hits — an odd count
+# that made _resolve_docs_by_combinatorial_pairing decline outright, and the
+# question fell back to independent per-name scoring, which silently missed
+# the other pair's actual document entirely.
+_OF_TO_RE = re.compile(
+    r'\bof\s+([A-Z][A-Za-z0-9&.\-]{2,})\b(?=(?:\s+[A-Z][A-Za-z0-9&.\-]{2,}){0,3}\s+to\s+[A-Z])'
+)
+
 _CAPITALISED_WORD_RE = re.compile(r'\b[A-Z][A-Za-z0-9&.\-]*\b')
 
 
@@ -7892,6 +7933,8 @@ def _bare_party_tokens(question: str) -> list[str]:
                  if _is_party_like(w)]
         if prior:
             add(prior[-1])
+    for m in _OF_TO_RE.finditer(question or ''):
+        add(m.group(1))
     return tokens
 
 
@@ -7994,6 +8037,23 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
         return narrowed
     if len(content_verified) <= max_docs:
         return content_verified
+
+    # Still too large, and the question named no instrument by TYPE (that
+    # would already have narrowed above) — try what it names by SUBJECT
+    # instead. Matches the kind_hint word against each candidate's own
+    # filename directly (no DB round-trip needed: ingest's document-type
+    # word survives in the filename regardless of which party's name that
+    # filename happens to carry — see _SUBJECT_KIND_HINTS).
+    for rx, hint in _SUBJECT_KIND_HINTS:
+        if not rx.search(question):
+            continue
+        by_subject = {d for d in content_verified if hint.lower() in (d or '').lower()}
+        if by_subject and len(by_subject) <= max_docs:
+            logger.info("Content-supplement candidates %d narrowed by subject %r → %d document(s): %s",
+                        len(content_verified), hint, len(by_subject),
+                        {_norm_doc_name(d) for d in by_subject})
+            return by_subject
+        break
     return set()
 
 
@@ -8353,6 +8413,18 @@ def _resolve_docs_by_combinatorial_pairing(question: str, session_id: str,
         if tok and tok.lower() not in {t.lower() for t in tokens}:
             tokens.append(tok)
             token_full[tok] = n
+    # One side of a compound comparison can name its party without a
+    # corporate suffix (a natural person, or a bare short-name once a matter
+    # is under discussion) — _PARTY_NAME_RE alone then hands back an odd
+    # count and every matching below is skipped before it's tried. Confirmed
+    # live: "the notification obligations of Nidra Bhandari to X ... with
+    # those of Y to Z" resolved only 3 suffixed names for a real 4-party
+    # question. Supplementing with the same bare-token detectors the
+    # single-pair resolver already falls back on recovers the 4th.
+    for tok in _bare_party_tokens(question):
+        if tok.lower() not in {t.lower() for t in tokens}:
+            tokens.append(tok)
+            token_full[tok] = tok
     if len(tokens) < 4 or len(tokens) % 2 or len(tokens) > 6:
         return set()
 
