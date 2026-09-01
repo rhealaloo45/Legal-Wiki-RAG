@@ -2177,6 +2177,15 @@ _RX_AGG_VETO = re.compile(
     r"\b(?:in|of|under|for)\s+(?:the|this|that|our)\s+"
     r"(?:agreement|contract|msa|nda|document|deed|lease)\b"
     r"|\bdated\b|\bclause\s+\d", re.IGNORECASE)
+# A question also asking WHAT KIND of liability a cap excludes ("carve-outs",
+# "what is excluded/excepted from the cap") wants clause text, not a number —
+# the aggregate branch answers with bare statistics and has no clause text to
+# return. Confirmed live: "the aggregate liability cap for X and Y, and what
+# types of liability are excluded from that cap" tripped only the numeric
+# half and silently dropped the carve-out half of its own question.
+_RX_AGG_CARVEOUT_VETO = re.compile(
+    r"\bcarve[-\s]?outs?\b|\bexclu(?:ded|ding|sions?)\s+from\b|"
+    r"\bexcept(?:ed|ions?)\s+from\b", re.IGNORECASE)
 
 _RX_GAP = re.compile(
     r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,80}?"
@@ -2208,7 +2217,20 @@ def _is_analytics_query(question: str) -> str:
         return "trend"
     if _RX_GAP.search(q) and _RX_GAP_FIELD.search(q):
         return "gap"
-    if _RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q) and not _RX_AGG_VETO.search(q):
+    if (_RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q)
+            and not _RX_AGG_VETO.search(q)
+            and not _RX_AGG_CARVEOUT_VETO.search(q)
+            # A question naming a specific party (a corporate suffix the
+            # question spells out) is asking about THAT party's document(s),
+            # not a corpus-wide statistic — the closed operation-word list
+            # above includes "aggregate"/"total", words a lawyer also uses
+            # for "the aggregate cap FOR [named party]" meaning that party's
+            # own single cap, not a sum across the corpus. Confirmed live:
+            # "the aggregate liability cap for Apex Suvarna Telecommunications
+            # Private Limited and Nidra Bhandari" returned a corpus statistic
+            # over one arbitrarily-retrieved document and dropped the
+            # question's own carve-out half entirely.
+            and not wiki._PARTY_NAME_RE.search(q)):
         return "aggregate"
     return ""
 
