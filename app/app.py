@@ -2083,6 +2083,74 @@ def admin_vocabulary_compare():
     return jsonify(_pb.compare_rule_matching(wiki_id, docs, rules))
 
 
+@app.route("/admin/analytics/aggregate")
+def admin_analytics_aggregate():
+    """SUM/AVG/median over liability caps or contract values.
+
+    Always returns its own coverage alongside the figures — an average over the
+    subset that could be parsed is not a statement about the corpus, and the
+    caller must never be handed the number without the denominator.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import analytics
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    metric = request.args.get("metric", "liability_cap")
+    parties = [p for p in (request.args.get("parties") or "").split(",") if p.strip()]
+    doc_type = request.args.get("doc_type") or None
+    fn = (analytics.aggregate_contract_values if metric == "contract_value"
+          else analytics.aggregate_liability_caps)
+    return jsonify(fn(current_wiki_id(), sid, parties or None, doc_type))
+
+
+@app.route("/admin/analytics/gaps")
+def admin_analytics_gaps():
+    """Documents genuinely lacking a field, kept separate from ones we cannot read."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import analytics
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    parties = [p for p in (request.args.get("parties") or "").split(",") if p.strip()]
+    return jsonify(analytics.find_gaps(
+        current_wiki_id(), sid, request.args.get("field", "liability_cap"),
+        parties or None, request.args.get("doc_type") or None,
+        int(request.args.get("limit", 50))))
+
+
+@app.route("/admin/analytics/trend")
+def admin_analytics_trend():
+    """Year-bucketed aggregate, with per-bucket counts so a thin year is visible."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import analytics
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    parties = [p for p in (request.args.get("parties") or "").split(",") if p.strip()]
+    return jsonify(analytics.trend_over_time(
+        current_wiki_id(), sid, request.args.get("metric", "liability_cap"),
+        parties or None, request.args.get("doc_type") or None))
+
+
+@app.route("/admin/analytics/backfill_values", methods=["POST"])
+def admin_analytics_backfill_values():
+    """Parse clause typed_value figures into comparable money columns."""
+    _lock = _locked_in_production()
+    if _lock:
+        return _lock
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import db as _db
+    data = request.get_json(silent=True) or {}
+    return jsonify(_db.backfill_clause_values(
+        current_wiki_id(), _regression_session_id() or None,
+        dry_run=bool(data.get("dry_run"))))
+
+
 @app.route("/admin/normalize", methods=["POST"])
 def admin_normalize():
     """Parse raw money/duration values into the normalised columns."""
