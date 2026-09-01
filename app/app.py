@@ -1316,84 +1316,13 @@ def query_route():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# Minimum files sharing a prefix before it is believed to be a folder rather
-# than a filename that happens to start the same way.
-_FOLDER_MIN_FILES = 3
-
-
-def _derive_upload_folders(names: list[str]) -> tuple[str, set[str]]:
-    """Recover the (top_folder, {category folders}) an upload was flattened from.
-
-    Upload flattens a relative path into the stored filename by replacing the
-    separator with "_" ("NDA/foo.pdf" -> "NDA_foo.pdf"), which is lossy:
-    "_" is also a legitimate filename character, so the boundary cannot be
-    recovered from any one name in isolation. It CAN be recovered from the
-    corpus as a whole, because a folder name is precisely the prefix many
-    different files share.
-
-    Two passes, both driven by the data rather than by a list of folder names
-    this deployment happens to know about:
-
-    1. The TOP folder is the most widely shared first segment, extended one
-       segment at a time for as long as extending it does not lose any files.
-       This is what recovers a top folder whose own name contains underscores
-       ("pdfs_by_category_generated"): every extension of "pdfs" still covers
-       all 484 of its files, so extension continues, and stops only at the
-       first segment that splits them (the category).
-    2. The CATEGORY vocabulary is then read off directly — it is the set of
-       segments sitting immediately after that top folder, which is exact
-       rather than inferred. Applying that same vocabulary to the files that
-       carry no top-folder prefix is what re-unites two upload batches of the
-       same tree (one rooted at the tree, one rooted inside it) into a single
-       correct hierarchy.
-
-    The previous implementation hardcoded seven document-type names and
-    matched them anywhere in the string. On this corpus that recognised 4 of
-    23 real folders, so ~1,000 of 1,358 documents collapsed into one flat
-    level. Verified against the operator's own source tree: this derivation
-    reproduces all 24 folders and all 1,358 files exactly.
-
-    Returns ("", set()) when nothing is shared widely enough to be a folder,
-    which is the correct answer for a genuinely flat upload.
-    """
-    counts: Counter[str] = Counter()
-    for n in names:
-        segs = n.split("_")
-        for i in range(1, len(segs)):
-            counts["_".join(segs[:i])] += 1
-    if not counts:
-        return "", set()
-
-    top = max(counts, key=lambda k: (counts[k], -k.count("_")))
-    if counts[top] < _FOLDER_MIN_FILES:
-        return "", set()
-    while True:
-        depth = top.count("_") + 1
-        ext = [k for k in counts
-               if k.startswith(top + "_") and k.count("_") == depth
-               and counts[k] == counts[top]]
-        if len(ext) != 1:
-            break
-        top = ext[0]
-
-    cats = {n[len(top) + 1:].split("_")[0]
-            for n in names if n.startswith(top + "_")}
-    cats = {c for c in cats if c and counts.get(f"{top}_{c}", 0) >= 1}
-    return top, cats
-
-
-def _split_flat_name(name: str, top: str, cats: set[str]) -> tuple[str, str]:
-    """Split one flattened name into (folder, filename) using the derived
-    vocabulary. Longest category wins, so "Service Level Agreement" is not
-    mistaken for "Service Agreement". Returns ("", name) for a file that sat
-    at the top of the uploaded tree.
-    """
-    rest = name[len(top) + 1:] if top and name.startswith(top + "_") else name
-    hit = ""
-    for c in cats:
-        if rest.startswith(c + "_") and len(c) > len(hit):
-            hit = c
-    return (hit, rest[len(hit) + 1:]) if hit else ("", rest)
+# Folder reconstruction lives in services/doc_paths so the Ask pipeline can
+# render the same names this browser shows. See that module for why the
+# derivation is data-driven rather than a list of folder names.
+from services.doc_paths import (  # noqa: E402
+    derive_upload_folders as _derive_upload_folders,
+    split_flat_name as _split_flat_name,
+)
 
 
 def _session_document_paths(session_id: str) -> dict[str, str]:
