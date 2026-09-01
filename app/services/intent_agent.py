@@ -379,6 +379,8 @@ class QueryState(TypedDict, total=False):
     target_doc: str
     is_followup: bool
     exclude_cached_answers: bool
+    collection_id: int       # user-pinned collection — a hard retrieval
+                             # boundary, see resolve_scope_node
     # Classification
     intent: str
     intent_confidence: float
@@ -772,6 +774,7 @@ def resolve_scope_node(state: QueryState) -> dict:
         logger.error("resolve_scope failed, defaulting to corpus: %s", e)
         decision = {"scope": "corpus", "target_docs": [], "target_family": None,
                     "is_broad": False, "confidence": 0.0, "method": "error"}
+    decision = _apply_collection_scope(decision, state.get("collection_id"))
     logger.info("[AGENT] scope=%s family=%s broad=%s method=%s",
                 decision.get("scope"), decision.get("target_family"),
                 decision.get("is_broad"), decision.get("method"))
@@ -779,6 +782,57 @@ def resolve_scope_node(state: QueryState) -> dict:
     if _trace:
         _trace.log_scope_decision(decision)
     return {"scope_decision": decision}
+
+
+def _apply_collection_scope(decision: dict, collection_id) -> dict:
+    """Confine a resolved scope to a collection the user pinned in the Ask box.
+
+    A pinned collection is a HARD boundary, not a hint: the user has said
+    which documents this question is about, and that outranks anything the
+    resolver inferred from the wording. So the collection is applied AFTER
+    resolution rather than instead of it — the resolver still does the work
+    of picking the right instrument, and this only removes what falls
+    outside the pin:
+
+      * documents it resolved that are in the collection  -> keep those
+      * documents it resolved, none of them in the collection -> the
+        resolver was looking outside the pin, so fall back to the whole
+        collection rather than answering from documents the user excluded
+      * family or corpus scope -> replace with the whole collection
+
+    An empty or unreadable collection returns the decision untouched: a pin
+    that resolves to nothing must not silently turn into "no documents",
+    which would abstain on every question.
+    """
+    if not collection_id:
+        return decision
+    try:
+        from services import collections as _collections
+        from services import wikis as _wikis
+        members = set(_collections.documents_in(_wikis.active_wiki_id(), int(collection_id)))
+    except Exception as e:
+        logger.error("Collection scope lookup failed for %r: %s", collection_id, e)
+        return decision
+    if not members:
+        logger.warning("Pinned collection %r has no documents — ignoring the pin",
+                       collection_id)
+        return decision
+
+    resolved = [d for d in (decision.get("target_docs") or []) if d]
+    kept = [d for d in resolved if d in members]
+    if kept:
+        docs, how = kept, "collection-narrowed"
+    else:
+        docs, how = sorted(members), "collection"
+    logger.info("[AGENT] collection %s pinned: %d document(s) in scope (%s)",
+                collection_id, len(docs), how)
+    return {**decision,
+            "scope": "single_doc",
+            "target_docs": docs,
+            "target_family": None,
+            "is_broad": False,
+            "collection_id": int(collection_id),
+            "method": f"{decision.get('method', 'default')}+{how}"}
 
 
 @tracing.traced_node("retrieve_context")
@@ -3388,7 +3442,7 @@ def _general_knowledge_answer(question: str, method: str) -> dict | None:
 
 def run_query_stream(question: str, session_id: str, target_doc: str = "",
                      is_followup: bool = False, exclude_cached_answers: bool = False,
-                     chat_session_id: str = ""):
+                     chat_session_id: str = "", collection_id=None):
     """Run the query graph and yield stage event dicts in real time.
 
     Each yielded dict is a custom stage event emitted by a node. The terminal
@@ -3396,6 +3450,10 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     the frontend renders. app.py wraps each dict as a Server-Sent Event.
 
     exclude_cached_answers: QA/testing option — see wiki.get_context().
+    collection_id: when set, confines retrieval to that collection's member
+        documents — see _apply_collection_scope. The corpus-wide fast paths
+        below are skipped while a collection is pinned, since each answers
+        over the whole wiki and would silently escape the boundary.
     """
     # Greetings and sign-offs short-circuit before the graph. Unlike the meta
     # path below this one DOES run on follow-ups — "thanks" after an answer is
@@ -3420,7 +3478,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # document-oriented structural paths, since "the average liability cap
     # across our contracts" is about the corpus, not about any one document,
     # and retrieval would answer it from whatever sample it happened to fetch.
-    if not is_followup:
+    if not is_followup and not collection_id:
         _akind = _is_analytics_query(question)
         if _akind:
             from services import wikis as _wikis_a
@@ -3435,7 +3493,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                        "payload": _a, "message": "Done"}
                 return
 
-    if not is_followup:
+    if not is_followup and not collection_id:
         _kind = _is_structural_query(question)
         if _kind:
             _structural = _structural_answer(_kind, question, session_id)
@@ -3446,7 +3504,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                        "payload": _structural, "message": "Done"}
                 return
 
-    if not is_followup and _is_precedent_query(question):
+    if not is_followup and not collection_id and _is_precedent_query(question):
         _prec = _precedent_answer(question, session_id)
         if _prec:
             logger.info("[AGENT] precedent fast-path: %r", (question or "")[:70])
@@ -3457,7 +3515,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # Clause-level precedent — "have we agreed to this before". Checked after
     # the document-level path above, which is the more specific question when
     # both could match.
-    if not is_followup and _is_clause_precedent_query(question):
+    if not is_followup and not collection_id and _is_clause_precedent_query(question):
         _cprec = _clause_precedent_answer(question, session_id)
         if _cprec:
             logger.info("[AGENT] clause-precedent fast-path: %r", (question or "")[:70])
@@ -3565,6 +3623,7 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         "target_doc": target_doc or "",
         "is_followup": bool(is_followup),
         "exclude_cached_answers": bool(exclude_cached_answers),
+        "collection_id": int(collection_id) if collection_id else None,
         "conversation_context": "",
     }
     for chunk in graph.stream(state, stream_mode="custom"):

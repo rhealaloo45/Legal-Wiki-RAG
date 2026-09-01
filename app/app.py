@@ -1156,6 +1156,20 @@ def query_route():
     target_doc = data.get("target_doc", "").strip()
     is_followup = data.get("is_followup", False)
     exclude_cached_answers = bool(data.get("exclude_cached_answers", False))
+    # A collection pinned in the Ask box confines retrieval to its members.
+    # Resolved through collections.resolve so a name works as well as an id,
+    # and so an id belonging to another wiki resolves to nothing rather than
+    # silently scoping this wiki's answer to a foreign document set.
+    collection_id = None
+    _coll_ref = data.get("collection_id") or data.get("collection")
+    if _coll_ref:
+        try:
+            from services import collections as _collections
+            collection_id = _collections.resolve(current_wiki_id(), _coll_ref)
+            if collection_id is None:
+                logger.warning("Ignoring unknown collection %r on /query", _coll_ref)
+        except Exception as _c_err:
+            logger.error("Could not resolve collection %r: %s", _coll_ref, _c_err)
 
     if not question:
         return jsonify({"error": "No question provided"}), 400
@@ -1185,7 +1199,8 @@ def query_route():
         try:
             for ev in intent_agent.run_query_stream(question, wiki_session_id, target_doc, is_followup,
                                                      exclude_cached_answers,
-                                                     chat_session_id=session_id):
+                                                     chat_session_id=session_id,
+                                                     collection_id=collection_id):
                 etype = ev.get("type")
                 logger.info("SSE stage: %s | %s", ev.get("stage", etype), ev.get("message", ""))
 

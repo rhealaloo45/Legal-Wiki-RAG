@@ -504,6 +504,45 @@
       background: var(--green); color: #fff
     }
 
+    /* Scope bar above the composer. Sits outside .ask-box so focusing the
+       textarea does not ring the select too, and stays visible while typing —
+       which document set a question will run against is the kind of thing a
+       lawyer needs to see at the moment of asking, not in a settings panel. */
+    .ask-scope {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      color: var(--text-3, #888);
+      margin: 0 0 6px 4px;
+      flex-shrink: 0
+    }
+
+    .ask-scope select {
+      background: var(--bg-input);
+      border: 0.5px solid var(--border);
+      border-radius: 7px;
+      color: var(--text-1, inherit);
+      font: inherit;
+      padding: 3px 7px;
+      max-width: 320px;
+      cursor: pointer
+    }
+
+    .ask-scope select:focus {
+      outline: none;
+      border-color: var(--accent)
+    }
+
+    /* Pinned state is deliberately loud: answering from a subset of the
+       corpus without the user realising is a wrong answer, not a preference. */
+    .ask-scope.pinned select {
+      border-color: var(--accent);
+      color: var(--accent)
+    }
+
+    .ask-scope #ask-scope-note { color: var(--accent) }
+
     .ask-box {
       background: var(--bg-input);
       border: 0.5px solid var(--border);
@@ -3625,6 +3664,14 @@
               <input type="checkbox" id="no-cache-toggle" style="margin:0">
               Testing mode: ignore cached answers (forces a fresh generation, no caching)
             </label>
+            <div class="ask-scope" id="ask-scope-bar">
+              <i class="ti ti-folder" style="font-size:12px;color:var(--accent)"></i>
+              <label for="ask-collection" style="white-space:nowrap">Search in</label>
+              <select id="ask-collection" onchange="onAskCollectionChange()">
+                <option value="">All documents</option>
+              </select>
+              <span id="ask-scope-note"></span>
+            </div>
             <div class="ask-box">
               <textarea class="ask-input" id="question-input" rows="2"
                 placeholder="Ask LexWiki anything…"></textarea>
@@ -4857,7 +4904,10 @@
       document.getElementById('panel-admin').style.setProperty('display', 'none', 'important');
       document.getElementById('doc-reader').style.display = 'none';
 
-      if (name === 'ask') document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
+      if (name === 'ask') {
+        document.getElementById('panel-ask').style.setProperty('display', 'flex', 'important');
+        loadAskCollections();
+      }
       else if (name === 'review') document.getElementById('panel-review').style.setProperty('display', 'flex', 'important');
       else if (name === 'compare') document.getElementById('panel-compare').style.setProperty('display', 'flex', 'important');
       else if (name === 'draft') document.getElementById('panel-draft').style.setProperty('display', 'flex', 'important');
@@ -9340,6 +9390,8 @@
         const payload = { question, session_id: SID };
         if (targetDoc) payload.target_doc = targetDoc;
         if (isFollowup) payload.is_followup = true;
+        const askCol = document.getElementById('ask-collection');
+        if (askCol && askCol.value) payload.collection_id = askCol.value;
         const noCacheToggle = document.getElementById('no-cache-toggle');
         if (noCacheToggle && noCacheToggle.checked) payload.exclude_cached_answers = true;
 
@@ -9720,6 +9772,49 @@
         checked.slice(MAX_DOC_SELECTION).forEach(cb => cb.checked = false);
         syncFolderCheckboxes(containerId);
         showToast(`Up to ${MAX_DOC_SELECTION} documents can be selected at a time`, 'error');
+      }
+    }
+
+    // Collections available to pin in the Ask box. Kept in sync with the
+    // Admin > Collections screen by reloading whenever Ask is opened, so a
+    // collection created there is pinnable without a page refresh.
+    async function loadAskCollections() {
+      const sel = document.getElementById('ask-collection');
+      if (!sel) return;
+      const prev = sel.value;
+      try {
+        const j = await (await fetch('/admin/collections')).json();
+        const rows = (j.collections || []).filter(c => c.document_count > 0);
+        sel.innerHTML = '<option value="">All documents</option>'
+          + rows.map(c => `<option value="${c.id}">${esc(c.name)}`
+              + ` (${c.document_count} doc${c.document_count === 1 ? '' : 's'})</option>`).join('');
+        if (prev && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+      } catch (e) {
+        sel.innerHTML = '<option value="">All documents</option>';
+      }
+      onAskCollectionChange();
+    }
+
+    // Announces the pin in the thread the first time it changes, so the
+    // transcript itself records which document set an answer came from —
+    // scrollback read later has no other way to tell.
+    let askScopeAnnounced = '';
+    function onAskCollectionChange() {
+      const sel = document.getElementById('ask-collection');
+      const bar = document.getElementById('ask-scope-bar');
+      const note = document.getElementById('ask-scope-note');
+      if (!sel || !bar) return;
+      const on = !!sel.value;
+      bar.classList.toggle('pinned', on);
+      const label = on ? sel.options[sel.selectedIndex].text : '';
+      if (note) note.textContent = on ? '— other documents are excluded' : '';
+      if (sel.value !== askScopeAnnounced) {
+        askScopeAnnounced = sel.value;
+        if (typeof appendSystemMsg === 'function' && document.getElementById('chat-thread')) {
+          appendSystemMsg(on
+            ? `Answers will now come only from “${label}”.`
+            : 'Answers will now come from all documents.');
+        }
       }
     }
 
