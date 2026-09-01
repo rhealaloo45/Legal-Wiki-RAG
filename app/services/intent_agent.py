@@ -2745,6 +2745,14 @@ _VERDICT_ORDER = ["unacceptable", "missing", "fallback", "unclear", "standard"]
 _COMPLIANCE_MAX_DOCS = 3
 
 
+def _dp_display(source_doc: str, wiki_id: str = "", session_id: str = "") -> str:
+    """``doc_paths.display``, imported lazily to keep module import order free
+    of a services-to-services cycle at start-up."""
+    from services import doc_paths as _dp
+    return _dp.display(source_doc, wiki_id, session_id)
+
+
+
 def _compliance_answer(question: str, session_id: str, wiki_id: str,
                        docs: list, ask=None) -> dict | None:
     """Measure the in-scope document(s) against a playbook, clause by clause.
@@ -2779,7 +2787,7 @@ def _compliance_answer(question: str, session_id: str, wiki_id: str,
                 "This wiki has more than one playbook, and the question does not "
                 "say which house position to measure against: " + names + ".\n\n"
                 "Name the playbook in the question and I will run it over "
-                + wiki._norm_doc_name(docs[0]) + ".",
+                + _dp_display(docs[0], wiki_id, session_id) + ".",
                 "Compliance", "playbook-ambiguous")
         return None
     if not book.get("rules"):
@@ -2816,7 +2824,8 @@ def _compliance_answer(question: str, session_id: str, wiki_id: str,
         by_verdict.setdefault(f.get("verdict") or "unclear", []).append(f)
     breaches = len(by_verdict.get("unacceptable", [])) + len(by_verdict.get("missing", []))
 
-    names = ", ".join(wiki._norm_doc_name(d) for d in docs)
+    from services import doc_paths as _dp
+    names = ", ".join(_dp.display(d, wiki_id, session_id) for d in docs)
     lines = ['**%s measured against the "%s" playbook**' % (names, book["name"]), ""]
     counts = ", ".join("%d %s" % (len(by_verdict[v]), v)
                        for v in _VERDICT_ORDER if by_verdict.get(v))
@@ -2834,7 +2843,7 @@ def _compliance_answer(question: str, session_id: str, wiki_id: str,
             continue
         lines.append("### " + _VERDICT_LABEL.get(verdict, verdict.title()))
         for f in rows:
-            doc = wiki._norm_doc_name(f.get("source_doc") or "")
+            doc = _dp.display(f.get("source_doc") or "", wiki_id, session_id)
             lines.append("- **%s** - %s" % (f.get("clause_type"), doc))
             if f.get("rationale"):
                 lines.append("  - " + str(f["rationale"]))
