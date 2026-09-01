@@ -2136,6 +2136,27 @@ def admin_analytics_trend():
         parties or None, request.args.get("doc_type") or None))
 
 
+@app.route("/admin/clause_attributes")
+def admin_clause_attributes():
+    """Structured liability-cap attributes for one document, or the corpus profile.
+
+    Reports uncapped exceptions and excluded losses as separate fields, since
+    they are opposite outcomes — liability surviving the cap without limit
+    versus not arising at all — and both are drafted as similar-looking prose.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import clause_attributes as _ca
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    doc = request.args.get("source_doc")
+    if doc:
+        return jsonify(_ca.liability_cap_attributes(current_wiki_id(), sid, doc))
+    return jsonify(_ca.corpus_cap_profile(
+        current_wiki_id(), sid, int(request.args.get("limit", 200))))
+
+
 @app.route("/admin/terms", methods=["GET", "POST"])
 def admin_defined_terms():
     """Defined terms for a document, or across the corpus; POST rebuilds them.
