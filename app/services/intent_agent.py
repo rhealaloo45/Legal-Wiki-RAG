@@ -2739,6 +2739,11 @@ _VERDICT_LABEL = {
 }
 _VERDICT_ORDER = ["unacceptable", "missing", "fallback", "unclear", "standard"]
 
+# How many documents a compliance question may assess inline before it is
+# referred to the Admin batch run instead. Small on purpose — see
+# _compliance_answer.
+_COMPLIANCE_MAX_DOCS = 3
+
 
 def _compliance_answer(question: str, session_id: str, wiki_id: str,
                        docs: list, ask=None) -> dict | None:
@@ -2780,11 +2785,22 @@ def _compliance_answer(question: str, session_id: str, wiki_id: str,
     if not book.get("rules"):
         return None
 
-    # Capped deliberately. A run costs one fast classification per clause per
-    # rule, and a compliance question asked in chat is about the document in
-    # front of the lawyer - a whole collection belongs in the Admin batch run,
-    # which reports progress and stores its results.
-    docs = list(docs)[:3]
+    # A compliance question asked in chat is about the document in front of
+    # the lawyer. Too many in scope — a pinned 144-document collection, say —
+    # is refused rather than truncated: silently assessing the first few and
+    # heading the report with them reads as a verdict on the set, and a
+    # compliance report is acted on. The Admin batch run is the right tool for
+    # a whole collection; it reports progress and stores its findings.
+    docs = list(docs)
+    if len(docs) > _COMPLIANCE_MAX_DOCS:
+        return _canned_payload(
+            f"{len(docs)} documents are in scope. Assessing only some of them "
+            "would read as a verdict on all of them, so I would rather not "
+            f"guess.\n\nNarrow this to {_COMPLIANCE_MAX_DOCS} document(s) or "
+            f"fewer, or run the \"{book['name']}\" playbook over the whole set "
+            "from Admin > Playbooks, which reports progress and stores every "
+            "finding.",
+            "Compliance", "playbook-scope-too-wide")
     try:
         run_id = _pb.run(wiki_id, session_id, book["id"], docs, ask=ask)
         result = _pb.get_run(wiki_id, run_id, with_findings=True)
