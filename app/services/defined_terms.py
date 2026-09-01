@@ -61,28 +61,57 @@ def term_key(term: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (term or "").lower()).strip()
 
 
-def extract_term(clause_type: str, verbatim_text: str) -> str | None:
-    """The term a definition clause defines, or None.
-
-    Text first, clause_type second: the text carries the term as the drafter
-    wrote it, while the type carries whatever the extracting model chose to
-    call the clause.
-    """
-    m = _RX_DEFINITION.search(verbatim_text or "")
-    if m:
-        term = m.group(1).strip()
-    else:
-        m2 = _RX_TYPE_TERM.match((clause_type or "").strip())
-        if not m2:
-            return None
-        term = m2.group(1).strip()
-    term = re.sub(r"\s+", " ", term).strip(" .,:;\"'")
+def _clean_term(raw: str) -> str | None:
+    term = re.sub(r"\s+", " ", raw or "").strip(" .,:;\"'")
     if not term or len(term) < 2 or term_key(term) in _SKIP_TERMS:
         return None
     # A "term" carrying sentence punctuation is a mis-parse, not a term.
     if re.search(r"[.;]|\b(?:means|shall)\b", term, re.IGNORECASE):
         return None
     return term
+
+
+def extract_terms(clause_type: str, verbatim_text: str) -> list[tuple[str, str]]:
+    """Every (term, definition) pair in one definition clause.
+
+    A combined "Definitions" clause defines several terms in one row, and an
+    earlier version of this took only the first match — which stored the whole
+    multi-definition blob under that one term, so asking how "Affiliate" was
+    defined returned text that also defined Confidential Information and
+    Business Day. Found by reading the grouped output in the UI, not by the
+    extractor's own tests, which only ever fed it single-definition clauses.
+
+    Each term now gets the span from its own quoted name up to the start of the
+    next definition, so the stored text is that term's definition and nothing
+    else.
+    """
+    text_ = verbatim_text or ""
+    matches = list(_RX_DEFINITION.finditer(text_))
+    out: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        term = _clean_term(m.group(1))
+        if not term:
+            continue
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text_)
+        definition = text_[m.start():end].strip()
+        out.append((term, definition))
+    if out:
+        return out
+    # No quoted form anywhere — fall back to the clause_type suffix, which
+    # names at most one term.
+    m2 = _RX_TYPE_TERM.match((clause_type or "").strip())
+    if m2:
+        term = _clean_term(m2.group(1))
+        if term:
+            return [(term, text_)]
+    return []
+
+
+def extract_term(clause_type: str, verbatim_text: str) -> str | None:
+    """The first term a definition clause defines, or None. Kept for callers
+    that only need one; extract_terms is the complete answer."""
+    terms = extract_terms(clause_type, verbatim_text)
+    return terms[0][0] if terms else None
 
 
 def build(wiki_id: str, session_id: str, dry_run: bool = False) -> dict:
@@ -108,12 +137,10 @@ def build(wiki_id: str, session_id: str, dry_run: bool = False) -> dict:
 
         found: list[dict] = []
         for cid, doc, ctype, vtext, page in rows:
-            term = extract_term(ctype, vtext)
-            if not term:
-                continue
-            found.append({"clause_id": int(cid), "source_doc": doc, "term": term,
-                          "term_key": term_key(term),
-                          "definition": (vtext or "")[:2000], "page_num": page})
+            for term, definition in extract_terms(ctype, vtext):
+                found.append({"clause_id": int(cid), "source_doc": doc, "term": term,
+                              "term_key": term_key(term),
+                              "definition": definition[:2000], "page_num": page})
 
         if dry_run:
             return {"dry_run": True, "definition_clauses": len(rows),
