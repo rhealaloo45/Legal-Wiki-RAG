@@ -27,7 +27,9 @@
       --green-light: #E1F5EE;
       --green-border: #9FE1CB;
       --green-text: #0F6E56;
-      --amber: #BA7517;
+      /* Was #BA7517 — 3.72:1 on white. It marks flagged values in the
+         register, which is exactly the text a reviewer must not miss. */
+      --amber: #9A5F0F;
       --amber-light: #FAEEDA;
       --amber-border: #FAC775;
       --red: #A32D2D;
@@ -36,8 +38,15 @@
       --border: rgba(0, 0, 0, 0.06);
       --border-strong: rgba(0, 0, 0, 0.12);
       --text-primary: #1a1a1a;
-      --text-secondary: #6B7280;
-      --text-muted: #9CA3AF;
+      /* Was #6B7280 — 4.01:1 on the hover fill and 4.35:1 on the page
+         background, both under the 4.5:1 AA floor for body text. */
+      --text-secondary: #4B5563;
+      /* Darkened from #9CA3AF, which measured 2.54:1 on white and 2.28:1 on
+         the page background — below the 4.5:1 AA floor everywhere it was
+         used, and it labels the rail groups and table headers. #5F6875
+         clears 4.5:1 on white, the page background and the hover fill. */
+      --text-muted: #5F6875;
+      --text-faint: #9CA3AF;
       --radius-sm: 6px;
       --radius-md: 8px;
       --radius-lg: 12px;
@@ -438,7 +447,7 @@
       max-width: 90%;
       margin: 6px 0;
       padding: 0 8px;
-      font-size: 11.5px;
+      font-size: 12px;
       line-height: 1.5;
       color: var(--text-muted);
       text-align: center
@@ -1506,6 +1515,7 @@
       border-bottom: .5px solid var(--border);
       color: var(--text-primary);
       vertical-align: top;
+      overflow-wrap: break-word;
     }
     .quality-table tr:last-child td { border-bottom: none; }
     .quality-table tbody tr:hover td { background: var(--bg-hover); }
@@ -1628,6 +1638,10 @@
     .admin-table {
       border-collapse: collapse;
       width: 100%;
+      /* The register carries seven columns. Below this the browser compresses
+         them to ~60px each and every cell wraps to a vertical strip; the
+         wrapper already scrolls horizontally, so let it. */
+      min-width: 760px;
       font-size: 12px;
       background: var(--bg-surface);
     }
@@ -1652,6 +1666,13 @@
       color: var(--text-secondary);
       vertical-align: top;
       max-width: 260px;
+      /* A document name is one unbroken token, so it overflowed the cell and
+         was silently cut — 180 cells on the register alone. break-word, NOT
+         anywhere: anywhere also shatters ordinary words, which turned
+         "SHAREHOLDERS' AGREEMENT" into seven vertical strips once the columns
+         were narrow. Paired with the table min-width below, which stops the
+         columns getting that narrow in the first place. */
+      overflow-wrap: break-word;
     }
     .admin-table tr:last-child td { border-bottom: none; }
     .admin-table tr:hover td { background: var(--bg-hover); }
@@ -3736,7 +3757,7 @@
         <div id="panel-ask" class="panel d-none" style="display:none;justify-content:center;overflow:hidden">
           <div class="ask-wrap">
             <div class="chat-thread" id="chat-thread"></div>
-            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-3, #888);margin:0 0 6px 4px;cursor:pointer;user-select:none">
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary);margin:0 0 6px 4px;cursor:pointer;user-select:none">
               <input type="checkbox" id="no-cache-toggle" style="margin:0">
               Testing mode: ignore cached answers (forces a fresh generation, no caching)
             </label>
@@ -9805,7 +9826,7 @@
           fileCounter.n++;
           html += `
           <div class="tree-file-row" style="padding-left:${indent}px;">
-            <input type="checkbox" value="${fullPath}" class="doc-checkbox" ${checkedAttr} style="accent-color:var(--accent);">
+            <input type="checkbox" value="${fullPath}" class="doc-checkbox" ${checkedAttr} aria-label="Select ${esc(k)}" style="accent-color:var(--accent);">
             <i class="ti ti-file" style="font-size:11px; color:var(--text-secondary); margin-top:1px;"></i>
             <span class="doc-ck-lbl" title="${k}" style="font-size:11px; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="var cb=this.previousElementSibling.previousElementSibling; cb.checked=!cb.checked; cb.dispatchEvent(new Event('change', {bubbles:true}));">${k}</span>
           </div>
@@ -9816,7 +9837,7 @@
           html += `
           <div class="tree-folder-row" style="padding-left:${indent}px;">
             <i class="ti ti-chevron-down fold-chevron" style="font-size:11px; color:var(--text-secondary); padding:2px;" onclick="toggleCheckboxFolder('${folderId}', this)"></i>
-            <input type="checkbox" class="folder-checkbox" style="accent-color:var(--accent);" onclick="toggleFolderCheckboxChildren(this)">
+            <input type="checkbox" class="folder-checkbox" aria-label="Select all in ${esc(k)}" style="accent-color:var(--accent);" onclick="toggleFolderCheckboxChildren(this)">
             <i class="ti ti-folder" style="font-size:11px; color:var(--accent); margin-top:1px;"></i>
             <span class="folder-name" title="${k}" style="font-size:11px; font-weight:500; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer;" onclick="toggleCheckboxFolder('${folderId}', this.previousElementSibling.previousElementSibling.previousElementSibling)">${k}</span>
           </div>
