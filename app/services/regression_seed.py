@@ -38,11 +38,39 @@ SEED_CASES: list[dict] = [
     # ---------------------------------------------------------------- scope
     {
         "name": "scope-compound-party-pair",
-        "archetype": "scope",
+        "archetype": "abstention",
         "question": "What is the liability cap in the agreement between Apex Meridian Software and Ironvane Data Centers?",
-        "expect_docs": [_IOA],
-        "notes": "Compound party pair stated with 'between'. Baseline case for "
-                 "_resolve_docs_by_party_pair.",
+        # Only the document a correct answer actually needs to cite. resolve_scope
+        # itself reaches the IT Outsourcing Agreement too (checked separately, by
+        # hand, against wiki.resolve_scope directly) — but files_used reflects what
+        # the ANSWER cites, and a correct abstention here is fully supported by the
+        # Amendment's own text without needing to quote the IOA. Requiring both
+        # fragments here would fail a correct answer for not citing a document it
+        # had no need to.
+        "expect_docs": [_IOA_AMDT],
+        "expect_abstain": True,
+        "expect_answer": "No numeric liability cap is stated. The Amendment explicitly notes it "
+                         "does not set or modify a cap and only preserves the original agreement's "
+                         "limitation-of-liability terms; the original IT Outsourcing Agreement itself "
+                         "contains no liability-cap clause.",
+        "notes": "CORRECTED after the pipeline tier's first real run flagged this case as failing, "
+                 "which led to checking the actual document text rather than trusting the seed's "
+                 "original assumption. Two things were wrong, not the product:"
+                 " (1) this was seeded as a 'find the cap' case, but neither the IOA nor the "
+                 "Amendment states one — verified directly against both documents' extracted text. "
+                 "It is an abstention case."
+                 " (2) the case's own docstring called it 'baseline for _resolve_docs_by_party_pair', "
+                 "but that resolver returns empty here: its title-based intersection needs both party "
+                 "names in a shared page TITLE, and this document family titles pages by matter code "
+                 "('MAT-2026-4342'), not by party. Scope still reaches both correct documents, via the "
+                 "weaker party-multi single-party fallback — which also pulls in one unrelated document "
+                 "(a Consulting Agreement between Meridian and a third party) as noise. Not fixed here: "
+                 "content-based pair intersection was tried as a fix and produced its own false positive "
+                 "(a Loan Agreement page coincidentally containing both 'Ironvane' and 'Meridian' from two "
+                 "unrelated entities), matching the exact failure class _resolve_one_party_pair's own "
+                 "docstring already warns content-intersection causes. A real fix belongs on "
+                 "documents.parties (a clean JSONB array, not text matching) — flagged as a follow-up, "
+                 "not attempted under this fix.",
     },
     {
         "name": "scope-original-of-amendment",

@@ -3118,6 +3118,40 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # run-to-run citation-warning non-determinism. Scope strictly to the pinned
         # document's own pages; skip supplementary retrieval entirely.
         selected_titles = file_pages
+        # Multi-document strict scope ("the agreement between X and Y" resolving
+        # to several instruments) force-includes EVERY page of EVERY pinned
+        # document with no relevance ranking, and the char-budget loop below
+        # truncates selected_titles in whatever order they arrive in — which is
+        # document-enumeration order, not relevance order. Confirmed live: a
+        # 3-document, 55-page scope (Consulting Agreement + Amendment + the
+        # actual IT Outsourcing Agreement) exceeded the 60k budget by 13 pages;
+        # those 13 were the IOA's LAST pages because it happened to be enumerated
+        # last, and one of them — "Retention, Escrow and Indemnity" — was the
+        # page carrying the liability cap the question asked about. The answer
+        # reported no cap while the correct document was fully in scope and
+        # simply never reached. The structured-extraction block below already
+        # solves this exact failure for clause-table content via `_q_overlap`
+        # (see the Term Sheet / Relationship Of Parties incident in that
+        # comment) — this applies the identical fix to the raw page text, which
+        # was the one channel it was never extended to. Single-document scope is
+        # deliberately left untouched: reordering one document's own pages could
+        # break a coherent read-through, and there is no cross-document budget
+        # race to fix when there is only one document.
+        if len(forced_set) > 1:
+            _q_tokens = {w for w in re.findall(r'[a-z0-9]{3,}', (question or "").lower())
+                        if w not in _NARROW_TOKEN_STOPWORDS}
+            if _q_tokens:
+                def _page_overlap(_t: str) -> int:
+                    _p = pages.get(_t)
+                    _c = _p.get("content", "") if isinstance(_p, dict) else (_p or "")
+                    return len(_q_tokens & set(re.findall(r'[a-z0-9]{3,}', (_t + " " + _c).lower())))
+                _before = list(selected_titles)
+                selected_titles = sorted(selected_titles, key=lambda t: -_page_overlap(t))
+                if selected_titles != _before:
+                    logger.info("Multi-document strict scope (%d docs, %d pages): reordered by "
+                                "question-term overlap so a budget cut drops the least relevant "
+                                "pages first, not whichever document was enumerated last",
+                                len(forced_set), len(selected_titles))
         logger.info("Single-document scope (%s): scoped to %d page(s), supplementary retrieval skipped",
                      target_doc or f"party:{sorted(forced_set)}", len(file_pages))
         _trace = tracing.get_trace()
