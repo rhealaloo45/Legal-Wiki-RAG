@@ -2136,6 +2136,60 @@ def admin_analytics_trend():
         parties or None, request.args.get("doc_type") or None))
 
 
+@app.route("/admin/terms", methods=["GET", "POST"])
+def admin_defined_terms():
+    """Defined terms for a document, or across the corpus; POST rebuilds them.
+
+    The rebuild is deterministic regex over clauses already classified as
+    definitions — no model call, so it is free and re-runnable.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import defined_terms as _dt
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    wiki_id = current_wiki_id()
+
+    if request.method == "POST":
+        _lock = _locked_in_production()
+        if _lock:
+            return _lock
+        data = request.get_json(silent=True) or {}
+        return jsonify(_dt.build(wiki_id, sid, dry_run=bool(data.get("dry_run"))))
+
+    doc = request.args.get("source_doc")
+    term = request.args.get("term")
+    if term:
+        return jsonify({"term": term,
+                        "definitions": _dt.find_definition(wiki_id, sid, term, doc)})
+    if doc:
+        return jsonify({"source_doc": doc,
+                        "terms": _dt.terms_in_document(wiki_id, sid, doc)})
+    from services import db as _db
+    from sqlalchemy import text as _sql
+    with _db.get_engine().connect() as c:
+        rows = c.execute(_sql("""
+            SELECT term, count(*) FROM defined_terms
+            WHERE wiki_id=:w AND session_id=:sid
+            GROUP BY 1 ORDER BY 2 DESC LIMIT 100
+        """), {"w": wiki_id, "sid": sid}).fetchall()
+    return jsonify({"terms": [{"term": r[0], "documents": int(r[1])} for r in rows]})
+
+
+@app.route("/admin/terms/undefined")
+def admin_undefined_terms():
+    """Terms a document relies on but never defines — a drafting-defect check."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import defined_terms as _dt
+    sid = _regression_session_id()
+    doc = request.args.get("source_doc")
+    if not sid or not doc:
+        return jsonify({"error": "source_doc is required"}), 400
+    return jsonify(_dt.undefined_terms(current_wiki_id(), sid, doc))
+
+
 @app.route("/admin/relations/traverse")
 def admin_relations_traverse():
     """Bounded-hop traversal from one document.
