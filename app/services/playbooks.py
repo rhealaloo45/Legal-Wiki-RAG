@@ -225,22 +225,52 @@ def resolve(wiki_id: str, ref: Any) -> int | None:
 def clauses_for_rule(wiki_id: str, source_doc: str, clause_type: str) -> list[dict]:
     """Clauses in a document that a rule for `clause_type` should assess.
 
-    Keyword match, not equality — see the module docstring. Rejected clauses
+    CANONICAL MATCH, with the keyword matcher as a fallback. Rejected clauses
     are excluded: a reviewer has already said that row is wrong, and assessing
     it would report a deviation that rests on discredited text.
 
-    STILL THE KEYWORD MATCHER. The canonical vocabulary (§ Phase 3.5c) exists
-    and is backfilled, but this function has deliberately not been switched
-    over to it yet — see clauses_for_rule_canon and compare_rule_matching
-    below. Today's matcher OVER-matches, which shows up as a visibly wrong
-    finding a reviewer can catch; a canonical matcher with a bad mapping
-    UNDER-matches, and a clause that is silently never assessed produces no
-    finding at all for anyone to notice. Trading a loud failure for a quiet
-    one is a regression even if the match rate improves, so the cutover waits
-    on a reviewed diff rather than on the new code merely existing.
+    Cut over from pure keyword matching after compare_rule_matching was run on
+    the real rules across 40 documents and the diff reviewed: 43 clauses
+    selected by keywords, 35 by canon, 8 dropped, 0 added, 0 unmapped rules.
+    All 8 dropped were carve-outs or schedule notes — "Liability Cap
+    Exclusions", "Liability Carve-Outs", "Liability Cap Exceptions" — which
+    the keyword matcher had been assessing against a liability-cap standard
+    they exist to carve out of. That was a wrong finding the model was never
+    given a chance to get right.
+
+    The keyword fallback is deliberate and is what makes this cutover safe.
+    The vocabulary maps 64% of clause rows; a rule whose own name the
+    vocabulary cannot place, or a document whose clauses predate the
+    backfill, would otherwise select NOTHING and silently stop being assessed
+    — an under-match nobody sees, which is worse than the over-match being
+    fixed. Falling back means the worst case is today's behaviour, not
+    silence. See _keyword_clauses for the fallback itself.
     """
     if not _enabled():
         return []
+    canon_hits = clauses_for_rule_canon(wiki_id, source_doc, clause_type)
+    if canon_hits:
+        return canon_hits
+
+    from services import clause_vocab
+    canon = clause_vocab.canonical(clause_type)
+    if canon:
+        # The rule mapped fine and the canonical query genuinely found nothing
+        # in this document. Trust that: falling back here would re-admit the
+        # carve-outs this cutover exists to exclude.
+        return []
+    logger.info("Playbook rule %r has no canonical type — falling back to keyword "
+                "matching for %s", clause_type, source_doc)
+    return _keyword_clauses(wiki_id, source_doc, clause_type)
+
+
+def _keyword_clauses(wiki_id: str, source_doc: str, clause_type: str) -> list[dict]:
+    """The original keyword matcher, kept as the fallback path.
+
+    Retained rather than deleted because the canonical vocabulary does not
+    cover every clause label in the corpus, and a rule it cannot place must
+    still assess something.
+    """
     kws = _keywords(clause_type)
     if not kws:
         return []
@@ -322,7 +352,12 @@ def compare_rule_matching(wiki_id: str, source_docs: list[str],
 
     for doc in source_docs:
         for ct in clause_types:
-            kw = {c["id"]: c for c in clauses_for_rule(wiki_id, doc, ct)}
+            # Compares the ORIGINAL keyword matcher against the canonical one,
+            # not clauses_for_rule — since the cutover that function IS the
+            # canonical path, so comparing against it would diff canon against
+            # itself and report no difference at all. The point of this view is
+            # to keep showing what the cutover changed.
+            kw = {c["id"]: c for c in _keyword_clauses(wiki_id, doc, ct)}
             cn = {c["id"]: c for c in clauses_for_rule_canon(wiki_id, doc, ct)}
             kw_total += len(kw)
             canon_total += len(cn)

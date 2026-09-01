@@ -1322,6 +1322,100 @@
       box-shadow: var(--shadow-card);
     }
 
+    /* ---- Quality section (Phase 3.5): Accuracy, Corpus Health, Vocabulary ---- */
+    .admin-subhead {
+      font-size: 13px;
+      font-weight: 650;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .admin-note {
+      font-size: 12px;
+      line-height: 1.55;
+      color: var(--text-secondary);
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-left: 2px solid var(--border-strong, var(--border));
+      border-radius: var(--radius-sm, 6px);
+      padding: 9px 12px;
+    }
+
+    .quality-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 10px;
+    }
+
+    .quality-card {
+      background: var(--bg-surface);
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 12px 14px;
+    }
+
+    .quality-card .qc-value {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1.15;
+    }
+
+    .quality-card .qc-label {
+      font-size: 11.5px;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+
+    .quality-card.good .qc-value { color: var(--success, #3fa66a); }
+    .quality-card.warn .qc-value { color: var(--warning, #d08a2c); }
+    .quality-card.bad  .qc-value { color: var(--danger, #c9524d); }
+
+    .quality-table {
+      border: .5px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      /* Wide rows scroll inside the panel rather than pushing the page sideways. */
+      overflow-x: auto;
+    }
+
+    .quality-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .quality-table th {
+      text-align: left;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: .02em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      background: var(--bg-subtle, transparent);
+      padding: 8px 12px;
+      border-bottom: .5px solid var(--border);
+      white-space: nowrap;
+    }
+    .quality-table td {
+      padding: 8px 12px;
+      border-bottom: .5px solid var(--border);
+      color: var(--text-primary);
+      vertical-align: top;
+    }
+    .quality-table tr:last-child td { border-bottom: none; }
+    .quality-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .quality-table .muted { color: var(--text-secondary); }
+    .quality-empty { padding: 14px; font-size: 12.5px; color: var(--text-secondary); }
+
+    .q-pill {
+      display: inline-block;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      border: .5px solid var(--border);
+      white-space: nowrap;
+    }
+    .q-pill.pass { color: var(--success, #3fa66a); border-color: currentColor; }
+    .q-pill.fail { color: var(--danger,  #c9524d); border-color: currentColor; }
+    .q-pill.warn { color: var(--warning, #d08a2c); border-color: currentColor; }
+
     .admin-pill-btn {
       display: flex;
       align-items: center;
@@ -3970,6 +4064,17 @@
             <div class="admin-nav-item" id="adminNav-prompts" data-target="prompts" onclick="switchAdminTab('prompts',this)">
               <span class="admin-nav-left"><i class="ti ti-message-2" style="font-size:16px"></i>Prompt Library</span>
             </div>
+            <div class="admin-rail-label" style="margin-top:16px">Quality</div>
+            <div class="admin-nav-item" id="adminNav-accuracy" data-target="accuracy" onclick="switchAdminTab('accuracy',this)">
+              <span class="admin-nav-left"><i class="ti ti-target-arrow" style="font-size:16px"></i>Accuracy</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-corpus" data-target="corpus" onclick="switchAdminTab('corpus',this)">
+              <span class="admin-nav-left"><i class="ti ti-file-alert" style="font-size:16px"></i>Corpus Health</span>
+              <span class="admin-nav-badge d-none" id="admin-corpus-badge">0</span>
+            </div>
+            <div class="admin-nav-item" id="adminNav-vocabulary" data-target="vocabulary" onclick="switchAdminTab('vocabulary',this)">
+              <span class="admin-nav-left"><i class="ti ti-tags" style="font-size:16px"></i>Vocabulary</span>
+            </div>
           </div>
 
           <div class="admin-content">
@@ -4124,6 +4229,111 @@
               </div>
               <div class="admin-card admin-table-wrap"><div id="admin-prompts-table"></div></div>
               <div id="admin-prompt-detail" class="admin-card d-none" style="display:none;margin-top:12px"></div>
+            </div>
+
+            <!-- ===================== Accuracy (Phase 3.5a) ===================== -->
+            <div id="admin-panel-accuracy" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Accuracy</div>
+                  <div class="admin-section-sub">Regression suite — does a change make answers better or worse?</div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button type="button" class="admin-pill-btn" onclick="adminSeedRegression()" title="Load the hand-verified seed cases (idempotent)"><i class="ti ti-download" style="font-size:14px"></i>Load seed cases</button>
+                  <button type="button" class="admin-pill-btn primary" onclick="adminRunRegression('scope')" title="Free — asserts scope resolution only, no LLM calls"><i class="ti ti-player-play" style="font-size:14px"></i>Run scope tier (free)</button>
+                </div>
+              </div>
+
+              <div class="admin-note" style="margin-bottom:14px">
+                Three tiers, split by cost. <strong>scope</strong> asserts which documents a question
+                resolves to — no pipeline, no LLM, no spend, so it can run on every change.
+                <strong>pipeline</strong> runs the real query graph and checks the answer's structure.
+                <strong>graded</strong> adds an LLM judge scoring against a verified answer.
+                The paid tiers ask for confirmation and show the call count first.
+              </div>
+
+              <div id="accuracy-latest" class="quality-cards"></div>
+
+              <div style="display:flex;gap:8px;margin:16px 0 10px">
+                <button type="button" class="admin-pill-btn" onclick="adminRunRegression('pipeline')"><i class="ti ti-player-play" style="font-size:14px"></i>Run pipeline tier</button>
+                <button type="button" class="admin-pill-btn" onclick="adminRunRegression('graded')"><i class="ti ti-scale" style="font-size:14px"></i>Run graded tier</button>
+              </div>
+
+              <div class="admin-subhead">Runs</div>
+              <div id="accuracy-runs" class="quality-table"></div>
+
+              <div class="admin-subhead" style="margin-top:22px">Cases</div>
+              <div id="accuracy-cases" class="quality-table"></div>
+
+              <div class="admin-subhead" style="margin-top:22px">Latency, by scope method</div>
+              <div class="admin-note" style="margin-bottom:8px">Read from the query traces already written for every real question — no extra instrumentation.</div>
+              <div id="accuracy-latency" class="quality-table"></div>
+
+              <div class="admin-subhead" style="margin-top:22px">Latency, by pipeline stage</div>
+              <div id="accuracy-stages" class="quality-table"></div>
+            </div>
+
+            <!-- ================= Corpus Health (Phase 3.5b) ================= -->
+            <div id="admin-panel-corpus" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Corpus Health</div>
+                  <div class="admin-section-sub">Unreadable pages and duplicate documents</div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button type="button" class="admin-pill-btn" onclick="loadAdminCorpus()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
+                </div>
+              </div>
+
+              <div id="corpus-cards" class="quality-cards"></div>
+
+              <div class="admin-subhead" style="margin-top:20px">Documents with unreadable pages</div>
+              <div class="admin-note" style="margin-bottom:8px">
+                A page whose text could not be extracted, even after OCR, is a page no answer can be
+                grounded in. These documents surface a warning to the reader when an answer uses them.
+                Quality provenance is recorded at ingest, so documents ingested before this shipped
+                appear only after they are re-ingested.
+              </div>
+              <div id="corpus-quality" class="quality-table"></div>
+
+              <div class="admin-subhead" style="margin-top:22px">Duplicate documents</div>
+              <div class="admin-note" style="margin-bottom:8px">
+                Byte-identical uploads. Resolving keeps the copy with the richest extraction and
+                hard-deletes the rest, then enforces a unique index so it cannot recur.
+              </div>
+              <div id="corpus-duplicates" class="quality-table"></div>
+            </div>
+
+            <!-- ================== Vocabulary (Phase 3.5c) ================== -->
+            <div id="admin-panel-vocabulary" class="d-none" style="display:none">
+              <div class="admin-section-head">
+                <div>
+                  <div class="admin-section-title">Clause Vocabulary</div>
+                  <div class="admin-section-sub">Canonical types mapped from the raw extracted labels</div>
+                </div>
+                <div style="display:flex;gap:8px">
+                  <button type="button" class="admin-pill-btn" onclick="adminCompareVocabulary()" title="Diff the keyword matcher against the canonical one"><i class="ti ti-git-compare" style="font-size:14px"></i>Compare matchers</button>
+                  <button type="button" class="admin-pill-btn primary" onclick="adminBackfillVocabulary()" title="Re-map every clause — deterministic, no LLM calls"><i class="ti ti-refresh" style="font-size:14px"></i>Re-run mapping</button>
+                </div>
+              </div>
+
+              <div class="admin-note" style="margin-bottom:14px">
+                The extracting model names clauses freely, so the same clause arrives under many
+                labels. The canonical type is stored <em>beside</em> the raw label, never over it,
+                and a label the vocabulary cannot place stays empty rather than being guessed —
+                a wrong canonical type is worse than an absent one. Playbooks selects on this,
+                which is what stops a "Liability Cap" rule assessing "Exclusions from Liability Cap".
+              </div>
+
+              <div id="vocabulary-cards" class="quality-cards"></div>
+              <div id="vocabulary-compare" style="margin-top:14px"></div>
+
+              <div class="admin-subhead" style="margin-top:20px">Canonical types</div>
+              <div id="vocabulary-canon" class="quality-table"></div>
+
+              <div class="admin-subhead" style="margin-top:22px">Largest unmapped labels</div>
+              <div class="admin-note" style="margin-bottom:8px">The vocabulary's own to-do list, ordered by how many clauses each label affects.</div>
+              <div id="vocabulary-unmapped" class="quality-table"></div>
             </div>
 
             <div id="admin-panel-wikis" class="d-none" style="display:none">
@@ -4606,11 +4816,15 @@
       document.querySelectorAll('#panel-admin .admin-nav-item').forEach(t => t.classList.remove('active'));
       el.classList.add('active');
       ['ingest', 'documents', 'wiki', 'review', 'wikis', 'register', 'obligations',
-       'collections', 'playbooks', 'precedent', 'deviation', 'prompts'].forEach(n => {
+       'collections', 'playbooks', 'precedent', 'deviation', 'prompts',
+       'accuracy', 'corpus', 'vocabulary'].forEach(n => {
         document.getElementById('admin-panel-' + n).style.setProperty('display', 'none', 'important');
       });
       document.getElementById('admin-panel-' + name).style.setProperty('display', 'block', 'important');
-      if (name === 'ingest') loadAdminIngestStatus();
+      if (name === 'accuracy') loadAdminAccuracy();
+      else if (name === 'corpus') loadAdminCorpus();
+      else if (name === 'vocabulary') loadAdminVocabulary();
+      else if (name === 'ingest') loadAdminIngestStatus();
       else if (name === 'documents') loadDocumentManageList();
       else if (name === 'wiki') loadAdminWikiPages();
       else if (name === 'wikis') loadAdminWikis();
@@ -4911,6 +5125,257 @@
     }
 
     // ---- Prompt Library ------------------------------------------------------
+    // ==================== Quality: Accuracy / Corpus / Vocabulary ==========
+    // Phase 3.5. All three views are read-only by default; the actions that
+    // cost money (paid regression tiers) or delete data (duplicate resolution)
+    // confirm first and say what they will do.
+
+    function qTable(headers, rows, emptyMsg) {
+      if (!rows.length) return '<div class="quality-empty">' + esc(emptyMsg) + '</div>';
+      const th = headers.map(h => '<th' + (h.num ? ' class="num"' : '') + '>' + esc(h.label) + '</th>').join('');
+      const tr = rows.map(r => '<tr>' + r.map((c, i) =>
+        '<td' + (headers[i] && headers[i].num ? ' class="num"' : '') + '>' + c + '</td>').join('') + '</tr>').join('');
+      return '<table><thead><tr>' + th + '</tr></thead><tbody>' + tr + '</tbody></table>';
+    }
+
+    function qCard(value, label, tone) {
+      return '<div class="quality-card ' + (tone || '') + '">' +
+             '<div class="qc-value">' + esc(String(value)) + '</div>' +
+             '<div class="qc-label">' + esc(label) + '</div></div>';
+    }
+
+    function fmtMs(ms) {
+      if (ms == null) return '—';
+      return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+    }
+
+    async function loadAdminAccuracy() {
+      const runsEl = document.getElementById('accuracy-runs');
+      runsEl.innerHTML = '<div class="quality-empty">Loading…</div>';
+      try {
+        const [runsR, casesR, latR] = await Promise.all([
+          fetch('/admin/regression/runs?limit=15'),
+          fetch('/admin/regression/cases'),
+          fetch('/admin/regression/latency?days=90')
+        ]);
+        const runs = (await runsR.json()).runs || [];
+        const cases = (await casesR.json()).cases || [];
+        const lat = await latR.json();
+
+        const latest = runs[0];
+        document.getElementById('accuracy-latest').innerHTML = latest
+          ? qCard(latest.cases_passed + '/' + latest.cases_total, 'Latest run — ' + latest.tier,
+                  latest.cases_failed ? 'bad' : 'good') +
+            qCard(cases.length, 'Stored cases') +
+            qCard(runs.length, 'Runs recorded') +
+            qCard(latest.git_sha || '—', 'Commit under test')
+          : qCard(cases.length, 'Stored cases') + qCard(0, 'Runs recorded');
+
+        runsEl.innerHTML = qTable(
+          [{label: 'Run'}, {label: 'Tier'}, {label: 'Label'}, {label: 'Commit'},
+           {label: 'Passed', num: true}, {label: 'Failed', num: true}, {label: 'When'}],
+          runs.map(r => [
+            String(r.id), '<span class="q-pill">' + esc(r.tier) + '</span>',
+            esc(r.label || '—'), '<span class="muted">' + esc(r.git_sha || '—') + '</span>',
+            '<span class="q-pill pass">' + r.cases_passed + '</span>',
+            r.cases_failed ? '<span class="q-pill fail">' + r.cases_failed + '</span>' : '0',
+            '<span class="muted">' + esc((r.started_at || '').replace('T', ' ').slice(0, 16)) + '</span>'
+          ]), 'No runs yet — start with the free scope tier.');
+
+        document.getElementById('accuracy-cases').innerHTML = qTable(
+          [{label: 'Case'}, {label: 'Archetype'}, {label: 'Question'}, {label: 'Expects'}],
+          cases.map(c => [
+            esc(c.name), '<span class="q-pill">' + esc(c.archetype || '—') + '</span>',
+            '<span class="muted">' + esc((c.question || '').slice(0, 90)) + '</span>',
+            c.expect_abstain ? '<span class="q-pill warn">abstention</span>'
+                             : esc(c.expect_scope_method || (c.expect_docs || []).join(', ') || '—')
+          ]), 'No cases stored — load the seed set.');
+
+        document.getElementById('accuracy-latency').innerHTML = qTable(
+          [{label: 'Scope method'}, {label: 'Queries', num: true}, {label: 'p50', num: true},
+           {label: 'p90', num: true}, {label: 'p95', num: true}, {label: 'LLM calls', num: true}],
+          (lat.by_method || []).slice(0, 12).map(m => [
+            esc(m.method), String(m.queries), fmtMs(m.p50_ms), fmtMs(m.p90_ms),
+            fmtMs(m.p95_ms), String(m.avg_llm_calls)
+          ]), 'No query traces in this window.');
+
+        document.getElementById('accuracy-stages').innerHTML = qTable(
+          [{label: 'Stage'}, {label: 'Samples', num: true}, {label: 'p50', num: true}, {label: 'p95', num: true}],
+          (lat.by_stage || []).map(s => [
+            esc(s.stage), String(s.samples), fmtMs(s.p50_ms), fmtMs(s.p95_ms)
+          ]), 'No stage timings recorded.');
+      } catch (e) {
+        runsEl.innerHTML = '<div class="quality-empty">Failed to load: ' + esc(String(e)) + '</div>';
+      }
+    }
+
+    async function adminSeedRegression() {
+      try {
+        const r = await fetch('/admin/regression/seed', {method: 'POST'});
+        const j = await r.json();
+        if (!r.ok) return showToast(j.error || 'Seed failed', 'error');
+        showToast('Loaded ' + j.loaded + ' regression case(s)', 'success');
+        loadAdminAccuracy();
+      } catch (e) { showToast('Seed failed: ' + e, 'error'); }
+    }
+
+    async function adminRunRegression(tier) {
+      try {
+        // The scope tier is free and runs immediately. The paid tiers are
+        // quoted first — the server refuses them without confirm, and this
+        // shows the same number the server would have refused on.
+        if (tier !== 'scope') {
+          const est = await (await fetch('/admin/regression/estimate?tier=' + tier)).json();
+          const ok = confirm(
+            'Run the ' + tier + ' tier?\n\n' +
+            est.cases + ' case(s), about ' + est.estimated_llm_calls + ' real LLM calls.\n' +
+            'This spends money on the model API.');
+          if (!ok) return;
+        }
+        showToast('Running ' + tier + ' tier…', 'info');
+        const r = await fetch('/admin/regression/run', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({tier: tier, confirm: tier !== 'scope'})
+        });
+        const j = await r.json();
+        if (!r.ok) return showToast(j.error || 'Run failed', 'error');
+        showToast(j.passed + ' passed, ' + j.failed + ' failed', j.failed ? 'error' : 'success');
+        loadAdminAccuracy();
+      } catch (e) { showToast('Run failed: ' + e, 'error'); }
+    }
+
+    async function loadAdminCorpus() {
+      const qEl = document.getElementById('corpus-quality');
+      const dEl = document.getElementById('corpus-duplicates');
+      qEl.innerHTML = '<div class="quality-empty">Loading…</div>';
+      try {
+        const [qR, dR] = await Promise.all([
+          fetch('/admin/quality/summary'), fetch('/admin/duplicates')
+        ]);
+        const q = await qR.json();
+        const dupes = (await dR.json()).groups || [];
+
+        document.getElementById('corpus-cards').innerHTML =
+          qCard(q.documents_tracked || 0, 'Documents with quality data') +
+          qCard(q.pages_unreadable || 0, 'Unreadable pages', q.pages_unreadable ? 'bad' : 'good') +
+          qCard(q.pages_needing_ocr || 0, 'Pages needing OCR', q.pages_needing_ocr ? 'warn' : '') +
+          qCard(dupes.length, 'Duplicate groups', dupes.length ? 'bad' : 'good');
+
+        const badge = document.getElementById('admin-corpus-badge');
+        const issues = (q.pages_unreadable || 0) + dupes.length;
+        badge.textContent = String(issues);
+        badge.classList.toggle('d-none', !issues);
+
+        qEl.innerHTML = qTable(
+          [{label: 'Document'}, {label: 'Pages', num: true}, {label: 'Unreadable', num: true},
+           {label: 'OCR pages', num: true}, {label: 'Share', num: true}],
+          (q.documents || []).map(d => [
+            esc(shortDocName(d.source_doc)), String(d.pages),
+            '<span class="q-pill fail">' + d.unreadable_pages + '</span>',
+            String(d.ocr_pages), (d.unreadable_share * 100).toFixed(0) + '%'
+          ]),
+          (q.documents_tracked || 0) === 0
+            ? 'No quality data yet. Provenance is recorded at ingest, so this fills in as documents are ingested from now on.'
+            : 'No unreadable pages — every tracked document extracted cleanly.');
+
+        dEl.innerHTML = dupes.length
+          ? qTable([{label: 'Keeping'}, {label: 'Removing'}, {label: ''}],
+              dupes.map(g => [
+                esc(shortDocName(g.keep)),
+                (g.remove || []).map(x => esc(shortDocName(x))).join('<br>'),
+                '<button type="button" class="admin-pill-btn" onclick="adminResolveDuplicates()">Resolve all</button>'
+              ]), '')
+          : '<div class="quality-empty">No duplicate documents. A unique index on the file hash prevents new ones.</div>';
+      } catch (e) {
+        qEl.innerHTML = '<div class="quality-empty">Failed to load: ' + esc(String(e)) + '</div>';
+      }
+    }
+
+    function shortDocName(s) {
+      // source_doc carries a session-id prefix that is noise in a table.
+      return String(s || '').replace(/^[0-9a-f-]{36}_/, '').slice(0, 78);
+    }
+
+    async function adminResolveDuplicates() {
+      if (!confirm('Resolve duplicates?\n\nKeeps the copy with the richest extraction and ' +
+                   'permanently deletes the others, including their uploaded files. ' +
+                   'This cannot be undone.')) return;
+      try {
+        const r = await fetch('/admin/duplicates', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({confirm: true})
+        });
+        const j = await r.json();
+        if (!r.ok) return showToast(j.error || 'Failed', 'error');
+        showToast('Removed ' + (j.removed || []).length + ' duplicate(s)', 'success');
+        loadAdminCorpus();
+      } catch (e) { showToast('Failed: ' + e, 'error'); }
+    }
+
+    async function loadAdminVocabulary() {
+      const el = document.getElementById('vocabulary-canon');
+      el.innerHTML = '<div class="quality-empty">Loading…</div>';
+      try {
+        const v = await (await fetch('/admin/vocabulary')).json();
+        document.getElementById('vocabulary-cards').innerHTML =
+          qCard(((v.coverage || 0) * 100).toFixed(1) + '%', 'Clause rows mapped',
+                v.coverage >= 0.6 ? 'good' : 'warn') +
+          qCard((v.rows_mapped || 0).toLocaleString(), 'Rows with a canonical type') +
+          qCard((v.rows_total || 0).toLocaleString(), 'Clause rows total') +
+          qCard((v.by_canon || []).length, 'Canonical types in use');
+
+        el.innerHTML = qTable(
+          [{label: 'Canonical type'}, {label: 'Clauses', num: true}],
+          (v.by_canon || []).map(c => [
+            '<span class="q-pill">' + esc(c.canon) + '</span>', String(c.count)
+          ]), 'Nothing mapped yet — run the mapping.');
+
+        document.getElementById('vocabulary-unmapped').innerHTML = qTable(
+          [{label: 'Raw label'}, {label: 'Clauses', num: true}],
+          (v.top_unmapped || []).map(c => [
+            esc(c.clause_type), String(c.count)
+          ]), 'Every label is mapped.');
+      } catch (e) {
+        el.innerHTML = '<div class="quality-empty">Failed to load: ' + esc(String(e)) + '</div>';
+      }
+    }
+
+    async function adminBackfillVocabulary() {
+      try {
+        showToast('Re-mapping clause types…', 'info');
+        const r = await fetch('/admin/vocabulary', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+        });
+        const j = await r.json();
+        if (!r.ok) return showToast(j.error || 'Failed', 'error');
+        showToast('Mapped ' + j.rows_with_canon + ' of ' + j.rows_total + ' rows', 'success');
+        loadAdminVocabulary();
+      } catch (e) { showToast('Failed: ' + e, 'error'); }
+    }
+
+    async function adminCompareVocabulary() {
+      const el = document.getElementById('vocabulary-compare');
+      el.innerHTML = '<div class="quality-empty">Comparing…</div>';
+      try {
+        const d = await (await fetch('/admin/vocabulary/compare')).json();
+        if (d.error) { el.innerHTML = '<div class="quality-empty">' + esc(d.error) + '</div>'; return; }
+        el.innerHTML =
+          '<div class="admin-note"><strong>Keyword matcher vs canonical matcher</strong> across ' +
+          d.documents + ' document(s) and ' + d.rules + ' rule(s). ' +
+          'Keyword selected ' + d.keyword_selected + ' clause(s); canonical selected ' +
+          d.canon_selected + '. <strong>' + d.dropped_count + ' dropped</strong>, ' +
+          d.added_count + ' added' +
+          (d.unmapped_rules && d.unmapped_rules.length
+            ? '. <span class="q-pill fail">' + d.unmapped_rules.length + ' rule(s) unmapped</span> — these would select nothing.'
+            : '. No unmapped rules.') +
+          '<br><br>Dropped clauses are the carve-outs and notes a rule should never have assessed:' +
+          '<br>' + (d.dropped_by_type || []).map(t => '&nbsp;&nbsp;' + t[1] + ' × ' + esc(t[0])).join('<br>') +
+          '</div>';
+      } catch (e) {
+        el.innerHTML = '<div class="quality-empty">Failed: ' + esc(String(e)) + '</div>';
+      }
+    }
+
     async function loadPrompts() {
       const el = document.getElementById('admin-prompts-table');
       el.innerHTML = '<div class="admin-empty">Loading…</div>';

@@ -44,18 +44,22 @@ TIERS = ("scope", "pipeline", "graded")
 # abstention case passes when the answer carries one of these AND does not
 # then go on to assert a specific figure — checked separately, since a model
 # can hedge in one sentence and assert in the next.
-_ABSTAIN_MARKERS = (
-    "not established",
-    "not addressed",
-    "does not appear",
-    "no such clause",
-    "not stated",
-    "not specified",
-    "not found in",
-    "does not contain",
-    "cannot be determined",
-    "no information",
-    "not mentioned",
+# A regex rather than a substring list: the answer layer writes "does not
+# contain" and "do not contain" interchangeably depending on whether the
+# subject is one document or several, and an earlier substring list carrying
+# only the singular reported a correct abstention as an asserted answer. A
+# false failure in an abstention case is the worst kind this suite can
+# produce — it argues for loosening exactly the behaviour that should stay
+# strict.
+_RX_ABSTAIN = re.compile(
+    r"\bnot\s+(?:established|addressed|present|stated|specified|mentioned|covered|"
+    r"included|found)\b"
+    r"|\bdo(?:es)?\s+not\s+(?:contain|appear|include|address|specify|state|impose)\b"
+    r"|\bno\s+(?:such\s+)?(?:clause|provision|restriction|term|fee|cap|information)\b"
+    r"|\bcannot\s+be\s+determined\b"
+    r"|\bis\s+silent\s+(?:on|as\s+to)\b"
+    r"|\bnothing\s+in\s+the\s+(?:document|agreement|excerpts?)\b",
+    re.IGNORECASE,
 )
 
 
@@ -90,8 +94,7 @@ def _doc_matches(actual_docs: list[str], expected_fragment: str) -> bool:
 
 
 def _looks_abstained(answer: str) -> bool:
-    low = _norm(answer)
-    return any(m in low for m in _ABSTAIN_MARKERS)
+    return bool(_RX_ABSTAIN.search(answer or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +138,16 @@ def _run_pipeline(question: str, session_id: str) -> dict:
     """Drive the real query graph and return its terminal payload.
 
     Uses the same generator app.py's /query route uses, so a case exercises the
-    production path rather than a test-only reimplementation of it. A
-    disambiguation or clarification turn is a legitimate terminal state and is
-    returned as-is for the caller to assert on.
+    production path rather than a test-only reimplementation of it.
+
+    Terminal detection is by PAYLOAD, not by stage name. The graph emits
+    progress chunks that share their stage name with a terminal state —
+    `{"stage": "disambiguation", "status": "active", "message": "Checking
+    document scope…"}` is emitted on the way to a perfectly good answer, not
+    instead of one. An earlier version of this function broke on the stage name
+    alone and reported 8 of 9 cases as failing at disambiguation while the
+    pipeline was in fact answering all of them correctly. A stream event is
+    terminal when it carries the result, so that is what this waits for.
     """
     from services import intent_agent
     payload: dict = {}
@@ -145,11 +155,11 @@ def _run_pipeline(question: str, session_id: str) -> dict:
     for chunk in intent_agent.run_query_stream(
         question, session_id, exclude_cached_answers=True
     ):
-        if chunk.get("stage") in ("complete", "disambiguation", "clarification"):
-            kind = chunk.get("type") or chunk.get("stage") or ""
-            if isinstance(chunk.get("payload"), dict):
-                payload = chunk["payload"]
-            break
+        if not isinstance(chunk.get("payload"), dict):
+            continue
+        payload = chunk["payload"]
+        kind = chunk.get("type") or chunk.get("stage") or ""
+        break
     payload = dict(payload)
     payload["_terminal_kind"] = kind
     return payload
@@ -171,9 +181,12 @@ def _check_pipeline_case(case: dict, session_id: str) -> tuple[bool, list[str], 
 
     # A case that expects an answer but got a disambiguation prompt has failed
     # in a way worth naming explicitly — the pipeline didn't err, it declined
-    # to proceed, and that reads very differently in a results table.
+    # to proceed, and that reads very differently in a results table. Keyed on
+    # the terminal payload's own type, never on a stage name (see _run_pipeline).
     if payload.get("_terminal_kind") in ("disambiguation", "clarification"):
         failures.append(f"pipeline stopped at {payload['_terminal_kind']} instead of answering")
+    elif not payload:
+        failures.append("pipeline produced no terminal payload")
 
     if case.get("expect_abstain"):
         if not _looks_abstained(answer):
