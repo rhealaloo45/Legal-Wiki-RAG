@@ -2136,6 +2136,36 @@ def admin_analytics_trend():
         parties or None, request.args.get("doc_type") or None))
 
 
+@app.route("/admin/relations/traverse")
+def admin_relations_traverse():
+    """Bounded-hop traversal from one document.
+
+    `op` selects a named operation with its depth fixed at the call site —
+    chain (2 hops, version labels), related (1 hop, any label), cluster
+    (2 hops, any label). A raw `hops` value is accepted but still clamped to
+    the 3-hop ceiling, and the response says when that clamp applied.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "Database not configured"}), 400
+    from services import relations as _rel
+    sid = _regression_session_id()
+    if not sid:
+        return jsonify({"error": "No active wiki session"}), 400
+    doc = request.args.get("source_doc")
+    if not doc:
+        return jsonify({"error": "source_doc is required"}), 400
+    op = request.args.get("op", "related")
+    wiki_id = current_wiki_id()
+    if op == "chain":
+        return jsonify(_rel.find_amendment_chain(wiki_id, sid, doc))
+    if op == "cluster":
+        return jsonify(_rel.find_transaction_cluster(wiki_id, sid, doc))
+    if op == "related":
+        return jsonify(_rel.find_related_documents(wiki_id, sid, doc))
+    return jsonify(_rel.traverse(wiki_id, sid, doc,
+                                 max_hops=int(request.args.get("hops", 2))))
+
+
 @app.route("/admin/analytics/backfill_values", methods=["POST"])
 def admin_analytics_backfill_values():
     """Parse clause typed_value figures into comparable money columns."""
