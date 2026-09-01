@@ -2158,6 +2158,61 @@ _RX_COUNT_DOCTYPE = re.compile(
 )
 
 
+# --- Phase 4 analytics detectors ------------------------------------------
+# All three are narrow by construction. These branches answer from SQL with no
+# retrieval at all, so a false positive does not merely answer oddly — it
+# answers a document question with a corpus statistic. Each therefore requires
+# BOTH an operation word and a metric word, and the metric list is closed.
+_RX_AGG_METRIC = re.compile(
+    r"\b(?:liability\s+caps?|caps?\b|contract\s+values?|contract\s+prices?|"
+    r"total\s+values?|deal\s+values?)", re.IGNORECASE)
+_RX_AGG_OP = re.compile(
+    r"\b(?:total|sum|average|avg|mean|median|typical|highest|lowest|largest|"
+    r"smallest|aggregate|combined|across\s+all|how\s+much\s+in\s+total)\b",
+    re.IGNORECASE)
+# "what is the liability cap in X" is a document lookup, not an aggregate. An
+# operation word plus a singular document reference is still a lookup, so a
+# preposition naming one instrument vetoes the branch.
+_RX_AGG_VETO = re.compile(
+    r"\b(?:in|of|under|for)\s+(?:the|this|that|our)\s+"
+    r"(?:agreement|contract|msa|nda|document|deed|lease)\b"
+    r"|\bdated\b|\bclause\s+\d", re.IGNORECASE)
+
+_RX_GAP = re.compile(
+    r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,80}?"
+    r"\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
+    r"without|no|absent|fail\s+to)\b",
+    re.IGNORECASE)
+_RX_GAP_FIELD = re.compile(
+    r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?)\b",
+    re.IGNORECASE)
+
+_RX_TREND = re.compile(
+    r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend|trending|"
+    r"year[- ]on[- ]year|by\s+year|changed?\s+since|historically|"
+    r"getting\s+(?:longer|shorter|higher|lower|bigger|smaller))\b",
+    re.IGNORECASE)
+
+
+def _is_analytics_query(question: str) -> str:
+    """'aggregate' | 'gap' | 'trend' | '' — questions the normalised columns answer.
+
+    Checked before the document-oriented structural branches because these are
+    corpus-shaped questions: "what's the average liability cap across our
+    contracts" is not asking about any one document, and retrieval answering it
+    from whichever handful of pages it fetched would produce a confident
+    average over an arbitrary sample.
+    """
+    q = question or ""
+    if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
+        return "trend"
+    if _RX_GAP.search(q) and _RX_GAP_FIELD.search(q):
+        return "gap"
+    if _RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q) and not _RX_AGG_VETO.search(q):
+        return "aggregate"
+    return ""
+
+
 def _is_structural_query(question: str) -> str:
     """'cites' | 'cited_by' | 'amends' | 'count' | '' — questions the typed tables answer.
 
@@ -2181,6 +2236,107 @@ def _is_structural_query(question: str) -> str:
     if _RX_COUNT.search(q):
         return "count"
     return ""
+
+
+def _fmt_money(v, currency: str | None = None) -> str:
+    if v is None:
+        return "—"
+    cur = "" if not currency or currency == "unspecified" else f"{currency} "
+    return f"{cur}{v:,.0f}"
+
+
+def _analytics_answer(kind: str, question: str, session_id: str,
+                      wiki_id: str) -> dict | None:
+    """Answer an aggregate / gap / trend question from the normalised columns.
+
+    Every answer carries the coverage note the analytics layer produced. That
+    is not decoration: an average over the caps this corpus could parse is a
+    statement about those contracts, not about the corpus, and a reader shown
+    a bare figure will reasonably assume the latter.
+    """
+    from services import analytics, wiki as _wiki
+    parties = []
+    m = _RX_COUNT_PARTY.search(question or "")
+    if m:
+        raw = m.group(1).strip().rstrip(".,;:?")
+        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw) if len(p.strip()) > 2]
+
+    try:
+        if kind == "aggregate":
+            metric = ("contract_value"
+                      if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
+                      else "liability_cap")
+            data = (analytics.aggregate_contract_values(wiki_id, session_id, parties)
+                    if metric == "contract_value"
+                    else analytics.aggregate_liability_caps(wiki_id, session_id, parties))
+            if data.get("error") or not data.get("by_currency"):
+                return None
+            label = "contract value" if metric == "contract_value" else "liability cap"
+            scope_txt = f" for {' and '.join(parties)}" if parties else ""
+            lines = [f"**{label.title()} across the corpus{scope_txt}**", ""]
+            for c in data["by_currency"]:
+                n = c.get("contracts") or c.get("documents")
+                lines.append(f"- **{c['currency']}** — {n} document(s)")
+                lines.append(f"  - Total: {_fmt_money(c['sum'], c['currency'])}")
+                if c.get("median") is not None:
+                    lines.append(f"  - Median: {_fmt_money(c['median'], c['currency'])}")
+                lines.append(f"  - Mean: {_fmt_money(c['mean'], c['currency'])}")
+                lines.append(f"  - Range: {_fmt_money(c['min'], c['currency'])} to "
+                             f"{_fmt_money(c['max'], c['currency'])}")
+            if data.get("mixed_currency"):
+                lines += ["", "Reported per currency and deliberately not converted or "
+                              "combined — a single total across currencies would be wrong "
+                              "in each of them."]
+            lines += ["", f"*{data['coverage']}*"]
+            payload = _canned_payload("\n".join(lines), "Aggregate", "structured-analytics")
+
+        elif kind == "gap":
+            field = ("governing_law" if re.search(r"governing\s+law", question or "", re.I)
+                     else "termination" if re.search(r"terminat", question or "", re.I)
+                     else "liability_cap")
+            data = analytics.find_gaps(wiki_id, session_id, field, parties)
+            if data.get("error"):
+                return None
+            lines = [f"**{data['missing']} document(s) state no {data['label']}.**", ""]
+            for d in data["documents"][:20]:
+                date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+                lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])}{date}")
+            if data["truncated"]:
+                lines.append(f"- …and {data['missing'] - len(data['documents'])} more")
+            lines += ["", f"*{data['note']}*"]
+            if data["indeterminate"]:
+                lines.append("")
+                lines.append("The indeterminate documents are excluded from the list above "
+                             "on purpose: reporting a contract as uncapped when its cap is "
+                             "recorded in a schedule would be a worse error than omitting it.")
+            payload = _canned_payload("\n".join(lines), "Gap analysis", "structured-analytics")
+
+        elif kind == "trend":
+            metric = ("contract_value"
+                      if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
+                      else "liability_cap")
+            data = analytics.trend_over_time(wiki_id, session_id, metric, parties)
+            if data.get("error") or not data.get("buckets"):
+                return None
+            label = "contract value" if metric == "contract_value" else "liability cap"
+            head = (f"**{label.title()} by year — {data['direction']}**"
+                    if data.get("direction") else f"**{label.title()} by year**")
+            lines = [head, "", "| Year | Documents | With a readable value | Median |",
+                     "| --- | --- | --- | --- |"]
+            for b in data["buckets"]:
+                med = _fmt_money(b["median"]) if b["median"] is not None else "—"
+                lines.append(f"| {b['year']} | {b['documents']} | {b['with_value']} | {med} |")
+            lines += ["", f"*{data['note']}*"]
+            payload = _canned_payload("\n".join(lines), "Trend", "structured-analytics")
+        else:
+            return None
+    except Exception as e:
+        logger.error("[AGENT] analytics fast-path (%s) failed: %s", kind, e)
+        return None
+
+    payload["meta_answer"] = False
+    payload["files_used"] = []
+    return payload
 
 
 def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
@@ -3200,6 +3356,25 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # Citation and amendment questions are answered by a SQL join over the
     # typed tables rather than by retrieval, which ranks documents ABOUT the
     # subject above the ones actually carrying the citation.
+    # Corpus-shaped analytics (aggregate / gap / trend) — checked before the
+    # document-oriented structural paths, since "the average liability cap
+    # across our contracts" is about the corpus, not about any one document,
+    # and retrieval would answer it from whatever sample it happened to fetch.
+    if not is_followup:
+        _akind = _is_analytics_query(question)
+        if _akind:
+            from services import wikis as _wikis_a
+            try:
+                _a = _analytics_answer(_akind, question, session_id, _wikis_a.active_wiki_id())
+            except Exception as _a_err:
+                logger.error("[AGENT] analytics fast-path failed: %s", _a_err)
+                _a = None
+            if _a:
+                logger.info("[AGENT] analytics fast-path (%s): %r", _akind, (question or "")[:70])
+                yield {"stage": "complete", "status": "done", "type": "answer",
+                       "payload": _a, "message": "Done"}
+                return
+
     if not is_followup:
         _kind = _is_structural_query(question)
         if _kind:

@@ -3897,6 +3897,88 @@ def compare_regression_runs(run_a: int, run_b: int) -> dict:
     return out
 
 
+def _init_clause_value_columns(conn, text) -> None:
+    """Normalised money on `clauses` (§ Phase 4).
+
+    Same status-beside-value contract as contracts/obligations: a clause whose
+    typed_value holds a figure gets an amount, and one that does not gets an
+    explicit status rather than a NULL that an aggregate would silently skip
+    without saying so.
+    """
+    conn.execute(text("ALTER TABLE clauses ADD COLUMN IF NOT EXISTS value_amount NUMERIC"))
+    conn.execute(text("ALTER TABLE clauses ADD COLUMN IF NOT EXISTS value_currency TEXT"))
+    conn.execute(text("ALTER TABLE clauses ADD COLUMN IF NOT EXISTS value_status TEXT"))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS clauses_value_idx
+        ON clauses (wiki_id, session_id, clause_type_canon, value_amount)
+        WHERE value_amount IS NOT NULL
+    """))
+
+
+def backfill_clause_values(wiki_id: str, session_id: str | None = None,
+                           dry_run: bool = False) -> dict:
+    """Parse clauses.typed_value into comparable money columns.
+
+    The corpus stores the same concept under several invented key names —
+    {'total': 'Rs. 9,284,268,071'}, {'total_value': 'Rs. 4,085,376,476'} — so
+    this looks for any of them rather than one canonical key, and falls back to
+    the clause's own verbatim text when typed_value carries no figure.
+    """
+    from sqlalchemy import text
+    from services import normalize
+    import json as _json
+    engine = get_engine()
+    where = "wiki_id = :w" + (" AND session_id = :sid" if session_id else "")
+    params: dict = {"w": wiki_id}
+    if session_id:
+        params["sid"] = session_id
+
+    # Keys the extraction has actually used for a monetary total, in priority
+    # order. Anything else falls through to the verbatim text.
+    money_keys = ("total", "total_value", "value", "amount", "consideration",
+                  "contract_value", "price", "payment_value")
+
+    with engine.connect() as conn:
+        _init_clause_value_columns(conn, text)
+        conn.commit()
+        rows = conn.execute(text(
+            f"SELECT id, typed_value, verbatim_text FROM clauses WHERE {where}"
+            f" AND clause_type_canon IN ('contract_value', 'fees', 'liability_cap')"
+        ), params).fetchall()
+
+        stats: dict[str, int] = {}
+        for cid, typed, verbatim in rows:
+            raw = None
+            if isinstance(typed, dict):
+                for k in money_keys:
+                    if typed.get(k) is not None:
+                        raw = typed[k]
+                        break
+            elif isinstance(typed, str) and typed.strip().startswith("{"):
+                try:
+                    d = _json.loads(typed)
+                    for k in money_keys:
+                        if d.get(k) is not None:
+                            raw = d[k]
+                            break
+                except Exception:
+                    pass
+            if raw is None:
+                raw = verbatim
+            parsed = normalize.parse_money(raw)
+            stats[parsed["status"]] = stats.get(parsed["status"], 0) + 1
+            if not dry_run:
+                conn.execute(text("""
+                    UPDATE clauses SET value_amount = :a, value_currency = :c,
+                                       value_status = :s
+                     WHERE id = :id
+                """), {"a": parsed["amount"], "c": parsed["currency"],
+                       "s": parsed["status"], "id": cid})
+        if not dry_run:
+            conn.commit()
+    return {"dry_run": dry_run, "rows": len(rows), "by_status": stats}
+
+
 def _init_normalized_columns(conn, text) -> None:
     """Normalised value columns (§ Phase 3.5c), added beside the raw fields.
 
