@@ -149,8 +149,9 @@ def build(wiki_id: str, session_id: str, dry_run: bool = False) -> dict:
 
         conn.execute(text("DELETE FROM defined_terms WHERE wiki_id=:w AND session_id=:sid"),
                      {"w": wiki_id, "sid": session_id})
+        inserted = 0
         for f in found:
-            conn.execute(text("""
+            r = conn.execute(text("""
                 INSERT INTO defined_terms
                     (wiki_id, session_id, source_doc, term, term_key, definition,
                      clause_id, page_num)
@@ -159,12 +160,20 @@ def build(wiki_id: str, session_id: str, dry_run: bool = False) -> dict:
             """), {"w": wiki_id, "sid": session_id, "d": f["source_doc"],
                    "t": f["term"], "k": f["term_key"], "def": f["definition"],
                    "cid": f["clause_id"], "p": f["page_num"]})
+            inserted += r.rowcount or 0
         conn.commit()
 
         refs = _link_references(conn, text, wiki_id, session_id)
 
+    # `found` can attempt two inserts for the same (source_doc, term_key) — a
+    # document with both a combined "Definitions" clause and a standalone
+    # "Definition - X" clause defining the same term produces exactly that —
+    # and ON CONFLICT DO NOTHING drops the second silently. `len(found)` is
+    # the attempt count, not what persisted; an earlier version returned that
+    # as `terms_stored` and reported 3,443 in one commit message when the
+    # table actually held 2,537 rows. `inserted` is the real number.
     return {"dry_run": False, "definition_clauses": len(rows),
-            "terms_stored": len(found),
+            "terms_attempted": len(found), "terms_stored": inserted,
             "distinct_terms": len({f["term_key"] for f in found}),
             "references_linked": refs}
 
