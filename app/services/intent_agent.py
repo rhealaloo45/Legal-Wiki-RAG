@@ -2213,8 +2213,20 @@ def _is_analytics_query(question: str) -> str:
     return ""
 
 
+# Version-chain questions — answered by a bounded 2-hop traversal rather than
+# the single-hop amends lookup, since a chain is commonly original → amendment
+# → further amendment and one hop shows only the middle of it.
+_RX_CHAIN = re.compile(
+    r"\b(?:amendment\s+(?:chain|history|trail)|version\s+(?:chain|history)|"
+    r"full\s+(?:chain|history)\s+of|chain\s+of\s+amendments?|"
+    r"all\s+(?:the\s+)?amendments?\s+(?:to|of)|"
+    r"(?:complete|entire)\s+(?:amendment|version))\b",
+    re.IGNORECASE,
+)
+
+
 def _is_structural_query(question: str) -> str:
-    """'cites' | 'cited_by' | 'amends' | 'count' | '' — questions the typed tables answer.
+    """'cites' | 'cited_by' | 'amends' | 'chain' | 'count' | '' — typed-table questions.
 
     Citation and amendment links are single lines inside documents that are
     otherwise about unrelated subjects, so embedding the question ranks the
@@ -2228,6 +2240,11 @@ def _is_structural_query(question: str) -> str:
         return "cites"
     if _RX_CITED_BY.search(q):
         return "cited_by"
+    # Chain before the single-hop amends branch: "the full amendment history"
+    # wants the whole version chain, and answering it one hop deep would show
+    # the first amendment while omitting the one that superseded it.
+    if _RX_CHAIN.search(q):
+        return "chain"
     if _RX_AMENDS.search(q):
         return "amends"
     # Checked last: an amendment question phrased as "how many documents amend
@@ -2449,10 +2466,31 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         if kind == "count":
             return _count_answer(question, session_id, wiki_id)
 
-        # cited_by / amends both need the document the question is about.
+        # cited_by / amends / chain all need the document the question is about.
         anchor = _resolve_anchor_doc(question, session_id, wiki_id)
         if not anchor:
             return None
+
+        if kind == "chain":
+            from services import relations as _rel
+            chain = _rel.find_amendment_chain(wiki_id, session_id, anchor)
+            if chain.get("error") or not chain.get("documents"):
+                return None
+            lines = [f"**Version chain for {wiki._norm_doc_name(anchor)}**", ""]
+            for d in chain["documents"]:
+                hop = "directly" if d["hops"] == 1 else f"{d['hops']} steps away"
+                lines.append(f"- {d['name']} — linked {hop}")
+            if chain["edges"]:
+                lines += ["", "Links:"]
+                for e in chain["edges"][:12]:
+                    lines.append(f"- {wiki._norm_doc_name(e['from'])} "
+                                 f"*{e['label']}* {wiki._norm_doc_name(e['to'])}")
+            lines += ["", f"*{chain['note']} Read from the recorded document "
+                          f"relationships, not from a text search.*"]
+            payload = _canned_payload("\n".join(lines), "Version chain", "relation-graph")
+            payload["files_used"] = [anchor] + [d["source_doc"] for d in chain["documents"]]
+            payload["meta_answer"] = False
+            return payload
 
         if kind == "cited_by":
             auths = _db.get_authorities_cited(wiki_id, session_id, anchor)
