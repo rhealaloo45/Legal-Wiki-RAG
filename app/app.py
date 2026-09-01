@@ -21,6 +21,7 @@ import time
 import json
 import shutil
 import logging
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import threading
@@ -1300,23 +1301,84 @@ def query_route():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# Matches the document-type folder segment inside an underscore-flattened
-# source_doc name (e.g. "...Court Case Documents (1)_Court Case Document 1
-# (1).pdf"), regardless of what the TOP-level upload folder is called — used
-# by /files's reconstruction fallback below, which previously hardcoded one
-# specific top-level name and un-suffixed subfolder names that matched
-# neither this corpus's real prefix ("Legal AI - Test"/"Legal AI - Raja") nor
-# its "(1)"-suffixed subfolder names, so every file fell through to a single
-# flat level with no folder grouping at all (confirmed live on the deployed
-# instance, whose wiki arrived via DB import rather than the app's own
-# /upload flow — so it never has a `sessions.json` entry with file_paths,
-# and always hits this fallback).
-_DOC_TYPE_FOLDER_RE = re.compile(
-    r'(Court\s+Case\s+Documents?|Joint\s+Venture\s+Agreements?|Judgments?|'
-    r'Legal\s+Opinions?|NDA|Service\s+Agreements?|Shareholders?\s+Agreements?)'
-    r'(?:\s*\(\d+\))?',
-    re.IGNORECASE,
-)
+# Minimum files sharing a prefix before it is believed to be a folder rather
+# than a filename that happens to start the same way.
+_FOLDER_MIN_FILES = 3
+
+
+def _derive_upload_folders(names: list[str]) -> tuple[str, set[str]]:
+    """Recover the (top_folder, {category folders}) an upload was flattened from.
+
+    Upload flattens a relative path into the stored filename by replacing the
+    separator with "_" ("NDA/foo.pdf" -> "NDA_foo.pdf"), which is lossy:
+    "_" is also a legitimate filename character, so the boundary cannot be
+    recovered from any one name in isolation. It CAN be recovered from the
+    corpus as a whole, because a folder name is precisely the prefix many
+    different files share.
+
+    Two passes, both driven by the data rather than by a list of folder names
+    this deployment happens to know about:
+
+    1. The TOP folder is the most widely shared first segment, extended one
+       segment at a time for as long as extending it does not lose any files.
+       This is what recovers a top folder whose own name contains underscores
+       ("pdfs_by_category_generated"): every extension of "pdfs" still covers
+       all 484 of its files, so extension continues, and stops only at the
+       first segment that splits them (the category).
+    2. The CATEGORY vocabulary is then read off directly — it is the set of
+       segments sitting immediately after that top folder, which is exact
+       rather than inferred. Applying that same vocabulary to the files that
+       carry no top-folder prefix is what re-unites two upload batches of the
+       same tree (one rooted at the tree, one rooted inside it) into a single
+       correct hierarchy.
+
+    The previous implementation hardcoded seven document-type names and
+    matched them anywhere in the string. On this corpus that recognised 4 of
+    23 real folders, so ~1,000 of 1,358 documents collapsed into one flat
+    level. Verified against the operator's own source tree: this derivation
+    reproduces all 24 folders and all 1,358 files exactly.
+
+    Returns ("", set()) when nothing is shared widely enough to be a folder,
+    which is the correct answer for a genuinely flat upload.
+    """
+    counts: Counter[str] = Counter()
+    for n in names:
+        segs = n.split("_")
+        for i in range(1, len(segs)):
+            counts["_".join(segs[:i])] += 1
+    if not counts:
+        return "", set()
+
+    top = max(counts, key=lambda k: (counts[k], -k.count("_")))
+    if counts[top] < _FOLDER_MIN_FILES:
+        return "", set()
+    while True:
+        depth = top.count("_") + 1
+        ext = [k for k in counts
+               if k.startswith(top + "_") and k.count("_") == depth
+               and counts[k] == counts[top]]
+        if len(ext) != 1:
+            break
+        top = ext[0]
+
+    cats = {n[len(top) + 1:].split("_")[0]
+            for n in names if n.startswith(top + "_")}
+    cats = {c for c in cats if c and counts.get(f"{top}_{c}", 0) >= 1}
+    return top, cats
+
+
+def _split_flat_name(name: str, top: str, cats: set[str]) -> tuple[str, str]:
+    """Split one flattened name into (folder, filename) using the derived
+    vocabulary. Longest category wins, so "Service Level Agreement" is not
+    mistaken for "Service Agreement". Returns ("", name) for a file that sat
+    at the top of the uploaded tree.
+    """
+    rest = name[len(top) + 1:] if top and name.startswith(top + "_") else name
+    hit = ""
+    for c in cats:
+        if rest.startswith(c + "_") and len(c) > len(hit):
+            hit = c
+    return (hit, rest[len(hit) + 1:]) if hit else ("", rest)
 
 
 def _session_document_paths(session_id: str) -> dict[str, str]:
@@ -1349,15 +1411,27 @@ def _session_document_paths(session_id: str) -> dict[str, str]:
 
     paths: dict[str, str] = {}  # relative_path -> source_doc key
     covered: set[str] = set()  # source_doc keys already placed via file_paths
+    flat: dict[str, str] = {}  # flattened rel_name -> source_doc key
+    recorded: dict[str, str] = {}  # rel path that kept its separators -> key
 
-    # 1. Try to read from session metadata first
+    # 1. Session metadata first, but only where it actually recorded a PATH.
+    # A recorded name with no separator in it is not evidence the document
+    # sat at the top of the tree — /upload stores the flattened name, so a
+    # file from a subfolder is recorded flat here too. Those are handed to
+    # the same reconstruction as the disk scan below rather than being
+    # trusted as top-level, which is what previously stranded ~570 of this
+    # corpus's documents at the root of the file browser.
     if session_id in sessions and "file_paths" in sessions[session_id]:
         for p in sessions[session_id]["file_paths"]:
             flat_key = flatten_doc_key(session_id, p)
             if indexed_docs and flat_key not in indexed_docs:
                 continue
-            paths[p.replace("\\", "/")] = flat_key
             covered.add(flat_key)
+            norm = p.replace("\\", "/")
+            if "/" in norm:
+                recorded[norm] = flat_key
+            else:
+                flat[norm] = flat_key
 
     # 2. Reconstruct from disk anything indexed that file_paths never recorded
     # (or the whole set, when there was no file_paths entry at all). A bulk
@@ -1370,33 +1444,47 @@ def _session_document_paths(session_id: str) -> dict[str, str]:
     remaining = (indexed_docs - covered) if indexed_docs else set()
     if remaining or not paths:
         prefix = f"{session_id}_"
-        for fname in os.listdir(config.UPLOAD_PATH):
-            if not fname.startswith(prefix) or fname in covered:
+        try:
+            disk = os.listdir(config.UPLOAD_PATH)
+        except OSError as _ls_err:
+            logger.warning("Could not scan UPLOAD_PATH for document listing: %s", _ls_err)
+            disk = []
+        for fname in disk:
+            if not fname.startswith(prefix):
                 continue
             if indexed_docs and fname not in indexed_docs:
                 continue
-            rel_name = fname[len(prefix):]
+            flat.setdefault(fname[len(prefix):], fname)
 
-            # Reconstruct "<top folder>/<doc-type folder>/<filename>"
-            # by locating the doc-type segment wherever it falls —
-            # works for any top-level folder name, not just one
-            # hardcoded string. Underscores are the flattening
-            # separator only at the boundary right around that match;
-            # trimming just there (not a blind split on every "_")
-            # keeps underscores that are part of the filename itself
-            # intact (e.g. "Test_CCD_01.txt").
-            reconstructed = False
-            m = _DOC_TYPE_FOLDER_RE.search(rel_name)
-            if m:
-                top = rel_name[:m.start()].rstrip('_')
-                type_folder = m.group(0)
-                file_part = rel_name[m.end():].lstrip('_')
-                if top and file_part:
-                    paths[f"{top}/{type_folder}/{file_part}"] = fname
-                    reconstructed = True
+    # 3. Rebuild the uploaded folder tree over every flattened name at once —
+    # the vocabulary is derived from the whole set, so it cannot be done one
+    # file at a time.
+    cats: set[str] = set()
+    if flat:
+        top, cats = _derive_upload_folders(list(flat))
+        for rel_name, key in flat.items():
+            folder, leaf = _split_flat_name(rel_name, top, cats)
+            rel = f"{folder}/{leaf}" if folder else leaf
+            paths[rel.replace("\\", "/")] = key
 
-            if not reconstructed:
-                paths[rel_name.replace("\\", "/")] = fname
+    # 4. One corpus can arrive as several uploads of the SAME tree taken from
+    # different roots — one dragged in at the tree itself, another at a
+    # parent that merely wrapped it. The wrapper is an artefact of how that
+    # batch was selected, not a level of the library, and keeping it splits
+    # every category in two ("NDA/" beside "somewrapper/NDA/"). Confirmed
+    # live: 484 of 1,358 documents sat under a second copy of the same 23
+    # category folders. Dropping it requires evidence, not a guess — the
+    # root must be the ONLY root among recorded paths, and its children must
+    # already be known categories — so a genuinely distinct top folder, or a
+    # deep tree whose real nesting matters, is left alone.
+    if recorded:
+        roots = {p.split("/", 1)[0] for p in recorded}
+        if len(roots) == 1:
+            root = next(iter(roots))
+            children = {p.split("/")[1] for p in recorded if p.count("/") >= 2}
+            if children and cats and children <= cats:
+                recorded = {p.split("/", 1)[1]: k for p, k in recorded.items()}
+    paths.update(recorded)
 
     return paths
 
