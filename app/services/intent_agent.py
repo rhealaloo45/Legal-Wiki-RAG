@@ -2664,6 +2664,188 @@ _RX_CLAUSE_PRECEDENT = re.compile(
 )
 
 
+# Playbook compliance, asked conversationally (Phase 3.5c). Playbooks have only
+# ever run as a batch job from Admin over a whole collection, producing a
+# deviation dashboard. The question a lawyer actually asks - "is this NDA in
+# satisfaction of our company rules" - reached ordinary retrieval instead,
+# which reads the document back to them without ever consulting the house
+# position it is supposed to be measured against.
+#
+# Needs BOTH halves to fire: a compliance verb AND a reference to the house
+# standard. "Does this comply with the MSA" is a question about the MSA, not
+# about a playbook, and must not be intercepted.
+_RX_COMPLIANCE_VERB = re.compile(
+    r"\b(?:comply|complies|compliant|compliance|conform(?:s|ing)?|"
+    r"in\s+satisfaction\s+of|satisf(?:y|ies|ying)|adhere(?:s|nce)?|"
+    r"meet(?:s|ing)?|align(?:s|ed|ment)?|consistent\s+with|in\s+line\s+with|"
+    r"deviat(?:e|es|ion|ions)|acceptable\s+(?:under|per)|"
+    r"(?:review|check|assess|vet)\s+(?:this|it|the)?\s*\w*\s*against)\b",
+    re.IGNORECASE,
+)
+_RX_HOUSE_STANDARD = re.compile(
+    r"\b(?:playbook|house\s+(?:position|standard|style|rules?)|"
+    r"(?:our|company|firm|internal|standard|approved)\s+"
+    r"(?:rules?|standards?|positions?|policy|policies|guidelines?|templates?|"
+    r"requirements?|terms?|precedent)|"
+    r"fallback\s+positions?|standard\s+terms?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_compliance_query(question: str) -> bool:
+    """"Does this document meet our house position?" - a playbook question.
+
+    Deliberately conjunctive. The compliance verbs alone are far too common in
+    ordinary contract questions ("does the supplier comply with Applicable
+    Law", "which milestones did they meet"), and intercepting one of those
+    would replace a real answer with a playbook report about a rule the
+    question never mentioned.
+    """
+    q = question or ""
+    return bool(_RX_COMPLIANCE_VERB.search(q) and _RX_HOUSE_STANDARD.search(q))
+
+
+def _pick_playbook(question: str, wiki_id: str):
+    """Resolve which playbook a compliance question means.
+
+    Named outright wins; a single playbook in the wiki is unambiguous on its
+    own; anything else is genuinely ambiguous and returns the candidate list
+    so the caller can ask rather than guess - running the wrong house position
+    produces a deviation report that reads as authoritative and is not.
+    """
+    from services import playbooks as _pb
+    try:
+        books = _pb.list_all(wiki_id)
+    except Exception as e:
+        logger.error("Playbook lookup failed: %s", e)
+        return None, []
+    if not books:
+        return None, []
+    q = (question or "").lower()
+    named = [b for b in books if b.get("name") and b["name"].lower() in q]
+    if len(named) == 1:
+        return _pb.get(wiki_id, named[0]["id"]), books
+    if len(books) == 1:
+        return _pb.get(wiki_id, books[0]["id"]), books
+    return None, books
+
+
+_VERDICT_LABEL = {
+    "standard": "Meets the house position",
+    "fallback": "Falls back - acceptable but not preferred",
+    "unacceptable": "Outside the house position",
+    "missing": "Clause absent from the document",
+    "unclear": "Could not be assessed",
+}
+_VERDICT_ORDER = ["unacceptable", "missing", "fallback", "unclear", "standard"]
+
+
+def _compliance_answer(question: str, session_id: str, wiki_id: str,
+                       docs: list, ask=None) -> dict | None:
+    """Measure the in-scope document(s) against a playbook, clause by clause.
+
+    Returns None (so ordinary retrieval still runs) whenever the question
+    cannot be answered honestly: no playbook, no document in scope, or a
+    playbook that produced no findings at all. A compliance report is acted
+    on, so an empty or half-resolved one is worse than no report.
+    """
+    from services import playbooks as _pb
+    book, candidates = _pick_playbook(question, wiki_id)
+    if not book and not candidates:
+        # No house position exists in this wiki at all. Ordinary retrieval is
+        # genuinely the best available answer, so fall through to it.
+        return None
+    if not docs:
+        # A playbook exists but scope could not pin an instrument — commonly a
+        # whole family ("the NDAs", 148 documents). Assessing an arbitrary
+        # handful of them would read as a verdict on the document the user
+        # meant, and falling through answers a compliance question from
+        # ordinary retrieval, which has no access to the house position at
+        # all. Ask instead.
+        return _canned_payload(
+            "I can measure a document against the house position, but this "
+            "question does not narrow to one.\n\nName the document (or pin a "
+            "collection above the message box) and ask again.",
+            "Compliance", "playbook-needs-document")
+    if not book:
+        if len(candidates) > 1:
+            names = ", ".join('"%s"' % b["name"] for b in candidates[:8])
+            return _canned_payload(
+                "This wiki has more than one playbook, and the question does not "
+                "say which house position to measure against: " + names + ".\n\n"
+                "Name the playbook in the question and I will run it over "
+                + wiki._norm_doc_name(docs[0]) + ".",
+                "Compliance", "playbook-ambiguous")
+        return None
+    if not book.get("rules"):
+        return None
+
+    # Capped deliberately. A run costs one fast classification per clause per
+    # rule, and a compliance question asked in chat is about the document in
+    # front of the lawyer - a whole collection belongs in the Admin batch run,
+    # which reports progress and stores its results.
+    docs = list(docs)[:3]
+    try:
+        run_id = _pb.run(wiki_id, session_id, book["id"], docs, ask=ask)
+        result = _pb.get_run(wiki_id, run_id, with_findings=True)
+    except Exception as e:
+        logger.error("Compliance run failed: %s", e)
+        return None
+    findings = (result or {}).get("findings") or []
+    if not findings:
+        return None
+
+    by_verdict = {}
+    for f in findings:
+        by_verdict.setdefault(f.get("verdict") or "unclear", []).append(f)
+    breaches = len(by_verdict.get("unacceptable", [])) + len(by_verdict.get("missing", []))
+
+    names = ", ".join(wiki._norm_doc_name(d) for d in docs)
+    lines = ['**%s measured against the "%s" playbook**' % (names, book["name"]), ""]
+    counts = ", ".join("%d %s" % (len(by_verdict[v]), v)
+                       for v in _VERDICT_ORDER if by_verdict.get(v))
+    lines.append("%d rule check(s) across %d document(s): %s."
+                 % (len(findings), len(docs), counts))
+    lines.append("")
+    lines.append("**No** - this does not fully meet the house position."
+                 if breaches else
+                 "**Yes** - nothing falls outside the house position.")
+    lines.append("")
+
+    for verdict in _VERDICT_ORDER:
+        rows = by_verdict.get(verdict)
+        if not rows:
+            continue
+        lines.append("### " + _VERDICT_LABEL.get(verdict, verdict.title()))
+        for f in rows:
+            doc = wiki._norm_doc_name(f.get("source_doc") or "")
+            lines.append("- **%s** - %s" % (f.get("clause_type"), doc))
+            if f.get("rationale"):
+                lines.append("  - " + str(f["rationale"]))
+            if f.get("redline"):
+                lines.append("  - Suggested redline: " + str(f["redline"]))
+            # A verdict reached against text that is not really in the stored
+            # clause is what the dashboard's `grounded` flag exists to
+            # separate, so it is surfaced here too rather than read as fact.
+            if f.get("grounded") is False:
+                lines.append("  - [warning] assessed text could not be matched to "
+                             "the stored clause - treat this verdict as unverified")
+        lines.append("")
+
+    lines.append('Rules come from the "%s" playbook, not from the document. '
+                 "Full results are in Admin > Deviation Dashboard (run %s)."
+                 % (book["name"], run_id))
+
+    payload = _canned_payload("\n".join(lines), "Compliance", "playbook-compliance")
+    payload["meta_answer"] = False
+    payload["files_used"] = docs
+    # Scope IS resolved here, so the next turn may inherit it - unlike a true
+    # canned reply, this answer really is about these documents.
+    payload["scope_method"] = "playbook-compliance"
+    payload["scope_docs"] = docs
+    return payload
+
+
 def _is_clause_precedent_query(question: str) -> bool:
     """"Have we agreed to this kind of term before, and what did we do?"
 
@@ -3521,6 +3703,33 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
             logger.info("[AGENT] clause-precedent fast-path: %r", (question or "")[:70])
             yield {"stage": "complete", "status": "done", "type": "answer",
                    "payload": _cprec, "message": "Done"}
+            return
+
+    # Playbook compliance. Unlike every other fast path this one needs the
+    # document scope first — "is this NDA in satisfaction of our rules" is
+    # about a specific instrument — so it resolves scope itself rather than
+    # keying off the question alone. resolve_scope costs no LLM call, and the
+    # fallthrough path re-resolves it inside the graph, so a miss here is
+    # cheap and leaves ordinary retrieval completely unchanged.
+    if not is_followup and _is_compliance_query(question):
+        from services import wikis as _wikis_c
+        try:
+            _wid_c = _wikis_c.active_wiki_id()
+            _scope_c = wiki.resolve_scope(question, session_id,
+                                          chat_session_id=chat_session_id or session_id)
+            _scope_c = _apply_collection_scope(_scope_c, collection_id)
+            _docs_c = (_scope_c.get("target_docs") or []
+                       if _scope_c.get("scope") == "single_doc" else [])
+            if target_doc:
+                _docs_c = [target_doc]
+            _comp = _compliance_answer(question, session_id, _wid_c, _docs_c)
+        except Exception as _c_err:
+            logger.error("[AGENT] compliance fast-path failed: %s", _c_err)
+            _comp = None
+        if _comp:
+            logger.info("[AGENT] playbook-compliance fast-path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _comp, "message": "Done"}
             return
 
     # Meta questions short-circuit before the graph — no classify, no retrieve,
