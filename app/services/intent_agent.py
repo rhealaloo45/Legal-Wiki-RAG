@@ -1304,14 +1304,44 @@ def _extract_claims(text: str) -> list[str]:
     return claims
 
 
+def _norm_claim_text(text: str) -> str:
+    """Flatten a claim or the context so only real differences survive.
+
+    Punctuation was previously stripped on the claim but only partly, and
+    unevenly between the two sides, so an apostrophe alone could sink a claim:
+    an answer citing "The Shareholders' Agreement" scored ungrounded against a
+    context whose own page title reads "Shareholders Agreement". That is not a
+    fabrication, it is a typographic difference, and it dragged the grounding
+    score on answers whose every substantive line was a verbatim quote — the
+    reported 50% next to "3 of 3 claims verified" on an answer that was
+    entirely correct.
+
+    Curly quotes, apostrophes and hyphens are the three that matter here:
+    documents and answers disagree about all of them constantly, and none of
+    the three carries meaning a grounding check should be sensitive to.
+    """
+    t = (text or "").lower()
+    t = t.replace("’", "'").replace("‘", "'")
+    t = t.replace("“", '"').replace("”", '"')
+    t = re.sub(r"[‐-―]", "-", t)
+    t = re.sub(r"['\"]", "", t)
+    t = re.sub(r"[-/]", " ", t)
+    t = re.sub(r"[,.;:]", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 def _claim_grounded(claim: str, context_norm: str) -> bool:
     """Normalize and substring-match a single claim against the flattened
     context. Exact-enough for numbers/dates; good-enough for proper nouns
     (a real fabrication swaps the name/number outright, it doesn't just
     reformat whitespace)."""
-    norm = re.sub(r'\s+', ' ', claim.strip().lower())
-    norm = re.sub(r'[,.]', '', norm)
-    return norm in context_norm
+    norm = _norm_claim_text(claim)
+    # A leading article belongs to the sentence, not to the thing named.
+    # "The Shareholders' Agreement" was scored ungrounded against a context
+    # reading "... for Cause - Shareholders Agreement", on the strength of a
+    # word that carries no fact.
+    norm = re.sub(r"^(?:the|a|an)\s+", "", norm)
+    return bool(norm) and norm in context_norm
 
 
 def _deterministic_grounding(context: str, answer: str) -> dict:
@@ -1327,8 +1357,8 @@ def _deterministic_grounding(context: str, answer: str) -> dict:
                  "No checkable factual claims (amounts/dates/names) found in answer.",
                  "total_claims": 0, "method": "deterministic"}
 
-    context_norm = re.sub(r'\s+', ' ', context.lower())
-    context_norm = re.sub(r'[,.]', '', context_norm)
+    # Same normalisation on both sides — see _norm_claim_text.
+    context_norm = _norm_claim_text(context)
     ungrounded = [c for c in claims if not _claim_grounded(c, context_norm)]
     score = round(100 * (len(claims) - len(ungrounded)) / len(claims))
     return {
