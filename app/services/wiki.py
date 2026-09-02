@@ -4261,6 +4261,112 @@ def _append_milestone_total(answer: str, context: str, question: str) -> str:
             f"({pct_sum:.0f}% of contract value).")
 
 
+# Only long enumerations are touched. A five-item list repeating a word is
+# almost certainly saying something; a fifty-item list repeating one is padding.
+_MIN_LIST_FOR_DEDUPE = 8
+
+# Trailing qualifiers the answer layer adds when it re-lists a provision it has
+# already listed: "Set-Off (repeat / Schedule 1 operational rule)", "Records
+# Retention (repeat emphasis)", "Audit and Cost Allocation specifics".
+_RX_LIST_LABEL_NOISE = re.compile(
+    r"\b(?:repeat(?:ed|s)?|repetition|again|duplicate|details?|specifics?|"
+    r"mechanics|emphasis|examples?|continued|cont\.?|reference|refs?)\b",
+    re.IGNORECASE)
+
+_RX_LIST_ITEM = re.compile(r"^(\s*)(\d{1,3})([.)])\s+(\S.*?)\s*$")
+
+
+def _list_item_label(text: str) -> str:
+    """The identifying head of a list item, normalised for comparison.
+
+    Everything from the first bracket, dash or colon onward is elaboration, not
+    identity: "Insurance (Seller to maintain ... Rs. 42,255,094)" and "Insurance
+    amount and scope (comprehensive general liability ...)" are one clause
+    described twice.
+    """
+    head = re.split(r"\s*[\(\[\u2014\u2013:]|\s+-\s+", text or "", maxsplit=1)[0]
+    head = _RX_LIST_LABEL_NOISE.sub(" ", head)
+    head = re.sub(r"[^a-z0-9 ]+", " ", head.lower())
+    head = re.sub(r"\s+", " ", head).strip()
+    # Drop a leading article and a trailing generic noun so "The Audit Right"
+    # and "Audit Rights" collapse together.
+    head = re.sub(r"^(?:the|a|an)\s+", "", head)
+    # Strip a trailing generic noun only while enough remains to identify the
+    # clause: "Audit Right" must not collapse to "audit", which would match far
+    # too much.
+    trimmed = re.sub(r"\s+(?:clause|clauses|provision|provisions|terms?|rights?|"
+                     r"obligations?)$", "", head)
+    if len(trimmed) >= 8:
+        head = trimmed
+    return head
+
+
+def _dedupe_numbered_list(answer: str) -> tuple[str, int]:
+    """Collapse entries a long numbered list states more than once.
+
+    A fifty-item clause listing came back with roughly a third of it repeated —
+    "Further Assurance" twice, "Set-Off" twice, "Records Retention" twice,
+    "Liquidated Damages" three times — several of them labelled "(repeat)" by
+    the answer layer itself. It knew, and listed them anyway. A list padded to
+    fifty when it holds thirty-three distinct clauses misrepresents how much is
+    in the document, which is the thing the reader was asking.
+
+    Deterministic and conservative: only lists of at least eight items are
+    touched, only an exact match on the normalised identifying head counts, and
+    a head shorter than six characters is never matched on. The surviving entry
+    keeps the longer of the two descriptions, so deduplication never costs
+    detail, and the items are renumbered so the list a reader points back at is
+    the list they were shown.
+    """
+    if not answer:
+        return answer, 0
+    lines = answer.splitlines()
+    idxs = [i for i, ln in enumerate(lines) if _RX_LIST_ITEM.match(ln)]
+    if len(idxs) < _MIN_LIST_FOR_DEDUPE:
+        return answer, 0
+
+    seen: dict = {}
+    drop: set = set()
+    for i in idxs:
+        m = _RX_LIST_ITEM.match(lines[i])
+        body = m.group(4)
+        label = _list_item_label(body)
+        if len(label) < 6:
+            continue
+        # A later item whose label BEGINS with an earlier one is the same
+        # clause described at more length: "Insurance" then "Insurance amount
+        # and scope", "Liquidated Damages" then "Liquidated Damages
+        # per-contract cap". Nine characters minimum, because a short prefix
+        # would swallow genuinely different clauses that share a first word.
+        match_label = label if label in seen else next(
+            (k for k in seen if len(k) >= 9 and label.startswith(k + " ")), "")
+        if match_label:
+            label = match_label
+            first = seen[label]
+            # Keep whichever description says more.
+            if len(body) > len(_RX_LIST_ITEM.match(lines[first]).group(4)):
+                fm = _RX_LIST_ITEM.match(lines[first])
+                lines[first] = f"{fm.group(1)}{fm.group(2)}{fm.group(3)} {body}"
+            drop.add(i)
+        else:
+            seen[label] = i
+    if not drop:
+        return answer, 0
+
+    kept = [ln for i, ln in enumerate(lines) if i not in drop]
+    # Renumber the surviving items so the numbering a reader refers back to is
+    # the numbering they can see.
+    n = 0
+    for i, ln in enumerate(kept):
+        m = _RX_LIST_ITEM.match(ln)
+        if m:
+            n += 1
+            kept[i] = f"{m.group(1)}{n}{m.group(3)} {m.group(4)}"
+    logger.info("Answer list: %d repeated entr(ies) merged from a %d-item list",
+                len(drop), len(idxs))
+    return "\n".join(kept), len(drop)
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -5559,6 +5665,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # presented as verbatim that doesn't actually appear in the retrieved
     # context (paraphrase dressed up as an exact quote), and any quote
     # attributed to the wrong document.
+    # Collapse a long list that states the same clause more than once, before
+    # the citation checks run over it — see _dedupe_numbered_list.
+    answer, _list_dupes = _dedupe_numbered_list(answer)
+    if _list_dupes:
+        answer += (
+            f"\n\n[LIST NOTE: {_list_dupes} entr(ies) above repeated a clause already "
+            f"listed and were merged into it, so the numbering reflects distinct "
+            f"provisions rather than the number of times each was mentioned.]"
+        )
+
     _unverified_quotes = _verify_answer_citations(answer, wiki_content, question)
     _misattributed = _verify_citation_attribution(answer, wiki_content)
     _unverified_ids = _verify_identifier_claims(answer, wiki_content)
@@ -6873,6 +6989,17 @@ _PARTY_NAME_RE = re.compile(
 # ALL-CAPS words specifically (not just Title Case) — ordinary capitalised legal
 # vocabulary a user copies from a document ("Confidential Information", "Force
 # Majeure") is essentially never typed in all caps, so this stays narrow.
+# "in this agreement", "under that contract", "of the said deed" — a phrase
+# that can only mean the document already being discussed. Requires a
+# demonstrative: a bare "the agreement" is how a first question names a
+# document type, not a back-reference.
+_RX_DEMONSTRATIVE_DOC = re.compile(
+    r"\b(?:in|under|of|for|about|within)\s+(?:this|that|the\s+said|the\s+same)\s+"
+    r"(?:agreement|contract|document|deed|lease|instrument|sla|nda|msa|dpa|spa|"
+    r"sow|licence|license|arrangement)\b",
+    re.IGNORECASE)
+
+
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
 
 # A third naming style neither of the above catches: a single Title-Case word
@@ -10107,7 +10234,19 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # stale answer frozen in the ingest session (confirmed live: every no-doc
     # question in every new chat defaulted to a July-17 JVA7 answer). Falls back
     # to session_id when no separate chat session is passed (dev single-session).
-    if not unresolved_party:
+    # A demonstrative pointing AT a document overrides the party gate. "What
+    # are the biggest risks for Suvarna in this agreement?" names a party, so
+    # the rule above treated it as a fresh topic and searched all 1,372
+    # documents — but "in this agreement" is an explicit back-reference, and the
+    # party name is qualifying the document already under discussion rather
+    # than introducing a new one. The gate exists to stop a NEW party name
+    # inheriting a stale document; it was never meant to catch a question that
+    # says outright which document it means.
+    _points_back = bool(_RX_DEMONSTRATIVE_DOC.search(question or ""))
+    if _points_back and unresolved_party:
+        logger.info("Carryover party gate overridden: question points back at "
+                    "the document under discussion (%r)", unresolved_party)
+    if not unresolved_party or _points_back:
         carried = _carryover_scope(question, chat_session_id or session_id)
         if carried:
             logger.info("Scope carried over from the conversation: %s",
