@@ -7694,6 +7694,111 @@ def _resolve_docs_by_party_pair_index(question: str, session_id: str,
     return docs
 
 
+# A pasted document name has to be long enough that matching it cannot be an
+# accident. Fifteen characters of a filename is already far more specific than
+# any phrase a question would contain by chance.
+_MIN_PASTED_NAME_CHARS = 15
+
+
+# The ingest folder prefix the UI strips when it displays a document, so a
+# pasted display name can be compared against the stored one.
+_RX_INGEST_ONLY_PREFIX = re.compile(r"^pdfs[_ ]by[_ ]category[_ ]generated[_ ]")
+_RX_DOC_EXTENSION = re.compile(r"\.(?:pdf|docx?|txt|rtf)$", re.IGNORECASE)
+_RX_INGEST_FOLDER_PREFIX = re.compile(
+    r"^(?:pdfs[_ ]by[_ ]category[_ ]generated[_ ])?(?:[A-Za-z][A-Za-z ]{2,40}?[_])?",
+)
+
+
+def _resolve_docs_by_display_name(question: str, session_id: str) -> set[str]:
+    """The document whose own displayed name the question quotes back.
+
+    The app shows a document as "Consulting Agreement / Consultancy Agreement -
+    2024-11-17 (2).pdf" and lists it in References as "pdfs by category
+    generated Consulting Agreement Consultancy Agreement - 2024-11-17 (2)".
+    When asked which document they meant, a user pastes one of those. Neither
+    resolved: every resolver here looks for party names, instrument types,
+    dates or matter codes, and a filename is none of those.
+
+    So the system answered "the retrieved context does not contain a file
+    titled 'Consulting Agreement Consultancy Agreement - 2024-11-17 (2)'" about
+    a document it had displayed moments earlier, and answered from unrelated
+    documents instead. Telling someone a document they can see does not exist
+    is the single worst thing this system can say.
+
+    Matched in the forward direction only — a stored name appearing IN the
+    question — which is safe because these names are long and specific. A
+    document is accepted only when its name is matched in full and no other
+    document's name matches, so an ambiguous paste resolves nothing rather
+    than picking.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    q_norm = _alnum_only(_norm_for_match(question or ""))
+    if len(q_norm) < _MIN_PASTED_NAME_CHARS:
+        return set()
+
+    try:
+        from sqlalchemy import text as _sql
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(_sql(
+                "SELECT source_doc FROM documents WHERE wiki_id = :w AND session_id = :s"
+            ), {"w": _active_wiki_id(), "s": session_id}).fetchall()
+    except Exception as e:
+        logger.error("resolve_scope: display-name lookup failed: %s", e)
+        return set()
+
+    hits: list[tuple[int, str]] = []
+    for (sd,) in rows:
+        if not sd:
+            continue
+        # Three spellings of the same document, because three are shown: the
+        # normalised name used in References, the folder/basename pair the
+        # Files tab and answers display, and the bare basename on its own.
+        candidates = {_norm_doc_name(sd)}
+        base = sd.split("_", 1)[-1]
+        candidates.add(base)
+        candidates.add(base.rsplit("/", 1)[-1].rsplit("\\", 1)[-1])
+        # What the screen actually shows drops the ingest folder prefix, so a
+        # paste of the displayed name matches none of the stored spellings
+        # above. Derived by string surgery rather than by calling doc_paths for
+        # every document: this runs over the whole corpus on every question,
+        # and a per-document display() call made resolve_scope take minutes.
+        # Two more spellings, both of which a user really pastes: the display
+        # form with the ingest folder gone but the category folder kept
+        # ("Consulting Agreement / Consultancy Agreement - 2024-11-17 (2)"),
+        # and the bare filename. Extensions are stripped from every candidate
+        # because the screen shows ".pdf" and a paste usually drops it.
+        candidates.add(_RX_INGEST_ONLY_PREFIX.sub("", base))
+        candidates.add(_RX_INGEST_FOLDER_PREFIX.sub("", base))
+        candidates.add(sd.split("_")[-1])
+        for cand in list(candidates):
+            no_ext = _RX_DOC_EXTENSION.sub("", cand or "")
+            if no_ext and no_ext != cand:
+                candidates.add(no_ext)
+        for cand in candidates:
+            c_norm = _alnum_only(_norm_for_match(cand or ""))
+            if len(c_norm) >= _MIN_PASTED_NAME_CHARS and c_norm in q_norm:
+                hits.append((len(c_norm), sd))
+                break
+
+    if not hits:
+        return set()
+    # Longest match wins only when it is unambiguous: two documents whose names
+    # both appear in full is a paste naming two documents, which is not a case
+    # to guess on.
+    best = max(h[0] for h in hits)
+    winners = {sd for ln, sd in hits if ln == best}
+    if len(winners) != 1:
+        # Near-duplicates of one document (an OCR twin, a "(1)" copy) are the
+        # common case here and are all genuinely named, so keep them; anything
+        # wider than that is ambiguous.
+        if len(winners) > 3:
+            return set()
+    logger.info("Display-name paste resolved %d document(s): %s",
+                len(winners), {_norm_doc_name(w) for w in winners})
+    return winners
+
+
 def _resolve_docs_by_single_named_instrument(question: str, session_id: str,
                                              max_docs: int = _SINGLE_NAMED_MAX_DOCS) -> set[str]:
     """One document named by nickname plus instrument type, with no other signal.
@@ -9611,6 +9716,24 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
         except Exception as e:
             logger.error("resolve_scope: could not load index: %s", e)
             pages = {}
+
+    # A document the question quotes back by its own displayed or referenced
+    # name — the strongest identifier a question can carry, and exactly what a
+    # user supplies when the system has just asked which document they meant.
+    #
+    # Ahead of _detect_mentioned_files below, which is looser by design: asked
+    # about "Palladion Global PurcAgre 26-05-2022 - filed.pdf" it matched on
+    # the word "filed" and pinned thirty documents. A name matched in full
+    # should win over a name matched in part.
+    try:
+        pasted = _resolve_docs_by_display_name(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: display-name resolution failed: %s", e)
+        pasted = set()
+    if pasted:
+        return {"scope": "single_doc", "target_docs": sorted(pasted),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.92, "method": "display-name"}
 
     # 1. Single specific document — a named file or a distinctive known entity.
     #    Mirrors get_context's own force-include logic; here it only records the
