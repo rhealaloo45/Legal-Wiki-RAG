@@ -4166,6 +4166,76 @@ def clause_canon_summary(wiki_id: str, session_id: str | None = None) -> dict:
     }
 
 
+# documents.effective_date is TEXT, and on this corpus it holds three shapes:
+# 1,125 rows in ISO form, 76 in prose the extractor copied verbatim from the
+# document ("Date: 01 June 2025", "1ST August 2022", "1st day of February 2026
+# (\u201cEffective Date\u201d)", "23.09.2025"), and 178 nulls. Sorted as text,
+# "Date: 18 July 2025" lands above every 2026 date, because 'D' sorts after '2'
+# — which is exactly how a "most recent first" list ended up leading with a
+# 2025 document.
+#
+# The column is deliberately NOT rewritten. The raw string is what the document
+# says and what an answer cites; parsing happens for ordering only, and a value
+# this cannot parse sorts last rather than being guessed at.
+_RX_DATE_ISO = re.compile(r"^\s*(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\s*$")
+_RX_DATE_YEAR = re.compile(r"^\s*(\d{4})\s*$")
+_RX_DATE_DOTTED = re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b")
+_RX_DATE_PROSE = re.compile(
+    r"\b(\d{1,2})\s*(?:st|nd|rd|th)?\s*(?:day\s+of\s+)?"
+    r"([A-Za-z]{3,9})\.?\s+(\d{4})\b", re.IGNORECASE)
+_RX_DATE_PROSE_MY = re.compile(r"\b([A-Za-z]{3,9})\.?\s+(\d{4})\b", re.IGNORECASE)
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun",
+     "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
+
+
+def parse_effective_date(raw):
+    """A ``datetime.date`` for ordering, or None when the text cannot be read.
+
+    None is a real answer here, not a failure: an unreadable date sorts to the
+    end of a "most recent first" list, which is where an undated document
+    belongs. Inventing a date to make the sort tidy would put a document in a
+    position the corpus does not support.
+    """
+    import datetime as _dt
+    if not raw:
+        return None
+    text_val = str(raw).strip()
+    if not text_val:
+        return None
+
+    def _safe(y, m, d):
+        try:
+            return _dt.date(int(y), int(m), int(d))
+        except (ValueError, TypeError):
+            return None
+
+    m = _RX_DATE_ISO.match(text_val)
+    if m:
+        return _safe(m.group(1), m.group(2), m.group(3) or 1)
+    m = _RX_DATE_YEAR.match(text_val)
+    if m:
+        return _safe(m.group(1), 1, 1)
+    m = _RX_DATE_DOTTED.search(text_val)
+    if m:
+        # Day-first: every dotted value on this corpus is Indian convention.
+        return _safe(m.group(3), m.group(2), m.group(1))
+    m = _RX_DATE_PROSE.search(text_val)
+    if m:
+        month = _MONTHS.get(m.group(2)[:3].lower())
+        if month:
+            return _safe(m.group(3), month, m.group(1))
+    # Month and year with no day — the first of that month orders correctly
+    # against everything else without claiming a day the document never gave.
+    m = _RX_DATE_PROSE_MY.search(text_val)
+    if m:
+        month = _MONTHS.get(m.group(1)[:3].lower())
+        if month:
+            return _safe(m.group(2), month, 1)
+    return None
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
@@ -4189,7 +4259,11 @@ def count_documents_by_party(wiki_id: str, session_id: str,
     from sqlalchemy import text
     engine = get_engine()
     clauses = ["d.wiki_id = :w", "d.session_id = :sid"]
-    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
+    # Bounded so a whole-corpus count can never pull unbounded rows into
+    # memory just to order the handful that get shown.
+    _ROW_FETCH_CAP = 2000
+    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit,
+                    "cap": _ROW_FETCH_CAP}
 
     for i, party in enumerate(parties or []):
         # Party match is substring and case-insensitive against the array
@@ -4223,27 +4297,38 @@ def count_documents_by_party(wiki_id: str, session_id: str,
     with engine.connect() as conn:
         total = conn.execute(text(
             f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar()
+        # Ordered in Python, not SQL: effective_date is TEXT holding three
+        # different shapes, so ORDER BY sorts it lexically and puts prose dates
+        # above every ISO one. Fetching under a hard cap and sorting the parsed
+        # value is both correct and cheap — the largest realistic result here is
+        # one instrument type across the corpus, a few hundred narrow rows.
         rows = conn.execute(text(f"""
             SELECT d.source_doc, d.doc_type, d.effective_date, d.parties
             FROM documents d WHERE {where}
-            ORDER BY d.effective_date DESC NULLS LAST, d.source_doc
-            LIMIT :lim
+            ORDER BY d.source_doc
+            LIMIT :cap
         """), params).fetchall()
         by_type = conn.execute(text(f"""
             SELECT COALESCE(NULLIF(d.doc_type, ''), 'Unclassified') AS t, count(*)
             FROM documents d WHERE {where}
             GROUP BY 1 ORDER BY 2 DESC LIMIT 12
         """), params).fetchall()
+    import datetime as _dt
+    _ordered = sorted(
+        rows,
+        key=lambda r: (parse_effective_date(r[2]) or _dt.date.min, r[0]),
+        reverse=True)
+    _shown = [{"source_doc": r[0], "doc_type": r[1],
+               "effective_date": str(r[2]) if r[2] else None,
+               "parties": r[3]} for r in _ordered[:limit]]
     return {
         "total": int(total or 0),
         "parties": parties or [],
         "doc_type": doc_type_hint,
         "doc_type_patterns": _patterns,
         "by_type": [{"doc_type": r[0], "count": int(r[1])} for r in by_type],
-        "documents": [{"source_doc": r[0], "doc_type": r[1],
-                       "effective_date": str(r[2]) if r[2] else None,
-                       "parties": r[3]} for r in rows],
-        "truncated": int(total or 0) > len(rows),
+        "documents": _shown,
+        "truncated": int(total or 0) > len(_shown),
     }
 
 
