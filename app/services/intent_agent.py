@@ -4072,6 +4072,31 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                                 gk_deferred_method)
                     chunk["payload"] = promoted
                     gk_aside_wanted = False
+            # Query decomposition (Phase 6) — runs ONLY here, once the
+            # whole-question route has already come back with a decline. That
+            # placement is the whole safety argument: it sits in front of
+            # nothing. Every question that resolves today reaches this point
+            # with an answer and never enters the branch, so decomposition
+            # cannot hand a fragment to a resolver that has lost the party pair
+            # it needed — the failure that makes this feature dangerous
+            # anywhere earlier in the pipeline.
+            #
+            # Sub-questions are routed through the zero-LLM structured paths
+            # only, so a rescue costs nothing beyond the SQL it runs.
+            from services import decomposition as _decomp
+            if _decomp.enabled() and _decomp.looks_declined(chunk["payload"]):
+                try:
+                    from services import wikis as _wikis_d
+                    _rescued = _decomp.rescue(
+                        question, session_id, _wikis_d.active_wiki_id(),
+                        chunk["payload"].get("scope_docs") or [])
+                except Exception as _d_err:
+                    logger.error("[AGENT] decomposition failed: %s", _d_err)
+                    _rescued = None
+                if _rescued:
+                    logger.info("[AGENT] decomposition rescued a declined answer: %r",
+                                (question or "")[:70])
+                    chunk["payload"] = _rescued
             if advice_seeking:
                 chunk["payload"]["advice_notice"] = _ADVICE_NOTICE
             # Answer handoff (§ Phase 3.5b) — names the shipped surface that
