@@ -1397,7 +1397,12 @@ def _check_grounding_hybrid(question: str, context: str, answer: str, intent: st
             "[GROUNDING] Deterministic pass inconclusive (claims=%d, score=%s) — escalating to LLM judge",
             det["total_claims"], score,
         )
-        llm_result = _check_grounding(question, context, answer, intent=intent)
+        # The judge checks the answer's claims against the passages those
+        # claims cite, so it is sent the cited subset rather than everything
+        # retrieved. Falls back to the full context whenever the subset cannot
+        # be identified confidently - see wiki.cited_context.
+        _judge_ctx = wiki.cited_context(context, answer)
+        llm_result = _check_grounding(question, _judge_ctx, answer, intent=intent)
         if llm_result.get("grounding_score") is not None:
             llm_result["method"] = "llm"
             return llm_result
