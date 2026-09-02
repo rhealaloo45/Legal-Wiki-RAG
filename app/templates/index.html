@@ -84,8 +84,17 @@
       padding: 0 20px;
       height: 50px;
       gap: 14px;
-      flex-shrink: 0
+      flex-shrink: 0;
+      /* Direct children default to flex-shrink:1, so once their combined
+         width outgrows the bar every button was compressed proportionally —
+         icon-btn measured down to 15px wide. Scroll the bar itself instead
+         of crushing any control in it; each child below is pinned at its own
+         width to make that the only way the overflow can resolve. */
+      overflow-x: auto;
+      scrollbar-width: none;
     }
+    .topbar::-webkit-scrollbar { display: none }
+    .topbar > * { flex-shrink: 0 }
 
     .logo {
       font-family: var(--font-heading);
@@ -94,7 +103,7 @@
       color: var(--text-primary);
       display: flex;
       align-items: center;
-      gap: 7px
+      gap: 8px
     }
 
     .logo-dot {
@@ -109,34 +118,36 @@
       font-size: 11px;
       color: var(--text-secondary);
       background: var(--bg-base);
-      padding: 3px 10px;
+      padding: 4px 10px;
       border-radius: 20px;
       border: 0.5px solid var(--border);
       display: flex;
       align-items: center;
-      gap: 5px
+      gap: 6px
     }
 
     .topbar-right {
       margin-left: auto;
       display: flex;
       align-items: center;
-      gap: 8px
+      gap: 8px;
+      flex-shrink: 0
     }
+    .topbar-right > * { flex-shrink: 0 }
 
     .provider-toggle {
       display: flex;
       background: var(--bg-hover);
       border: 0.5px solid var(--border);
       border-radius: 999px;
-      padding: 3px;
+      padding: 4px;
       font-size: 11px;
       font-weight: 500;
       margin-right: 10px;
     }
 
     .provider-option {
-      padding: 5px 12px;
+      padding: 6px 12px;
       border-radius: 999px;
       cursor: pointer;
       color: var(--text-secondary);
@@ -158,7 +169,7 @@
       background: var(--bg-hover);
       border: 0.5px solid var(--border);
       border-radius: var(--radius-md);
-      padding: 5px 12px;
+      padding: 6px 12px;
       cursor: pointer;
       margin-right: 10px
     }
@@ -199,8 +210,10 @@
     }
 
     .icon-btn {
-      width: 30px;
-      height: 30px;
+      /* 30px was under the 32px touch-target floor. */
+      width: 32px;
+      height: 32px;
+      flex-shrink: 0;
       border-radius: var(--radius-md);
       border: 0.5px solid var(--border);
       background: var(--bg-surface);
@@ -227,7 +240,7 @@
       background: var(--accent-light);
       border: 0.5px solid var(--accent-border);
       border-radius: var(--radius-md);
-      padding: 5px 12px;
+      padding: 6px 12px;
       cursor: pointer
     }
 
@@ -261,8 +274,8 @@
     .new-btn {
       display: flex;
       align-items: center;
-      gap: 7px;
-      padding: 7px 10px;
+      gap: 8px;
+      padding: 8px 10px;
       border-radius: var(--radius-md);
       font-size: 12px;
       font-weight: 500;
@@ -275,7 +288,7 @@
     }
 
     .s-item {
-      padding: 7px 10px;
+      padding: 8px 10px;
       border-radius: var(--radius-md);
       cursor: pointer;
       display: flex;
@@ -354,7 +367,7 @@
     }
 
     .tab {
-      padding: 11px 16px;
+      padding: 12px 16px;
       font-size: 12px;
       font-weight: 500;
       color: var(--text-secondary);
@@ -363,7 +376,7 @@
       margin-bottom: -0.5px;
       display: flex;
       align-items: center;
-      gap: 5px
+      gap: 6px
     }
 
     .tab.active {
@@ -478,7 +491,7 @@
 
     /* --- Query progress stage tiles (vertical stack) --- */
     .query-stages { display:flex; flex-direction:column; gap:6px; width:100%; max-width:340px }
-    .stage-tile { display:flex; align-items:center; gap:9px; padding:8px 12px; background:var(--bg-surface); border:0.5px solid var(--border); border-left:2px solid var(--border); border-radius:var(--radius-md); font-size:12px; color:var(--text-muted); opacity:0; transform:translateY(4px); animation:stageSlideIn 0.22s ease forwards }
+    .stage-tile { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--bg-surface); border:0.5px solid var(--border); border-left:2px solid var(--border); border-radius:var(--radius-md); font-size:12px; color:var(--text-muted); opacity:0; transform:translateY(4px); animation:stageSlideIn 0.22s ease forwards }
     @keyframes stageSlideIn { to { opacity:1; transform:translateY(0) } }
     .stage-tile.active { border-left-color:var(--accent); color:var(--text-primary) }
     .stage-tile.done { border-left-color:var(--green); color:var(--text-secondary) }
@@ -488,7 +501,7 @@
     @keyframes stageSpin { to { transform:rotate(360deg) } }
     .stage-label { flex:1; line-height:1.3 }
     /* --- Intent tag on answer card --- */
-    .tag-intent { font-size:10px; font-weight:600; letter-spacing:0.7px; padding:3px 9px; border-radius:4px; color:#fff; text-transform:uppercase }
+    .tag-intent { font-size:10px; font-weight:600; letter-spacing:0.7px; padding:4px 10px; border-radius:4px; color:#fff; text-transform:uppercase }
     .tag-intent-factual { background:#2563eb }
     .tag-intent-risk_assessment { background:#dc2626 }
     .tag-intent-comparison { background:#7c3aed }
@@ -610,14 +623,14 @@
       color: #fff;
       border: none;
       border-radius: var(--radius-md);
-      padding: 7px 14px;
+      padding: 8px 14px;
       font-size: 12px;
       font-weight: 500;
       cursor: pointer;
       white-space: nowrap;
       display: flex;
       align-items: center;
-      gap: 5px
+      gap: 6px
     }
 
     .ask-submit:disabled {
@@ -654,7 +667,7 @@
       letter-spacing: 0.7px;
       color: var(--green-text);
       background: var(--green-light);
-      padding: 3px 9px;
+      padding: 4px 10px;
       border-radius: 4px
     }
 
@@ -677,7 +690,7 @@
     .conf {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-size: 12px;
       font-weight: 500;
       color: var(--text-primary)
@@ -723,7 +736,7 @@
       font-size: 11px;
       font-weight: 600;
       color: var(--text-primary);
-      margin-bottom: 3px;
+      margin-bottom: 4px;
     }
 
     .metric-popover-desc {
@@ -746,7 +759,7 @@
     .act-btn {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-size: 11px;
       color: var(--text-secondary);
       background: var(--bg-surface);
@@ -908,7 +921,7 @@
        this one says "part of what follows may not be in the document at all". */
     .context-warning {
       margin: 0 24px 14px;
-      padding: 11px 14px;
+      padding: 12px 14px;
       border-left: 3px solid var(--red);
       background: var(--red-light);
       border: 1px solid var(--red-border);
@@ -928,8 +941,8 @@
        questioning the score, and a permanent strip above the answer read as a
        criticism of it before the reader had read a word. */
     .metric-popover-facts {
-      margin-top: 7px;
-      padding-top: 7px;
+      margin-top: 8px;
+      padding-top: 8px;
       border-top: 0.5px solid var(--border);
       font-size: 11px;
       line-height: 1.6;
@@ -1028,7 +1041,7 @@
 
     .answer-body :not(pre) > code {
       background: var(--bg-secondary);
-      padding: 2px 5px;
+      padding: 2px 6px;
       border-radius: 3px;
       font-size: 12px;
     }
@@ -1045,7 +1058,7 @@
       color: var(--green-text);
       background: var(--green-light);
       border: 0.5px solid var(--green-border);
-      padding: 2px 7px;
+      padding: 2px 8px;
       border-radius: 3px;
       cursor: pointer;
       margin: 0 2px;
@@ -1074,7 +1087,7 @@
       margin-bottom: 8px;
       display: flex;
       align-items: center;
-      gap: 5px
+      gap: 6px
     }
 
     .sources-grid {
@@ -1091,7 +1104,7 @@
       cursor: pointer;
       display: flex;
       align-items: flex-start;
-      gap: 7px;
+      gap: 8px;
       min-width: 140px;
       max-width: 200px;
       box-shadow: var(--shadow-card);
@@ -1172,7 +1185,7 @@
     .ftree-row {
       display: flex;
       align-items: center;
-      padding: 7px 14px;
+      padding: 8px 14px;
       border-bottom: 0.5px solid var(--border);
       cursor: pointer;
       gap: 8px;
@@ -1261,15 +1274,15 @@
     .ftree-manage-btn {
       display: inline-flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-family: inherit;
-      font-size: 11.5px;
+      font-size: 12px;
       font-weight: 600;
       color: var(--text-secondary);
       background: var(--bg-input);
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-sm);
-      padding: 5px 10px;
+      padding: 6px 10px;
       cursor: pointer;
       white-space: nowrap;
       transition: background .1s, color .1s;
@@ -1323,10 +1336,10 @@
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      padding: 9px 10px;
+      padding: 10px 10px;
       border-radius: var(--radius-md);
       cursor: pointer;
-      font-size: 12.5px;
+      font-size: 13px;
       font-weight: 500;
       color: var(--text-secondary);
     }
@@ -1355,7 +1368,7 @@
       border-radius: 20px;
       min-width: 16px;
       height: 16px;
-      padding: 0 5px;
+      padding: 0 6px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -1386,6 +1399,11 @@
     .admin-section-head > :last-child { flex: 0 0 auto; flex-wrap: wrap }
 
     .admin-section-title {
+      /* Now an <h2> for 17 of its uses (one per Admin screen) — the browser
+         default heading margin is reset so the tag change is invisible;
+         the smaller in-panel sub-headers that reuse this class via an
+         inline font-size override stay <div>, unchanged. */
+      margin: 0;
       font-size: 17px;
       font-weight: 700;
       color: var(--text-primary);
@@ -1393,7 +1411,7 @@
     }
 
     .admin-section-sub {
-      font-size: 12.5px;
+      font-size: 13px;
       line-height: 1.5;
       color: var(--text-secondary);
       margin-top: 4px;
@@ -1472,7 +1490,7 @@
     }
 
     .quality-card .qc-label {
-      font-size: 11.5px;
+      font-size: 12px;
       color: var(--text-secondary);
       margin-top: 2px;
     }
@@ -1494,7 +1512,7 @@
       overflow-x: auto;
     }
 
-    .quality-table table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .quality-table table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .quality-table th {
       text-align: left;
       font-weight: 600;
@@ -1503,7 +1521,7 @@
       text-transform: uppercase;
       color: var(--text-muted);
       background: var(--bg-input);
-      padding: 9px 12px;
+      padding: 10px 12px;
       border-bottom: .5px solid var(--border);
       white-space: nowrap;
       position: sticky;
@@ -1521,13 +1539,13 @@
     .quality-table tbody tr:hover td { background: var(--bg-hover); }
     .quality-table .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .quality-table .muted { color: var(--text-secondary); }
-    .quality-empty { padding: 14px; font-size: 12.5px; color: var(--text-secondary); }
+    .quality-empty { padding: 14px; font-size: 13px; color: var(--text-secondary); }
 
     .q-pill {
       display: inline-block;
-      font-size: 10.5px;
+      font-size: 11px;
       font-weight: 600;
-      padding: 2px 7px;
+      padding: 2px 8px;
       border-radius: 999px;
       border: .5px solid var(--border);
       white-space: nowrap;
@@ -1543,7 +1561,7 @@
       font-size: 12px;
       font-weight: 500;
       border-radius: var(--radius-md);
-      padding: 7px 13px;
+      padding: 8px 14px;
       cursor: pointer;
       border: .5px solid var(--border);
       background: var(--bg-surface);
@@ -1571,7 +1589,7 @@
     .admin-search-input {
       font-size: 12px;
       border-radius: var(--radius-md);
-      padding: 7px 11px;
+      padding: 8px 12px;
       min-width: 240px;
       border: .5px solid var(--border);
       background: var(--bg-surface);
@@ -1591,8 +1609,8 @@
        every one of those tables falls back to. Both were being used by the
        Collections / Playbooks / Precedent markup before they existed. */
     .admin-chip {
-      font-size: 11.5px;
-      padding: 3px 9px;
+      font-size: 12px;
+      padding: 4px 10px;
       border-radius: 20px;
       border: 1px solid var(--border, #2c333f);
       background: var(--panel-2, rgba(127, 127, 127, .08));
@@ -1609,10 +1627,10 @@
     }
 
     .admin-filter-pill {
-      font-size: 11.5px;
+      font-size: 12px;
       font-weight: 500;
       border-radius: 20px;
-      padding: 5px 12px;
+      padding: 6px 12px;
       cursor: pointer;
       border: .5px solid var(--border);
       background: var(--bg-surface);
@@ -1651,12 +1669,12 @@
       z-index: 1;
       background: var(--bg-surface);
       text-align: left;
-      font-size: 10.5px;
+      font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: .04em;
       color: var(--text-muted);
-      padding: 11px 12px;
+      padding: 12px 12px;
       border-bottom: .5px solid var(--border);
       white-space: nowrap;
     }
@@ -1678,7 +1696,7 @@
     .admin-table tr:hover td { background: var(--bg-hover); }
     .admin-table td.num {
       font-family: var(--font-mono, monospace);
-      font-size: 11.5px;
+      font-size: 12px;
       text-align: right;
       white-space: nowrap;
     }
@@ -1690,7 +1708,7 @@
     .admin-table .cell-empty { color: var(--text-muted); }
 
     .admin-badge {
-      font-size: 10.5px;
+      font-size: 11px;
       font-family: var(--font-mono, monospace);
       font-weight: 600;
       border-radius: 20px;
@@ -1719,13 +1737,13 @@
     }
 
     .admin-stat-val { font-size: 24px; font-weight: 700; }
-    .admin-stat-label { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; }
+    .admin-stat-label { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
 
     .admin-row {
       display: flex;
       align-items: center;
       gap: 12px;
-      padding: 11px 18px;
+      padding: 12px 18px;
       border-bottom: .5px solid var(--border);
     }
     .admin-row:last-child { border-bottom: none; }
@@ -1756,7 +1774,7 @@
     .review-col-head {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 8px;
       margin-bottom: 10px;
       font-size: 11px;
       font-weight: 700;
@@ -1821,7 +1839,7 @@
       font-size: 12px; color: var(--text-muted);
     }
     .review-doc-item {
-      padding: 11px 13px;
+      padding: 12px 14px;
       border-bottom: .5px solid var(--border);
       cursor: pointer;
       transition: background .12s;
@@ -1833,7 +1851,7 @@
       box-shadow: inset 2px 0 0 var(--accent);
     }
     .review-doc-name {
-      font-size: 12.5px; font-weight: 600; color: var(--text-primary);
+      font-size: 13px; font-weight: 600; color: var(--text-primary);
       line-height: 1.4; margin-bottom: 4px;
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
       overflow: hidden;
@@ -1850,7 +1868,7 @@
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 8px;
       align-items: start;
-      padding: 9px 14px;
+      padding: 10px 14px;
       border-bottom: .5px solid var(--border);
       font-size: 12px;
     }
@@ -1858,7 +1876,7 @@
     .review-field-name {
       color: var(--text-muted);
       font-family: var(--font-mono, monospace);
-      font-size: 11.5px;
+      font-size: 12px;
       word-break: break-word;
     }
     .review-field-value {
@@ -1866,12 +1884,12 @@
     }
     .review-field-null { color: var(--text-muted); font-style: italic; }
     .review-conf-chip {
-      font-size: 10.5px; font-weight: 700;
+      font-size: 11px; font-weight: 700;
       font-family: var(--font-mono, monospace);
-      padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+      padding: 2px 8px; border-radius: 5px; white-space: nowrap;
     }
     .review-conf-quiet {
-      font-size: 10.5px; font-weight: 400;
+      font-size: 11px; font-weight: 400;
       font-family: var(--font-mono, monospace);
       color: var(--text-muted); white-space: nowrap;
     }
@@ -1879,7 +1897,7 @@
       flex: none;
       padding: 10px 14px;
       border-bottom: .5px solid var(--border);
-      font-size: 11.5px; font-weight: 600;
+      font-size: 12px; font-weight: 600;
       color: var(--text-primary);
       background: var(--bg-surface);
       position: sticky; top: 0; z-index: 3;
@@ -1889,22 +1907,22 @@
     .review-doc-source .review-pane-head {
       background: var(--bg-input);
       text-transform: uppercase; letter-spacing: .05em;
-      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+      font-size: 11px; font-weight: 700; color: var(--text-muted);
     }
     .review-doc-list .review-pane-head {
       text-transform: uppercase; letter-spacing: .05em;
-      font-size: 10.5px; font-weight: 700; color: var(--text-muted);
+      font-size: 11px; font-weight: 700; color: var(--text-muted);
     }
     .review-head-sub {
       font-size: 11px; font-weight: 400; color: var(--text-muted);
       margin-left: auto; flex: none;
     }
     .review-sub-head {
-      padding: 9px 14px;
+      padding: 10px 14px;
       background: var(--bg-input);
       border-top: .5px solid var(--border);
       border-bottom: .5px solid var(--border);
-      font-size: 10.5px; font-weight: 700;
+      font-size: 11px; font-weight: 700;
       letter-spacing: .05em; text-transform: uppercase;
       color: var(--text-muted);
     }
@@ -1914,8 +1932,8 @@
     }
     .review-doc-footer {
       flex: none;
-      display: flex; gap: 9px;
-      padding: 11px 14px;
+      display: flex; gap: 10px;
+      padding: 12px 14px;
       border-top: .5px solid var(--border);
       background: var(--bg-surface);
     }
@@ -1927,28 +1945,28 @@
     }
     .review-item-row:last-child { border-bottom: none; }
     .review-item-text {
-      display: block; font-size: 11.5px; line-height: 1.5;
+      display: block; font-size: 12px; line-height: 1.5;
       color: var(--text-secondary); word-break: break-word;
     }
     .rfield-actions {
-      display: flex; align-items: center; gap: 5px; flex: none;
+      display: flex; align-items: center; gap: 6px; flex: none;
     }
     .rfield-note {
       font-size: 11px; line-height: 1.45; color: var(--amber); margin-top: 4px;
     }
     .rfield-raw {
-      font-size: 11px; color: var(--text-muted); margin-top: 3px;
+      font-size: 11px; color: var(--text-muted); margin-top: 4px;
       word-break: break-word;
     }
     .rfield-edited {
-      display: inline-flex; align-items: center; gap: 3px;
+      display: inline-flex; align-items: center; gap: 4px;
       margin-left: 7px; padding: 1px 6px; border-radius: 5px;
       background: var(--bg-hover); color: var(--green-text);
-      font-size: 10.5px; font-weight: 600; white-space: nowrap;
+      font-size: 11px; font-weight: 600; white-space: nowrap;
     }
     .rfield-editor input, .rfield-editor textarea {
       width: 100%; box-sizing: border-box;
-      padding: 7px 9px; border-radius: 7px;
+      padding: 8px 10px; border-radius: 7px;
       border: .5px solid var(--border-strong, var(--border));
       background: var(--bg-input); color: var(--text-primary);
       font-family: inherit; font-size: 12px; line-height: 1.5;
@@ -1958,10 +1976,10 @@
       outline: none; border-color: var(--accent);
     }
     .rfield-editor-actions {
-      display: flex; align-items: center; gap: 7px;
-      margin-top: 7px; flex-wrap: wrap;
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 8px; flex-wrap: wrap;
     }
-    .rfield-hint { font-size: 10.5px; color: var(--text-muted); }
+    .rfield-hint { font-size: 11px; color: var(--text-muted); }
 
     /* Clicking a field or a flagged item locates it in the source pane.
        Only the name+value area is clickable — the confidence chip and edit
@@ -2004,11 +2022,11 @@
       border-bottom: .5px solid var(--border);
     }
     .review-source-title {
-      font-size: 11.5px; font-weight: 600; color: var(--text-primary);
-      margin-bottom: 5px;
+      font-size: 12px; font-weight: 600; color: var(--text-primary);
+      margin-bottom: 6px;
     }
     .review-source-body {
-      font-size: 11.5px; line-height: 1.65; color: var(--text-secondary);
+      font-size: 12px; line-height: 1.65; color: var(--text-secondary);
       white-space: pre-wrap; word-break: break-word;
     }
     .review-mode-switch {
@@ -2017,7 +2035,7 @@
     }
     .review-mode-btn {
       border: none; background: transparent; cursor: pointer;
-      padding: 6px 11px; font-size: 11.5px; color: var(--text-muted);
+      padding: 6px 12px; font-size: 12px; color: var(--text-muted);
       font-family: inherit;
     }
     .review-mode-btn.active { background: var(--bg-hover); color: var(--text-primary); }
@@ -2285,7 +2303,7 @@
       font-size: 14px;
       font-weight: 600;
       color: var(--text-primary);
-      margin-bottom: 5px;
+      margin-bottom: 6px;
       display: flex;
       align-items: center;
       gap: 6px;
@@ -2312,7 +2330,7 @@
 
     .tutorial-dots {
       display: flex;
-      gap: 5px;
+      gap: 6px;
     }
 
     .tutorial-dot {
@@ -2338,7 +2356,7 @@
     .tutorial-btn {
       font-size: 11px;
       font-weight: 500;
-      padding: 5px 11px;
+      padding: 6px 12px;
       border-radius: var(--radius-md);
       cursor: pointer;
       border: 0.5px solid var(--border);
@@ -2373,8 +2391,10 @@
     }
 
     .help-btn {
-      width: 28px;
-      height: 28px;
+      /* 28px was under the 32px touch-target floor. */
+      width: 32px;
+      height: 32px;
+      flex-shrink: 0;
       border-radius: var(--radius-md);
       border: 0.5px solid var(--border);
       background: var(--bg-surface);
@@ -2633,7 +2653,7 @@
       border: 0.5px solid var(--border-strong);
       color: var(--text-secondary);
       border-radius: var(--radius-md);
-      padding: 7px 0;
+      padding: 8px 0;
       font-size: 12px;
       font-family: var(--font-sans);
       cursor: pointer;
@@ -2787,7 +2807,7 @@
     .doc-ck {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 8px;
       padding: 4px 0;
       cursor: pointer
     }
@@ -2807,8 +2827,8 @@
       justify-content: space-between;
       background: var(--bg-base);
       border-radius: var(--radius-md);
-      padding: 4px 9px;
-      margin-bottom: 5px
+      padding: 4px 10px;
+      margin-bottom: 6px
     }
 
     .col-tag-t {
@@ -2818,14 +2838,14 @@
 
     .add-row {
       display: flex;
-      gap: 5px
+      gap: 6px
     }
 
     .add-inp {
       flex: 1;
       border: 0.5px solid var(--border);
       border-radius: var(--radius-md);
-      padding: 5px 8px;
+      padding: 6px 8px;
       font-size: 11px;
       font-family: var(--font-sans);
       outline: none;
@@ -2837,7 +2857,7 @@
       color: #fff;
       border: none;
       border-radius: var(--radius-md);
-      padding: 5px 9px;
+      padding: 6px 10px;
       font-size: 11px;
       cursor: pointer
     }
@@ -2883,13 +2903,13 @@
     .exp-btn {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-size: 11px;
       color: var(--accent);
       background: var(--accent-light);
       border: none;
       border-radius: var(--radius-md);
-      padding: 5px 10px;
+      padding: 6px 10px;
       cursor: pointer
     }
 
@@ -2897,7 +2917,7 @@
     .draft-toolbar {
       display: flex;
       align-items: center;
-      gap: 3px;
+      gap: 4px;
       padding: 6px 14px;
       border-bottom: 0.5px solid var(--border);
       background: var(--bg-surface);
@@ -3001,7 +3021,7 @@
       background: var(--green-light);
       color: var(--green-text);
       border-radius: 3px;
-      padding: 3px 7px;
+      padding: 4px 8px;
       font-size: 10px;
       display: inline-block
     }
@@ -3010,7 +3030,7 @@
       background: var(--amber-light);
       color: var(--amber);
       border-radius: 3px;
-      padding: 3px 7px;
+      padding: 4px 8px;
       font-size: 10px;
       display: inline-block
     }
@@ -3019,7 +3039,7 @@
       background: var(--red-light);
       color: var(--red);
       border-radius: 3px;
-      padding: 3px 7px;
+      padding: 4px 8px;
       font-size: 10px;
       display: inline-block
     }
@@ -3027,11 +3047,11 @@
     .flag-bar {
       display: flex;
       align-items: center;
-      gap: 7px;
+      gap: 8px;
       background: var(--red-light);
       border: 0.5px solid var(--red-border);
       border-radius: var(--radius-md);
-      padding: 7px 11px;
+      padding: 8px 12px;
       margin-bottom: 10px;
       font-size: 11px;
       color: var(--red)
@@ -3051,7 +3071,7 @@
       color: var(--text-secondary);
       text-transform: uppercase;
       letter-spacing: 0.6px;
-      margin-bottom: 7px
+      margin-bottom: 8px
     }
 
     .narr-txt {
@@ -3063,8 +3083,8 @@
     .outlier-row {
       display: flex;
       align-items: flex-start;
-      gap: 7px;
-      padding: 7px 0;
+      gap: 8px;
+      padding: 8px 0;
       border-bottom: 0.5px solid var(--border)
     }
 
@@ -3076,7 +3096,7 @@
       background: var(--red-light);
       color: var(--red);
       font-size: 10px;
-      padding: 2px 7px;
+      padding: 2px 8px;
       border-radius: 20px;
       white-space: nowrap;
       flex-shrink: 0
@@ -3105,11 +3125,11 @@
     .up-badge {
       display: inline-flex;
       align-items: center;
-      gap: 3px;
+      gap: 4px;
       background: var(--amber-light);
       color: var(--amber);
       font-size: 10px;
-      padding: 2px 7px;
+      padding: 2px 8px;
       border-radius: 20px;
       margin-top: 6px
     }
@@ -3207,12 +3227,12 @@
       background: var(--bg-surface);
       color: var(--text-secondary);
       border-radius: var(--radius-md);
-      padding: 7px 16px;
+      padding: 8px 16px;
       font-size: 12px;
       cursor: pointer;
       display: flex;
       align-items: center;
-      gap: 5px
+      gap: 6px
     }
 
     .upl-btn:hover {
@@ -3357,7 +3377,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 3px 0;
+      padding: 4px 0;
     }
 
     .tree-folder-row:hover,
@@ -3525,7 +3545,7 @@
     .id-header { padding-bottom: 10px; border-bottom: 0.5px solid var(--border); }
     .id-title {
       font-size: 14px; font-weight: 500; color: var(--text-primary);
-      display: flex; align-items: center; gap: 7px; margin-bottom: 9px;
+      display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
     }
     .id-spin { animation: spin 1.6s linear infinite; color: var(--accent); display: inline-block; }
     .id-overall-row { display: flex; align-items: center; gap: 10px; }
@@ -3542,7 +3562,7 @@
     .id-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .id-panel {
       background: var(--bg-surface); border: 0.5px solid var(--border);
-      border-radius: var(--radius-md); padding: 11px 13px;
+      border-radius: var(--radius-md); padding: 12px 14px;
       box-shadow: var(--shadow-card);
     }
     .id-panel-title {
@@ -3552,7 +3572,7 @@
     /* Pipeline steps */
     .id-step {
       display: flex; align-items: center; gap: 8px;
-      font-size: 12px; color: var(--text-muted); padding: 3px 0; transition: color 0.3s;
+      font-size: 12px; color: var(--text-muted); padding: 4px 0; transition: color 0.3s;
     }
     .id-step.done  { color: var(--green-text); }
     .id-step.active { color: var(--text-primary); }
@@ -3563,7 +3583,7 @@
     .id-stats-row { display: flex; gap: 6px; margin-bottom: 10px; }
     .id-stat {
       flex: 1; background: var(--accent-light);
-      border-radius: var(--radius-sm); padding: 7px 4px; text-align: center;
+      border-radius: var(--radius-sm); padding: 8px 4px; text-align: center;
     }
     .id-stat-val {
       font-size: 17px; font-weight: 600; color: var(--accent);
@@ -3578,7 +3598,7 @@
     .id-feed-panel { max-height: 190px; overflow-y: auto; }
     .id-doc-item {
       display: flex; align-items: center; gap: 8px;
-      padding: 5px 4px; border-radius: var(--radius-sm); transition: background 0.15s;
+      padding: 6px 4px; border-radius: var(--radius-sm); transition: background 0.15s;
     }
     .id-doc-item:hover { background: var(--bg-base); }
     .id-doc-icon { width: 16px; font-size: 13px; flex-shrink: 0; text-align: center; }
@@ -3594,14 +3614,24 @@
     .id-doc-item.status-synthesizing .id-doc-icon,
     .id-doc-item.status-extracting   .id-doc-icon,
     .id-doc-item.status-merging      .id-doc-icon { color: var(--accent); animation: spin 1.2s linear infinite; display: inline-block; }
+    .sr-only {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
   </style>
 </head>
 
 <body>
   <div id="toast-container" class="toast-container"></div>
+  <h1 class="sr-only">LexWiki</h1>
 
   <div class="app" id="app">
-    <div class="topbar">
+    <div class="topbar" role="banner">
       <div class="icon-btn" onclick="toggleSidebar()" style="margin-right: -4px" title="Toggle Sidebar"><i
           class="ti ti-menu-2"></i></div>
       <div class="logo"><span class="logo-dot"></span>LexWiki</div>
@@ -3634,7 +3664,7 @@
     </div>
 
     <div class="layout">
-      <div class="sidebar" id="sidebar">
+      <div class="sidebar" id="sidebar" role="navigation" aria-label="Chat sessions">
         {% if production_mode %}
         <button class="new-btn" id="tour-newchat-btn" onclick="newChat()"><i class="ti ti-plus" style="font-size:13px"></i>New
           chat</button>
@@ -3649,7 +3679,7 @@
         </div>
       </div>
 
-      <div class="main" id="main-area">
+      <div class="main" id="main-area" role="main">
         <div class="tabs d-none" id="modeTabs">
           <div class="tab active" data-target="ask" onclick="switchTab('ask',this)"><i class="ti ti-message-circle"
               style="font-size:13px"></i>Ask</div>
@@ -4166,7 +4196,7 @@
 
         <!-- ADMIN -->
         <div id="panel-admin" class="d-none" style="display:none;flex:1;flex-direction:row;overflow:hidden">
-          <div class="admin-rail">
+          <div class="admin-rail" role="navigation" aria-label="Admin sections">
             <button type="button" class="icon-btn" style="margin-bottom:10px" title="Back to chat" onclick="switchTab('ask', document.querySelector('.tab[data-target=&quot;ask&quot;]'))"><i class="ti ti-arrow-left"></i></button>
             <div class="admin-rail-label">Library</div>
             <div class="admin-nav-item" id="adminNav-wikis" data-target="wikis" onclick="switchAdminTab('wikis',this)">
@@ -4232,7 +4262,7 @@
             <div id="admin-panel-ingest">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Ingest</div>
+                  <h2 class="admin-section-title">Ingest</h2>
                   <div class="admin-section-sub">Current session — <span id="admin-ingest-session-name">this session</span></div>
                 </div>
                 <div style="display:flex;gap:8px">
@@ -4250,7 +4280,7 @@
             <div id="admin-panel-documents" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Documents</div>
+                  <h2 class="admin-section-title">Documents</h2>
                   <div class="admin-section-sub" id="admin-documents-sub">&nbsp;</div>
                 </div>
               </div>
@@ -4260,7 +4290,7 @@
             <div id="admin-panel-wiki" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Wiki pages</div>
+                  <h2 class="admin-section-title">Wiki pages</h2>
                   <div class="admin-section-sub" id="admin-wiki-sub">&nbsp;</div>
                 </div>
                 <button type="button" class="admin-pill-btn accent" title="View the page-relation graph" onclick="toggleGraph()"><i class="ti ti-topology-star-ring" style="font-size:14px"></i>Knowledge graph</button>
@@ -4271,7 +4301,7 @@
             <div id="admin-panel-register" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Register</div>
+                  <h2 class="admin-section-title">Register</h2>
                   <div class="admin-section-sub" id="admin-register-sub">&nbsp;</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4286,7 +4316,7 @@
             <div id="admin-panel-obligations" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Obligations</div>
+                  <h2 class="admin-section-title">Obligations</h2>
                   <div class="admin-section-sub" id="admin-obligations-sub">&nbsp;</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4302,7 +4332,7 @@
             <div id="admin-panel-collections" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Collections</div>
+                  <h2 class="admin-section-title">Collections</h2>
                   <div class="admin-section-sub" id="admin-collections-sub">Named sets of documents — what a playbook runs over</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4317,7 +4347,7 @@
             <div id="admin-panel-playbooks" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Playbooks</div>
+                  <h2 class="admin-section-title">Playbooks</h2>
                   <div class="admin-section-sub" id="admin-playbooks-sub">House positions per clause type</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4338,7 +4368,7 @@
             <div id="admin-panel-precedent" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Precedent layer</div>
+                  <h2 class="admin-section-title">Precedent layer</h2>
                   <div class="admin-section-sub" id="admin-precedent-sub">Clause-level search over role-tagged precedent documents</div>
                 </div>
                 <button type="button" class="admin-pill-btn" onclick="buildPrecedentEmbeddings()"><i class="ti ti-refresh" style="font-size:14px"></i>Embed pending</button>
@@ -4356,7 +4386,7 @@
             <div id="admin-panel-deviation" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Deviation Dashboard</div>
+                  <h2 class="admin-section-title">Deviation Dashboard</h2>
                   <div class="admin-section-sub" id="admin-deviation-sub">Which documents deviate from house positions, ranked</div>
                 </div>
                 <button type="button" class="admin-pill-btn" onclick="loadDeviationOverview()"><i class="ti ti-refresh" style="font-size:14px"></i>Refresh</button>
@@ -4368,7 +4398,7 @@
             <div id="admin-panel-prompts" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Prompt Library</div>
+                  <h2 class="admin-section-title">Prompt Library</h2>
                   <div class="admin-section-sub" id="admin-prompts-sub">Reusable templates with {% raw %}{{placeholder}}{% endraw %} variables</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4385,7 +4415,7 @@
             <div id="admin-panel-accuracy" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Accuracy</div>
+                  <h2 class="admin-section-title">Accuracy</h2>
                   <div class="admin-section-sub">Regression suite — does a change make answers better or worse?</div>
                 </div>
                 <div style="display:flex;gap:8px">
@@ -4427,7 +4457,7 @@
             <div id="admin-panel-corpus" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Corpus Health</div>
+                  <h2 class="admin-section-title">Corpus Health</h2>
                   <div class="admin-section-sub">Unreadable pages and duplicate documents</div>
                 </div>
                 <div style="display:flex;gap:8px">
@@ -4458,7 +4488,7 @@
             <div id="admin-panel-vocabulary" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Clause Vocabulary</div>
+                  <h2 class="admin-section-title">Clause Vocabulary</h2>
                   <div class="admin-section-sub">Canonical types mapped from the raw extracted labels</div>
                 </div>
                 <div style="display:flex;gap:8px">
@@ -4490,7 +4520,7 @@
             <div id="admin-panel-analytics" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Analytics</div>
+                  <h2 class="admin-section-title">Analytics</h2>
                   <div class="admin-section-sub">Aggregates, gaps and trends over the normalised columns</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
@@ -4538,7 +4568,7 @@
             <div id="admin-panel-terms" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Defined Terms</div>
+                  <h2 class="admin-section-title">Defined Terms</h2>
                   <div class="admin-section-sub">What each document defines, and what it relies on but never defines</div>
                 </div>
                 <div style="display:flex;gap:8px">
@@ -4569,7 +4599,7 @@
             <div id="admin-panel-wikis" class="d-none" style="display:none">
               <div class="admin-section-head">
                 <div>
-                  <div class="admin-section-title">Wikis</div>
+                  <h2 class="admin-section-title">Wikis</h2>
                   <div class="admin-section-sub" id="admin-wikis-sub">Isolated corpora — one active at a time</div>
                 </div>
                 <button type="button" class="admin-pill-btn primary" title="Create a new empty wiki" onclick="adminCreateWiki()"><i class="ti ti-plus" style="font-size:14px"></i>New wiki</button>
@@ -4584,7 +4614,7 @@
             <div id="admin-panel-review" class="d-none" style="display:none" tabindex="-1" onkeydown="handleReviewQueueKeydown(event)">
               <div class="admin-section-head" style="margin-bottom:6px">
                 <div>
-                  <div class="admin-section-title">Review Queue</div>
+                  <h2 class="admin-section-title">Review Queue</h2>
                   <div class="admin-section-sub" id="admin-review-sub">&nbsp;</div>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
