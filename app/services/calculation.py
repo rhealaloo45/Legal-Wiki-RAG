@@ -195,6 +195,51 @@ def _typed_rows(wiki_id: str, session_id: str, source_doc: str) -> list[dict]:
 # The three computations.
 # --------------------------------------------------------------------------
 
+_GENERIC_COMPONENT_LABELS = {"line item", "milestone", ""}
+
+
+def _dedupe_components(components: list[dict]) -> list[dict]:
+    """Drop rows that are the same priced line extracted twice.
+
+    A document re-extracted, or extracted once coarsely and once in detail,
+    leaves two clause rows describing one line of one table. Summing both
+    double-counts it, and the symptom is the worst kind this module can
+    produce: a total that looks computed, cites real figures, and is wrong.
+
+    Found on the Palladion Global purchase agreement, where three of ten typed
+    line items were an earlier partial pass over the same table — identical
+    unit price, identical annual value, identical payment terms, just without
+    the item name the later pass captured. The duplicates summed to
+    INR 926,482,386, and removing them lands the schedule on
+    INR 2,582,327,852: exactly the total the document states. The document
+    reconciled all along; the arithmetic was double-counting.
+
+    Equal AMOUNT alone is not duplication — M4 and M5 of CND-TOR-SOW are both
+    19,20,000 and both real. The key pairs the amount with what identifies the
+    row: its schedule position for a milestone, its unit price for a line item.
+    Where a duplicate carries a real name and the row already kept does not,
+    the name is promoted, so deduplication never costs information.
+    """
+    kept: dict = {}
+    order: list = []
+    for c in components:
+        k = c.get("key") or (c["amount"], c["label"])
+        if k in kept:
+            existing = kept[k]
+            if (existing["label"].strip().lower() in _GENERIC_COMPONENT_LABELS
+                    and c["label"].strip().lower() not in _GENERIC_COMPONENT_LABELS):
+                existing["label"] = c["label"]
+            existing["duplicates"] = existing.get("duplicates", 0) + 1
+            continue
+        kept[k] = dict(c)
+        order.append(k)
+    dropped = len(components) - len(order)
+    if dropped:
+        logger.info("Calculation: %d duplicate priced component(s) dropped "
+                    "before summing", dropped)
+    return [kept[k] for k in order]
+
+
 def total_contract_value(wiki_id: str, session_id: str, source_doc: str) -> dict:
     """Sum the priced components a document states, and reconcile with its total.
 
@@ -219,16 +264,25 @@ def total_contract_value(wiki_id: str, session_id: str, source_doc: str) -> dict
         if "fee" in tv and ("milestone" in tv or "week" in tv):
             amt, cur = parse_money(tv.get("fee"))
             if amt is not None:
+                _label = " ".join(str(tv.get(k)) for k in ("milestone", "week")
+                                  if tv.get(k)) or "Milestone"
                 milestones.append({
-                    "label": " ".join(str(tv.get(k)) for k in ("milestone", "week")
-                                      if tv.get(k)) or "Milestone",
-                    "amount": amt, "currency": cur, "page": r["page"]})
+                    "label": _label, "amount": amt, "currency": cur,
+                    "page": r["page"],
+                    # Two milestones can legitimately carry the same fee — M4 and
+                    # M5 of CND-TOR-SOW are both 19,20,000 — so the schedule
+                    # position is part of what makes a row distinct.
+                    "key": (amt, _label)})
         elif "annual_value" in tv:
             amt, cur = parse_money(tv.get("annual_value"))
             if amt is not None:
+                _unit, _ = parse_money(tv.get("unit_price"))
                 line_items.append({
                     "label": str(tv.get("item") or tv.get("vendor") or "Line item"),
-                    "amount": amt, "currency": cur, "page": r["page"]})
+                    "amount": amt, "currency": cur, "page": r["page"],
+                    # Unit price alongside the total is what separates two real
+                    # rows of equal value from one row extracted twice.
+                    "key": (amt, _unit)})
         for key in ("total", "total_value", "contract_value", "aggregate_value"):
             if key in tv:
                 amt, cur = parse_money(tv.get(key))
@@ -243,7 +297,7 @@ def total_contract_value(wiki_id: str, session_id: str, source_doc: str) -> dict
                 stated.append({"label": "stated fee", "amount": amt,
                                "currency": cur, "page": r["page"]})
 
-    components = milestones or line_items
+    components = _dedupe_components(milestones or line_items)
     if not components and not stated:
         return {"ok": False, "missing": "priced components",
                 "detail": "This document has no typed fee schedule, priced line "
