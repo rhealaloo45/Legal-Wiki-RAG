@@ -54,7 +54,15 @@ TIERS = ("scope", "pipeline", "graded")
 _RX_ABSTAIN = re.compile(
     r"\bnot\s+(?:established|addressed|present|stated|specified|mentioned|covered|"
     r"included|found)\b"
-    r"|\bdo(?:es)?\s+not\s+(?:contain|appear|include|address|specify|state|impose)\b"
+    # An adverb routinely sits between the negation and its verb — "does not
+    # EXPRESSLY label", "does not SPECIFICALLY provide". A correct abstention
+    # was being scored as an assertion for exactly that reason, on an answer
+    # the grader itself marked 10/10/10. The verb list is wider for the same
+    # reason: a document can fail to label, define, designate or name a thing
+    # just as readily as it can fail to contain one.
+    r"|\bdo(?:es)?\s+not\s+(?:\w+ly\s+)?(?:contain|appear|include|address|specify|"
+    r"state|impose|label|define|designate|name|identify|provide|require|mention|"
+    r"refer|set\s+out|establish)\b"
     r"|\bno\s+(?:such\s+)?(?:clause|provision|restriction|term|fee|cap|information)\b"
     r"|\bcannot\s+be\s+determined\b"
     r"|\bis\s+silent\s+(?:on|as\s+to)\b"
@@ -241,16 +249,29 @@ REFERENCE ANSWER (verified correct):
 SYSTEM ANSWER (grade this):
 {actual}
 
-Score three axes from 0 to 10, judging ONLY against the reference answer:
+The reference is a MINIMUM, not an exhaustive account. It is one or two
+sentences written by hand; the system reads whole documents and legitimately
+returns more — clause references, party names, dates, the filenames it read.
+Detail beyond the reference that is consistent with it is CORRECT BEHAVIOUR
+and must not be penalised on any axis. Penalise only what CONTRADICTS the
+reference or could not have come from the documents at all.
 
-- accuracy: does the system answer state the same facts as the reference? A
-  correct refusal to answer, where the reference itself says the information is
-  not established, scores 10. Contradicting the reference scores 0.
-- relevance: does it answer the question that was asked, without padding or
-  drifting to a different document or clause?
-- hallucination: 10 means every specific claim (figures, dates, party names,
-  clause numbers) is supported by the reference. Each unsupported specific
-  claim costs points. Vagueness is not hallucination; inventing a number is.
+Score three axes from 0 to 10:
+
+- accuracy: does the system answer state the facts the reference states?
+  Extra correct detail does not reduce this. A correct refusal, where the
+  reference itself says the information is not established, scores 10.
+  Contradicting the reference scores 0.
+- relevance: does it answer the question that was asked, about the right
+  document or the right corpus? Supporting quotes, breakdowns and lists of the
+  documents relied on are not padding. Drifting to a different document or a
+  different clause is.
+- hallucination: 10 means nothing in the answer contradicts the reference and
+  no specific looks invented. A figure, date, clause number or party name that
+  the reference simply does not mention is NOT hallucination. Deduct only for
+  a claim the reference contradicts, or a specific that could not plausibly
+  come from the documents named. Vagueness is not hallucination; a wrong
+  number is.
 
 Reply with ONLY a JSON object, no other text:
 {{"accuracy": <0-10>, "relevance": <0-10>, "hallucination": <0-10>, "note": "<one short sentence>"}}"""
