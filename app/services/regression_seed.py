@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # regression._doc_matches for why.
 _IOA = "Apex Meridian Software-IOA"
 _IOA_AMDT = "Apex Meridian Software Amdt"
+# Sept 2026 grading pass — see the block at the end of SEED_CASES.
+_CONS = "Consultancy Agreement - 2024-11-17"
+_SPA = "Share Purchase Agreement_2024-05-26"
+_NDA_ZEPHYRA = "NDA_APEX ZEPHYRA TRADING"
 
 SEED_CASES: list[dict] = [
     # ---------------------------------------------------------------- scope
@@ -88,7 +92,10 @@ SEED_CASES: list[dict] = [
         "name": "scope-named-instrument-list",
         "archetype": "scope",
         "question": "Compare the confidentiality clauses of the Amberline NDA and the Apex Cobalt NDA.",
-        "expect_docs": ["Amberline", "Cobalt"],
+        # "Cobalt" alone also matches an unrelated Cobalt Capital SPA, so the
+        # case could pass while scope resolved the wrong document. Narrowed to
+        # the instrument the question actually names.
+        "expect_docs": ["Amberline", "Apex Cobalt - NDA"],
         "notes": "Several documents named by bare nickname with no party suffix and "
                  "no 'between'. Covers _resolve_docs_by_named_instruments.",
     },
@@ -154,6 +161,195 @@ SEED_CASES: list[dict] = [
         "notes": "Presupposition trap: the question assumes a fee exists. Correct "
                  "behaviour is to decline rather than to produce a plausible number.",
     },
+    # ------------------------------------------------- Sept 2026 grading pass
+    # Fifteen lawyer-grade questions run against the live system and graded by
+    # hand. Every figure below was then read back out of `clauses` verbatim
+    # before being written here — none is transcribed from the system's own
+    # answer, which is the standard the rest of this file is held to.
+    #
+    # Two documents carry these cases:
+    #   CONS  a Consultancy Agreement, Apex Suvarna Telecommunications / Nidra
+    #         Bhandari, MAT-2018-3636. Nidra Bhandari is a natural person, so
+    #         the name carries no corporate suffix — which is exactly what the
+    #         party-pair resolver used to choke on.
+    #   SPA   a Share Purchase Agreement, Apex Zephyra Trading (Buyer) /
+    #         Nimbus Capital (Seller), MAT-2021-7750. One of SEVENTEEN real
+    #         documents in this corpus between those same two parties.
+    {
+        "name": "answer-termination-convenience-cons",
+        "archetype": "factual",
+        "question": "What notice is required to terminate the consultancy agreement between "
+                    "Apex Suvarna Telecommunications Private Limited and Nidra Bhandari for convenience?",
+        "expect_docs": [_CONS],
+        "must_contain": ["60"],
+        "expect_answer": "Either Party may terminate for convenience on not less than 60 days' "
+                         "prior written notice, without liability save for accrued rights and "
+                         "obligations as at the date of termination.",
+        "notes": "Scored 10/10. Baseline single-document factual lookup — the archetype the "
+                 "system is strongest at. Here to catch a regression in the easy case.",
+    },
+    {
+        "name": "answer-insurance-cover-cons",
+        "archetype": "factual",
+        "question": "What insurance is Nidra Bhandari required to maintain under the consultancy agreement?",
+        "expect_docs": [_CONS],
+        "must_contain": ["30,618,959"],
+        "expect_answer": "Comprehensive general liability and professional indemnity insurance of "
+                         "not less than Rs. 30,618,959, maintained at Nidra Bhandari's own cost for "
+                         "the duration of the Term.",
+        "notes": "Scored 10/10. Precise figure plus the two named cover types.",
+    },
+    {
+        "name": "answer-customer-data-location-cons",
+        "archetype": "factual",
+        "question": "What restrictions apply to where Customer Data may be stored under the "
+                    "consultancy agreement with Nidra Bhandari?",
+        "expect_docs": [_CONS],
+        "must_contain": ["Singapore"],
+        "expect_answer": "Customer Data may not be stored or processed outside Singapore without "
+                         "Apex Suvarna's prior written consent, and Nidra Bhandari must keep a "
+                         "current record of every location at which Customer Data is processed.",
+        "notes": "Scored 10/10. The record-keeping duty is the half a summary most often drops.",
+    },
+    {
+        "name": "answer-security-incident-24h-cons",
+        "archetype": "factual",
+        "question": "How quickly must Nidra Bhandari notify Apex Suvarna Telecommunications "
+                    "Private Limited of a security incident?",
+        "expect_docs": [_CONS],
+        "must_contain": ["24 hours"],
+        "expect_answer": "Without undue delay and in any event within 24 hours of becoming aware "
+                         "of any actual or suspected security incident affecting Customer Data.",
+        "notes": "Scored 10/10. Paired deliberately with the 48-hour SPA-side case below — the "
+                 "two together are what the cross-document comparison case needs.",
+    },
+    {
+        "name": "answer-audit-rights-cons",
+        "archetype": "factual",
+        "question": "What audit rights does Apex Suvarna Telecommunications Private Limited have "
+                    "over Nidra Bhandari?",
+        "expect_docs": [_CONS],
+        "must_contain": ["15", "5%"],
+        "expect_answer": "Apex Suvarna may audit Nidra Bhandari's relevant books and records on not "
+                         "less than 15 days' written notice, no more than once in any twelve-month "
+                         "period, during normal business hours and at Apex Suvarna's cost — except "
+                         "where a material discrepancy of more than 5% is identified.",
+        "notes": "Scored 10/10. Four constraints in one clause; the cost-shifting exception is "
+                 "the one most often lost.",
+    },
+    {
+        "name": "answer-milestone-payment-45d-cons",
+        "archetype": "factual",
+        "question": "When do milestone payments fall due under the consultancy agreement with Nidra Bhandari?",
+        "expect_docs": [_CONS],
+        "must_contain": ["45"],
+        "expect_answer": "Within 45 days of Apex Suvarna's written acceptance of the corresponding "
+                         "Milestone deliverable, subject to the retention provision.",
+        "notes": "Scored 10/10. The retention carve-out is part of a correct answer.",
+    },
+    {
+        "name": "answer-take-or-pay-cons",
+        "archetype": "factual",
+        "question": "What is the take-or-pay minimum quantity under the agreement with Nidra Bhandari?",
+        "expect_docs": [_CONS],
+        "must_contain": ["487,520"],
+        "expect_answer": "487,520 units per annum, payable whether or not Apex Suvarna takes "
+                         "delivery, save where non-delivery arises from a Force Majeure Event or "
+                         "Nidra Bhandari's own default.",
+        "notes": "Scored 10/10. The two exceptions matter — without them the obligation reads as "
+                 "absolute when it is not.",
+    },
+    {
+        "name": "router-liability-cap-with-carveouts-cons",
+        "archetype": "factual",
+        "question": "What is the aggregate liability cap for Apex Suvarna Telecommunications "
+                    "Private Limited and Nidra Bhandari, and what types of liability are excluded "
+                    "from that cap?",
+        "expect_docs": [_CONS],
+        "must_contain": ["366,841,583", "fraud", "gross negligence",
+                         "wilful misconduct", "confidentiality"],
+        "expect_answer": "The aggregate liability cap is Rs. 366,841,583. It does not apply to "
+                         "liability arising from fraud, gross negligence, wilful misconduct, or "
+                         "breach of confidentiality obligations.",
+        "notes": "ROUTER REGRESSION CASE. Scored 6/10 originally: the words 'aggregate' and "
+                 "'liability cap' sent this to the corpus-analytics fast path, which answered "
+                 "with Total/Median/Mean over ONE document and silently dropped the carve-out "
+                 "half of the question entirely. Fixed by vetoing the aggregate branch when a "
+                 "named party or a carve-out request is present. must_contain deliberately lists "
+                 "all four carve-outs — a statistic cannot satisfy them.",
+    },
+    {
+        "name": "scope-buyer-seller-role-disambiguation",
+        "archetype": "scope",
+        "question": "Now look at the agreement where Apex Zephyra Trading Company LLC is the buyer "
+                    "and Nimbus Capital Private Limited is the seller. What is the minimum annual "
+                    "off-take commitment of Apex Zephyra, and what happens if it falls short?",
+        "expect_docs": [_SPA],
+        "must_contain": ["206,696"],
+        "expect_answer": "Apex Zephyra must purchase not less than 206,696 units of the Products "
+                         "each Contract Year (the Minimum Purchase Commitment). On a shortfall it "
+                         "pays Nimbus Capital a shortfall fee equal to 5% of the value of the "
+                         "shortfall.",
+        "notes": "Seventeen real documents in this corpus name these same two parties. Only the "
+                 "Share Purchase Agreement labels them 'Buyer' and 'Seller' in its own Parties "
+                 "clause — verified directly — so the question's own wording resolves it uniquely. "
+                 "A near-identical Minimum Off-take of 46,133 units sits in the NDA-titled "
+                 "document and is the wrong answer here; that is the trap this case exists to "
+                 "catch.",
+    },
+    {
+        "name": "scope-cross-document-notification-compare",
+        "archetype": "comparison",
+        "question": "Compare the security incident notification obligations of Nidra Bhandari to "
+                    "Apex Suvarna Telecommunications Private Limited with those of Nimbus Capital "
+                    "Private Limited to Apex Zephyra Trading Company LLC. Which counterparty has "
+                    "the shorter contractual notification period?",
+        "expect_docs": [_CONS, _NDA_ZEPHYRA],
+        "must_contain": ["24", "48"],
+        "expect_answer": "Nidra Bhandari must notify within 24 hours; Nimbus Capital must notify "
+                         "within 48 hours. Nidra Bhandari therefore has the shorter notification "
+                         "period.",
+        "notes": "THE HARDEST CASE IN THE SET, and the one that found a real bug. Scored 5/10: it "
+                 "retrieved the 24-hour obligation and then reported the 48-hour one as 'not "
+                 "present in the supplied materials' — it is present, verbatim. Two independent "
+                 "causes: (1) 'Nidra Bhandari' carries no corporate suffix so only THREE of the "
+                 "four party names were extracted, leaving an odd token count that made "
+                 "combinatorial pairing decline outright; (2) the document holding the 48-hour "
+                 "clause is titled 'NDA-Apex Zephyra' on every page and never says 'Nimbus', so "
+                 "title-token search could not reach it at any threshold. Both fixed. Requires "
+                 "BOTH documents, which is the point.",
+    },
+    {
+        "name": "answer-milestone-failure-protection-spa",
+        "archetype": "factual",
+        "question": "From Apex Zephyra Trading Company LLC's perspective, what protections does it "
+                    "have if Nimbus Capital Private Limited fails to achieve a contractual "
+                    "milestone on time?",
+        "expect_docs": [_SPA],
+        "must_contain": ["0.5%"],
+        "expect_answer": "Liquidated damages at 0.5% of the Contract Price per week of delay, "
+                         "subject to the stated cap.",
+        "notes": "Scored 9/10. Worth keeping because the identical liquidated-damages wording "
+                 "also appears in the NDA-titled sibling document, so a wrong-document answer "
+                 "still produces the right number here — the case tests scope by expect_docs, "
+                 "not by the figure.",
+    },
+    {
+        "name": "abstain-consultant-role-label-cons",
+        "archetype": "abstention",
+        "question": "Is Nidra Bhandari identified as the Consultant in the parties clause of the "
+                    "consultancy agreement?",
+        "expect_abstain": True,
+        "expect_docs": [_CONS],
+        "expect_answer": "The extracted parties text does not assign Nidra Bhandari the role label "
+                         "'Consultant'. The party is named directly, without a defined role term.",
+        "notes": "ABSENCE case, and a genuine disagreement with the human answer key: the key "
+                 "asserted the 'Consultant' label, the system said it was absent, and checking "
+                 "the document showed the system was right. Kept because the failure mode it "
+                 "guards against — inventing a role label that reads plausibly — is exactly the "
+                 "kind of small fabrication that survives review.",
+    },
+
 ]
 
 
