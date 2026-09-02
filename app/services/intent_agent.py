@@ -3826,6 +3826,47 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # document-oriented structural paths, since "the average liability cap
     # across our contracts" is about the corpus, not about any one document,
     # and retrieval would answer it from whatever sample it happened to fetch.
+    # Ahead of the corpus-analytics branch below, and the ordering is
+    # load-bearing. "The total contract value of CND-TOR-SOW-2026-001" trips
+    # the aggregate detector on "total" + "contract value" and was answered
+    # with a statistic across the whole corpus - a number about 1,372
+    # documents in reply to a question about one. The two are separated by
+    # whether a document resolves, not by wording: this branch returns None
+    # when it resolves none, so "the total contract value across our
+    # agreements" still falls through to analytics, where it belongs.
+    # Calculation Agent (Phase 5) - a derived value computed in Python rather
+    # than by the model. Placed here for the same reason the compliance path is:
+    # it needs a resolved document, resolve_scope costs no LLM call, and a miss
+    # falls straight through, leaving ordinary retrieval untouched.
+    #
+    # Ahead of compliance because it is the narrower detector - it needs an
+    # arithmetic verb as well as a subject - and behind everything above it
+    # because a question that merely mentions money is a lookup, and a quoted
+    # clause is a better answer to a lookup than a number.
+    if not is_followup:
+        from services import calculation as _calc_mod
+        if _calc_mod.is_calculation_query(question):
+            from services import wikis as _wikis_k
+            try:
+                _wid_k = _wikis_k.active_wiki_id()
+                _scope_k = wiki.resolve_scope(
+                    question, session_id,
+                    chat_session_id=chat_session_id or session_id)
+                _scope_k = _apply_collection_scope(_scope_k, collection_id)
+                _docs_k = (_scope_k.get("target_docs") or []
+                           if _scope_k.get("scope") == "single_doc" else [])
+                if target_doc:
+                    _docs_k = [target_doc]
+                _calc = _calc_mod.answer(question, _wid_k, session_id, _docs_k)
+            except Exception as _k_err:
+                logger.error("[AGENT] calculation fast-path failed: %s", _k_err)
+                _calc = None
+            if _calc:
+                logger.info("[AGENT] calculation fast-path: %r", (question or "")[:70])
+                yield {"stage": "complete", "status": "done", "type": "answer",
+                       "payload": _calc, "message": "Done"}
+                return
+
     if not is_followup and not collection_id:
         _akind = _is_analytics_query(question)
         if _akind:
