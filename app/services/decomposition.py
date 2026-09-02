@@ -48,7 +48,9 @@ def enabled() -> bool:
 _RX_DECLINE = re.compile(
     r"\bnot\s+(?:established|addressed|present|stated|specified|mentioned|covered|"
     r"included|found)\b"
-    r"|\bdo(?:es)?\s+not\s+(?:contain|appear|include|address|specify|state|impose)\b"
+    r"|\bdo(?:es)?\s+not\s+(?:\w+ly\s+)?(?:contain|appear|include|address|specify|"
+    r"state|impose|label|define|designate|name|identify|provide|require|mention|"
+    r"refer|set\s+out|establish)\b"
     r"|\bno\s+(?:such\s+)?(?:clause|provision|restriction|term|fee|cap|information)\b"
     r"|\bcannot\s+be\s+determined\b"
     r"|\bis\s+silent\s+(?:on|as\s+to)\b"
