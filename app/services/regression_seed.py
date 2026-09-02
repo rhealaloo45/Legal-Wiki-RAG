@@ -333,13 +333,14 @@ SEED_CASES: list[dict] = [
                  "also appears in the NDA-titled sibling document, so a wrong-document answer "
                  "still produces the right number here — the case tests scope by expect_docs, "
                  "not by the figure. "
-                 "KNOWN GAP, tracked not fresh: this fails the SCOPE tier. The question names "
-                 "a party pair and no instrument, and Apex Zephyra Trading and Nimbus Capital "
-                 "share a whole document family (NDA, KERA, Escrow, IP Assignment, TSA, "
-                 "Amendment and this SPA), so resolve_scope returns corpus/default rather than "
-                 "picking one. Left failing on purpose: it is the honest signal that party-pair "
-                 "resolution does not narrow a shared family, and silencing it would remove the "
-                 "only place that gap is visible.",
+                 "This case documented a real gap and now guards the fix. The question names a "
+                 "party pair and no instrument, and Apex Zephyra Trading and Nimbus Capital "
+                 "share sixteen documents (NDA, KERA, Escrow, IP Assignment, TSA, Amendment, "
+                 "Side Letter, Tax Deed and this SPA). The title- and content-intersection "
+                 "resolvers all decline on a set that size, so scope fell through to an "
+                 "unscoped corpus search — discarding a strong signal for being insufficiently "
+                 "precise. _resolve_docs_by_party_pair_index now reads documents.parties and "
+                 "pins the shared set, so retrieval ranks sixteen candidates rather than 1,372.",
     },
     {
         "name": "abstain-consultant-role-label-cons",
