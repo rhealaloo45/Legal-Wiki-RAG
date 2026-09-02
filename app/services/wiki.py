@@ -7577,6 +7577,189 @@ _NAMED_INSTRUMENT_RE = re.compile(
 )
 
 
+# The instrument words a lawyer actually attaches to a document nickname. Far
+# wider than _NAMED_INSTRUMENT_RE's list, and case-insensitive on the KIND only
+# — a question says "the Voltas escrow agreement" in lower case as readily as
+# "the Amberline NDA" in caps, while the NAME must stay capitalised or this
+# would match "the payment agreement" and resolve on a word that names nothing.
+_SINGLE_INSTRUMENT_KIND = (
+    r"(?i:NDAs?|MSAs?|SLAs?|DPAs?|SPAs?|SSAs?|SHAs?|SOWs?|JVAs?|LOIs?|POAs?|TSAs?"
+    r"|non-disclosure\s+agreements?|confidentiality\s+agreements?"
+    r"|master\s+services?\s+agreements?|service\s+level\s+agreements?"
+    r"|data\s+processing\s+agreements?|share\s+purchase\s+agreements?"
+    r"|share\s+subscription\s+agreements?|shareholders?'?\s+agreements?"
+    r"|joint\s+venture\s+(?:governance\s+)?agreements?|escrow\s+agreements?"
+    r"|purchase\s+agreements?|supply\s+agreements?|licen[cs]e\s+agreements?"
+    r"|consultancy\s+agreements?|consulting\s+agreements?"
+    r"|employment\s+agreements?|facility\s+agreements?|framework\s+agreements?"
+    r"|technical\s+services?\s+agreements?|transition\s+services?\s+agreements?"
+    r"|amendment\s+agreements?|services?\s+agreements?"
+    r"|statements?\s+of\s+work|terms?\s+sheets?|term\s+sheets?"
+    r"|conditions\s+precedent\s+checklists?|disclosure\s+letters?"
+    r"|closing\s+certificates?|side\s+letters?|letters?\s+of\s+intent"
+    r"|lease\s+deeds?|tax\s+deeds?|legal\s+opinions?"
+    r"|board\s+resolutions?|powers?\s+of\s+attorney"
+    r"|agreements?|contracts?|deeds?|leases?|opinions?|judg(?:e)?ments?"
+    r"|orders?|petitions?|plaints?|affidavits?|notices?|checklists?)"
+)
+
+# Anchored on a preposition so the name is being used to POINT at a document
+# ("under the Voltas escrow agreement"), not merely mentioned in passing.
+_SINGLE_NAMED_INSTRUMENT_RE = re.compile(
+    r"\b(?:in|of|under|for|from|about|within)\s+(?:the\s+)?"
+    r"((?:[A-Z][A-Za-z0-9&'.\-]*\s+){0,3}[A-Z][A-Za-z0-9&'.\-]*)\s+"
+    + _SINGLE_INSTRUMENT_KIND + r"\b"
+)
+
+# A capitalised word that begins a sentence, or is a generic legal noun, is not
+# a document nickname. Without this, "What is the liability cap in The Agreement"
+# would search the corpus for a company called "The".
+_NOT_A_NICKNAME = {
+    "the", "this", "that", "our", "their", "its", "a", "an", "any", "all",
+    "what", "which", "who", "when", "where", "how", "does", "do", "is", "are",
+    "master", "mutual", "original", "executed", "signed", "draft", "final",
+    "same", "above", "below", "said", "such", "each", "both", "either",
+}
+
+# Small on purpose. One document is a clean resolution and a handful is a real
+# ambiguity the answer can report per document; beyond that the nickname did
+# not actually narrow anything and scope should stay where it was.
+_SINGLE_NAMED_MAX_DOCS = 3
+
+
+# Words that ride along on the front of a captured party name and are not part
+# of it — _PARTY_NAME_RE anchors on a capital letter, so a sentence-initial
+# "From Apex Zephyra Trading Company" captures the "From" too.
+_PARTY_LEAD_NOISE = re.compile(
+    r"^(?:from|in|of|under|for|between|with|against|by|the|this|that|and|to)\s+",
+    re.IGNORECASE)
+
+# How many documents a party pair may share before the pair stops being a
+# usable narrowing signal. Generous, because the alternative is the whole
+# corpus: twenty candidate documents is a scope a retrieval pass can rank
+# sensibly, 1,372 is not.
+_PAIR_FAMILY_MAX_DOCS = 20
+
+
+def _resolve_docs_by_party_pair_index(question: str, session_id: str,
+                                      max_docs: int = _PAIR_FAMILY_MAX_DOCS) -> set[str]:
+    """Documents naming EVERY party the question names, read from documents.parties.
+
+    The existing pair resolvers intersect page TITLES and page CONTENT, and both
+    return nothing when a pair shares a whole document family: the titles do not
+    carry party names, and a content intersection over sixteen documents is not
+    a narrowing. Scope then fell through to an unscoped corpus search, which is
+    the worst available answer — the pair is a real, strong signal and it was
+    being discarded because it did not resolve to exactly one document.
+
+    ``documents.parties`` is the clean JSONB array the counting path already
+    reads reliably, so the intersection is exact rather than inferred from text.
+    Matching is substring and case-insensitive because the corpus stores full
+    legal names while a question says "Nimbus Capital".
+
+    Returns the whole shared set, not a guess at which one was meant. Sixteen
+    documents is a scope; one document chosen from sixteen without saying so is
+    a fabrication with a citation attached.
+    """
+    if not config.USE_DATABASE:
+        return set()
+
+    names: list[str] = []
+    for raw in _PARTY_NAME_RE.findall(question or ""):
+        name = _PARTY_LEAD_NOISE.sub("", str(raw).strip()).strip(" ,.;:'\"")
+        # Two words minimum: a single capitalised token is far too weak to
+        # intersect on, and would pull in every document sharing one word.
+        if len(name.split()) >= 2 and len(name) >= 6:
+            if name.lower() not in {n.lower() for n in names}:
+                names.append(name)
+    if len(names) < 2:
+        return set()
+
+    try:
+        from services import wikis as _wikis
+        result = _db.count_documents_by_party(
+            _wikis.active_wiki_id(), session_id, names, None,
+            limit=max_docs + 1)
+    except Exception as e:
+        logger.error("resolve_scope: party-pair index lookup failed: %s", e)
+        return set()
+
+    total = int(result.get("total") or 0)
+    if not total or total > max_docs:
+        return set()
+    docs = {d["source_doc"] for d in (result.get("documents") or []) if d.get("source_doc")}
+    if not docs:
+        return set()
+    logger.info("Party-pair index %s -> %d document(s)", names, len(docs))
+    return docs
+
+
+def _resolve_docs_by_single_named_instrument(question: str, session_id: str,
+                                             max_docs: int = _SINGLE_NAMED_MAX_DOCS) -> set[str]:
+    """One document named by nickname plus instrument type, with no other signal.
+
+    The multi-name resolver below requires TWO names, because it exists to
+    answer "compare the Amberline NDA and the Apex Cobalt NDA". A question
+    naming ONE document that way had no resolver at all, so "the total contract
+    value of the Palladion Global purchase agreement" fell through to an
+    unscoped corpus search while the same question with a date attached
+    resolved immediately. That gap made a date feel mandatory in ordinary
+    phrasing, which is a query language with extra steps.
+
+    Deliberately runs LAST, after every party, matter-reference and date signal
+    has already passed. It can only turn a fall-through into a resolution,
+    never redirect one that already worked — the same constraint the
+    Calculation Agent's identifier fallback carries, and for the same reason.
+
+    Resolved the way the multi-name resolver resolves each of its names: a
+    content search for the nickname, narrowed to whichever of those documents
+    also carries the stated instrument word in its own page titles. Returns
+    nothing rather than guessing when the result is empty or too broad.
+    """
+    if not config.USE_DATABASE:
+        return set()
+
+    candidates: list[tuple[str, str]] = []
+    for m in _SINGLE_NAMED_INSTRUMENT_RE.finditer(question or ""):
+        name = m.group(1).strip()
+        head = name.split()[0].lower() if name.split() else ""
+        if head in _NOT_A_NICKNAME or len(name) < 4:
+            continue
+        kind = m.group(0)[m.end(1) - m.start():].strip()
+        candidates.append((name, kind))
+    if len(candidates) != 1:
+        # Zero means the question named no document this way. More than one is
+        # the multi-name resolver's job, and it has already had its turn.
+        return set()
+
+    name, kind = candidates[0]
+    try:
+        content_docs = {d for d in _db.find_source_docs_mentioning_phrase(
+            _active_wiki_id(), session_id, name, cap=40) if d}
+    except Exception as e:
+        logger.error("resolve_scope: single-named-instrument content lookup failed "
+                     "for %r: %s", name, e)
+        return set()
+    if not content_docs:
+        return set()
+
+    kind_word = re.sub(r"\s+", " ", kind).strip().rstrip("s")
+    try:
+        title_docs = {d for d in _db.find_source_docs_by_title_tokens(
+            _active_wiki_id(), session_id, [kind_word], cap=2000) if d}
+    except Exception as e:
+        logger.error("resolve_scope: single-named-instrument title lookup failed "
+                     "for %r: %s", kind_word, e)
+        return set()
+
+    narrowed = (content_docs & title_docs) if title_docs else content_docs
+    if not narrowed or len(narrowed) > max_docs:
+        return set()
+    logger.info("Single named instrument %r + %r -> %d document(s): %s",
+                name, kind_word, len(narrowed), {_norm_doc_name(d) for d in narrowed})
+    return narrowed
+
+
 def _resolve_docs_by_named_instruments(question: str, session_id: str,
                                        max_docs: int = 6) -> set[str]:
     """Resolve a question naming several documents by nickname, each with no
@@ -9678,6 +9861,48 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
         return {"scope": "single_doc", "target_docs": sorted(date_docs),
                 "target_family": None, "is_broad": False,
                 "confidence": 0.8, "method": "date"}
+
+    # One document named by nickname plus instrument type ("the Voltas escrow
+    # agreement", "the Palladion Global purchase agreement"). Placed here, after
+    # every party, matter-reference and date signal has already declined, so it
+    # can only turn a fall-through into a resolution. Before this, the same
+    # question resolved only when the user also recited a date — which made a
+    # date feel mandatory in ordinary phrasing.
+    try:
+        named_one = _resolve_docs_by_single_named_instrument(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: single named-instrument resolution failed: %s", e)
+        named_one = set()
+    if named_one:
+        return _enforce_question_family(
+            {"scope": "single_doc", "target_docs": sorted(named_one),
+             "target_family": None, "is_broad": False,
+             "confidence": 0.78, "method": "named-instrument-single"},
+            _fam_name, _fam_docs)
+
+    # A party pair that shares a whole document family. The title- and
+    # content-intersection resolvers above both decline here, because sixteen
+    # documents is not a narrowing to them — and scope then fell all the way
+    # through to an unscoped corpus search, discarding a strong signal for
+    # being insufficiently precise. Reading documents.parties gives the shared
+    # set exactly; retrieval ranking over sixteen candidates is a far better
+    # position than over 1,372.
+    #
+    # Returned as a pinned set rather than a single document on purpose. One
+    # document chosen from sixteen, without saying so, is a fabrication with a
+    # citation attached.
+    try:
+        pair_family = _resolve_docs_by_party_pair_index(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party-pair index resolution failed: %s", e)
+        pair_family = set()
+    if pair_family:
+        _single = len(pair_family) == 1
+        return {"scope": "single_doc" if _single else "family",
+                "target_docs": sorted(pair_family),
+                "target_family": None, "is_broad": not _single,
+                "confidence": 0.8 if _single else 0.7,
+                "method": "party-pair-index"}
 
     if _question_names_a_document(question, []) and _question_mentions_known_entity(question, pages):
         # Resolve the concrete document(s) the entity points at so retrieval can
