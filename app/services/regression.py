@@ -111,6 +111,14 @@ def _check_scope_case(case: dict, session_id: str) -> tuple[bool, list[str], dic
     """
     from services import wiki
     failures: list[str] = []
+    if case.get("scope_resolved_by"):
+        # Some paths reach their documents without resolve_scope at all: the
+        # counting path counts from the document index, and the Calculation
+        # Agent falls back to an identifier lookup when scope returns nothing.
+        # Asserting resolve_scope for those reports a working feature as a
+        # scope regression. The pipeline tier still checks the documents, from
+        # files_used, which is where they actually appear.
+        return True, [], {"skipped": f"scope tier n/a: {case['scope_resolved_by']}"}
     try:
         scope = wiki.resolve_scope(case["question"], session_id) or {}
     except Exception as e:
@@ -253,12 +261,23 @@ Reply with ONLY a JSON object, no other text:
 GRADE_PASS_FLOOR = 8
 
 
+# The judge's visible output is a JSON object of about sixty tokens, but on an
+# Azure GPT-5.x deployment max_completion_tokens covers HIDDEN REASONING TOO.
+# At 300 the reasoning routinely consumed the whole budget and the call came
+# back with no visible content at all, which the parser could only report as
+# "judge returned no JSON" — five of twenty-one graded cases in one run, none
+# of them a product fault. Same failure, same fix as the grounding check, which
+# was moved 900 -> 1500 for exactly this reason (see config.MAX_TOKENS_GROUNDING_CHECK).
+_JUDGE_MAX_TOKENS = 1500
+
+
 def _judge(question: str, expected: str, actual: str) -> dict:
     """One LLM call scoring an answer against a verified reference."""
     from services import llm
     import json as _json
     prompt = _JUDGE_PROMPT.format(question=question, expected=expected, actual=actual)
-    raw, _usage = llm.ask(prompt, pipeline="regression_judge", max_tokens=300)
+    raw, _usage = llm.ask(prompt, pipeline="regression_judge",
+                          max_tokens=_JUDGE_MAX_TOKENS)
     text = (raw or "").strip()
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
@@ -281,8 +300,13 @@ def _check_graded_case(case: dict, session_id: str) -> tuple[bool, list[str], di
     passed, failures, actual = _check_pipeline_case(case, session_id)
     expected = (case.get("expect_answer") or "").strip()
     if not expected:
-        failures.append("graded tier requires expect_answer, none stored")
-        return False, failures, actual
+        # A scope case asserts which documents were reached, and deliberately
+        # carries no reference answer — there is nothing for a grader to score
+        # it against. Failing it here reported three harness gaps as three
+        # product regressions in the same list as real ones, which is the
+        # fastest way to make a suite stop being read. It still ran the
+        # pipeline tier above; that verdict stands.
+        return passed, failures, actual
 
     scores = _judge(case["question"], expected, actual.get("answer") or "")
     actual["scores"] = scores

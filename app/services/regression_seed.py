@@ -332,7 +332,14 @@ SEED_CASES: list[dict] = [
         "notes": "Scored 9/10. Worth keeping because the identical liquidated-damages wording "
                  "also appears in the NDA-titled sibling document, so a wrong-document answer "
                  "still produces the right number here — the case tests scope by expect_docs, "
-                 "not by the figure.",
+                 "not by the figure. "
+                 "KNOWN GAP, tracked not fresh: this fails the SCOPE tier. The question names "
+                 "a party pair and no instrument, and Apex Zephyra Trading and Nimbus Capital "
+                 "share a whole document family (NDA, KERA, Escrow, IP Assignment, TSA, "
+                 "Amendment and this SPA), so resolve_scope returns corpus/default rather than "
+                 "picking one. Left failing on purpose: it is the honest signal that party-pair "
+                 "resolution does not narrow a shared family, and silencing it would remove the "
+                 "only place that gap is visible.",
     },
     {
         "name": "abstain-consultant-role-label-cons",
@@ -348,6 +355,95 @@ SEED_CASES: list[dict] = [
                  "the document showed the system was right. Kept because the failure mode it "
                  "guards against — inventing a role label that reads plausibly — is exactly the "
                  "kind of small fabrication that survives review.",
+    },
+
+
+    # ------------------------------------------- corpus counting (Sept 2026)
+    # Answered by SQL over the document index, so these cost nothing to run and
+    # they guard the exact number, not a range. A counting answer that is
+    # quietly wrong is the worst kind: it looks authoritative and nobody
+    # recounts 1,372 documents by hand to check it.
+    {
+        "name": "count-ndas-every-spelling",
+        "archetype": "factual",
+        "question": "How many NDAs do we have?",
+        "expect_answer": "148 non-disclosure agreements. The corpus files them under "
+                         "several doc_type spellings - 96 as 'Mutual Confidentiality and "
+                         "Non-Disclosure Agreement', 29 as the same in upper case, 19 as "
+                         "'Non-Disclosure Agreement', and a handful of one-off variants - "
+                         "and all of them are NDAs.",
+        "notes": "The regression this case exists for: before the instrument vocabulary, "
+                 "the doc_type filter was a single ILIKE against the questioner's own "
+                 "wording and this returned 19. Verified against SQL over all 1,372 "
+                 "documents.",
+    },
+    {
+        "name": "count-slas-by-acronym",
+        "archetype": "factual",
+        "question": "How many SLAs do we have in our corpus?",
+        "expect_answer": "17 Service Level Agreements, counted from the document index "
+                         "rather than from a text search. The most recent is the Tata Power "
+                         "Company SLA of 13 February 2025.",
+        "notes": "'SLA' was not in the countable-noun list at all, so this question never "
+                 "reached the count path and fell through to retrieval - which answers with "
+                 "however many pages it happened to fetch.",
+    },
+    {
+        "name": "count-dpas-with-party",
+        "archetype": "factual",
+        "question": "How many DPAs do we have that are with Tata Motors Limited?",
+        "expect_docs": ["Tata Motors_DPA_Agreement_05-01-2021"],
+        "scope_resolved_by": "the document index, in count_documents_by_party",
+        "expect_answer": "One: the Tata Motors data processing agreement dated 5 January 2021.",
+        "notes": "Instrument type and party together. Covers the doctype-plus-party form of "
+                 "count_documents_by_party.",
+    },
+
+    # ------------------------------------ Calculation Agent (Phase 5, Sept 2026)
+    {
+        "name": "calc-total-contract-value-reconciles",
+        "archetype": "factual",
+        "question": "What is the total contract value of CND-TOR-SOW-2026-001?",
+        "expect_docs": ["CND-TOR-SOW-2026-001"],
+        "scope_resolved_by": "calculation.resolve_by_identifier, after resolve_scope returned none",
+        "expect_answer": "INR 96,00,000 (9,600,000). The five milestone fees - 14,40,000 at "
+                         "Wk 3, 19,20,000 at Wk 8, 24,00,000 at Wk 12, 19,20,000 at Wk 17 and "
+                         "19,20,000 at Wk 20 - sum to INR 96,00,000, which reconciles exactly "
+                         "against the total the document itself states.",
+        "notes": "The headline Calculation Agent case, and the reconciliation is the point: "
+                 "the sum is checked against the document's own stated total. Also guards the "
+                 "router ordering - this question trips the aggregate detector on 'total' + "
+                 "'contract value' and was previously answered with a statistic across the "
+                 "whole corpus.",
+    },
+    {
+        "name": "calc-ld-exposure-hits-cap",
+        "archetype": "factual",
+        "question": "What is our liquidated damages exposure after 40 weeks of delay under the "
+                    "Apex Ranveer-Windermere Defence SOW?",
+        "expect_docs": ["Windermere Defence-SOW"],
+        "expect_answer": "INR 279,504,599.40, which is the aggregate cap. At the stated 0.5% "
+                         "of the contract price per week, 40 weeks would be 20% of INR "
+                         "1,863,363,996 - that is INR 372,672,799.20 - but the stated 15% "
+                         "aggregate cap limits the exposure to INR 279,504,599.40. The cap is "
+                         "reached at week 30.",
+        "notes": "Exercises the cap, which is where LD arithmetic is most often got wrong by "
+                 "hand: the uncapped figure is the plausible-looking wrong answer.",
+    },
+    {
+        "name": "calc-liability-cap-out-of-scope",
+        "archetype": "abstention",
+        "question": "What is the liability cap in rupees under the Castellane Hotels MSA?",
+        "expect_abstain": True,
+        "expect_answer": "It cannot be computed from the document. The cap is expressed as a "
+                         "multiple of fees paid or payable over a rolling window, which is "
+                         "billing data held in a finance system and not a term the agreement "
+                         "states, so this document does not state the input the calculation "
+                         "needs. The clause as drafted can be quoted instead.",
+        "notes": "The scope boundary, asserted as behaviour rather than left as a comment. All "
+                 "six formula-shaped liability caps in the corpus resolve to invoiced fees over "
+                 "a rolling window. The failure this guards against is a confident computed "
+                 "rupee figure that no contract supports.",
     },
 
 ]

@@ -4089,7 +4089,8 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                     from services import wikis as _wikis_d
                     _rescued = _decomp.rescue(
                         question, session_id, _wikis_d.active_wiki_id(),
-                        chunk["payload"].get("scope_docs") or [])
+                        chunk["payload"].get("scope_docs") or [],
+                        original_answer=chunk["payload"].get("answer") or "")
                 except Exception as _d_err:
                     logger.error("[AGENT] decomposition failed: %s", _d_err)
                     _rescued = None
