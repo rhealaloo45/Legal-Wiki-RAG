@@ -4870,8 +4870,8 @@
     // ============================================================
     const METRIC_INFO = {
       confidence: { title: 'Confidence', desc: 'How well a model judges the retrieved context supports this answer.' },
-      grounding:  { title: 'Grounding', desc: '% of the answer\'s checkable claims verified against the source text.' },
-      claims:     { title: 'Claims', desc: 'Quoted spans found verbatim in the exact text the model was given, and attributed to the right document. A count, not a score — nothing predicts it.' },
+      grounding:  { title: 'Grounding', desc: 'Every figure, date and name the answer states, checked for literal presence in the source text. A different measure from the claim count beside it — that one checks quotations, this one checks details, so the two can legitimately differ.' },
+      claims:     { title: 'Claims', desc: 'Quoted spans found verbatim in the exact text the model was given, and attributed to the right document. A count, not a score — nothing predicts it. It counts quotations only, so it can differ from Grounding, which checks every figure, date and name.' },
     };
 
     function metricInfo(label, score, key) {
