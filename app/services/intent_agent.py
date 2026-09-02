@@ -2646,6 +2646,110 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     return payload
 
 
+# Words that ride along on the front of a captured party name — _PARTY_NAME_RE
+# anchors on a capital letter, so a sentence-initial "From Apex Zephyra" keeps
+# the "From".
+_RX_PARTY_LEAD = re.compile(
+    r"^(?:from|in|of|under|for|between|with|against|by|the|this|that|and|to|"
+    r"what|which|list|give|show|tell)\s+", re.IGNORECASE)
+
+# An instrument named as a possession of a party: "Vishesh's SLA", "the SLA
+# with Oberon", "their DPAs". Requires the instrument word, which is what keeps
+# this from firing on every question that happens to name a company.
+_RX_INSTRUMENT_MENTION = re.compile(
+    r"\b(SLAs?|DPAs?|MSAs?|NDAs?|SPAs?|SSAs?|SHAs?|SOWs?|JVAs?|LOIs?|KERAs?|TSAs?"
+    r"|service\s+level\s+agreements?|data\s+processing\s+agreements?"
+    r"|master\s+services?\s+agreements?|non-disclosure\s+agreements?"
+    r"|joint\s+venture\s+agreements?|shareholders?'?\s+agreements?"
+    r"|share\s+purchase\s+agreements?|escrow\s+agreements?"
+    r"|statements?\s+of\s+work|term\s+sheets?|consultancy\s+agreements?"
+    r"|employment\s+agreements?|supply\s+agreements?|lease\s+deeds?)\b",
+    re.IGNORECASE)
+
+
+def _absent_instrument_answer(question: str, session_id: str,
+                              wiki_id: str) -> dict | None:
+    """"What does X's SLA say" when X has no SLA — say so, and say what X has.
+
+    Asked to list the clauses in Apex Vishesh Motors' SLAs, the system answered
+    from a Conditions Precedent Checklist: fifty items from the wrong
+    instrument, with the mismatch disclosed only in a note at the very bottom.
+    Apex Vishesh Motors has no Service Level Agreement at all. It has a Master
+    Services Agreement, a Technical Services Agreement, three Framework Supply
+    Agreements and more, and naming those is the answer the question deserved.
+
+    Deliberately narrow, and every gate matters. It fires only when the party
+    is known to the index, the instrument type exists somewhere in the corpus,
+    and the two genuinely do not intersect. Without the first two gates a
+    missing `parties` row or an unrecognised type word would produce a
+    confident "you have none" about documents that exist — which is a far worse
+    answer than the wrong-document one it replaces.
+    """
+    from services import db as _db, wiki as _wiki
+
+    q = question or ""
+    m_instr = _RX_INSTRUMENT_MENTION.search(q)
+    if not m_instr:
+        return None
+    label, patterns = _resolve_doctype(m_instr.group(1))
+    if not patterns:
+        return None
+
+    parties: list[str] = []
+    for raw in _wiki._PARTY_NAME_RE.findall(q):
+        name = _RX_PARTY_LEAD.sub("", str(raw).strip()).strip(" ,.;:'\"")
+        if len(name.split()) >= 2 and len(name) >= 6:
+            if name.lower() not in {n.lower() for n in parties}:
+                parties.append(name)
+    if not parties:
+        return None
+    # One party. With two, the question is about a pair and "neither has this
+    # instrument type together" is a much weaker claim than it looks.
+    party = parties[0]
+
+    try:
+        # Does this party exist in the index at all? If not, silence here and
+        # let retrieval try — the party may be named only in page text.
+        party_all = _db.count_documents_by_party(wiki_id, session_id, [party], None, limit=40)
+        if not party_all.get("total"):
+            return None
+        # Does this instrument type exist anywhere? If not, the vocabulary is
+        # wrong rather than the corpus being empty.
+        type_all = _db.count_documents_by_party(wiki_id, session_id, [], None,
+                                                limit=1, doc_type_patterns=patterns)
+        if not type_all.get("total"):
+            return None
+        both = _db.count_documents_by_party(wiki_id, session_id, [party], None,
+                                            limit=25, doc_type_patterns=patterns)
+    except Exception as e:
+        logger.error("[AGENT] absent-instrument check failed: %s", e)
+        return None
+
+    if both.get("total"):
+        return None  # They do have one — the ordinary path can answer.
+
+    have = [t for t in (party_all.get("by_type") or []) if t.get("doc_type")]
+    lines = [f"**{party} has no {label} in this corpus.**", ""]
+    lines.append(f"The corpus holds {type_all['total']} {label}(s) overall, and "
+                 f"{party_all['total']} document(s) naming {party} — but none of "
+                 f"them is a {label}.")
+    lines.append("")
+    if have:
+        lines.append(f"What {party} does have:")
+        for t in have[:14]:
+            lines.append(f"- {t['doc_type']}: {t['count']}")
+        lines.append("")
+        lines.append("Name one of these and the question can be answered against it.")
+    lines.append("")
+    lines.append("Counted from the document index rather than from a text search, so "
+                 "this is the complete picture for this party, not the closest matches.")
+
+    payload = _canned_payload("\n".join(lines), "Not in corpus", "document-index")
+    payload["meta_answer"] = False
+    payload["files_used"] = []
+    return payload
+
+
 def _structural_answer(kind: str, question: str, session_id: str) -> dict | None:
     """Answer a citation / amendment question from the typed tables.
 
@@ -3881,6 +3985,25 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                 yield {"stage": "complete", "status": "done", "type": "answer",
                        "payload": _a, "message": "Done"}
                 return
+
+    # A question about an instrument type this party does not have. Answered
+    # before retrieval, because retrieval cannot answer it: asked for a party's
+    # SLAs it returns the nearest documents it can find and describes those
+    # instead, which is how a Conditions Precedent Checklist came back as a
+    # list of SLA clauses. Returns None unless the absence is certain.
+    if not is_followup and not collection_id:
+        from services import wikis as _wikis_ab
+        try:
+            _absent = _absent_instrument_answer(
+                question, session_id, _wikis_ab.active_wiki_id())
+        except Exception as _ab_err:
+            logger.error("[AGENT] absent-instrument fast path failed: %s", _ab_err)
+            _absent = None
+        if _absent:
+            logger.info("[AGENT] absent-instrument fast path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _absent, "message": "Done"}
+            return
 
     if not is_followup and not collection_id:
         _kind = _is_structural_query(question)
