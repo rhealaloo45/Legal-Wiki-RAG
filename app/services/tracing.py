@@ -50,6 +50,7 @@ class Trace:
         self.pages: list[dict] = []
         self.pages_meta: dict = {}
         self.validation: Optional[dict] = None
+        self.citation_retry: Optional[dict] = None
 
     def record_stage(self, name: str, duration_ms: float, error: str = None) -> None:
         self.stages.append({"name": name, "duration_ms": round(duration_ms, 1), "error": error})
@@ -92,6 +93,16 @@ class Trace:
             "completion_tokens": (usage or {}).get("completion_tokens", 0),
             "finish_reason": (usage or {}).get("finish_reason"),
         })
+
+    def log_citation_retry(self, **fields) -> None:
+        """Why the citation retry fired and whether its output was kept.
+
+        The retry is a full regeneration and one of the largest single
+        costs in the pipeline, but nothing recorded which of the three
+        checks triggered it or whether the result was used - so its 27%
+        fire rate could not be reduced without guessing at the cause.
+        """
+        self.citation_retry = fields
 
     def log_validation(self, validation: dict) -> None:
         self.validation = validation
