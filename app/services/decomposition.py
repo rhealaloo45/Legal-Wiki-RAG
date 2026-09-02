@@ -229,7 +229,8 @@ def _route(sub: str, session_id: str, wiki_id: str,
 
 
 def rescue(question: str, session_id: str, wiki_id: str,
-           docs: list[str] | None = None) -> dict | None:
+           docs: list[str] | None = None,
+           original_answer: str = "") -> dict | None:
     """Answer the answerable parts of a compound question, or None.
 
     None means leave the original decline exactly as it is — which is the
@@ -273,9 +274,19 @@ def rescue(question: str, session_id: str, wiki_id: str,
         for sub in unanswered:
             lines.append(f"- {sub.strip()}")
         lines.append("")
-        lines.append("These parts were not found in the documents in scope. The "
-                     "whole question was declined; the parts above were then "
-                     "answered separately from the structured records.")
+        # The original decline is carried through verbatim, not summarised away.
+        # A correct abstention explains WHY a provision is absent, and that
+        # explanation is often the most useful part of the reply - replacing it
+        # with a bare "not found" would lose the reasoning the pipeline already
+        # did and paid for.
+        body = (original_answer or "").strip()
+        if body:
+            lines.append("What the documents in scope did say about the question "
+                         "as a whole:")
+            lines.append("")
+            lines.append(body)
+        else:
+            lines.append("These parts were not found in the documents in scope.")
 
     from services.intent_agent import _canned_payload
     payload = _canned_payload("\n".join(lines), "Decomposed",
