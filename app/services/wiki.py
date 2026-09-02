@@ -5924,6 +5924,36 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                 if sd not in files_used and _identifier_in_citation(ident, t_norm):
                     files_used.append(sd)
 
+    # The loop above resolves PAGE citations. An answer's References block names
+    # source FILES, so a document cited only there never reached files_used —
+    # and the fallback below cannot rescue it, because the fallback only runs
+    # when files_used is empty.
+    #
+    # Confirmed live: a cross-document comparison quoted the Consultancy
+    # Agreement verbatim and listed it under References with the quote, while
+    # files_used carried only the three NDAs scope had resolved. The document
+    # was read and cited; the provenance simply failed to record it. That
+    # understates the sources beneath an answer a lawyer is being asked to
+    # rely on, which is worse than it sounds — the document list is how they
+    # check the answer.
+    #
+    # Forward direction only (clean_name in answer), the same direction the
+    # loop above documents as safe: clean_name is long and specific by
+    # construction, so it cannot spuriously match.
+    _NAMED_IN_ANSWER_CAP = 12
+    if answer:
+        _answer_norm = answer.lower()
+        for clean_name, sd in canonical_files.items():
+            if len(files_used) >= _NAMED_IN_ANSWER_CAP:
+                break
+            if sd in files_used:
+                continue
+            cn = (clean_name or "").lower()
+            if len(cn) >= 12 and cn in _answer_norm:
+                files_used.append(sd)
+                logger.info("files_used: %r added — named in the answer text "
+                            "but not resolvable from a page citation", clean_name)
+
     # Fallback: if no inline citations were found, populate files_used.
     # Prefer the file(s) explicitly mentioned in the question; only fall back
     # to selected-page source docs when no file was detected — and cap that
