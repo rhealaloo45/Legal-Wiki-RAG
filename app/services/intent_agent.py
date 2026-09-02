@@ -2189,11 +2189,23 @@ _COUNT_BLOCKERS = (
     r"signed|is|are|was|were|do|does|did|have|has|had|must|shall|require[sd]?|"
     r"needs?|takes?|remain|survive[sd]?"
 )
+# The instrument nouns a counting question may end on. Kept as one shared
+# alternation so the detector and the extractor can never disagree about what
+# is countable - if they drift apart the symptom is a question that classifies
+# as a count and then extracts no type from itself, and answers for the whole
+# corpus instead. The acronyms carry as much weight as the words: a lawyer
+# asks "how many SLAs do we have", never "how many service level agreements".
+_COUNT_NOUNS = (
+    "contracts?|agreements?|documents?|deeds?|leases?|licen[cs]es?|"
+    "amendments?|policies|opinions?|judgm?ents?|petitions?|plaints?|"
+    "affidavits?|term sheets?|statements? of work|"
+    "slas?|dpas?|ndas?|msas?|spas?|ssas?|shas?|sows?|poas?|lois?|"
+    "jvas?|jvs?|keras?|mous?|tsas?"
+)
 _RX_COUNT = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
     rf"(?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
-    r"(?:contracts?|agreements?|documents?|ndas?|msas?|deeds?|leases?|"
-    r"licen[cs]es?|amendments?|policies)\b",
+    rf"(?:{_COUNT_NOUNS})\b",
     re.IGNORECASE,
 )
 # A counting question must also name who or what to count, otherwise "how many
@@ -2206,10 +2218,135 @@ _RX_COUNT_PARTY = re.compile(
 _RX_COUNT_DOCTYPE = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
     rf"((?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
-    r"(?:contracts?|agreements?|documents?|ndas?|msas?|deeds?|leases?|"
-    r"licen[cs]es?|amendments?|policies))\b",
+    rf"(?:{_COUNT_NOUNS}))\b",
     re.IGNORECASE,
 )
+
+
+# --- Instrument vocabulary -------------------------------------------------
+# Maps the word a lawyer uses for an instrument to (display label, every
+# doc_type spelling on the corpus that names it). Built against the live
+# distinct-doc_type list, which holds 176 strings for far fewer real instrument
+# types: "NDA" alone is filed as "Mutual Confidentiality and Non-Disclosure
+# Agreement", "Non-Disclosure Agreement", and both again in upper case. A
+# single ILIKE would report 19 NDAs where there are 145.
+#
+# Patterns are deliberately narrow rather than generous. "services agreement"
+# must not sweep in "Service Level Agreement", so the pattern keeps the "s"
+# that separates them; getting a count silently too high is worse than not
+# recognising the word at all, because the caller falls back to retrieval.
+_DOCTYPE_SYNONYMS = {
+    "sla": ("Service Level Agreement", ["service level agreement"]),
+    "dpa": ("Data Processing Agreement", ["data processing agreement"]),
+    "nda": ("Non-Disclosure Agreement",
+            ["non-disclosure", "nondisclosure", "confidentiality"]),
+    "msa": ("Master Services Agreement",
+            ["master services agreement", "master service agreement"]),
+    "spa": ("Share Purchase Agreement", ["share purchase agreement"]),
+    "ssa": ("Share Subscription Agreement", ["share subscription agreement"]),
+    "sha": ("Shareholders' Agreement", ["shareholder"]),
+    "jv": ("Joint Venture Agreement", ["joint venture"]),
+    "jva": ("Joint Venture Agreement", ["joint venture"]),
+    "sow": ("Statement of Work", ["statement of work"]),
+    "poa": ("Power of Attorney", ["power of attorney"]),
+    "loi": ("Letter of Intent", ["letter of intent"]),
+    "kera": ("Key Employee Retention Agreement", ["key employee retention"]),
+    "mou": ("Memorandum of Understanding", ["memorandum of understanding"]),
+    "tsa": ("Transition Services Agreement", ["transition services agreement"]),
+    # Spelled-out forms, so "how many service level agreements" and "how many
+    # SLAs" resolve to the same set rather than to two different counts.
+    "service level agreement": ("Service Level Agreement",
+                                ["service level agreement"]),
+    "data processing agreement": ("Data Processing Agreement",
+                                  ["data processing agreement"]),
+    "non-disclosure agreement": ("Non-Disclosure Agreement",
+                                 ["non-disclosure", "nondisclosure", "confidentiality"]),
+    "nondisclosure agreement": ("Non-Disclosure Agreement",
+                                ["non-disclosure", "nondisclosure", "confidentiality"]),
+    "confidentiality agreement": ("Non-Disclosure Agreement",
+                                  ["non-disclosure", "nondisclosure", "confidentiality"]),
+    "master services agreement": ("Master Services Agreement",
+                                  ["master services agreement", "master service agreement"]),
+    "joint venture agreement": ("Joint Venture Agreement", ["joint venture"]),
+    "shareholders agreement": ("Shareholders' Agreement", ["shareholder"]),
+    "shareholder agreement": ("Shareholders' Agreement", ["shareholder"]),
+    "share purchase agreement": ("Share Purchase Agreement",
+                                 ["share purchase agreement"]),
+    "statement of work": ("Statement of Work", ["statement of work"]),
+    "power of attorney": ("Power of Attorney", ["power of attorney"]),
+    "letter of intent": ("Letter of Intent", ["letter of intent"]),
+    "term sheet": ("Term Sheet", ["term sheet"]),
+    "legal opinion": ("Legal Opinion", ["legal opinion"]),
+    "escrow agreement": ("Escrow Agreement", ["escrow agreement"]),
+    "consultancy agreement": ("Consultancy Agreement", ["consultancy agreement"]),
+    "employment agreement": ("Executive Employment Agreement",
+                             ["employment agreement"]),
+    "lease deed": ("Commercial Lease Deed", ["lease deed"]),
+    "facility agreement": ("Facility Agreement", ["facility agreement"]),
+    "supply agreement": ("Framework Supply Agreement", ["supply agreement"]),
+    "amendment agreement": ("Amendment Agreement", ["amendment agreement"]),
+    "disclosure letter": ("Disclosure Letter", ["disclosure letter"]),
+    "closing certificate": ("Closing Certificate", ["closing certificate"]),
+    "board resolution": ("Certified Board Resolutions", ["board resolution"]),
+}
+
+# Words that qualify a noun without naming an instrument. Stripped before the
+# vocabulary lookup so "how many signed NDAs" still resolves to NDA.
+_DOCTYPE_STOPWORDS = {"the", "our", "all", "total", "any", "every", "existing",
+                      "signed", "executed", "current", "active", "live"}
+
+
+def _singularise(word: str) -> str:
+    """Crude but sufficient for the closed noun list above."""
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith("ses") and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _resolve_doctype(phrase: str):
+    """(display label, ILIKE patterns) for a counting question's noun phrase.
+
+    Returns (None, []) for the generic nouns - "contracts", "documents" - which
+    are the whole-corpus ask and must never become a doc_type filter, because
+    no stored doc_type is literally "contract" and filtering on it would count
+    almost nothing while looking like a real answer.
+    """
+    words = [w for w in (phrase or "").lower().replace("'", "").split()
+             if w and w not in _DOCTYPE_STOPWORDS]
+    if not words:
+        return None, []
+    generic = {"contract", "document", "agreement"}
+    singular = [_singularise(w) for w in words]
+    # Whole phrase first, so "master services agreement" beats "agreement".
+    # Three spellings are tried because English pluralises the head noun while
+    # keeping a plural inside the name: "master services agreements" is
+    # "master services agreement", not "master service agreement".
+    candidates = [
+        " ".join(words),
+        " ".join(words[:-1] + [_singularise(words[-1])]),
+        " ".join(singular),
+    ]
+    for key in candidates:
+        hit = _DOCTYPE_SYNONYMS.get(key)
+        if hit:
+            return hit[0], list(hit[1])
+    # Then the head noun alone, catching "signed NDAs" and "our SLAs".
+    for w in singular:
+        hit = _DOCTYPE_SYNONYMS.get(w)
+        if hit:
+            return hit[0], list(hit[1])
+    if all(w in generic for w in singular):
+        return None, []
+    # Unknown but non-generic - fall back to the literal phrase, which is what
+    # this code did before the vocabulary existed.
+    literal = " ".join(w for w in words if _singularise(w) not in generic)
+    if not literal:
+        return None, []
+    return literal.title(), [literal]
 
 
 # --- Phase 4 analytics detectors ------------------------------------------
@@ -2454,34 +2591,38 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         parts = re.split(r"\s+(?:and|&)\s+", raw)
         parties = [p.strip() for p in parts if len(p.strip()) > 2]
 
-    doc_type = None
+    # Only a qualified type ("SLAs", "supply agreements") narrows the query;
+    # the bare noun ("contracts", "documents") is the generic ask and must not
+    # become a doc_type filter, or it matches almost nothing while still
+    # looking like a real answer.
+    label, patterns = (None, [])
     dm = _RX_COUNT_DOCTYPE.search(question or "")
     if dm:
-        phrase = dm.group(1).strip().lower()
-        # Only a qualified type ("supply agreements") narrows the query; the
-        # bare noun ("contracts", "documents") is the generic ask and must not
-        # be used as a doc_type filter or it matches almost nothing.
-        generic = {"contract", "contracts", "agreement", "agreements",
-                   "document", "documents"}
-        if phrase not in generic:
-            words = [w for w in phrase.split() if w not in ("the", "our", "all", "total")]
-            if words and words[0] not in generic:
-                doc_type = " ".join(words)
+        label, patterns = _resolve_doctype(dm.group(1).strip())
 
-    if not parties and not doc_type:
+    if not parties and not patterns:
         return None
 
     try:
-        result = _db.count_documents_by_party(wiki_id, session_id, parties, doc_type)
+        result = _db.count_documents_by_party(
+            wiki_id, session_id, parties, None, doc_type_patterns=patterns)
     except Exception as e:
         logger.error("[AGENT] count fast-path failed: %s", e)
         return None
     if not result["total"]:
         return None
 
-    subject = " and ".join(parties) if parties else (doc_type or "the corpus")
-    noun = doc_type or "document"
-    lines = [f"**{result['total']} {noun}(s) matching {subject}.**", ""]
+    noun = label or "document"
+    if parties:
+        # "between X and Y" counts the documents naming BOTH, which is what the
+        # question means - not the union of each party's paperwork.
+        joiner = " and " if len(parties) > 1 else ""
+        headline = (f"**{result['total']} {noun}(s) "
+                    f"{'between' if len(parties) > 1 else 'with'} "
+                    f"{joiner.join(parties)}.**")
+    else:
+        headline = f"**{result['total']} {noun}(s) in the corpus.**"
+    lines = [headline, ""]
     if len(result["by_type"]) > 1:
         lines.append("By document type:")
         for t in result["by_type"]:
@@ -2492,7 +2633,7 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         lines.append(f"{'Most recent, by effective date' if len(shown) > 1 else 'Document'}:")
         for d in shown:
             date = f" — {d['effective_date']}" if d.get("effective_date") else ""
-            lines.append(f"- {wiki._norm_doc_name(d['source_doc'])}{date}")
+            lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{date}")
         if result["truncated"]:
             lines.append(f"- …and {result['total'] - len(shown)} more")
     lines.append("")
