@@ -54,13 +54,14 @@ TIERS = ("scope", "pipeline", "graded")
 _RX_ABSTAIN = re.compile(
     r"\bnot\s+(?:established|addressed|present|stated|specified|mentioned|covered|"
     r"included|found)\b"
-    # An adverb routinely sits between the negation and its verb — "does not
-    # EXPRESSLY label", "does not SPECIFICALLY provide". A correct abstention
-    # was being scored as an assertion for exactly that reason, on an answer
-    # the grader itself marked 10/10/10. The verb list is wider for the same
-    # reason: a document can fail to label, define, designate or name a thing
-    # just as readily as it can fail to contain one.
-    r"|\bdo(?:es)?\s+not\s+(?:\w+ly\s+)?(?:contain|appear|include|address|specify|"
+    # Words routinely sit between the negation and its verb — "does not
+    # EXPRESSLY label", "does not VERBATIM identify", "does not SPECIFICALLY
+    # provide". Two correct abstentions were scored as assertions for exactly
+    # that reason, on answers the grader itself marked 10/10. Matching an
+    # adverb only was not enough ("verbatim" is not one), so up to two words
+    # may intervene — still bounded, and the verb list stays closed, which is
+    # what keeps this from matching an ordinary sentence.
+    r"|\bdo(?:es)?\s+not[,]?\s+(?:[\w,]+\s+){0,2}?(?:contain|appear|include|address|specify|"
     r"state|impose|label|define|designate|name|identify|provide|require|mention|"
     r"refer|set\s+out|establish)\b"
     r"|\bno\s+(?:such\s+)?(?:clause|provision|restriction|term|fee|cap|information)\b"
