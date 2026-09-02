@@ -2667,6 +2667,115 @@ _RX_INSTRUMENT_MENTION = re.compile(
     re.IGNORECASE)
 
 
+_ORDINAL_WORDS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6,
+    "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10, "last": -1,
+}
+
+# A question that is nothing but a pointer at something the previous answer
+# enumerated: "elaborate on 2", "tell me more about the second one", "expand
+# on #3", "what about number 4". The verb list and the length ceiling below
+# are what keep this off a real question that happens to contain a number.
+_RX_ORDINAL_REF = re.compile(
+    r"^\s*(?:please\s+)?"
+    r"(?:elaborate|expand|explain|tell\s+me\s+more|more|go\s+deeper|detail|"
+    r"what|describe|unpack)\b[^.?!]{0,40}?"
+    r"(?:\bon\b|\babout\b|\bre\b|:)?\s*"
+    r"(?:the\s+|#|number\s+|item\s+|point\s+|no\.?\s*)?"
+    r"(\d{1,2}|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|last)"
+    r"(?:st|nd|rd|th)?\s*(?:one|item|point|risk|clause|thing)?\s*[.?!]?\s*$",
+    re.IGNORECASE)
+
+# Numbered items as the answer layer writes them: "1. Take-or-Pay obligation",
+# "* 3. Something", "3) Something".
+_RX_NUMBERED_ITEM = re.compile(r"^\s*(?:[*\-]\s*)?(\d{1,2})[.)]\s+(\S.*?)\s*$")
+
+# How much of the referenced item to carry forward. Enough to identify it
+# unambiguously, short enough that the rewritten question stays a question.
+_ORDINAL_ITEM_CHARS = 180
+
+
+def _extract_numbered_items(answer: str) -> dict:
+    """{position: text} for the numbered list an answer presented, if any.
+
+    Only a run of items starting at 1 counts. A stray "2." inside prose is not
+    a list, and treating one as a list is how a pointer question ends up
+    resolved against a table buried in a document rather than against the list
+    the reader is actually looking at.
+    """
+    found: dict = {}
+    for line in (answer or "").splitlines():
+        m = _RX_NUMBERED_ITEM.match(line)
+        if not m:
+            continue
+        n = int(m.group(1))
+        if n in found:
+            continue  # first occurrence wins; later ones are sub-lists
+        found[n] = re.sub(r"\s+", " ", m.group(2)).strip()
+    if 1 not in found or len(found) < 2:
+        return {}
+    # Contiguous from 1 only: 1,2,3 is a list; 1,2,7 is prose with numbers.
+    out = {}
+    i = 1
+    while i in found:
+        out[i] = found[i]
+        i += 1
+    return out if len(out) >= 2 else {}
+
+
+def _resolve_ordinal_reference(question: str, chat_session_id: str) -> str:
+    """A pointer question rewritten to name what it points at, or "".
+
+    "Tell me more about the second one" was being sent to retrieval as written.
+    With nothing to anchor it, scope resolved on whatever capitalised words the
+    sentence happened to contain and the system answered about the second
+    highest-risk failure mode in two unrelated Legal Opinions — a confident,
+    well-cited answer to a question nobody asked.
+
+    The list the user is pointing at is the previous answer's own numbered
+    list, so that is what this reads. Returns "" whenever the previous answer
+    had no list, or the position does not exist in it, which leaves the
+    question exactly as the user typed it.
+    """
+    if not chat_session_id:
+        return ""
+    q = (question or "").strip()
+    if len(q) > 60:
+        return ""
+    m = _RX_ORDINAL_REF.match(q)
+    if not m:
+        return ""
+    token = m.group(1).lower()
+    pos = int(token) if token.isdigit() else _ORDINAL_WORDS.get(token, 0)
+    if not pos:
+        return ""
+
+    try:
+        from services import db as _db
+        msgs = _db.get_messages(chat_session_id, limit=40) or []
+    except Exception as e:
+        logger.error("[AGENT] ordinal reference: history lookup failed: %s", e)
+        return ""
+
+    for msg in reversed(msgs):
+        if (msg.get("role") or "") != "assistant":
+            continue
+        items = _extract_numbered_items(msg.get("content") or "")
+        if not items:
+            continue
+        if pos == -1:
+            pos = max(items)
+        item = items.get(pos)
+        if not item:
+            return ""
+        item = item[:_ORDINAL_ITEM_CHARS].rstrip()
+        rewritten = f"{q.rstrip('.?! ')}, specifically: {item}"
+        logger.info("[AGENT] ordinal reference %r resolved to item %d: %r",
+                    q, pos, item[:70])
+        return rewritten
+    return ""
+
+
 def _absent_instrument_answer(question: str, session_id: str,
                               wiki_id: str) -> dict | None:
     """"What does X's SLA say" when X has no SLA — say so, and say what X has.
@@ -3907,6 +4016,20 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         below are skipped while a collection is pinned, since each answers
         over the whole wiki and would silently escape the boundary.
     """
+    # A question that is only a pointer at something the previous answer
+    # enumerated ("tell me more about the second one") carries no subject of
+    # its own. Rewritten here, before anything else runs, so every path below
+    # sees a question that names what it is about. Leaves the question
+    # untouched whenever the previous answer had no such list.
+    try:
+        _ordinal = _resolve_ordinal_reference(question, chat_session_id)
+    except Exception as _ord_err:
+        logger.error("[AGENT] ordinal reference resolution failed: %s", _ord_err)
+        _ordinal = ""
+    if _ordinal:
+        question = _ordinal
+        is_followup = True
+
     # Greetings and sign-offs short-circuit before the graph. Unlike the meta
     # path below this one DOES run on follow-ups — "thanks" after an answer is
     # exactly when it happens — and it is safe there because every pattern is a
