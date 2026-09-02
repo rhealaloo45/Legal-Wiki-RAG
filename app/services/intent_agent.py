@@ -941,12 +941,27 @@ def generate_answer_node(state: QueryState) -> dict:
     _scope = state.get("scope_decision") or {}
     _scope_note = ""
     if _scope.get("method") == "carryover" and _scope.get("target_docs"):
-        _carried = wiki._norm_doc_name(_scope["target_docs"][0])
+        # Names EVERY document carried, not just the first. Carryover inherits
+        # the previous turn's whole scope, and since the party-pair index can
+        # pin a sixteen-document family, naming target_docs[0] alone disclosed
+        # the alphabetically-first document as though it were the source.
+        # Confirmed live: three consecutive answers drawn from a Shareholders'
+        # Agreement each declared they had been answered using "amendment
+        # agreement 01-09-2021", which was simply first in the sorted set. A
+        # provenance note that names the wrong document is worse than none —
+        # it is the line a reader would quote when checking the answer.
+        _carried_docs = _scope["target_docs"]
+        _names = ", ".join(f'"{wiki._norm_doc_name(d)}"' for d in _carried_docs[:4])
+        _extra = (f" and {len(_carried_docs) - 4} more"
+                  if len(_carried_docs) > 4 else "")
+        _subject = ("the document already under discussion in this conversation"
+                    if len(_carried_docs) == 1 else
+                    f"the {len(_carried_docs)} documents already under discussion "
+                    f"in this conversation")
         _scope_note = (
             f"This question named no document, so it was answered using "
-            f"\"{_carried}\" — the document already under discussion in this "
-            f"conversation. To scope it differently, name a document explicitly, "
-            f"or use \"across all …\" to search every document."
+            f"{_names}{_extra} — {_subject}. To scope it differently, name a "
+            f"document explicitly, or use \"across all …\" to search every document."
         )
     elif _scope.get("method") == "carryover-set" and _scope.get("target_docs"):
         # Same disclosure duty as the single-document carryover above: the
