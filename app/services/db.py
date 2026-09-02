@@ -673,6 +673,13 @@ def _init_regression_schema(conn, text) -> None:
             UNIQUE (wiki_id, session_id, name)
         )
     """))
+    # Names the mechanism that reaches this case's documents when it is NOT
+    # resolve_scope - the counting path reads the document index, the
+    # Calculation Agent falls back to an identifier lookup. Set, it tells the
+    # scope tier there is nothing here for it to assert; the pipeline tier
+    # still checks the documents from files_used.
+    conn.execute(text("ALTER TABLE regression_cases "
+                      "ADD COLUMN IF NOT EXISTS scope_resolved_by TEXT"))
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS regression_runs (
             id            BIGSERIAL PRIMARY KEY,
@@ -3698,6 +3705,7 @@ def upsert_regression_case(wiki_id: str, session_id: str, name: str,
         "must_not_contain": _json.dumps(fields.get("must_not_contain")) if fields.get("must_not_contain") is not None else None,
         "expect_answer": fields.get("expect_answer"),
         "notes": fields.get("notes"),
+        "scope_resolved_by": fields.get("scope_resolved_by"),
         "active": bool(fields.get("active", True)),
     }
     engine = get_engine()
@@ -3706,8 +3714,8 @@ def upsert_regression_case(wiki_id: str, session_id: str, name: str,
             INSERT INTO regression_cases
                 (wiki_id, session_id, name, question, archetype, expect_scope_method,
                  expect_docs, expect_abstain, must_contain, must_not_contain,
-                 expect_answer, notes, active)
-            VALUES (:w, :sid, :n, :q, :arch, :method, :docs, :abst, :mc, :mnc, :ans, :notes, :active)
+                 expect_answer, notes, scope_resolved_by, active)
+            VALUES (:w, :sid, :n, :q, :arch, :method, :docs, :abst, :mc, :mnc, :ans, :notes, :srb, :active)
             ON CONFLICT (wiki_id, session_id, name) DO UPDATE SET
                 question = EXCLUDED.question,
                 archetype = EXCLUDED.archetype,
@@ -3718,6 +3726,7 @@ def upsert_regression_case(wiki_id: str, session_id: str, name: str,
                 must_not_contain = EXCLUDED.must_not_contain,
                 expect_answer = EXCLUDED.expect_answer,
                 notes = EXCLUDED.notes,
+                scope_resolved_by = EXCLUDED.scope_resolved_by,
                 active = EXCLUDED.active
             RETURNING id
         """), {"w": wiki_id, "sid": session_id, "n": name, "q": question,
@@ -3725,6 +3734,7 @@ def upsert_regression_case(wiki_id: str, session_id: str, name: str,
                "docs": cols["expect_docs"], "abst": cols["expect_abstain"],
                "mc": cols["must_contain"], "mnc": cols["must_not_contain"],
                "ans": cols["expect_answer"], "notes": cols["notes"],
+               "srb": cols["scope_resolved_by"],
                "active": cols["active"]}).fetchone()
         conn.commit()
         return int(row[0])
@@ -3739,7 +3749,7 @@ def get_regression_cases(wiki_id: str, session_id: str,
     sql = """
         SELECT id, name, question, archetype, expect_scope_method, expect_docs,
                expect_abstain, must_contain, must_not_contain, expect_answer,
-               notes, active
+               notes, active, scope_resolved_by
         FROM regression_cases
         WHERE wiki_id = :w AND session_id = :sid
     """
@@ -3756,7 +3766,8 @@ def get_regression_cases(wiki_id: str, session_id: str,
              "expect_scope_method": r[4], "expect_docs": r[5],
              "expect_abstain": r[6], "must_contain": r[7],
              "must_not_contain": r[8], "expect_answer": r[9],
-             "notes": r[10], "active": r[11]} for r in rows]
+             "notes": r[10], "active": r[11],
+             "scope_resolved_by": r[12]} for r in rows]
 
 
 def delete_regression_case(wiki_id: str, session_id: str, name: str) -> bool:
