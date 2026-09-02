@@ -3753,7 +3753,26 @@ def _build_metadata_block(session_id: str, selected_titles: list, pages: dict) -
 # through the second quote's close — merging a citation label with its own
 # quoted text and producing a span that matches neither. Excluding quote
 # chars forces each `"..."` span to stop at its own closing quote instead.
-_QUOTE_SPAN_RE = re.compile(r'["“]([^"“”|\n]{15,500})["”]')
+# Pairs quote characters at ANY length; callers decide what is long enough to
+# be worth verifying, via _is_checkable_quote.
+#
+# The length floor used to live in the pattern, and that produced a false
+# CITATION WARNING on the model's own prose. In `The question "elaborate on 2"
+# reasonably refers to item 2 in the Closing Conditions Table...`, the span
+# "elaborate on 2" is fourteen characters - below the old floor - so the match
+# failed there and restarted from its CLOSING quote, which then paired with the
+# next opening quote and captured the narrative between them as a quotation.
+# The warning that followed told the reader that a sentence the model wrote
+# about itself could not be found in the source: true, useless, and the fastest
+# way to teach someone to ignore the warnings that do matter.
+_QUOTE_SPAN_RE = re.compile(r'["“]([^"“”|\n]{0,500})["”]')
+
+_QUOTE_MIN_CHARS = 15
+
+
+def _is_checkable_quote(text: str) -> bool:
+    """Long enough to be a quotation rather than a quoted word or label."""
+    return len(text or "") >= _QUOTE_MIN_CHARS
 
 # Matches the start of a reference-list line: an optional bullet/dash marker
 # followed by a "[N]"-style citation number, e.g. "- [1] FileName, ..." or
@@ -4402,6 +4421,8 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     question_norm = _norm(question) if question else ""
     unverified = []
     for q in _QUOTE_SPAN_RE.findall(answer):
+        if not _is_checkable_quote(q):
+            continue
         qn = _norm(q)
         if _alnum_only(qn) in known_titles:
             continue  # citation label (page title in quotes), not a content quote
@@ -4508,6 +4529,8 @@ def _drop_unverifiable_reference_quotes(answer: str, absent: list[str]) -> tuple
             new_line = line
             stripped_any = False
             for m in list(_QUOTE_SPAN_RE.finditer(line))[::-1]:
+                if not _is_checkable_quote(m.group(1)):
+                    continue
                 if not _matches_target(_norm_for_match(m.group(1))):
                     continue
                 start, end = m.start(), m.end()
@@ -4671,6 +4694,8 @@ def _verify_citation_attribution(answer: str, context: str) -> list[str]:
     mismatches = []
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
+        if not _is_checkable_quote(quote):
+            continue
         qn = _norm(quote)
         if _alnum_only(qn) in known_titles:
             continue  # citation label (page title in quotes), not a content quote
@@ -4807,6 +4832,8 @@ def _autocorrect_citation_attribution(answer: str, context: str) -> tuple[str, i
 
     for m in _QUOTE_SPAN_RE.finditer(answer):
         quote = m.group(1)
+        if not _is_checkable_quote(quote):
+            continue
         qn = _norm(quote)
         if _alnum_only(qn) in known_titles:
             continue
@@ -6221,14 +6248,16 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         # or the question are skipped by the verifier rather than failed, so they
         # count as verified here, which matches what they are.
         "citation_check": {
-            "total": len(_QUOTE_SPAN_RE.findall(answer)),
+            "total": len([q for q in _QUOTE_SPAN_RE.findall(answer)
+                          if _is_checkable_quote(q)]),
             "unverified": len(_unverified_quotes),
             "misattributed": len(_misattributed),
             # A quote can be both unverified and misattributed, so the two
             # counts are unioned rather than added — summing them would let a
             # single bad quote fail twice and report fewer verified claims
             # than the answer actually contains.
-            "verified": max(0, len(_QUOTE_SPAN_RE.findall(answer))
+            "verified": max(0, len([q for q in _QUOTE_SPAN_RE.findall(answer)
+                                    if _is_checkable_quote(q)])
                             - len(set(_unverified_quotes) | set(_misattributed))),
         },
         "token_breakdown": token_breakdown,
