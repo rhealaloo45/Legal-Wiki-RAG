@@ -4158,7 +4158,8 @@ def clause_canon_summary(wiki_id: str, session_id: str | None = None) -> dict:
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
-                             limit: int = 25) -> dict:
+                             limit: int = 25,
+                             doc_type_patterns: list[str] | None = None) -> dict:
     """Count documents matching a party (or every party pair member) and type.
 
     Reads documents.parties, a clean JSONB string array populated on the large
@@ -4189,9 +4190,23 @@ def count_documents_by_party(wiki_id: str, session_id: str,
         )""")
         params[f"party{i}"] = f"%{party.strip()}%"
 
-    if doc_type_hint:
-        clauses.append("d.doc_type ILIKE :dt")
-        params["dt"] = f"%{doc_type_hint.strip()}%"
+    # A lawyer's word for an instrument almost never equals the stored
+    # doc_type. "NDA" is filed on this corpus as "Mutual Confidentiality and
+    # Non-Disclosure Agreement", as "Non-Disclosure Agreement", and as both
+    # again in upper case - 176 distinct doc_type strings for far fewer
+    # actual instrument types. Counting a single ILIKE would report 19 NDAs
+    # where there are 145, which is the exact failure this whole function
+    # exists to prevent. The caller resolves one concept to every spelling
+    # that names it and they are OR'd here, so one concept counts once.
+    _patterns = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if not _patterns and doc_type_hint:
+        _patterns = [doc_type_hint.strip()]
+    if _patterns:
+        _ors = []
+        for i, pat in enumerate(_patterns):
+            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{pat}%"
+        clauses.append("(" + " OR ".join(_ors) + ")")
 
     where = " AND ".join(clauses)
     with engine.connect() as conn:
@@ -4212,6 +4227,7 @@ def count_documents_by_party(wiki_id: str, session_id: str,
         "total": int(total or 0),
         "parties": parties or [],
         "doc_type": doc_type_hint,
+        "doc_type_patterns": _patterns,
         "by_type": [{"doc_type": r[0], "count": int(r[1])} for r in by_type],
         "documents": [{"source_doc": r[0], "doc_type": r[1],
                        "effective_date": str(r[2]) if r[2] else None,
