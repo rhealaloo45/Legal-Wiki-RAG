@@ -341,6 +341,50 @@
     margin:8px 0 -4px 2px;
   }
 
+  /* ---------- compact spec table ---------- */
+  .spec-table{
+    width:100%;
+    border-collapse:collapse;
+    margin:18px 0 8px;
+    font-size:13.5px;
+  }
+  .spec-table th{
+    text-align:left;
+    font-family:var(--font-mono);
+    font-size:10.5px;
+    letter-spacing:.09em;
+    text-transform:uppercase;
+    color:var(--text-faint);
+    font-weight:400;
+    padding:0 14px 8px 0;
+    border-bottom:1px solid var(--border);
+  }
+  .spec-table td{
+    padding:11px 14px 11px 0;
+    border-bottom:1px solid var(--border-soft);
+    color:var(--text-dim);
+    vertical-align:top;
+    line-height:1.5;
+  }
+  .spec-table td:first-child{color:var(--text); white-space:nowrap;}
+  .spec-table tr:last-child td{border-bottom:none;}
+  .table-scroll{overflow-x:auto;}
+  .worked{
+    font-family:var(--font-mono);
+    font-size:12.5px;
+    line-height:1.75;
+    background:var(--bg-elev-2);
+    border:1px solid var(--border);
+    border-left:3px solid var(--done);
+    border-radius:4px;
+    padding:16px 20px;
+    margin:18px 0;
+    color:var(--text-dim);
+    overflow-x:auto;
+  }
+  .worked b{color:var(--text); font-weight:600;}
+  .worked .ok{color:var(--done);}
+
   /* ---------- family cards ---------- */
   .family-grid{
     display:grid;
@@ -1031,8 +1075,87 @@
         </div>
 
         <div class="callout">
-          <div class="callout-label">Query decomposition <span class="badge new" style="margin-left:6px;">new</span></div>
+          <div class="callout-label">Query decomposition <span class="badge done" style="margin-left:6px;">shipped</span></div>
           <p style="margin-bottom:0;">The router gap named earlier in this doc — "each fast-path branch has its own detector, no unified mechanism" — gets sharper on a compound question: <em>"which supplier contracts allow termination after a change of control and have less than 30 days notice"</em> is a comparison-to-standard clause, a relation, and a filtered exhaustive-set query stacked together, and no single branch above answers it whole. Decomposition breaks a compound question into sub-tasks before routing — identify the relevant clause type, find the relation, filter by the numeric threshold — and sends each sub-task to the cheapest capable path (structured lookup where one exists) rather than handing the whole compound question to a single expensive LLM call. This is the mechanism that makes Phase 4's new archetypes (§ 05) actually compose with each other on a real multi-part question, not just answer in isolation — worth building alongside Phase 4 rather than after it.</p>
+          <p style="margin-top:.7rem; margin-bottom:0;"><strong style="color:var(--done);">Shipped, with one change to the design above.</strong> It does not run before routing. It runs <em>after</em> the pipeline has produced an answer, and only when that answer is a decline — <code>services/decomposition.py</code>, behind <code>ENABLE_QUERY_DECOMPOSITION</code>. Decomposing before routing would split <em>“the liability cap in the agreement between Apex Meridian and Ironvane”</em> and hand each half to a resolver that no longer has the party pair, breaking the capability it was meant to extend. Placed on the decline path it sits in front of nothing: every question that resolves today reaches that point with an answer and never enters the branch. Two vetoes back it up — “between X and Y” is never split, and an “and” joining two capitalised names is treated as part of a party’s identity — and sub-questions route only through the zero-LLM paths, so a four-part rescue cannot quietly become four retrieval passes. Parts that do not resolve are named, and the original decline is carried through verbatim rather than summarised away.</p>
+        </div>
+
+        <h3 class="sub-title" style="margin-top:44px;">Calculation Agent &mdash; how it actually works <span class="badge done">shipped</span></h3>
+        <p class="section-kicker" style="margin-bottom:18px;">A model asked to add five milestone fees will usually get it right and will occasionally not, and nothing in the answer tells the two apart. <code>services/calculation.py</code> computes instead: the arithmetic is exact, or it is refused by name.</p>
+
+        <div class="flow">
+          <div class="flow-node new">Arithmetic verb<br>+ subject</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-node unchanged">Scope resolution</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-node new">Identifier fallback<br><span style="font-size:11px;">only if scope found none</span></div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-node ext">Read typed clause rows</div>
+          <div class="flow-branch-label">&#8601; every input parsed&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#8600; an input missing</div>
+          <div class="flow-node new">Compute in Python<br>+ show the working</div>
+          <div class="flow-arrow">&middot;</div>
+          <div class="flow-node flag">Decline, naming<br>the missing input</div>
+        </div>
+        <p class="fig-caption">Fig. 6 &mdash; No LLM call anywhere on this path. A missing input is an outcome, not an error.</p>
+
+        <h4 style="font-family:var(--font-display); font-weight:600; font-size:17px; margin:28px 0 6px;">The five steps</h4>
+        <div class="table-scroll">
+        <table class="spec-table">
+          <tr><th style="width:150px;">Step</th><th>What happens</th></tr>
+          <tr><td>1 &middot; Detect</td><td>Needs an arithmetic verb <em>and</em> its own subject. &ldquo;What is the fee under the SOW&rdquo; is a lookup and must reach retrieval &mdash; a quoted clause beats a number when the question wanted the clause. Verified at 16/16 on positives and negatives.</td></tr>
+          <tr><td>2 &middot; Resolve</td><td>Ordinary scope resolution first. Only if it returns nothing, an identifier matching <em>exactly one</em> document (<code>CND-TOR-SOW-2026-001</code>) is accepted. An ambiguous identifier resolves nothing rather than picking, so this can turn a fall-through into an answer, never an answer into a different one.</td></tr>
+          <tr><td>3 &middot; Read</td><td>Typed clause rows for that document &mdash; <code>clauses.typed_value</code>, the JSON extraction already stores. Nothing is re-extracted and nothing is re-read from the PDF.</td></tr>
+          <tr><td>4 &middot; Parse</td><td>Money, percentage and period parsers that return <em>nothing</em> rather than a guess. &ldquo;15% of the Contract Price&rdquo; and &ldquo;the cap agreed in Schedule IV&rdquo; are both real values of the cap field on this corpus; a percentage read as an amount is wrong by seven orders of magnitude and looks entirely plausible. Indian and Western digit grouping both parse (<code>14,40,000</code> &rarr; 1,440,000).</td></tr>
+          <tr><td>5 &middot; Compute</td><td>Python arithmetic, and the answer shows the working line by line rather than only the result &mdash; so a lawyer can check it without recomputing it.</td></tr>
+        </table>
+        </div>
+
+        <h4 style="font-family:var(--font-display); font-weight:600; font-size:17px; margin:28px 0 6px;">What it computes</h4>
+        <div class="table-scroll">
+        <table class="spec-table">
+          <tr><th style="width:190px;">Computation</th><th>Inputs it needs, and where they come from</th></tr>
+          <tr><td>Total contract value</td><td>Milestone fee schedules, or priced line items, or a stated total. Where both a schedule and a stated total exist they are <strong style="color:var(--text)">reconciled</strong> &mdash; a check nobody performs by hand.</td></tr>
+          <tr><td>Liquidated damages</td><td>A stated per-week rate and aggregate cap, both expressed as percentages of the contract price, plus a contract price to apply them to. Returns capped exposure, and the week the cap is reached.</td></tr>
+          <tr><td>Escalation</td><td>A fixed escalation percentage and its period, compounded over N years. Read from one clause at a time &mdash; never assembled across clauses.</td></tr>
+        </table>
+        </div>
+
+        <h4 style="font-family:var(--font-display); font-weight:600; font-size:17px; margin:28px 0 6px;">Worked example &mdash; CND-TOR-SOW-2026-001</h4>
+        <div class="worked">
+<b>Question</b>&nbsp; &ldquo;What is the total contract value of CND-TOR-SOW-2026-001?&rdquo;<br><br>
+scope resolution &rarr; corpus (no match)<br>
+identifier &ldquo;CND-TOR-SOW-2026-001&rdquo; &rarr; exactly 1 document &middot; accepted<br>
+typed rows read &rarr; 5 milestone fees + 1 stated fee amount<br><br>
+&nbsp;&nbsp;M1 Wk 3&nbsp;&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;1,440,000<br>
+&nbsp;&nbsp;M2 Wk 8&nbsp;&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;1,920,000<br>
+&nbsp;&nbsp;M3 Wk 12&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;2,400,000<br>
+&nbsp;&nbsp;M4 Wk 17&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;1,920,000<br>
+&nbsp;&nbsp;M5 Wk 20&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;1,920,000<br>
+&nbsp;&nbsp;<b>sum&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;INR&nbsp;&nbsp;9,600,000</b><br><br>
+stated in the document &rarr; INR 96,00,000 = 9,600,000<br>
+<span class="ok">&#10003; reconciles exactly &middot; 0 tokens spent</span>
+        </div>
+
+        <h4 style="font-family:var(--font-display); font-weight:600; font-size:17px; margin:28px 0 6px;">When it refuses, and why that is the feature</h4>
+        <p>Every decline names the input it is missing, so the answer is still usable &mdash; it tells you what to go and find. All four were written against things the live corpus actually does.</p>
+        <div class="table-scroll">
+        <table class="spec-table">
+          <tr><th style="width:210px;">Situation</th><th>Why it refuses rather than approximating</th></tr>
+          <tr><td>Liability cap in currency</td><td><strong style="color:var(--text)">Permanently out of scope.</strong> All six formula-shaped caps in the corpus resolve to &ldquo;fees paid or payable under the SOW in the twelve months preceding the event&rdquo; &mdash; billing data in a finance system, not a term any agreement states. No figure computed from the document alone would be the real cap. The clause as drafted can be quoted instead.</td></tr>
+          <tr><td>Index-linked escalation</td><td>&ldquo;Escalated by the increase in the Consumer Price Index, capped at 5% per annum&rdquo; &mdash; the 5% is a <em>cap on the index movement</em>, not the escalation. Reading it as the rate would answer a different question, silently. Index-linked clauses are never mined for a rate; the decline names the index.</td></tr>
+          <tr><td>Two escalation regimes</td><td>An Escrow agreement here escalates Fees by the Producer Price Index and Rent by a flat 10% every two years. Mining a percentage from one clause and a period from the other produced &ldquo;10% every 1 year&rdquo; &mdash; a rate stated nowhere in the document. Two regimes now decline as ambiguous, naming both.</td></tr>
+          <tr><td>No base amount</td><td>An escalation percentage with nothing stated to apply it to. Named as the missing input rather than inferred from elsewhere in the corpus.</td></tr>
+        </table>
+        </div>
+
+        <div class="callout">
+          <div class="callout-label">A finding that changed the design</div>
+          <p style="margin-bottom:0;">The first build flagged every document whose component schedule disagreed with its own stated total as a probable drafting error. Measured across the corpus: of 29 such documents, <strong style="color:var(--text)">28 have the components summing under the stated total and only 1 over</strong>. Extraction captures part of a long priced schedule far more often than a contract misstates its own value &mdash; so a shortfall now reports as an incomplete capture and the stated total stands as the answer. Only an overshoot, which partial extraction cannot cause, is flagged for a human. Calling 28 sound contracts wrong is a worse failure than saying less.</p>
+        </div>
+
+        <div class="callout flag">
+          <div class="callout-label">Router ordering &mdash; load-bearing</div>
+          <p style="margin-bottom:0;">This branch runs <em>ahead</em> of the corpus-analytics branch. &ldquo;The total contract value of CND-TOR-SOW-2026-001&rdquo; trips the aggregate detector on &ldquo;total&rdquo; + &ldquo;contract value&rdquo; and was being answered with a statistic across all 1,372 documents &mdash; a number about the whole corpus in reply to a question about one agreement. The two are separated by whether a document resolves, not by wording: this branch returns nothing when it resolves none, so &ldquo;the total contract value across our agreements&rdquo; still reaches analytics, where it belongs.</p>
         </div>
 
         <div class="callout flag">
@@ -1499,7 +1622,8 @@
               <li><strong>Per-page OCR/quality provenance.</strong> <span class="badge done">shipped</span> <code>extraction_method</code> (native / ocr / ocr_failed / ocr_unavailable), <code>char_count</code>, <code>needed_ocr</code>, <code>below_floor</code>. Deliberately no OCR confidence column — the OCR path tries several PSM modes and keeps the longest result, so no single figure honestly describes it, and a plausible invented number would be worse than none in a table whose whole job is saying when not to trust a document.</li>
               <li><strong>Document QA warning.</strong> <span class="badge done">shipped</span> Answers now carry a warning naming documents whose pages could not be extracted, distinguishing "3 of 9 pages unreadable" from "none of the 9 pages could be read." Reports only what is known to be bad — a document with no quality rows is absent from the warning rather than reported clean, since "no record" and "fine" are different claims.</li>
               <li><strong>Answer handoffs to existing surfaces.</strong> <span class="badge done">shipped</span> Suggests at most one of Deviation Dashboard / Obligation tracker / Collections / Admin Documents, and only when that surface has real rows to show — verified a risk question against a document with zero playbook findings suggests nothing, rather than sending the reader to an empty dashboard.</li>
-              <li><strong>Counting over document metadata.</strong> <span class="badge done">shipped</span> Zero-LLM structural fast path on <code>documents.parties</code>. The detector is deliberately narrow: an early version matched "how many <em>parties</em> signed the agreement" as a document count, which its own test caught before it could ship as a live regression on a question the existing retrieval path already answered well. 17 detector cases now pass, 11 of them negative.</li>
+              <li><strong>Counting over document metadata.</strong> <span class="badge done">shipped</span> Zero-LLM structural fast path on <code>documents.parties</code>. The detector is deliberately narrow: an early version matched "how many <em>parties</em> signed the agreement" as a document count, which its own test caught before it could ship as a live regression on a question the existing retrieval path already answered well. 17 detector cases now pass, 11 of them negative.
+                <div style="margin-top:10px; padding-left:14px; border-left:2px solid var(--gold-dim);"><strong style="color:var(--gold);">Extended, Sept 2026 — counting by instrument, not by wording.</strong> The count was exact about <em>which documents matched</em> and careless about <em>what the user asked for</em>. The <code>doc_type</code> filter was a single <code>ILIKE</code> against the questioner's own phrasing, and this corpus holds <strong style="color:var(--text)">176 distinct <code>doc_type</code> strings for far fewer real instruments</strong>. Asked how many NDAs we have, it matched "Non-Disclosure Agreement" and answered <strong style="color:var(--text)">19</strong>; the corpus has <strong style="color:var(--text)">148</strong>, also filed as "Mutual Confidentiality and Non-Disclosure Agreement" and as both again in upper case. The acronyms a lawyer actually uses were worse off still &mdash; "SLA" and "DPA" were not countable nouns at all, so "how many SLAs do we have" never reached this path and fell through to retrieval, which answers with however many pages it happened to fetch.<br><br>Now: one shared noun alternation for the detector and the extractor so they cannot drift apart, extended with the acronyms; a vocabulary mapping each instrument to every spelling the corpus files it under; and an <code>OR</code> of those patterns in the SQL. Patterns are kept <em>narrow</em> rather than generous &mdash; "services agreement" must not sweep in "Service Level Agreement" &mdash; because a count silently too high is worse than a word we do not recognise, which merely falls back to retrieval. Verified against independent SQL over all 1,372 documents: SLAs 17, DPAs 23, NDAs 148, JV agreements 144, shareholders' agreements 147, MSAs 22, plus the party and party-pair forms.</div></li>
               <li><strong>Precedent / similarity lookup, read-only.</strong> <span class="badge done">shipped</span> Both shapes: document-level (already existed) and clause-level ("have we agreed to this term before") — the latter's retrieval existed since Phase 2 but was reachable only from Draft Mode until now.</li>
             </ul>
             <p class="phase-desc" style="margin-top:.6rem;">Every item verified zero-cost or near-zero-cost: reader provenance tested on a real native-text PDF (no OCR triggered) and on a scanned one with a stubbed OCR call for both the success and failure branches, so nothing here spent a billed vision call. Regression suite at 9/9 throughout, with no case in this block ever failing.</p>
