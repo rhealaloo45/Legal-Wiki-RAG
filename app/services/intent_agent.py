@@ -2423,10 +2423,15 @@ _RX_AGG_CARVEOUT_VETO = re.compile(
     r"\bcarve[-\s]?outs?\b|\bexclu(?:ded|ding|sions?)\s+from\b|"
     r"\bexcept(?:ed|ions?)\s+from\b", re.IGNORECASE)
 
+# The bare "no" must not match the "No." of a case or matter number.
+# Confirmed live on the 200-question set: "C.S. No. 248/2026" routed a
+# conflated-documents question into corpus gap-analytics, which answered
+# "0 document(s) state no governing law" at zero tokens — a nonsense reply to
+# a question that deserved a refusal.
 _RX_GAP = re.compile(
     r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,80}?"
     r"\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
-    r"without|no|absent|fail\s+to)\b",
+    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b",
     re.IGNORECASE)
 _RX_GAP_FIELD = re.compile(
     r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?)\b",
@@ -2819,6 +2824,68 @@ def _resolve_ordinal_reference(question: str, chat_session_id: str) -> str:
                     q, pos, item[:70])
         return rewritten
     return ""
+
+
+# A question that asks for one document's clause "as stated in" a DIFFERENT
+# document. Three of these sit in the 200-question test set, all with the same
+# shape, and each is a deliberate trap: the second instrument does not contain
+# the first one's clause, and saying so is the only correct answer.
+#
+# Retrieval cannot produce that answer. Handed two unrelated documents it ranks
+# pages from whichever it can find and answers about that one, and the reply
+# reads as though the question had been sound. Measured on that set, one was
+# routed to corpus gap-analytics and answered "0 document(s) state no governing
+# law"; the other two were answered as though only one document had been asked
+# about.
+_RX_CONFLATED_LINK = re.compile(
+    r"\bas\s+(?:stated|set\s+out|set\s+forth|provided|specified|defined)\s+in\b"
+    r"|\bas\s+per\s+the\b",
+    re.IGNORECASE)
+
+# "between X and Y" naming a document's parties. One on each side of the link
+# phrase means two documents, which is what makes the phrase a conflation
+# rather than an ordinary internal cross-reference ("the cap as set out in
+# Schedule 4").
+_RX_DOC_PARTY_PAIR = re.compile(
+    r"\bbetween\s+[A-Z][^?]{3,90}?\s+and\s+[A-Z]")
+
+
+def _conflated_documents_answer(question: str) -> dict | None:
+    """Two unrelated documents joined by "as stated in" — say so, answer neither.
+
+    Answers from the question's own shape rather than from the corpus, on
+    purpose. Whether the second document happens to contain a governing-law
+    clause is beside the point: it would be the SECOND document's clause, not
+    the first's, so nothing retrieval could return makes the question
+    answerable as asked.
+    """
+    q = question or ""
+    link = _RX_CONFLATED_LINK.search(q)
+    if not link:
+        return None
+    before, after = q[:link.start()], q[link.end():]
+    if not (_RX_DOC_PARTY_PAIR.search(before) and _RX_DOC_PARTY_PAIR.search(after)):
+        return None
+
+    lines = [
+        "**This question names two different documents, and asks for one "
+        "document's clause as stated in the other.**",
+        "",
+        "Those are separate instruments. The second does not contain the first "
+        "document's clause, so the question has no answer as asked — and an "
+        "answer drawn from either one would be about a document the question "
+        "did not ask for.",
+        "",
+        "Ask about either document on its own and it can be answered directly.",
+        "",
+        "Determined from the question itself rather than from a search, so this "
+        "holds regardless of what either document contains.",
+    ]
+    payload = _canned_payload("\n".join(lines), "Conflated documents",
+                              "question-shape")
+    payload["meta_answer"] = False
+    payload["files_used"] = []
+    return payload
 
 
 def _absent_instrument_answer(question: str, session_id: str,
@@ -4153,6 +4220,21 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                 yield {"stage": "complete", "status": "done", "type": "answer",
                        "payload": _a, "message": "Done"}
                 return
+
+    # Two unrelated documents joined by "as stated in". Answered before every
+    # other path, because no amount of retrieval makes the question answerable
+    # and each of the paths below would answer it about one of the two.
+    if not is_followup and not collection_id:
+        try:
+            _conf = _conflated_documents_answer(question)
+        except Exception as _cf_err:
+            logger.error("[AGENT] conflation check failed: %s", _cf_err)
+            _conf = None
+        if _conf:
+            logger.info("[AGENT] conflated-documents fast path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _conf, "message": "Done"}
+            return
 
     # A question about an instrument type this party does not have. Answered
     # before retrieval, because retrieval cannot answer it: asked for a party's
