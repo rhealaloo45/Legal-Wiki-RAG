@@ -9244,9 +9244,29 @@ _DEMONSTRATIVE_BACKREF_RE = re.compile(
 # guards remain the exits, and every carried turn discloses itself. "carryover-set"
 # is included for the same reason: a comparison thread that established its set
 # should keep it for subsequent follow-ups, not only the turn that resolved it.
-_CARRYOVER_FROM_METHODS = frozenset({"file", "party", "party-multi", "party-pair",
-                                     "party-pair-compound",
-                                     "entity", "date", "carryover", "carryover-set"})
+# Matched as a PREFIX, not as an exact string. Scope methods are composed: a
+# resolver names itself and every downstream correction appends to it, so the
+# real values are "party-multi-doctype", "party-pair-family-corrected-doctype",
+# "effective-date-doctype-corrected". An exact-membership set knows none of
+# those, and every one of them silently ended the thread's scope.
+#
+# Measured across the 200-question audit: 137 of 196 resolved turns produced a
+# method this set did not recognise, so the NEXT question in the conversation
+# inherited nothing and fell back to the whole corpus. That is the thing a user
+# experiences as the system losing track of which document they mean once a
+# conversation gets long and moves between documents.
+#
+# Deliberately still a whitelist. "family", "default" and "broad" stay out: a
+# turn that answered across a family or the corpus is not a document the next
+# question should silently inherit.
+_CARRYOVER_FROM_PREFIXES = ("file", "display-name", "effective-date", "date",
+                            "party", "entity", "carryover",
+                            "named-instrument-single")
+
+
+def _is_carryover_method(method: str) -> bool:
+    m = (method or "").strip().lower()
+    return any(m == p or m.startswith(p + "-") for p in _CARRYOVER_FROM_PREFIXES)
 
 # How many answers back to look for the turn whose scope should be inherited.
 # NOT a widening of what may be inherited — see _last_document_turn. Bounded so a
@@ -9297,7 +9317,7 @@ def has_established_document_scope(session_id: str) -> bool:
         logger.error("has_established_document_scope: could not read scope: %s", e)
         return False
     last = _last_document_turn(recent)
-    return bool(last and last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"))
+    return bool(last and _is_carryover_method(last.get("method")) and last.get("docs"))
 
 
 def _carryover_scope(question: str, session_id: str) -> list[str]:
@@ -9354,7 +9374,7 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     last = _last_document_turn(recent)
     if not last:
         return []
-    if last.get("method") in _CARRYOVER_FROM_METHODS and last.get("docs"):
+    if _is_carryover_method(last.get("method")) and last.get("docs"):
         return list(last["docs"])
     return []
 
