@@ -4236,6 +4236,112 @@ def parse_effective_date(raw):
     return None
 
 
+# A date embedded in a filename: "..._LegaOpin_20250912", "Amdt_2021-12-31",
+# "LegaOpin 17-04-2023", "MAT-2025-3539_...06-11-2024".
+_FILENAME_DATE_PATTERNS = (
+    (re.compile(r"(20\d{2})(\d{2})(\d{2})"), "ymd"),
+    (re.compile(r"(20\d{2})-(\d{2})-(\d{2})"), "ymd"),
+    (re.compile(r"(\d{2})-(\d{2})-(20\d{2})"), "dmy"),
+    (re.compile(r"(\d{2})\.(\d{2})\.(20\d{2})"), "dmy"),
+    (re.compile(r"(\d{2})_(\d{2})_(20\d{2})"), "dmy"),
+)
+
+
+def date_from_filename(source_doc: str):
+    """A ``datetime.date`` read out of a document's filename, or None.
+
+    Ingest leaves ``documents.effective_date`` empty on 174 of 1,372 documents,
+    and 31 of those carry the date plainly in their own filename
+    ("National Council for_LegaOpin_20250912"). A question that recites that
+    date then cannot resolve to the document, because the only date the
+    resolver can compare against is the empty column.
+
+    Read rather than inferred: this parses a string the ingest pipeline already
+    produced, so it costs nothing and cannot invent a date the corpus does not
+    already carry. A filename with no parseable date returns None and the
+    column stays empty, which is the honest state.
+    """
+    import datetime as _dt
+    base = (source_doc or "").split("_", 1)[-1]
+    for rx, order in _FILENAME_DATE_PATTERNS:
+        m = rx.search(base)
+        if not m:
+            continue
+        a, b, c = m.groups()
+        y, mo, d = (a, b, c) if order == "ymd" else (c, b, a)
+        try:
+            got = _dt.date(int(y), int(mo), int(d))
+        except (ValueError, TypeError):
+            continue
+        # A filename can carry a matter year ("MAT-2025-3539") that is not a
+        # date; a full valid calendar date is the signal that this is one.
+        if 2000 <= got.year <= 2100:
+            return got
+    return None
+
+
+def backfill_effective_dates_from_filenames(wiki_id: str, session_id: str,
+                                            dry_run: bool = True) -> dict:
+    """Fill an empty effective_date from the document's own filename.
+
+    Only ever writes where the column is empty or unparseable — a date the
+    extractor read out of the document itself is better evidence than a
+    filename and is never overwritten.
+    """
+    from sqlalchemy import text as _sql
+    engine = get_engine()
+    filled, examined = [], 0
+    with engine.connect() as conn:
+        rows = conn.execute(_sql(
+            "SELECT source_doc, effective_date FROM documents "
+            "WHERE wiki_id = :w AND session_id = :s"
+        ), {"w": wiki_id, "s": session_id}).fetchall()
+        for sd, ed in rows:
+            examined += 1
+            if parse_effective_date(ed):
+                continue
+            got = date_from_filename(sd)
+            if not got:
+                continue
+            filled.append({"source_doc": sd, "date": got.isoformat()})
+            if not dry_run:
+                conn.execute(_sql(
+                    "UPDATE documents SET effective_date = :d "
+                    "WHERE wiki_id = :w AND session_id = :s AND source_doc = :sd"
+                ), {"d": got.isoformat(), "w": wiki_id, "s": session_id, "sd": sd})
+        if not dry_run:
+            conn.commit()
+    logger.info("effective_date backfill: %d of %d documents %s",
+                len(filled), examined, "would be filled" if dry_run else "filled")
+    return {"examined": examined, "filled": len(filled),
+            "dry_run": dry_run, "documents": filled}
+
+
+def find_documents_by_effective_date(wiki_id: str, session_id: str,
+                                     iso_date: str, cap: int = 25) -> list[str]:
+    """Documents whose stored effective_date is this day.
+
+    Compared on the PARSED value, not the stored string: the column is TEXT and
+    holds ISO dates, prose dates and dotted dates side by side, so a literal
+    comparison would match one shape and miss the rest.
+    """
+    from sqlalchemy import text as _sql
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(_sql(
+            "SELECT source_doc, effective_date FROM documents "
+            "WHERE wiki_id = :w AND session_id = :s AND effective_date IS NOT NULL"
+        ), {"w": wiki_id, "s": session_id}).fetchall()
+    out = []
+    for sd, ed in rows:
+        got = parse_effective_date(ed)
+        if got and got.isoformat() == iso_date:
+            out.append(sd)
+            if len(out) >= cap:
+                break
+    return out
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
