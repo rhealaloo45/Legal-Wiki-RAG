@@ -7406,6 +7406,49 @@ _QUESTION_DATE_RE = re.compile(
 )
 
 
+def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
+    """The one document whose stored effective_date is the date the question recites.
+
+    _resolve_docs_by_date below searches PAGE TEXT for the date as a phrase,
+    which only works when the document recites its own date in prose that
+    survived ingest. Measured on the 200-question audit: of ten questions whose
+    named document was never retrieved, seven recite an explicit date, and the
+    content search found the right document for none of them.
+
+    documents.effective_date answers the same question exactly. Fires ONLY on a
+    unique match across the corpus - a date shared by several documents is not
+    an identifier, which is why the party name outranks it everywhere else.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    matches = [m.group(0) for m in _QUESTION_DATE_RE.finditer(question or "")]
+    if not matches:
+        return set()
+    # Two dates means two documents. A comparison question ("the Legal Opinion
+    # dated 31 October 2024 and the Legal Opinion dated 12 September 2025")
+    # would otherwise be pinned to whichever of them happens to have a unique
+    # date, turning a two-document comparison into a one-document answer —
+    # a worse failure than the one this resolver exists to fix.
+    if len({_db.parse_effective_date(m) for m in matches} - {None}) > 1:
+        return set()
+    for date_str in matches:
+        parsed = _db.parse_effective_date(date_str)
+        if not parsed:
+            continue
+        try:
+            docs = _db.find_documents_by_effective_date(
+                _active_wiki_id(), session_id, parsed.isoformat(), cap=3)
+        except Exception as e:
+            logger.error("resolve_scope: effective-date lookup failed for %r: %s",
+                         date_str, e)
+            continue
+        if len(docs) == 1:
+            logger.info("Effective-date match -> 1 document: %s (%r)",
+                        _norm_doc_name(docs[0]), date_str)
+            return set(docs)
+    return set()
+
+
 def _resolve_docs_by_date(question: str, session_id: str, max_docs: int = 1) -> set[str]:
     """Resolve the document a question names by an explicit date it recites.
 
@@ -9881,6 +9924,28 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # about "Palladion Global PurcAgre 26-05-2022 - filed.pdf" it matched on
     # the word "filed" and pinned thirty documents. A name matched in full
     # should win over a name matched in part.
+
+    # An explicit date matching exactly one document in the whole corpus.
+    # Placed here with the filename match rather than down with the other date
+    # handling, because a UNIQUE date is a precise identifier and not the weak
+    # signal that ordering assumes. Measured on the 200-question audit: of ten
+    # questions whose named document was never retrieved, party-family
+    # resolution answered them with the wrong member of the right family - a
+    # different Legal Opinion, a different Pleading - while the date named
+    # exactly one document.
+    #
+    # Still only fires on a unique hit. A date shared by several documents is
+    # not an identifier, which is precisely why the party name outranks it
+    # everywhere else.
+    try:
+        _dated = _resolve_docs_by_effective_date(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: effective-date resolution failed: %s", e)
+        _dated = set()
+    if _dated:
+        return {"scope": "single_doc", "target_docs": sorted(_dated),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.88, "method": "effective-date"}
     try:
         pasted = _resolve_docs_by_display_name(question, session_id)
     except Exception as e:
