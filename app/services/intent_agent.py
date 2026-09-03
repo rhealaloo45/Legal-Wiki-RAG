@@ -2888,6 +2888,94 @@ def _conflated_documents_answer(question: str) -> dict | None:
     return payload
 
 
+# "How is the term "Affiliate" defined in ...", "What does "Business Day" mean
+# under ...". The quoted term is the whole question; everything else names the
+# document.
+_RX_DEFINED_TERM_Q = re.compile(
+    r"(?:how\s+is|what\s+is|what\s+does|where\s+is)\b[^?]{0,40}?"
+    r"\bterm\s+[\"“']([^\"”']{2,48})[\"”']"
+    r"|\bwhat\s+does\s+[\"“']([^\"”']{2,48})[\"”']\s+mean\b"
+    r"|\bdefinition\s+of\s+[\"“']([^\"”']{2,48})[\"”']",
+    re.IGNORECASE)
+
+# Beyond this the question is asking about a set of documents, and quoting one
+# definition from each stops being an answer.
+_DEFINED_TERM_MAX_DOCS = 3
+
+
+def _defined_term_answer(question: str, session_id: str, wiki_id: str,
+                         docs: list | None) -> dict | None:
+    """The stored verbatim definition of a term in the document asked about.
+
+    defined_terms holds 2,537 rows across 602 documents and nothing read it.
+    Measured on the 200-question audit, eleven of the twenty-two "how is the
+    term X defined" questions had their answer sitting in that table, quoted
+    from the document, while the answer model re-derived each one at ten to
+    twenty thousand prompt tokens.
+
+    Returns None whenever the term is not stored for the resolved document, so
+    a document whose definitions were never extracted still reaches retrieval
+    and is answered as before. This can make an answer cheaper and exact; it
+    cannot make one unavailable.
+    """
+    from services import db as _db
+
+    m = _RX_DEFINED_TERM_Q.search(question or "")
+    if not m:
+        return None
+    term = next((g for g in m.groups() if g), "").strip()
+    if not term:
+        return None
+    if not docs or len(docs) > _DEFINED_TERM_MAX_DOCS:
+        return None
+
+    try:
+        rows = _db.find_defined_term(wiki_id, session_id, list(docs), term)
+    except Exception as e:
+        logger.error("[AGENT] defined-term lookup failed: %s", e)
+        return None
+    if not rows:
+        return None
+
+    # One document, one definition is the ordinary case. Where the resolved set
+    # holds an OCR twin alongside its sibling, both carry the same text, so
+    # dedupe on the definition rather than on the document.
+    seen, uniq = set(), []
+    for r in rows:
+        key = re.sub(r"\s+", " ", (r.get("definition") or "")).strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            uniq.append(r)
+    if not uniq:
+        return None
+
+    lines = []
+    if len(uniq) == 1:
+        r = uniq[0]
+        lines.append(f"**{r['term'].strip(chr(34)) or term}** is defined as:")
+        lines.append("")
+        lines.append(f"> {r['definition'].strip()}")
+        lines.append("")
+        page = f", page {r['page_num']}" if r.get("page_num") else ""
+        lines.append(f"Document: {_dp_display(r['source_doc'], wiki_id, session_id)}{page}")
+    else:
+        lines.append(f"**{term}** is defined differently across the "
+                     f"{len(uniq)} documents in scope:")
+        lines.append("")
+        for r in uniq:
+            lines.append(f"- {_dp_display(r['source_doc'], wiki_id, session_id)}:")
+            lines.append(f"  > {r['definition'].strip()}")
+        lines.append("")
+    lines.append("Quoted from the definition stored for this document at ingest, "
+                 "not re-read by the language model, so the wording is the "
+                 "document's own.")
+
+    payload = _canned_payload("\n".join(lines), "Defined term", "defined-terms")
+    payload["meta_answer"] = False
+    payload["files_used"] = [r["source_doc"] for r in uniq]
+    return payload
+
+
 def _absent_instrument_answer(question: str, session_id: str,
                               wiki_id: str) -> dict | None:
     """"What does X's SLA say" when X has no SLA — say so, and say what X has.
@@ -4173,6 +4261,32 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # whether a document resolves, not by wording: this branch returns None
     # when it resolves none, so "the total contract value across our
     # agreements" still falls through to analytics, where it belongs.
+    # A defined term whose text is already stored for the document in scope.
+    # Needs the document, so it resolves scope itself the way the compliance
+    # and calculation paths do - resolve_scope costs no LLM call, and a miss
+    # falls straight through to retrieval.
+    if not is_followup:
+        from services import wikis as _wikis_dt
+        try:
+            _wid_dt = _wikis_dt.active_wiki_id()
+            _scope_dt = wiki.resolve_scope(
+                question, session_id,
+                chat_session_id=chat_session_id or session_id)
+            _scope_dt = _apply_collection_scope(_scope_dt, collection_id)
+            _docs_dt = (_scope_dt.get("target_docs") or []
+                        if _scope_dt.get("scope") == "single_doc" else [])
+            if target_doc:
+                _docs_dt = [target_doc]
+            _dterm = _defined_term_answer(question, session_id, _wid_dt, _docs_dt)
+        except Exception as _dt_err:
+            logger.error("[AGENT] defined-term fast path failed: %s", _dt_err)
+            _dterm = None
+        if _dterm:
+            logger.info("[AGENT] defined-term fast path: %r", (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _dterm, "message": "Done"}
+            return
+
     # Calculation Agent (Phase 5) - a derived value computed in Python rather
     # than by the model. Placed here for the same reason the compliance path is:
     # it needs a resolved document, resolve_scope costs no LLM call, and a miss
