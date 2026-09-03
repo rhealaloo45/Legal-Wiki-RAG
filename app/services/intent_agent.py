@@ -144,14 +144,26 @@ _RX_BETWEEN_EXCLUDE = re.compile(
 # C and D") still carries an explicit comparison keyword that _RX_COMPARISON
 # matches one check earlier, so this exclusion never reaches it.
 _RX_BETWEEN_PARTIES = re.compile(
-    # Litigation filings name their two parties the same way a contract does
-    # ("the Notice Invoking Arbitration between Tata Steel and NordForge"), and
-    # are just as much a SINGLE document — but only contract-type nouns were
-    # listed, so those questions still forced a comparison template.
-    r'\b(?:agreement|contract|nda|sha|jva?|jv|msa|mou|deed|lease|licen[cs]e|'
-    r'venture|arrangement|memorandum|settlement|'
+    # The list needed the rest of the corpus's instrument nouns. Measured on
+    # the 200-question audit: 38 of 43 answers that came back as a two-column
+    # comparison table were single-document questions, because the noun naming
+    # the document was not listed - "Closing Certificate", "Legal Opinion",
+    # "Term Sheet", "Statement of Work", "Board Resolution", "Judgment".
+    # Asked for one date, the comparison template produced 1,208 characters
+    # with a "Key Differences" section reporting that there were none.
+    r'\b(?:agreement|contract|nda|sha|jva?|jv|msa|mou|dpa|spa|ssa|sow|tsa|kera|loi|'
+    r'deed|lease|licen[cs]e|venture|arrangement|memorandum|settlement|'
+    r'certificate|opinion|judgm?ent|order|resolution|sheet|checklist|'
+    r'assignment|statement|letter|rejoinder|reply|undertaking|guarantee|attorney|'
     r'notice|petition|affidavit|application|award|plaint|summons|'
-    r'suit|claim|proceedings?|dispute|arbitration)\b[^.?!;]{0,30}?\bbetween\b'
+    r'suit|claim|proceedings?|dispute|arbitration)\b'
+    # A case or matter reference routinely sits between the noun and its
+    # parties - "the Judgment - Arb. Pet. No. 473/2026 between X and Y", "the
+    # Plaint in the matter of C.S. No. 248/2026 between X and Y". Thirty
+    # characters could not span that, so the suppression missed exactly the
+    # excluding them stopped the match short of "between" on every litigation question.
+    # Periods are allowed through: a case reference carries its own dots ("Arb. Pet. No. 473/2026"), and
+    r'[^?!;]{0,70}?\bbetween\b'
     # A corporate suffix between the two party names ("... Ltd. and ...",
     # "... Pte. Ltd. and ...") carries its own period, which [^.?!;]+ can never
     # cross — the exclusion silently stopped matching short of "and" and the
