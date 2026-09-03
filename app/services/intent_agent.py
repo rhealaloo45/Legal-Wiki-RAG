@@ -383,6 +383,9 @@ def get_query_strategy(intent: str) -> dict:
 class QueryState(TypedDict, total=False):
     # Input
     question: str
+    # The question as the user actually asked it, kept only when an
+    # ordinal rewrite replaced `question`. Scope resolution reads this.
+    scope_question: str
     session_id: str          # wiki/doc session — where pages & documents live (retrieval)
     chat_session_id: str     # per-thread chat session — where THIS conversation's
                              # messages are stored (carryover + conversation history).
@@ -595,9 +598,20 @@ def check_disambiguation_node(state: QueryState) -> dict:
     # live: "What records are sought to be preserved under THAT PETITION?",
     # asked right after a Section 9 petition was the established scope, still
     # forced a disambiguation prompt.
+    # And once more for a demonstrative pointing at a GENERIC instrument word
+    # ("in this agreement", "under that contract"). _VAGUE_DOC_PATTERN matches
+    # those by design - they are genuinely ambiguous when a thread has no
+    # document yet - but that is a question about the thread's state, not about
+    # the words, and this gate could only see the words. Blocked here, the
+    # phrase never reached _carryover_scope, so control fell to classify_query,
+    # which found a plausible party match and answered from a document the
+    # conversation had never been about instead of asking. _carryover_scope
+    # still returns [] when no prior turn resolved, so a fresh thread asks the
+    # disambiguation question exactly as before.
     if (not wiki._VAGUE_DOC_PATTERN.search(state["question"])
             or wiki._ORDINARY_TYPE_USAGE_RE.search(state["question"])
-            or wiki._DEMONSTRATIVE_BACKREF_RE.search(state["question"])):
+            or wiki._DEMONSTRATIVE_BACKREF_RE.search(state["question"])
+            or wiki._RX_DEMONSTRATIVE_DOC.search(state["question"])):
         # Carryover must read THIS thread's messages, which live under the CHAT
         # session — not the wiki/doc session, which is shared by every thread
         # served off the same fixed main wiki and therefore holds every answer
@@ -780,7 +794,11 @@ def resolve_scope_node(state: QueryState) -> dict:
     """
     logger.info("[AGENT] resolve_scope_node")
     try:
-        decision = wiki.resolve_scope(state["question"], state["session_id"],
+        # An ordinal follow-up resolves its scope from the pointer it was
+        # actually asked as, not from the previous answer's wording the rewrite
+        # appended to it — see the comment at the rewrite site.
+        _scope_q = state.get("scope_question") or state["question"]
+        decision = wiki.resolve_scope(_scope_q, state["session_id"],
                                       chat_session_id=state.get("chat_session_id"))
     except Exception as e:
         logger.error("resolve_scope failed, defaulting to corpus: %s", e)
@@ -4238,7 +4256,20 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     except Exception as _ord_err:
         logger.error("[AGENT] ordinal reference resolution failed: %s", _ord_err)
         _ordinal = ""
+    _scope_question = ""
     if _ordinal:
+        # The rewrite is for the ANSWER model: it appends the previous answer's
+        # own wording so the model knows which item "the second one" was. That
+        # wording is prose lifted from a legal document, and handing it to scope
+        # resolution makes it look like a question about whatever that prose
+        # names. Confirmed live: "Tell me more about the second one" became
+        # "... specifically: High risk - Termination for convenience with
+        # limited compensation", whose capitalised legal vocabulary hit a
+        # party-name CONTENT match and pinned two unrelated legal opinions -
+        # while the carryover check, given the ORIGINAL question, returned the
+        # right document. So scope keeps reading the pointer, which by
+        # definition points at the document the conversation is already on.
+        _scope_question = question
         question = _ordinal
         is_followup = True
 
@@ -4533,6 +4564,9 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     graph = get_query_graph()
     state: QueryState = {
         "question": question,
+        # Set only when an ordinal rewrite happened; resolve_scope_node reads
+        # it in preference to the rewritten question. See the comment there.
+        "scope_question": _scope_question,
         "session_id": session_id,
         "chat_session_id": chat_session_id or session_id,
         "target_doc": target_doc or "",

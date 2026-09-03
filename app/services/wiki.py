@@ -7162,6 +7162,17 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
     "the", "this", "that", "these", "those", "their", "its", "our", "your",
     "under", "over", "before", "after", "between", "within", "during",
     "against", "please", "kindly", "also", "then", "there", "here",
+    # Sentence-initial words. English capitalises the first word of every
+    # sentence regardless of what it is, so position alone is no evidence of a
+    # proper noun - but _BARE_PROPER_NOUN_RE only sees Title-Case and cannot
+    # tell the two apart. Confirmed live: "Tell me more about the second one."
+    # yielded "Tell" as a bare party-name candidate, whose content search
+    # matched two unrelated legal opinions and pinned the whole follow-up to
+    # them, discarding the document the conversation was actually on. The
+    # conjunctions are the same failure one turn later ("And what happens
+    # if..."). None of these is ever a party name on its own.
+    "tell", "give", "show", "draft", "find", "identify", "outline", "walk",
+    "and", "in", "of", "for", "as", "on", "at", "but", "so", "if",
     "client", "vendor", "party", "parties", "agreement", "agreements",
     "contract", "contracts", "document", "documents", "clause", "clauses",
     "section", "sections", "schedule", "schedules", "annexure", "annexures",
@@ -9470,7 +9481,25 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
             and not _COMPARATIVE_TYPE_REF_RE.search(question)
             and not _BACKREF_PRONOUN_RE.search(question)
             and not _ORDINARY_TYPE_USAGE_RE.search(question)
-            and not _DEMONSTRATIVE_BACKREF_RE.search(question)):
+            and not _DEMONSTRATIVE_BACKREF_RE.search(question)
+            # "in this agreement", "under that contract" — the type word is the
+            # thing being pointed AT, not a pivot to a new type.
+            # _DEMONSTRATIVE_BACKREF_RE deliberately omits the generic words
+            # (agreement/contract/document/nda) because a bare demonstrative
+            # plus a generic word is ambiguous in a FRESH thread, and the
+            # disambiguation prompt is the right answer there. It is not
+            # ambiguous one turn after a document was pinned, and this guard
+            # could not tell those apart: it refused the inheritance before the
+            # established-scope check below ever ran. Letting the phrase through
+            # restores that distinction without weakening the fresh-thread case,
+            # because a thread with no resolved prior turn still falls out at
+            # _is_carryover_method and returns [] exactly as before.
+            # Confirmed live: "What are the biggest risks for Suvarna in this
+            # agreement?", asked directly after a Consultancy Agreement was
+            # pinned, searched all 1,372 documents and answered from a different
+            # company's Joint Venture Agreement that merely shared the word
+            # "Suvarna" - and turns 3 and 4 then inherited that wrong document.
+            and not _RX_DEMONSTRATIVE_DOC.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
