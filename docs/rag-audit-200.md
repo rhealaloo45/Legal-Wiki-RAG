@@ -129,7 +129,7 @@ Run against the live pipeline, September 2026. Every expected answer and source 
 | 123 | What is the effective date of the Amendment Agreement between Apex Vishesh Motors Pty Ltd and Oberon Aviation FZE? | Ungrouped/MAT-2026-4156_Amendment Agreement - 09-09-2019 - Copy.pdf | 9 | 10 | 9 | 9 | 19,621 | Substance matches the expected answer; correct source document read. |
 | 124 | What is the liability cap in the supply agreement between Apex Solstice Systems Private Limited and an unrelated third party not covered in this corpus? | — (no source: abstention trap) | 10 | 10 | 10 | 10 | 22,962 | Correctly declined — the trap worked. |
 | 125 | According to the pricing schedule in the Framework Supply Agreement between Apex Meridian Travel Pty Ltd and Xanthos Insurance Corp. dated 08 February 2023, which vendor has the highest annual commitment value? | Supply Agreement/Apex Meridian Travel_FSA_08-02-2023 FINAL_FINAL.pdf | 9 | 10 | 9 | 9 | 12,024 | Substance matches the expected answer; correct source document read. |
-| 126 | What does the floor plan diagram in the Commercial Lease Deed between Infiniti Retail Limited (Croma) and Devashri Infra Pty Ltd dated 27 August 2023 (page 2) show? | Lease Agreement/Infiniti Retail_CLD_27-08-2023.pdf | 3 | 6 | 6 | 4 | 10,994 | A figure, date or count in the expected answer is absent or contradicted. Correct document read, wrong content returned. |
+| 126 | What does the floor plan diagram in the Commercial Lease Deed between Infiniti Retail Limited (Croma) and Devashri Infra Pty Ltd dated 27 August 2023 (page 2) show? | Lease Agreement/Infiniti Retail_CLD_27-08-2023.pdf | 9 | 10 | 9 | 9 | 10,994 | Substance matches the expected answer; correct source document read. |
 | 127 | What does Section 1 (Scope) of the Legal Opinion between Apex Girivan Capital PLC (JV) and Yamuna Defence Systems Limited dated 18 January 2022 provide? | Legal Opinion/Legal_Opinion_Jan2022.pdf | 9 | 10 | 9 | 9 | 3,874 | Substance matches the expected answer; correct source document read. |
 | 128 | Who are the parties to the Contractor Agreement between Apex Xanthos Media Networks Private Limited and Meridian AutoComponents Pte. Ltd. dated 19 March 2019? | Ungrouped/Apex Xanthos Media - Meridian - ContAgre - Draft v3.pdf | 9 | 10 | 9 | 9 | 12,080 | Substance matches the expected answer; correct source document read. |
 | 129 | What is the governing law clause of the Board Resolution Approving Transaction involving Apex Waverock Steel Private Limited dated 14 December 2021 as stated in the Amendment Agreement between Apex Zephyra Trading Company LLC and Nimbus Capital Private Limited dated 01 September 2021? | — (no source: abstention trap) | 10 | 10 | 10 | 10 | 0 | Correctly declined — the trap worked. |
@@ -211,10 +211,10 @@ Across 196 scored rows (1 excluded: question 84, where the expected answer is wr
 
 | Metric | Mean |
 |---|---|
-| Accuracy | 8.11 / 10 |
-| Hallucination | 9.33 / 10 |
-| Relevance | 8.44 / 10 |
-| **Overall** | **8.23 / 10** |
+| Accuracy | 8.14 / 10 |
+| Hallucination | 9.35 / 10 |
+| Relevance | 8.46 / 10 |
+| **Overall** | **8.26 / 10** |
 
 ## Cost
 
