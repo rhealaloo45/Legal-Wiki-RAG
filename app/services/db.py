@@ -4342,6 +4342,43 @@ def find_documents_by_effective_date(wiki_id: str, session_id: str,
     return out
 
 
+def find_defined_term(wiki_id: str, session_id: str, source_docs: list[str],
+                      term: str) -> list[dict]:
+    """The stored definition of one term in one or more documents.
+
+    defined_terms holds 2,537 rows across 602 documents and nothing read it.
+    Measured on the 200-question audit, twelve of the twenty-two "how is the
+    term X defined" questions already had their answer sitting in this table,
+    quoted verbatim from the document — eleven were being re-derived by the
+    answer model at ten to twenty thousand tokens each, and one was answered
+    "the Definitions section includes 'Applicable Law' as a defined term"
+    without ever giving the definition.
+    """
+    from sqlalchemy import text
+    if not source_docs or not term:
+        return []
+    engine = get_engine()
+    params: dict = {"w": wiki_id, "s": session_id, "t": term.strip()}
+    doc_clauses = []
+    for i, sd in enumerate(source_docs[:6]):
+        doc_clauses.append(f"source_doc = :d{i}")
+        params[f"d{i}"] = sd
+    where_docs = " OR ".join(doc_clauses)
+    with engine.connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT source_doc, term, definition, page_num
+            FROM defined_terms
+            WHERE wiki_id = :w AND session_id = :s
+              AND ({where_docs})
+              AND (lower(btrim(term, ' "')) = lower(btrim(:t, ' "'))
+                   OR term ILIKE '%' || :t || '%')
+            ORDER BY length(term)
+            LIMIT 6
+        """), params).fetchall()
+    return [{"source_doc": r[0], "term": r[1], "definition": r[2],
+             "page_num": r[3]} for r in rows]
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
