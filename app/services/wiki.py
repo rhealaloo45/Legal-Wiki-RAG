@@ -7442,10 +7442,43 @@ def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
             logger.error("resolve_scope: effective-date lookup failed for %r: %s",
                          date_str, e)
             continue
-        if len(docs) == 1:
-            logger.info("Effective-date match -> 1 document: %s (%r)",
-                        _norm_doc_name(docs[0]), date_str)
-            return set(docs)
+        if len(docs) != 1:
+            continue
+        # A unique date match is only an identifier if the RIGHT document has
+        # its date stored. effective_date is empty on 143 documents even after
+        # the filename backfill, so "the only document dated 24 October 2025"
+        # can be an unrelated NDA while the Facility Agreement actually asked
+        # about carries no date at all — which is exactly what happened, and
+        # it turned a correct answer into one about the wrong document.
+        #
+        # So when the question names a party, the date match must agree with
+        # it. A question naming no party ("the Master Services Agreement dated
+        # 12 August 2020") has nothing to corroborate against and the unique
+        # date stands on its own.
+        named = [m.group(1).strip() for m in _PARTY_NAME_RE.finditer(question or "")]
+        named = [n for n in named if len(n.split()) >= 2 and len(n) >= 6]
+        if named:
+            try:
+                agree = _db.count_documents_by_party(
+                    _active_wiki_id(), session_id, [named[0]], None, limit=1)
+                if not agree.get("total"):
+                    # The party is unknown to the index — nothing to check
+                    # against, so fall through rather than veto on no evidence.
+                    pass
+                else:
+                    hit = _db.count_documents_by_party(
+                        _active_wiki_id(), session_id, [named[0]], None, limit=50)
+                    if not any(d.get("source_doc") == docs[0]
+                               for d in (hit.get("documents") or [])):
+                        logger.info("Effective-date match %r rejected: %s does not "
+                                    "name %r", date_str, _norm_doc_name(docs[0]), named[0])
+                        continue
+            except Exception as e:
+                logger.error("resolve_scope: date/party corroboration failed: %s", e)
+                continue
+        logger.info("Effective-date match -> 1 document: %s (%r)",
+                    _norm_doc_name(docs[0]), date_str)
+        return set(docs)
     return set()
 
 
