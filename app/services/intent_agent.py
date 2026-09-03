@@ -1150,7 +1150,7 @@ def generate_answer_node(state: QueryState) -> dict:
     # Record HOW this turn's scope was resolved. app.py persists it to
     # chat_messages.metadata so the NEXT turn's wiki._carryover_scope can inherit
     # a genuinely-resolved single-document scope instead of guessing from a file
-    # count (see wiki._CARRYOVER_FROM_METHODS).
+    # count (see wiki._is_carryover_method).
     wr["scope_method"] = _scope.get("method", "")
     wr["scope_docs"] = _scope.get("target_docs") or []
     # Private key, not part of the public answer shape — app.py pops this off
