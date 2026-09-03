@@ -5156,6 +5156,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "prompt_tokens": page_selection_usage.get("prompt_tokens", 0),
             "completion_tokens": page_selection_usage.get("completion_tokens", 0),
             "total_tokens": page_selection_usage.get("prompt_tokens", 0) + page_selection_usage.get("completion_tokens", 0),
+            "cached_prompt_tokens": page_selection_usage.get("cached_prompt_tokens", 0),
         })
 
     # A retrieval failure (e.g. a transient embedding/DB hiccup) can leave
@@ -5723,6 +5724,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "prompt_tokens": retry_usage.get("prompt_tokens", 0),
             "completion_tokens": retry_usage.get("completion_tokens", 0),
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+            "cached_prompt_tokens": retry_usage.get("cached_prompt_tokens", 0),
         })
         _retry_ok = (retry_usage.get("finish_reason") != "length"
                      and len(retry_answer.strip()) >= _MIN_VIABLE_ANSWER_CHARS
@@ -5762,6 +5764,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "prompt_tokens": recheck_usage.get("prompt_tokens", 0),
             "completion_tokens": recheck_usage.get("completion_tokens", 0),
             "total_tokens": recheck_usage.get("prompt_tokens", 0) + recheck_usage.get("completion_tokens", 0),
+            "cached_prompt_tokens": recheck_usage.get("cached_prompt_tokens", 0),
         })
         if (recheck_answer.strip()
                 and not _is_not_covered_answer(recheck_answer)
@@ -5832,6 +5835,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             "prompt_tokens": retry_usage.get("prompt_tokens", 0),
             "completion_tokens": retry_usage.get("completion_tokens", 0),
             "total_tokens": retry_usage.get("prompt_tokens", 0) + retry_usage.get("completion_tokens", 0),
+            "cached_prompt_tokens": retry_usage.get("cached_prompt_tokens", 0),
         })
 
         _fewer_issues = (len(retry_unverified) + len(retry_misattributed) + len(retry_unverified_ids)
@@ -6299,6 +6303,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "prompt_tokens": usage.get("prompt_tokens", 0),
         "completion_tokens": usage.get("completion_tokens", 0),
         "total_tokens": usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
+        "cached_prompt_tokens": usage.get("cached_prompt_tokens", 0),
     })
 
     # Aggregate totals across all calls in this query
@@ -6306,6 +6311,11 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "prompt_tokens":     sum(e["prompt_tokens"]     for e in token_breakdown),
         "completion_tokens": sum(e["completion_tokens"] for e in token_breakdown),
         "total_tokens":      sum(e["total_tokens"]      for e in token_breakdown),
+        # Prompt tokens the provider served from its own cache. The static rule
+        # body of every answer template is byte-identical on every query, so a
+        # warm cache should cover most of it; a zero here means it is not being
+        # hit and the reordering that made the prefix stable is not paying off.
+        "cached_prompt_tokens": sum(e.get("cached_prompt_tokens", 0) for e in token_breakdown),
     }
 
     # Log per-call breakdown to session log
