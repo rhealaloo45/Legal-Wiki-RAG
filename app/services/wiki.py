@@ -4386,6 +4386,98 @@ def _dedupe_numbered_list(answer: str) -> tuple[str, int]:
     return "\n".join(kept), len(drop)
 
 
+# Phrases that name the SEARCH rather than the document. Ordered: the longer,
+# verb-carrying forms first, so "the context does not" becomes "these documents
+# do not" rather than the ungrammatical "these documents does not".
+#
+# Done deterministically because prompting alone did not hold. The voice rule
+# sits at the top of every template and the model still reaches for "the
+# context" whenever the answer is a refusal - which is exactly when a reader is
+# most likely to be told about machinery instead of about their documents.
+_VOICE_SUBS = (
+    (re.compile(r"\bthe (?:provided |retrieved |supplied |available )?context "
+                r"(does not|doesn't)\b", re.IGNORECASE), "these documents do not"),
+    (re.compile(r"\bthe (?:provided |retrieved |supplied |available )?context "
+                r"(?:contains|includes|holds|provides)\b", re.IGNORECASE),
+     "these documents contain"),
+    (re.compile(r"\bthe (?:provided|retrieved|supplied|excerpted|available)\s+"
+                r"(?:context|excerpts?|documents?|pages?|material|opinion|"
+                r"sources?)\b", re.IGNORECASE), "these documents"),
+    (re.compile(r"\bin the excerpts?\b", re.IGNORECASE), "in these documents"),
+    (re.compile(r"\bthe excerpted pages?\b", re.IGNORECASE), "these documents"),
+    (re.compile(r"\bthe context\b", re.IGNORECASE), "these documents"),
+    # Catch-all for the rest of the class: "the retrieved judgment", "the
+    # provided agreement", "the supplied opinion". Dropping the adjective is
+    # always grammatical and always right - the noun IS the document, and
+    # whether it was retrieved is a fact about the search, not about it.
+    (re.compile(r"\bthe (?:retrieved|provided|supplied|excerpted)\s+(?=[a-z])",
+                re.IGNORECASE), "the "),
+)
+
+# Cleanups for what the substitutions above can leave behind.
+_VOICE_FIXUPS = (
+    (re.compile(r"\bthese documents does\b", re.IGNORECASE), "these documents do"),
+    (re.compile(r"\bthese documents is\b", re.IGNORECASE), "these documents are"),
+    (re.compile(r"\bthese documents was\b", re.IGNORECASE), "these documents were"),
+    (re.compile(r"\bthese documents contains\b", re.IGNORECASE), "these documents contain"),
+    (re.compile(r"\bthese documents (?:only )?(?:contains|holds)\b", re.IGNORECASE),
+     "these documents contain"),
+    (re.compile(r"\bThese documents\b(?=[^.]*\bhere\b)"), "These documents"),
+)
+
+
+def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
+    """Say "these documents", never "the retrieved context".
+
+    Applied only OUTSIDE quotation marks and quote blocks: a document that
+    genuinely uses one of these phrases must keep its own wording, or a
+    verbatim quote stops being verbatim and the citation checks that just ran
+    over it would be checking different text than the reader sees.
+
+    Runs after those checks for the same reason - verification reads what the
+    model wrote, the reader reads this.
+    """
+    if not answer:
+        return answer, 0
+
+    # Spans to leave alone: anything in double quotes, and any "> " quote line.
+    protected = []
+    for m in re.finditer(r'["“][^"“”\n]{0,500}["”]', answer):
+        protected.append((m.start(), m.end()))
+    for m in re.finditer(r'^\s*>.*$', answer, re.M):
+        protected.append((m.start(), m.end()))
+
+    def _inside(pos):
+        return any(a <= pos < b for a, b in protected)
+
+    out, changed = answer, 0
+    for rx, repl in _VOICE_SUBS:
+        pieces, last = [], 0
+        for m in rx.finditer(out):
+            if _inside(m.start()):
+                continue
+            pieces.append(out[last:m.start()])
+            # Preserve sentence-initial capitalisation.
+            text = repl
+            if m.group(0)[:1].isupper():
+                text = text[:1].upper() + text[1:]
+            pieces.append(text)
+            last = m.end()
+            changed += 1
+        if pieces:
+            pieces.append(out[last:])
+            out = "".join(pieces)
+            # Positions moved; recompute the protected spans for the next rule.
+            protected = []
+            for m in re.finditer(r'["“][^"“”\n]{0,500}["”]', out):
+                protected.append((m.start(), m.end()))
+            for m in re.finditer(r'^\s*>.*$', out, re.M):
+                protected.append((m.start(), m.end()))
+    for rx, repl in _VOICE_FIXUPS:
+        out = rx.sub(repl, out)
+    return out, changed
+
+
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
     """Deterministically verify every quoted span in the answer is actually
     present (whitespace/case-insensitive) in the retrieved context.
@@ -5855,28 +5947,26 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             if _dropped:
                 logger.warning("Removed %d unverifiable quote(s) from References line(s)", _dropped)
                 answer += (
-                    f"\n\n[CITATION NOTE: {_dropped} reference(s) above cited an excerpt that could "
-                    f"not be matched to the retrieved source text. The excerpt was removed; the "
-                    f"document and clause citation are unchanged.]"
+                    f"\n\n[CITATION NOTE: {_dropped} reference(s) above quoted wording that is not in the "
+                    f"document. The quote was removed; the document and clause it points to are "
+                    f"unchanged.]"
                 )
             if _still_present:
                 answer += (
-                    f"\n\n[CITATION WARNING: {len(_still_present)} quoted passage(s) above do not "
-                    f"appear anywhere in the retrieved source text — do not rely on them as quotes "
-                    f"without checking the document: {_preview_of(_still_present)}]"
+                    f"\n\n[CITATION WARNING: {len(_still_present)} quoted passage(s) above are not in the "
+                    f"document — check them before relying on the wording: {_preview_of(_still_present)}]"
                 )
         if _prose_quotes:
             answer += (
-                f"\n\n[CITATION NOTE: {len(_prose_quotes)} passage(s) above match the retrieved "
-                f"material but not its verified excerpts — read them as paraphrase rather than "
-                f"exact wording: {_preview_of(_prose_quotes)}]"
+                f"\n\n[CITATION NOTE: {len(_prose_quotes)} passage(s) above say what the document says "
+                f"but not in its exact words — read them as paraphrase: {_preview_of(_prose_quotes)}]"
             )
 
     if _misattributed:
         logger.warning("Citation-attribution check: %d quote(s) attributed to the wrong document: %s",
                         len(_misattributed), _misattributed)
         answer += (
-            f"\n\n[ATTRIBUTION WARNING: {len(_misattributed)} quote(s) above appear to be attributed "
+            f"\n\n[ATTRIBUTION WARNING: {len(_misattributed)} quote(s) above look attributed "
             f"to the wrong document — {'; '.join(_misattributed[:2])}]"
         )
 
@@ -5933,7 +6023,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         _names = "; ".join(_norm_doc_name(d) for d in _empty_named[:3])
         answer += (
             f"\n\n[SCOPE WARNING: {len(_empty_named)} document(s) matching your question have "
-            f"NO ingested content and contributed nothing to this answer — {_names}. What you "
+            f"no readable text and contributed nothing to this answer — {_names}. What you "
             f"see above was drawn from other document(s) that matched the same name/number. "
             f"Check the References section names the document you actually meant.]"
         )
@@ -6224,6 +6314,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         for e in token_breakdown
     )
     _log_event(session_id, "TOKEN_USAGE", f"Total: {token_total['total_tokens']} | {breakdown_str}")
+
+    # Last step before the answer is handed back: say "these documents", never
+    # "the retrieved context". Placed after every citation and grounding check
+    # so those read exactly what the model wrote, while the reader gets prose
+    # that talks about their documents instead of about the search.
+    answer, _voice_edits = _rewrite_answer_voice(answer)
+    if _voice_edits:
+        logger.info("Answer voice: %d machine-register phrase(s) rewritten", _voice_edits)
 
     return {
         "answer": answer,
