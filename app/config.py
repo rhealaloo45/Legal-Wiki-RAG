@@ -178,6 +178,12 @@ MAX_QPAGE_CONTEXT_CHARS      = 3_000 # Cap on cached-answer (Q:) pages in contex
 MAX_PAGE_CONTEXT_CHARS       = 2_000 # Cap on any single wiki page in context (prevents merged pages dominating)
 MAX_TOTAL_CONTEXT_CHARS      = 60_000 # Cap on the combined wiki_content sent per LLM call (prevents context-window overflow on broad queries that match many similar documents)
 ENTITY_MATCH_MAX_PAGES       = 50    # Above this, an "entity" match is too common (reused across many docs) to force-scope the query to it
+FILE_MATCH_MAX_DOCS          = 4     # Per document NUMBER the question names, not per question: "Service Agreement 1, 2 & 3"
+                                     # legitimately matches three documents' worth of files. Above the scaled cap, a "named
+                                     # file" match is not naming a file and is dropped rather than pinned as single_doc -
+                                     # a pinned scope force-includes every page of every document it names, bypassing
+                                     # MAX_TOTAL_CONTEXT_CHARS. 4 allows the genuine ambiguity measured here (three distinct
+                                     # files are each plausibly "NDA 3") without letting a bad match pin twenty.
 
 # Draft mode — budgeted so a full generate-or-refine call stays under 12k
 # tokens total (classify + retrieval + this call's input + output combined),
