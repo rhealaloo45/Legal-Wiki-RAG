@@ -5039,6 +5039,57 @@ def _split_unverified_by_severity(unverified: list[str], context: str,
     return absent, prose_sourced
 
 
+# How much of a context span must already be copied before the answer is
+# treated as quoting THAT span (probe) and before a completion is allowed
+# (min). Both deliberately long: a short coincidental overlap must never
+# cause one passage to be rewritten into another.
+_QUOTE_COMPLETE_PROBE = 45
+_QUOTE_COMPLETE_MIN = 45
+
+
+def _complete_truncated_quotes(answer: str, context: str) -> tuple[str, int]:
+    """Finish any quote in the answer that the model cut off mid-way.
+
+    Distinct from _repair_truncated_quotes, which only sees quotes the citation
+    check FLAGGED. A quote cut mid-word usually is not flagged at all, and
+    correctly so: "...which expression shall, unless repu" is a genuine prefix
+    of "...unless repugnant to the context...", so it verifies as verbatim. The
+    grounding is fine; what reaches the reader is a quotation that stops in the
+    middle of a word.
+
+    Works from the context side, which is what makes it safe. For each span
+    really present in the context, find where the answer stops matching it. Act
+    only when the answer closes its quotation mark at exactly that point - that
+    is the signature of a truncation, not of a quote that legitimately ends
+    early - and only when enough of the span was already copied to be sure it
+    is the same passage.
+    """
+    if not answer or not context:
+        return answer, 0
+    corpus = _strict_verification_corpus(context)
+    spans = re.findall(r'>\s*([^\n]{60,600})', corpus)
+    spans += [x for x in re.split(r'(?<=[.!?])\s+', corpus) if len(x) >= 60]
+    fixed = 0
+    for span in spans:
+        span = span.strip()
+        head = span[:_QUOTE_COMPLETE_PROBE]
+        i = answer.find(head)
+        while i != -1:
+            d = 0
+            while (d < len(span) and i + d < len(answer)
+                   and answer[i + d] == span[d]):
+                d += 1
+            # Truncated iff the answer diverges before the span ends AND closes
+            # the quotation exactly there.
+            if (_QUOTE_COMPLETE_MIN <= d < len(span)
+                    and i + d < len(answer) and answer[i + d] == '"'):
+                answer = answer[:i] + span + answer[i + d:]
+                fixed += 1
+                break
+            i = answer.find(head, i + 1)
+    return answer, fixed
+
+
 def _repair_truncated_quotes(answer: str, flagged, context: str):
     """Fix quotes the model cut short, without spending a generation call.
 
@@ -6733,6 +6784,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     answer, _trimmed = _trim_appended_assessment(answer, question, intent)
     if _trimmed:
         logger.info("Assessment trimmed: dropped %s", _trimmed)
+
+    # A quote cut mid-word is finished from the context it came from. Runs
+    # after the citation retry so it also cleans up whatever that produced.
+    answer, _completed = _complete_truncated_quotes(answer, wiki_content)
+    if _completed:
+        logger.info("Answer quotes: completed %d truncated quotation(s) from context",
+                    _completed)
 
     answer, _voice_edits = _rewrite_answer_voice(answer)
     if _voice_edits:
