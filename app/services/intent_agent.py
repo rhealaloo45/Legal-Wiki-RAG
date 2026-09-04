@@ -1948,6 +1948,9 @@ def validate_response_node(state: QueryState) -> dict:
             pages_omitted=int(wr.get("pages_omitted") or 0),
             context_warning=wr.get("context_warning", ""),
             claim_states=wr.get("claim_states"),
+            # Topics the retrieved pages DO cover that the answer skipped —
+            # computed at intent_agent.py:1804 and read by nothing until now.
+            topics_missing=(wr.get("answer_facts") or {}).get("topics_missing"),
             doc_types=_meta.get("doc_types"),
             effective_dates=_meta.get("effective_dates"),
             scope_docs=wr.get("scope_docs"),

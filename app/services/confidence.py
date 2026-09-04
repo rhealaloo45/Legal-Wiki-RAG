@@ -160,13 +160,31 @@ def _evidence_score(citation_check: dict, quality_warning) -> tuple[int, str, bo
 
 
 def _completeness_score(missing_items, not_covered: bool,
-                        pages_omitted: int) -> tuple[int, str, bool]:
+                        pages_omitted: int, topics_missing=None) -> tuple[int, str, bool]:
+    """Did the answer cover what was asked.
+
+    Two different failures live here and they are not the same size.
+
+    missing_items is the answer saying these documents do not state something.
+    That is honest, and on a question with several parts it is often the
+    correct outcome, so it is penalised gently.
+
+    topics_missing is the opposite: the retrieved pages DO use the wording the
+    question asked about, and the answer did not cite it. Nothing is absent -
+    the answer went past it. That is the "correct but beside the point" failure,
+    the one no other dimension can see, and it is penalised harder because the
+    material was right there.
+    """
     n = len(missing_items or [])
+    t = len(topics_missing or [])
     if not_covered:
         # A refusal is complete in its own terms: it answered the question by
         # saying the documents do not. It is not an incomplete answer.
         return 90, "declined, which is an answer", True
     score, bits = 95, []
+    if t:
+        score = min(score, max(35, 95 - 20 * t))
+        bits.append("%d topic(s) the pages cover were not addressed" % t)
     if n:
         # Gentle per-item penalty on purpose. The answer cannot tell whether an
         # item is missing because the documents are silent or because retrieval
@@ -238,7 +256,7 @@ def score(question: str, *, scope_method: str = "", citation_check: dict | None 
           missing_items=None, not_covered: bool = False, pages_omitted: int = 0,
           context_warning: str = "", claim_states: dict | None = None,
           doc_types=None, effective_dates=None,
-          scope_docs=None, files_used=None,
+          scope_docs=None, files_used=None, topics_missing=None,
           quality_warning=None) -> dict:
     """Six scores, the lowest of which governs the answer.
 
@@ -247,7 +265,8 @@ def score(question: str, *, scope_method: str = "", citation_check: dict | None 
     answer, it does not edit one.
     """
     ev, ev_why, ev_on = _evidence_score(citation_check, quality_warning)
-    comp, comp_why, comp_on = _completeness_score(missing_items, not_covered, pages_omitted)
+    comp, comp_why, comp_on = _completeness_score(
+        missing_items, not_covered, pages_omitted, topics_missing)
     rea, rea_why, rea_on = _reasoning_score(context_warning, claim_states)
     aut, aut_why, aut_on = _authority_score(question, doc_types)
     tem, tem_why, tem_on = _temporal_score(question, effective_dates)
