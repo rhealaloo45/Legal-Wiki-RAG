@@ -1485,6 +1485,56 @@ def file_structure():
         return jsonify({})
 
 
+@app.route("/feedback", methods=["POST"])
+def answer_feedback():
+    """Record a reader's verdict on one answer.
+
+    Deliberately small. Every automated score this system produces measures
+    whether an answer is faithful to the documents it cites; none of them can
+    see whether the answer was useful to the person who asked, because that is
+    not a property of the documents. This is the only place that judgment
+    enters, and it is also the only way the six-score confidence can be
+    calibrated rather than believed - it separates correct from failing
+    answers by about 5 points today, which is real and far too weak to gate on.
+    """
+    if not config.USE_DATABASE:
+        return jsonify({"error": "database disabled"}), 400
+    data = request.get_json(silent=True) or {}
+    verdict = (data.get("verdict") or "").strip().lower()
+    if verdict not in ("up", "down"):
+        return jsonify({"error": "verdict must be 'up' or 'down'"}), 400
+    question = (data.get("question") or "").strip()
+    if not question:
+        return jsonify({"error": "question is required"}), 400
+    conf = data.get("confidence_six") or {}
+    from services import db as _db
+    try:
+        fid = _db.insert_answer_feedback(
+            current_wiki_id(), (data.get("session_id") or "").strip(),
+            question=question,
+            verdict=verdict,
+            answer_excerpt=(data.get("answer") or "")[:4000],
+            note=(data.get("note") or ""),
+            message_id=data.get("message_id"),
+            scope_method=(data.get("scope_method") or ""),
+            confidence_value=conf.get("value"),
+            confidence_governing=conf.get("governing") or "",
+            files_used=data.get("files_used") or [])
+    except Exception as e:
+        logger.error("Failed to record answer feedback: %s", e)
+        return jsonify({"error": "could not record feedback"}), 500
+    return jsonify({"ok": True, "id": fid})
+
+
+@app.route("/feedback/calibration")
+def answer_feedback_calibration():
+    """Whether the six-score confidence predicts what readers actually think."""
+    if not config.USE_DATABASE:
+        return jsonify({"error": "database disabled"}), 400
+    from services import db as _db
+    return jsonify(_db.feedback_calibration(current_wiki_id()))
+
+
 @app.route("/document/list")
 def document_list():
     """Return a flat list of every document in a session, active and
