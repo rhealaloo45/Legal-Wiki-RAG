@@ -2765,6 +2765,14 @@ def _uploaded_doc_names(session_id: str) -> set[str]:
         return set()
 
 
+# A document code: letters, then hyphen-joined groups, at least one digit
+# somewhere ("MAT-2022-1129", "CND-TOR-SOW-2026-001", "COM-2025-610"). Anchored
+# on a leading LETTER group so a bare date ("2023-02-18") can never be read as a
+# code, and required to carry a digit so ordinary hyphenated words ("take-or-pay",
+# "e-mail") never match.
+_DOC_CODE_RE = re.compile(r'\b([A-Za-z]{2,6}(?:-[A-Za-z0-9]{1,8}){1,4})\b')
+
+
 def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
     """Detect which SPECIFIC source documents the user is asking about.
 
@@ -2804,6 +2812,24 @@ def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
                 matched.add(sd)
         if matched:
             logger.info("Detected file mention (raw filename): %s", matched)
+            return matched
+
+    # 0b. Document CODE mention ("MAT-2022-1129", "CND-TOR-SOW-2026-001").
+    # 72 documents here carry a matter code in their filename and it is the most
+    # precise reference a question can make - more precise than "SA 1", which is
+    # a type plus an ordinal shared across several files. There was no branch for
+    # it, so naming the code resolved nothing and the question fell through to a
+    # corpus-wide search that answered from an unrelated agreement. Runs before
+    # the numbered pattern for that reason: a code names one document outright.
+    codes = [c for c in _DOC_CODE_RE.findall(question) if any(ch.isdigit() for ch in c)]
+    if codes:
+        for sd in src_docs:
+            norm = _norm_doc_name(sd)
+            if any(c.lower() in norm for c in codes):
+                matched.add(sd)
+        if matched:
+            logger.info("Detected file mention (document code %s): %s",
+                        codes, {_norm_doc_name(d) for d in matched})
             return matched
 
     # 1. Numbered type pattern — precise per-document scoping.
