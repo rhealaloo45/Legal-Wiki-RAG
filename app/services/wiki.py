@@ -1516,6 +1516,35 @@ def ingest(file_path: str, session_id: str) -> dict:
         except Exception as e:
             logger.error("Failed to record page quality for %s: %s", doc_name, e)
 
+    # --- Quality gate ------------------------------------------------------
+    # Until now this table only ever DISCLOSED a problem. A document whose pages
+    # would not extract became searchable anyway and answered questions with the
+    # same authority as a clean one - four such documents are live in this
+    # corpus, at nought to two readable pages each. Reading the ratio here, one
+    # step before the synthesis call, is the difference between paying a model
+    # to write a wiki page about nothing and not paying it.
+    _gate = _quality_gate(page_quality)
+    if _gate["decision"] == "hold":
+        logger.warning("%s: HELD at the quality gate - %s", doc_name, _gate["reason"])
+        _log_event(session_id, "QUALITY_HOLD", "%s: %s" % (doc_name, _gate["reason"]))
+        if config.USE_DATABASE:
+            try:
+                _db.insert_review_items(
+                    _active_wiki_id(), session_id, doc_name,
+                    [{"item_kind": "document_quality",
+                      "item_label": "unreadable document",
+                      "item_value": _gate["reason"],
+                      "confidence": 0.0,
+                      "reason": ("Held before synthesis: too little text extracted "
+                                 "for the document to be answered from. Re-upload a "
+                                 "text PDF, or accept to ingest it anyway.")}])
+            except Exception as e:
+                logger.error("Failed to queue quality hold for %s: %s", doc_name, e)
+        return {"status": "held", "reason": _gate["reason"],
+                "pages_unreadable": _gate["unreadable"], "pages_total": _gate["total"]}
+    if _gate["decision"] == "flag":
+        logger.warning("%s: ingesting with a quality flag - %s", doc_name, _gate["reason"])
+
     # --- Duplicate check #2: identical extracted text, different bytes -----
     # Secondary safety net for the case file_hash can't catch — same content
     # re-saved/re-scanned into a byte-different file. Only reachable once
@@ -6533,6 +6562,40 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         # unreadable source. Additive metadata — the answer text is untouched.
         "document_quality_warning": _document_quality_warning(session_id, files_used),
     }
+
+
+# Share of a document's pages that must be unreadable before ingesting it costs
+# more than it returns. Deliberately generous: a scanned exhibit at the back of
+# a clean contract is normal, and holding that document would lose the contract.
+_QUALITY_HOLD_RATIO = 0.60
+_QUALITY_FLAG_RATIO = 0.20
+# Below this many pages the ratio is noise - one bad page in a two-page document
+# is 50% and means nothing.
+_QUALITY_MIN_PAGES = 3
+
+
+def _quality_gate(page_quality: list) -> dict:
+    """Ingest, ingest-and-flag, or hold, from what extraction actually got.
+
+    Reads the rows already written above. No model call, no heuristic about
+    content - only how much text came out of how many pages.
+    """
+    total = len(page_quality or [])
+    unreadable = sum(1 for p in (page_quality or []) if p.get("below_floor"))
+    out = {"total": total, "unreadable": unreadable,
+           "decision": "ingest", "reason": ""}
+    if total < _QUALITY_MIN_PAGES or not unreadable:
+        return out
+    ratio = unreadable / float(total)
+    out["reason"] = "%d of %d pages held no readable text (%.0f%%)" % (
+        unreadable, total, 100 * ratio)
+    if ratio >= _QUALITY_HOLD_RATIO:
+        out["decision"] = "hold"
+    elif ratio >= _QUALITY_FLAG_RATIO:
+        out["decision"] = "flag"
+    else:
+        out["reason"] = ""
+    return out
 
 
 def _document_quality_warning(session_id: str, files_used: list[str]) -> dict | None:
