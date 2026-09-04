@@ -4156,6 +4156,37 @@ _CODE_SHAPED_TOKEN_RE = re.compile(
 )
 
 
+# A real formatted identifier is typed, not written: its alphabetic segments are
+# upper-case ("TSPL/LEGALOPS/2025/058", "MAT-2018-3636", "2025-CV-0041"), and it
+# carries at least one letter. _CODE_SHAPED_TOKEN_RE alone cannot tell one from
+# an ordinary hyphenated English phrase, which has exactly the same shape - and
+# the docstring above claims a letter is required where the pattern never
+# enforced it, so a bare "30/45/60" qualified too.
+#
+# Confirmed live and visible to the reader: an answer about a Consultancy
+# Agreement had "Take-or-pay" replaced with "[not stated in this document]",
+# leaving the sentence "[not stated in this document] obligation locked with
+# only limited carve-outs" - while the very document it was answering from has
+# a page titled "Take-or-Pay Obligation". Alongside it went "30/45/60",
+# "payment/gross-up" and "data-availability/security". The label gate does not
+# help here: any long answer that mentions a Matter Reference at all opens the
+# whole text to this check, and legal prose is full of hyphenated terms.
+#
+# The trade is deliberate: a fabricated code written in lower case is now
+# missed. That costs a warning the grounding and citation checks still make
+# their own way, where the false positive silently rewrites an answer's words.
+def _looks_like_formatted_identifier(code: str) -> bool:
+    """True when a code-shaped token is typed like a reference, not written."""
+    if not any(ch.isalpha() for ch in code):
+        return False          # "30/45/60", "10-20" - a range, not a reference
+    for seg in re.split(r'[/\-]', code):
+        if seg.isdigit():
+            continue          # a year or a serial
+        if any(ch.islower() for ch in seg):
+            return False      # "or", "pay", "security" - English, not a code
+    return True
+
+
 def _verify_identifier_claims(answer: str, context: str) -> list[str]:
     """Deterministically catch a fabricated matter-reference/docket/case-number
     value — a different failure shape from a fabricated QUOTE, and confirmed to
@@ -4195,6 +4226,8 @@ def _verify_identifier_claims(answer: str, context: str) -> list[str]:
     for m in _CODE_SHAPED_TOKEN_RE.finditer(answer):
         code = m.group(0)
         if code in unverified:
+            continue
+        if not _looks_like_formatted_identifier(code):
             continue
         if code not in context and code not in context_tight:
             unverified.append(code)
