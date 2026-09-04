@@ -1192,7 +1192,36 @@ def generate_answer_node(state: QueryState) -> dict:
     # contexts, including substantive multi-page answers where retrieval had
     # genuinely pulled real content).
     wr["_debug_context"] = state.get("wiki_context", "")
+
     return {"answer_result": wr}
+
+
+def _document_meta_for_confidence(session_id: str, docs: list) -> dict:
+    """Recorded type and effective date for the documents an answer used.
+
+    Read here rather than threaded through generate_answer: these are two
+    indexed lookups on a table the pipeline already maintains, and keeping the
+    read next to its only consumer means the answer path is untouched when the
+    confidence scoring is not wanted.
+    """
+    if not docs:
+        return {"doc_types": [], "effective_dates": []}
+    try:
+        from services import db as _db
+        from services import wikis as _wikis
+        from sqlalchemy import text as _text
+        with _db.get_engine().connect() as c:
+            rows = c.execute(_text("""
+                SELECT doc_type, effective_date FROM documents
+                WHERE wiki_id = :w AND session_id = :s
+                  AND source_doc = ANY(:d)
+            """), {"w": _wikis.active_wiki_id(), "s": session_id,
+                   "d": list(docs)[:8]}).fetchall()
+    except Exception as e:
+        logger.error("confidence: document metadata lookup failed: %s", e)
+        return {"doc_types": [], "effective_dates": []}
+    return {"doc_types": [r[0] for r in rows if r[0]],
+            "effective_dates": [r[1] for r in rows if r[1]]}
 
 
 _GROUNDING_PROMPT = """\
@@ -1374,6 +1403,30 @@ def _claim_grounded(claim: str, context_norm: str) -> bool:
     return bool(norm) and norm in context_norm
 
 
+_CLAIM_NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?%?")
+
+
+def _claim_state(claim: str, context_norm: str) -> str:
+    """One claim as supported, partial, or unsupported.
+
+    A binary verdict throws away the distinction a reader most needs. A claim
+    whose every figure is in the context but whose wording is not is a
+    paraphrase; a claim carrying a number that appears nowhere is a different
+    animal entirely, and calling both "ungrounded" hides which one happened.
+
+      supported    the claim's own words are in the context
+      partial      the wording is not, but every figure in it is
+      unsupported  a figure in the claim is not in the context, or there are
+                   no figures and the wording is absent
+    """
+    if _claim_grounded(claim, context_norm):
+        return "supported"
+    nums = _CLAIM_NUM_RE.findall(_norm_claim_text(claim))
+    if nums and all(n in context_norm for n in nums):
+        return "partial"
+    return "unsupported"
+
+
 def _deterministic_grounding(context: str, answer: str) -> dict:
     """Zero-cost grounding score: extract factual claims from the answer and
     check each one's literal presence in the retrieved context. Catches the
@@ -1389,12 +1442,27 @@ def _deterministic_grounding(context: str, answer: str) -> dict:
 
     # Same normalisation on both sides — see _norm_claim_text.
     context_norm = _norm_claim_text(context)
-    ungrounded = [c for c in claims if not _claim_grounded(c, context_norm)]
-    score = round(100 * (len(claims) - len(ungrounded)) / len(claims))
+    states = [(c, _claim_state(c, context_norm)) for c in claims]
+    ungrounded = [c for c, st in states if st == "unsupported"]
+    partial = [c for c, st in states if st == "partial"]
+    supported = [c for c, st in states if st == "supported"]
+    # A partial counts as half: its figures check out and its wording does not,
+    # which is neither a verified claim nor a fabricated one.
+    score = round(100 * (len(supported) + 0.5 * len(partial)) / len(claims))
     return {
         "grounding_score": score,
         "ungrounded_claims": ungrounded[:8],
-        "summary": f"{len(claims) - len(ungrounded)}/{len(claims)} checkable claims verified against context (deterministic).",
+        "partial_claims": partial[:8],
+        # Per-claim states, for the confidence reasoning dimension and for any
+        # surface that wants to show WHICH sentence is the weak one.
+        "claim_states": {
+            "checked": len(claims),
+            "supported": len(supported),
+            "partial": len(partial),
+            "unsupported": len(ungrounded),
+        },
+        "summary": (f"{len(supported)}/{len(claims)} checkable claims verified against "
+                    f"context, {len(partial)} partial (deterministic)."),
         "total_claims": len(claims),
         "method": "deterministic",
     }
@@ -1849,6 +1917,49 @@ def validate_response_node(state: QueryState) -> dict:
                "message": f"Grounding: {grounding.get('grounding_score', '?')}%"})
 
     wr["validation"] = {"valid": valid, "warning": warning, "grounding": grounding}
+    # Per-claim supported/partial/unsupported counts, lifted to the top level so
+    # the confidence reasoning dimension reads them without knowing the shape of
+    # the grounding result. Absent when the LLM judge produced the grounding, or
+    # when the answer carried no checkable claim.
+    #
+    # Deliberately NOT called answer_facts: that key already exists and carries
+    # topic coverage (pages, topics_asked, topics_found), which app.py persists
+    # and the frontend renders. Writing these counts there would have silently
+    # replaced it.
+    if isinstance(grounding, dict) and grounding.get("claim_states"):
+        wr["claim_states"] = grounding["claim_states"]
+
+    # Six independent confidence scores, of which the lowest governs. Computed
+    # in the LAST node on purpose: this is the only point where the answer, the
+    # scope decision AND the per-claim verification counts are all in hand, and
+    # the scope decision is precisely what the single self-reported score could
+    # never see. Costs no tokens; see services/confidence.py for why the minimum
+    # rather than a mean.
+    try:
+        from services import confidence as _conf
+        _docs_for_conf = wr.get("files_used") or wr.get("scope_docs") or []
+        _meta = _document_meta_for_confidence(state["session_id"], _docs_for_conf)
+        wr["confidence_six"] = _conf.score(
+            state["question"],
+            scope_method=wr.get("scope_method", ""),
+            citation_check=wr.get("citation_check"),
+            missing_items=wr.get("missing_items"),
+            not_covered=bool(wr.get("not_covered")),
+            pages_omitted=int(wr.get("pages_omitted") or 0),
+            context_warning=wr.get("context_warning", ""),
+            claim_states=wr.get("claim_states"),
+            doc_types=_meta.get("doc_types"),
+            effective_dates=_meta.get("effective_dates"),
+            scope_docs=wr.get("scope_docs"),
+            files_used=wr.get("files_used"),
+            quality_warning=wr.get("document_quality_warning"),
+        )
+        logger.info("[AGENT] confidence: %d governed by %s (%s)",
+                    wr["confidence_six"]["value"], wr["confidence_six"]["governing"],
+                    wr["confidence_six"]["reason"][:70])
+    except Exception as _conf_err:
+        logger.error("[AGENT] confidence scoring failed: %s", _conf_err)
+
 
     # Deliberately outside the ENABLE_ANSWER_VALIDATION block: this costs no LLM
     # call, and it is the only check that caught the confirmed fabrication.
