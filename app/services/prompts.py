@@ -164,7 +164,10 @@ REQUIRED OUTPUT FORMAT (Start your response exactly like this):
 CONFIDENCE_SCORE: [integer 0-100]
 CONFIDENCE_REASON: [one sentence]
 </reasoning>
-(Your final answer goes here — lead with it, and let its length be set by the question)"""
+(Your final answer goes here — lead with it, and let its length be set by the question)
+
+MISSING_ITEMS:
+(On its own line at the very end. List anything the question asked for that these documents do not answer — one "- " line each, naming the thing the reader asked for and what is not stated about it. An item belongs here ONLY if no supplied page answers it: if you answered it above, it is not missing, and a page that states it plainly is an answer whether or not it is phrased the way the question was. Write "MISSING_ITEMS: none" when the documents answered everything asked. Name documents and provisions, never the search: no mention of context, excerpts, retrieval or pages.)"""
 
 
 COMPARISON_PROMPT = """VOICE (applies to every line you write): talk about the documents, never about the machinery that found them. Say "the MSA does not set a cap" or "there is no Legal Opinion between X and Y here" - never "the provided context", "the retrieved documents", "the supplied excerpts". Name the document. And let the question set the length: answer it, then stop. Do not restate the question, do not add a heading the question did not ask for, and never open with the word "Answer".

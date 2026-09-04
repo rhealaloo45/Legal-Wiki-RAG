@@ -1252,6 +1252,11 @@ def query_route():
                                         # claims look unchecked.
                                         "citation_check": wiki_result.get("citation_check", {}),
                                         "files_used": wiki_result.get("files_used", []),
+                                        # What the documents did not answer. The
+                                        # rendered section is already in the answer
+                                        # text; this keeps the list itself readable
+                                        # after a reload, same as the flags below.
+                                        "missing_items": wiki_result.get("missing_items", []),
                                         "token_total": wiki_result.get("token_total", {}),
                                         "validation": wiki_result.get("validation", {}),
                                         "intent": wiki_result.get("intent", "factual"),
