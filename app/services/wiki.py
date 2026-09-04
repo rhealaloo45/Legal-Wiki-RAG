@@ -3645,6 +3645,30 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     total_chars = sum(len(p) for p in wiki_parts)
     pages_omitted = 0
     _trace_pages = []
+    _included_titles = []
+
+    # Fill order: one page per document in turn, not document by document.
+    # The cap is enforced by stopping when the budget runs out, so whatever
+    # sits at the END of this list is what gets dropped. Grouped by document -
+    # which is how selection returns them - that meant the LAST document lost
+    # almost everything: measured on a three-document question, 10 of the 12
+    # omitted pages were one document's, while the first two kept every page.
+    # An answer comparing three agreements was really reading two and a half,
+    # with nothing to say so. Round-robin spends the same budget but spreads
+    # the loss, and within each document the selection order (relevance) is
+    # untouched, so a single-document question is completely unaffected.
+    _by_doc: dict = {}
+    for _t in selected_titles:
+        _pg = pages.get(_t)
+        _sd = _pg.get("source_doc", "") if isinstance(_pg, dict) else ""
+        _by_doc.setdefault(_sd, []).append(_t)
+    if len(_by_doc) > 1:
+        _ordered, _queues = [], list(_by_doc.values())
+        while any(_queues):
+            for _qd in _queues:
+                if _qd:
+                    _ordered.append(_qd.pop(0))
+        selected_titles = _ordered
 
     for title in selected_titles:
         if title in pages:
@@ -3714,6 +3738,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             part = f"\n---\n## {display_title}\n[From: {from_label}]\n{content}\n"
             wiki_parts.append(part)
             total_chars += len(part)
+            _included_titles.append(title)
             _trace_pages.append({
                 "title": display_title, "source_doc": from_label,
                 "chars_included": len(content), "chars_original": _orig_chars,
@@ -3738,7 +3763,13 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
 
     return {
         "context": wiki_content,
-        "selected_titles": selected_titles,
+        # What the answer was actually built from, not what selection proposed.
+        # The omitted pages used to stay in this list, so the caller reported
+        # "Retrieved 48 page(s)" for an answer written from 38, and the metadata
+        # block described pages that were not in front of the model.
+        "selected_titles": _included_titles,
+        "pages_proposed": len(selected_titles),
+        "pages_omitted": pages_omitted,
         "bm25_count": bm25_count,
         "page_selection_usage": page_selection_usage,
     }
