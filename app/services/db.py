@@ -5323,6 +5323,64 @@ def _anchor_clauses(wiki_id: str, session_id: str, doc_hint: str,
             for r in rows]
 
 
+def clauses_of_type(wiki_id: str, session_id: str, source_doc: str,
+                    canon: str) -> list[dict]:
+    """Clauses of one canonical type recorded for one document.
+
+    Reads clause_type_canon rather than matching prose: "does this contain a
+    warranty clause" is a question about the clause TYPE, and the words of a
+    representation of authority ("represents and warrants that it has full
+    power") satisfy a prose search while answering a different question.
+    """
+    from sqlalchemy import text
+    if not source_doc or not canon:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT clause_type, clause_type_canon, verbatim_text, page_num
+            FROM clauses
+            WHERE wiki_id = :w AND session_id = :s
+              AND source_doc = :d AND clause_type_canon = :c
+            ORDER BY length(verbatim_text) DESC
+            LIMIT 5
+        """), {"w": wiki_id, "s": session_id, "d": source_doc, "c": canon}).fetchall()
+    return [{"clause_type": r[0], "clause_type_canon": r[1],
+             "verbatim_text": r[2], "page_num": r[3]} for r in rows]
+
+
+def clause_count_for_doc(wiki_id: str, session_id: str, source_doc: str) -> int:
+    """How many typed clauses were recorded for a document.
+
+    The denominator behind reading an absence: a document with two extracted
+    clauses is silent about everything, and that silence is the extractor's,
+    not the document's.
+    """
+    from sqlalchemy import text
+    if not source_doc:
+        return 0
+    with get_engine().connect() as conn:
+        return int(conn.execute(text("""
+            SELECT count(*) FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+        """), {"w": wiki_id, "s": session_id, "d": source_doc}).scalar() or 0)
+
+
+def clause_types_for_doc(wiki_id: str, session_id: str, source_doc: str,
+                         limit: int = 8) -> list[str]:
+    """The canonical clause types a document does carry, most common first."""
+    from sqlalchemy import text
+    if not source_doc:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT clause_type_canon, count(*) FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND clause_type_canon IS NOT NULL AND clause_type_canon <> 'structural'
+            GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT :n
+        """), {"w": wiki_id, "s": session_id, "d": source_doc, "n": limit}).fetchall()
+    return [r[0] for r in rows]
+
+
 def lookup_clause(wiki_id: str, session_id: str, doc_hint: str, clause_num: str) -> list[dict]:
     """Resolve a clause number to its heading and wiki page(s) for one document.
 
