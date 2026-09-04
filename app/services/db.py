@@ -1202,6 +1202,33 @@ def _init_backbone_schema(conn, text) -> None:
     # per-family metadata fields, and low-confidence table/figure extraction.
     # get_review_queue() unions the two so the admin panel keeps showing one
     # queue; two separate queues would be a worse answer than one join.
+    # Reader verdicts on answers. Every other score in this system measures
+    # whether an answer is faithful to the text it cites; none can see whether
+    # it was USEFUL, because that is not a property of the documents. This is
+    # the only ground truth for it, and the only way the six-score confidence
+    # can ever be calibrated rather than trusted.
+    conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS answer_feedback (
+            id                   BIGSERIAL PRIMARY KEY,
+            wiki_id              TEXT NOT NULL,
+            session_id           TEXT NOT NULL,
+            message_id           BIGINT,
+            question             TEXT NOT NULL,
+            answer_excerpt       TEXT,
+            verdict              TEXT NOT NULL,
+            note                 TEXT,
+            scope_method         TEXT,
+            confidence_value     INT,
+            confidence_governing TEXT,
+            files_used           JSONB,
+            created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """))
+    conn.execute(text("""
+        CREATE INDEX IF NOT EXISTS idx_answer_feedback_wiki
+            ON answer_feedback (wiki_id, id DESC)
+    """))
+
     conn.execute(text("""
         CREATE TABLE IF NOT EXISTS review_queue (
             id             BIGSERIAL PRIMARY KEY,
@@ -1826,6 +1853,92 @@ def _is_high_stakes_clause_type(clause_type: str) -> bool:
 # wrong call there is not one bad field but the wrong set of fields entirely
 # — strictly higher stakes than any single value within the right set.
 _ALWAYS_HIGH_STAKES_KINDS = {"doc_type"}
+
+
+def insert_answer_feedback(wiki_id: str, session_id: str, *, question: str,
+                           verdict: str, answer_excerpt: str = "",
+                           note: str = "", message_id=None,
+                           scope_method: str = "", confidence_value=None,
+                           confidence_governing: str = "",
+                           files_used=None) -> int:
+    """Record a reader's verdict on one answer.
+
+    The only ground truth this system has about usefulness. Every automated
+    score here measures whether an answer is faithful to the text it cites,
+    and an answer can be perfectly faithful and still miss what the lawyer
+    needed - no check in the pipeline can see that, because it is not a
+    property of the documents.
+
+    Stored alongside the scores the pipeline produced for the same answer, so
+    the six-dimension confidence can eventually be calibrated rather than
+    trusted: it currently separates correct from failing answers by 4.8 points
+    on the 200-question set, which is real but far too weak to gate on, and
+    nothing but human verdicts can say whether that gap is widenable.
+    """
+    from sqlalchemy import text
+    import json as _json
+    v = (verdict or "").strip().lower()
+    if v not in ("up", "down"):
+        raise ValueError("verdict must be 'up' or 'down', got %r" % verdict)
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(text("""
+            INSERT INTO answer_feedback
+                (wiki_id, session_id, message_id, question, answer_excerpt,
+                 verdict, note, scope_method, confidence_value,
+                 confidence_governing, files_used)
+            VALUES (:w, :s, :m, :q, :a, :v, :n, :sm, :cv, :cg, CAST(:f AS jsonb))
+            RETURNING id
+        """), {"w": wiki_id, "s": session_id, "m": message_id,
+               "q": (question or "")[:4000], "a": (answer_excerpt or "")[:4000],
+               "v": v, "n": (note or "")[:2000], "sm": scope_method or "",
+               "cv": confidence_value, "cg": confidence_governing or "",
+               "f": _json.dumps(list(files_used or [])[:12])}).fetchone()
+        conn.commit()
+        return int(row[0])
+
+
+def get_answer_feedback(wiki_id: str, session_id: str = "",
+                        limit: int = 200) -> list[dict]:
+    """Recorded verdicts, newest first. Session-scoped when one is given."""
+    from sqlalchemy import text
+    engine = get_engine()
+    sql = ("SELECT id, session_id, question, verdict, note, scope_method, "
+           "confidence_value, confidence_governing, created_at "
+           "FROM answer_feedback WHERE wiki_id = :w")
+    params = {"w": wiki_id, "n": max(1, min(int(limit or 200), 1000))}
+    if session_id:
+        sql += " AND session_id = :s"
+        params["s"] = session_id
+    sql += " ORDER BY id DESC LIMIT :n"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [{"id": r[0], "session_id": r[1], "question": r[2], "verdict": r[3],
+             "note": r[4], "scope_method": r[5], "confidence_value": r[6],
+             "confidence_governing": r[7], "created_at": str(r[8])} for r in rows]
+
+
+def feedback_calibration(wiki_id: str) -> dict:
+    """Does the six-score confidence predict what readers actually think?
+
+    The question the score cannot answer about itself. Returns the mean
+    confidence behind each verdict and the gap between them; a gap near zero
+    means the score is decorative, however carefully it was built.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT verdict, count(*), avg(confidence_value)
+            FROM answer_feedback
+            WHERE wiki_id = :w AND confidence_value IS NOT NULL
+            GROUP BY verdict
+        """), {"w": wiki_id}).fetchall()
+    by = {r[0]: {"n": int(r[1]), "mean_confidence": float(r[2])} for r in rows}
+    out = {"by_verdict": by, "separation": None}
+    if "up" in by and "down" in by:
+        out["separation"] = round(by["up"]["mean_confidence"]
+                                  - by["down"]["mean_confidence"], 1)
+    return out
 
 
 def insert_review_items(wiki_id: str, session_id: str, source_doc: str,
