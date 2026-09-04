@@ -2930,7 +2930,138 @@ _RX_DEFINED_TERM_Q = re.compile(
 
 # Beyond this the question is asking about a set of documents, and quoting one
 # definition from each stops being an answer.
+# "Does the Power of Attorney between X and Y contain a 'warranty' clause?" —
+# a yes/no about whether one named clause TYPE is present in one named document.
+#
+# Answered from the typed clause rows rather than from prose, because prose
+# matching answers the wrong question. Confirmed live: this exact question was
+# answered "contains a warranty clause", quoting the Power of Attorney's own
+# "Each Party represents and warrants to the other that it has full power and
+# authority to enter into and perform this Agreement" — a representation of
+# authority, boilerplate in every instrument in the corpus, and not a warranty
+# clause. The word "warrants" appears; the clause type does not. That document
+# carries 21 typed clauses and none of them is a warranty.
+_RX_CLAUSE_PRESENCE = re.compile(
+    r"\b(?:does|do|is|are)\b[^?]{0,160}?\b(?:contain|include|have|has|there)\b"
+    r"[^?]{0,60}?[\"'‘“]?([A-Za-z][A-Za-z /&'-]{2,40}?)[\"'’”]?\s+"
+    r"(?:clause|provision|section|term)\b",
+    re.IGNORECASE)
+
+# Below this, the document's clause extraction is too thin to read an absence
+# from. 954 of the 1,005 documents carrying any typed clause are at or above it.
+_CLAUSE_PRESENCE_MIN_ROWS = 8
+
+
+def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
+                            docs: "list | None") -> "dict | None":
+    """Whether one named clause type is present in one named document.
+
+    Returns None — leaving the question to the ordinary pipeline — whenever the
+    answer cannot be read with confidence: more than one document in scope, a
+    clause type outside the controlled vocabulary, or a document whose typed
+    extraction is too thin for an absence to mean anything. A present clause is
+    reported with its own verbatim text, so a yes is quotable.
+    """
+    from services import db as _db
+    from services import clause_vocab as _vocab
+
+    m = _RX_CLAUSE_PRESENCE.search(question or "")
+    if not m or not docs or len(docs) != 1:
+        return None
+    asked = (m.group(1) or "").strip(" '\"‘’“”")
+    # The pattern's window starts before the article, so strip it here rather
+    # than complicating the match: "a 'warranty" -> "warranty".
+    asked = re.sub(r"^(?:an?|the)\s+", "", asked, flags=re.IGNORECASE).strip(" '\"")
+    if not asked:
+        return None
+    canon = None
+    try:
+        canon = _vocab.canonical(asked)
+    except Exception as e:
+        logger.error("[AGENT] clause-presence: vocabulary lookup failed: %s", e)
+        return None
+    if not canon:
+        return None                      # not a type we canonicalise — stay out
+
+    try:
+        rows = _db.clauses_of_type(wiki_id, session_id, docs[0], canon)
+        total = _db.clause_count_for_doc(wiki_id, session_id, docs[0])
+    except Exception as e:
+        logger.error("[AGENT] clause-presence lookup failed: %s", e)
+        return None
+
+    doc_label = _dp_display(docs[0], wiki_id, session_id)
+
+    if rows:
+        r = rows[0]
+        body = [
+            "Yes — %s contains a %s clause." % (doc_label, asked.lower()),
+            "",
+            "> %s" % (r.get("verbatim_text") or "").strip()[:700],
+        ]
+        if r.get("clause_type"):
+            body.append("")
+            body.append("Recorded in this document as: %s" % r["clause_type"])
+        payload = _canned_payload("\n".join(body), "Clause presence", "clause-presence")
+        payload["meta_answer"] = False
+        payload["files_used"] = [docs[0]]
+        return payload
+
+    if total < _CLAUSE_PRESENCE_MIN_ROWS:
+        return None                      # too little extracted to read silence
+
+    body = [
+        "No — %s does not contain a %s clause." % (doc_label, asked.lower()),
+        "",
+        "Its %d recorded clauses cover %s." % (total, _clause_type_summary(
+            wiki_id, session_id, docs[0])),
+        "",
+        "A phrase such as \"represents and warrants that it has full power and "
+        "authority\" appears in most instruments in this corpus and is a "
+        "representation of authority, not a clause of the type asked about.",
+    ]
+    payload = _canned_payload("\n".join(body), "Clause presence", "clause-presence")
+    payload["meta_answer"] = False
+    payload["files_used"] = [docs[0]]
+    return payload
+
+def _clause_type_summary(wiki_id: str, session_id: str, source_doc: str) -> str:
+    """The clause types a document does carry, as a readable phrase."""
+    from services import db as _db
+    try:
+        types = _db.clause_types_for_doc(wiki_id, session_id, source_doc)
+    except Exception:
+        return "other subjects"
+    pretty = [t.replace('_', ' ') for t in types]
+    if not pretty:
+        return "other subjects"
+    if len(pretty) == 1:
+        return pretty[0]
+    return ", ".join(pretty[:-1]) + " and " + pretty[-1]
+
+
 _DEFINED_TERM_MAX_DOCS = 3
+
+# A stored definition that was cut off at ingest. The fast path quotes the
+# stored row verbatim and stops, so a truncated row is served as though it were
+# the whole definition - confirmed live: "Applicable Law" came back ending at
+# "...and binding", where the document continues "guidance of any Governmental
+# Authority applicable to the performance of a Party's obligations". 73 of the
+# corpus's 2,537 stored definitions end without terminal punctuation. Falling
+# through to retrieval costs tokens on those; serving half a definition costs
+# the reader the half that changes what it means.
+_DEFINITION_ENDS_CLEANLY = re.compile(r'[.;:!?"”’)]\s*$')
+
+# Short enough that it cannot be a real definition either way.
+_DEFINITION_MIN_CHARS = 25
+
+
+def _definition_looks_complete(text: str) -> bool:
+    """Whether a stored definition can be quoted as the whole of itself."""
+    t = (text or '').strip()
+    if len(t) < _DEFINITION_MIN_CHARS:
+        return False
+    return bool(_DEFINITION_ENDS_CLEANLY.search(t))
 
 
 def _defined_term_answer(question: str, session_id: str, wiki_id: str,
@@ -2965,6 +3096,19 @@ def _defined_term_answer(question: str, session_id: str, wiki_id: str,
         logger.error("[AGENT] defined-term lookup failed: %s", e)
         return None
     if not rows:
+        return None
+
+    # Every stored definition has to be quotable as the whole of itself. This
+    # path's whole value is that it quotes the document's own words instead of
+    # having the model re-derive them, and a row cut off at ingest breaks that
+    # promise silently - the reader sees a definition that simply stops. When
+    # any row in scope is truncated, decline the whole fast path rather than
+    # serve a mixed set, and let retrieval read the page as it did before.
+    _cut = [r for r in rows if not _definition_looks_complete(r.get("definition"))]
+    if _cut:
+        logger.info("[AGENT] defined-term fast path declined: %d stored definition(s) "
+                    "look truncated (%r)", len(_cut),
+                    (_cut[0].get("definition") or "")[-40:])
         return None
 
     # One document, one definition is the ordinary case. Where the resolved set
@@ -4328,6 +4472,23 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
             logger.info("[AGENT] defined-term fast path: %r", (question or "")[:70])
             yield {"stage": "complete", "status": "done", "type": "answer",
                    "payload": _dterm, "message": "Done"}
+            return
+
+        # "Does this document contain a <type> clause" — answered from the typed
+        # clause rows, which know the clause's TYPE, rather than from prose,
+        # which only knows its words. Reuses the scope already resolved just
+        # above, so it costs nothing beyond two indexed lookups, and returns
+        # None on anything it cannot read confidently.
+        try:
+            _cpres = _clause_presence_answer(question, session_id, _wid_dt, _docs_dt)
+        except Exception as _cp_err:
+            logger.error("[AGENT] clause-presence fast path failed: %s", _cp_err)
+            _cpres = None
+        if _cpres:
+            logger.info("[AGENT] clause-presence fast path (0 tokens): %r",
+                        (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _cpres, "message": "Done"}
             return
 
     # Calculation Agent (Phase 5) - a derived value computed in Python rather
