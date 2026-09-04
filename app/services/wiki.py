@@ -4419,6 +4419,99 @@ def _dedupe_numbered_list(answer: str) -> tuple[str, int]:
     return "\n".join(kept), len(drop)
 
 
+# The trailing MISSING_ITEMS block of the answer contract. Tolerant of the shapes
+# the model actually produces: bold, a leading list marker, "None"/"n/a", and
+# either a same-line value or a bulleted list beneath it.
+_MISSING_ITEMS_RE = re.compile(
+    r'(?im)^[ \t]*(?:[-*]\s*)?\**MISSING[_\s]*ITEMS\**[ \t]*:?[ \t]*'
+    r'(?P<inline>[^\n]*)\n?(?P<body>(?:[ \t]*(?:[-*•]|\d+[.)])[^\n]*\n?)*)')
+
+_MISSING_NONE_RE = re.compile(r'^(none|n/?a|nothing|no missing items?|-)\.?$', re.I)
+
+
+# A candidate item can arrive still carrying the contract's own label - the
+# model sometimes writes "MISSING_ITEMS: MISSING_ITEMS: none" on one line, and
+# the inner copy then reads as the item's text. Strip any number of leading
+# labels and list markers before deciding whether what is left is a real item.
+_MISSING_LABEL_PREFIX_RE = re.compile(
+    r'^[\s*>]*(?:[-*•]|\d+[.)])?[\s*]*MISSING[_\s]*ITEMS[\s*]*:?[\s*]*',
+    re.IGNORECASE)
+
+
+def _clean_missing_item(text: str) -> str:
+    """One item's text, or "" when it is really a no-items marker."""
+    t = (text or "").strip()
+    for _ in range(3):
+        stripped = _MISSING_LABEL_PREFIX_RE.sub("", t).strip()
+        if stripped == t:
+            break
+        t = stripped
+    t = t.strip().strip("*").strip()
+    if not t or _MISSING_NONE_RE.match(t):
+        return ""
+    return t
+
+
+def _extract_missing_items(answer: str) -> "tuple[str, list[str]]":
+    """Split the answer from its MISSING_ITEMS block.
+
+    Gives what the documents could not answer a slot of its own instead of a
+    sentence buried somewhere in the prose. Two things follow. The reader sees
+    it in one place rather than hunting for a hedge; and it becomes auditable
+    per question - a run can count unanswered items instead of grepping answers
+    for phrases like "not addressed", which is how they had to be counted
+    before, and which cannot tell a real gap from the words appearing in a
+    quote.
+
+    Returns the answer with the block removed, and the items. An answer with no
+    block - an older cached answer, or one of the zero-token fast paths that
+    never went through the template - comes back untouched with an empty list,
+    so nothing here depends on the model having complied.
+    """
+    if not answer:
+        return answer, []
+    items = []
+    cleaned = answer
+    # Every occurrence, not just the first. The model echoes the label once in
+    # passing before emitting the real block at the end, and consuming only the
+    # first left the trailing one rendered to the reader as raw contract syntax.
+    while True:
+        m = _MISSING_ITEMS_RE.search(cleaned)
+        if not m:
+            break
+        inline = _clean_missing_item(m.group("inline") or "")
+        if inline:
+            items.append(inline)
+        for line in (m.group("body") or "").splitlines():
+            t = _clean_missing_item(re.sub(r'^[ 	]*(?:[-*•]|\d+[.)])[ 	]*', "", line))
+            if t:
+                items.append(t)
+        cleaned = cleaned[:m.start()] + cleaned[m.end():]
+    # De-duplicate while keeping order: the echo and the real block can name
+    # the same item.
+    seen, uniq = set(), []
+    for i in items:
+        k = re.sub(r'\s+', ' ', i).strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            uniq.append(i)
+    return cleaned.rstrip(), uniq
+
+
+def _render_missing_items(items: "list[str]") -> str:
+    """The reader-facing form of the block.
+
+    Fixed wording rather than the model's own heading, so this one section
+    cannot drift into talking about retrieval the way free prose does.
+    """
+    if not items:
+        return ""
+    if len(items) == 1:
+        return "\n\nNot answered by these documents: " + items[0].rstrip(".") + "."
+    return ("\n\nNot answered by these documents:\n"
+            + "\n".join("- " + i.rstrip(".") + "." for i in items))
+
+
 # Phrases that name the SEARCH rather than the document. Ordered: the longer,
 # verb-carrying forms first, so "the context does not" becomes "these documents
 # do not" rather than the ungrammatical "these documents does not".
@@ -4436,6 +4529,13 @@ _VOICE_SUBS = (
     (re.compile(r"\bthe (?:provided|retrieved|supplied|excerpted|available)\s+"
                 r"(?:context|excerpts?|documents?|pages?|material|opinion|"
                 r"sources?)\b", re.IGNORECASE), "these documents"),
+    # Any modifier in front of "excerpts" still names the search, not the
+    # document. The fixed list above missed "the agreement excerpts do not
+    # state the auditor's name", and a one-word version of this rule then
+    # missed "the Consultancy Agreement excerpts" - the modifier is often
+    # the document's own name, which runs to several words.
+    (re.compile(r"\bthe\s+[A-Za-z0-9'\u2019\s-]{0,70}?\s*excerpts?\b", re.IGNORECASE),
+     "these documents"),
     (re.compile(r"\bin the excerpts?\b", re.IGNORECASE), "in these documents"),
     (re.compile(r"\bthe excerpted pages?\b", re.IGNORECASE), "these documents"),
     (re.compile(r"\bthe context\b", re.IGNORECASE), "these documents"),
@@ -6362,12 +6462,36 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # "the retrieved context". Placed after every citation and grounding check
     # so those read exactly what the model wrote, while the reader gets prose
     # that talks about their documents instead of about the search.
+    # Take the contract's MISSING_ITEMS block off the answer before the voice
+    # rewrite, and put it back in fixed wording after — so the section the
+    # reader sees is this file's sentence, not whatever the model reached for,
+    # and the items themselves survive as structured data on the payload.
+    answer, _missing_items = _extract_missing_items(answer)
+
     answer, _voice_edits = _rewrite_answer_voice(answer)
     if _voice_edits:
         logger.info("Answer voice: %d machine-register phrase(s) rewritten", _voice_edits)
 
+    # The items were lifted out before the rewrite above, so they never passed
+    # through it. They need it most: an item exists to say something is not
+    # there, which is exactly the sentence the model writes about excerpts and
+    # retrieval rather than about the document. Confirmed live on both items in
+    # the first run of this feature ("the provided excerpts do not include...",
+    # "the agreement excerpts do not state...").
+    _missing_items = [_rewrite_answer_voice(i)[0] for i in _missing_items]
+
+    if _missing_items:
+        logger.info("Missing items: %d not answered by these documents: %s",
+                    len(_missing_items), _missing_items[:3])
+        answer += _render_missing_items(_missing_items)
+
     return {
         "answer": answer,
+        # What the question asked for that these documents do not answer, as a
+        # list rather than a sentence somewhere in the prose — see
+        # _extract_missing_items. Empty for every fast path and every older
+        # answer, which is the correct reading: nothing was reported missing.
+        "missing_items": _missing_items,
         "pages_used": pages_used_dedup,
         "files_used": files_used,
         "selected_titles": selected_titles,
