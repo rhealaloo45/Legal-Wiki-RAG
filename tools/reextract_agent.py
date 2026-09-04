@@ -73,6 +73,26 @@ def key_for(kind, doc, label):
     return "%s::%s::%s" % (kind, (doc or "")[-70:], (label or "")[:60])
 
 
+# Notes a past attempt leaves when the mode did not actually run. Memory exists
+# so a second run does not repeat a real failure; an attempt that never happened
+# is not a failure, and treating it as one would freeze the backlog at whatever
+# the tooling could do on the day it first ran.
+_NON_ATTEMPTS = ("not attempted", "not implemented", "call failed",
+                 "no stored page text")
+
+
+def _already_properly_attempted(mem, cand):
+    rec = mem.get(key_for(cand["kind"], cand["doc"], cand["label"]))
+    if not rec:
+        return False
+    if rec.get("improved"):
+        return True
+    notes = " ".join(rec.get("notes") or []).lower()
+    # Every mode either improved it or gave a real reason. If any mode only
+    # recorded a non-attempt, the candidate is still owed a proper try.
+    return not any(n in notes for n in _NON_ATTEMPTS)
+
+
 def find_candidates():
     """Everything worth a second look, worst first."""
     out = []
@@ -104,33 +124,106 @@ def find_candidates():
 MODES = ("stored_text", "page_text", "vision")
 
 
+EXTRACT_PROMPT = """\
+Below is the full text of one page of a legal document. Find the definition of \
+the term given, and return it exactly as the document words it.
+
+TERM: {term}
+
+PAGE TEXT:
+{page}
+
+Return ONLY a JSON object:
+{{"definition": "the term's definition, verbatim from the page, complete to its \
+final full stop", "found": true or false}}
+
+Return found:false if the page does not define this term. Do not paraphrase, do \
+not summarise, do not complete a sentence the page leaves unfinished - if the \
+page itself is cut off, that is found:false. A definition that stops mid-clause \
+is the defect being repaired, so returning one would defeat the point."""
+
+
+def _page_text_for(doc, page_num=None):
+    """The stored text of one page, or of the document when no page is known."""
+    from sqlalchemy import text as _t
+    with DB.get_engine().connect() as c:
+        if page_num:
+            row = c.execute(_t("""
+                SELECT string_agg(content, ' ') FROM pages
+                WHERE session_id = :s AND source_doc = :d
+            """), {"s": SID, "d": doc}).scalar()
+        else:
+            row = c.execute(_t("""
+                SELECT string_agg(content, ' ') FROM pages
+                WHERE session_id = :s AND source_doc = :d
+            """), {"s": SID, "d": doc}).scalar()
+    return row or ""
+
+
 def attempt(cand, mode, dry_run=True):
     """One re-read in one mode. Returns (improved, replacement, note).
 
-    Every mode is bounded to a single page and a single call. The agent decides
-    WHICH page and WHICH mode; it never decides how many.
+    Every mode is bounded to one document and one call. The agent decides WHICH
+    candidate and WHICH mode; it never decides how many.
     """
+    label = (cand.get("label") or "").strip(' "')
+    current = cand.get("current") or ""
+
     if mode == "stored_text":
         # Free: the page's own prose often carries the full definition even when
         # the extracted row was cut. No model call at all.
-        with DB.get_engine().connect() as c:
-            rows = c.execute(text("""
-                SELECT content FROM pages
-                WHERE session_id = :s AND source_doc = :d
-            """), {"s": SID, "d": cand["doc"]}).fetchall()
-        hay = " ".join(r[0] or "" for r in rows)
-        label = (cand.get("label") or "").strip(' "')
+        hay = _page_text_for(cand["doc"])
         if not label:
             return False, "", "no label to search for"
         m = re.search(re.escape(label) + r'["”]?\s*(?:means|shall mean)[^.]{10,600}\.',
                       hay, re.IGNORECASE)
-        if m and len(m.group(0)) > len(cand.get("current") or ""):
+        if m and len(m.group(0)) > len(current):
             return True, m.group(0).strip(), "recovered from the page's own prose"
         return False, "", "page prose does not carry a fuller definition"
 
-    if dry_run:
-        return False, "", "%s not attempted (dry run)" % mode
-    return False, "", "%s not implemented in this pass" % mode
+    if mode == "page_text":
+        # One model call over the page the term lives on. Used only where the
+        # free pass found nothing, which means the prose does not contain the
+        # definition in a form a regex can lift - a wrapped line, a table cell,
+        # a defined term split across a page break.
+        if cand["kind"] != "definition" or not label:
+            return False, "", "page_text only repairs definitions"
+        if dry_run:
+            return False, "", "page_text not attempted (dry run)"
+        hay = _page_text_for(cand["doc"], cand.get("page"))
+        if not hay.strip():
+            return False, "", "no stored page text to re-read"
+        from services import llm
+        try:
+            raw, usage = llm.ask(
+                EXTRACT_PROMPT.format(term=label, page=hay[:14000]),
+                fast=True, max_tokens=1200)
+        except Exception as e:
+            return False, "", "page_text call failed: %s" % e
+        if usage.get("finish_reason") == "length" and not (raw or "").strip():
+            return False, "", "page_text reply truncated with no output"
+        import services.wiki as _W
+        parsed = _W._parse_json_safe(raw) or {}
+        if not parsed.get("found"):
+            return False, "", "model reports the page does not define this term"
+        got = re.sub(r"\s+", " ", str(parsed.get("definition") or "")).strip()
+        # The same completeness test the fast path uses to decline. A repair
+        # that is itself truncated is not a repair.
+        if not looks_truncated(got) and len(got) > len(current):
+            return True, got, "re-read from the page text"
+        return False, "", "re-read produced nothing longer or nothing complete"
+
+    if mode == "vision":
+        # Deliberately not built. The 69 definitions the cheap modes cannot
+        # reach are wrapped or split in the TEXT layer, not missing from it -
+        # page_quality shows these documents extracted cleanly. Rendering a
+        # clean page to an image to re-read text that is already stored would
+        # spend a vision call to answer a question the page text can answer.
+        # Vision belongs to the below_floor candidates, which is a different
+        # repair and needs the page renderer wired in.
+        return False, "", "vision not applicable to a document that extracted cleanly"
+
+    return False, "", "unknown mode %s" % mode
 
 
 def main():
@@ -142,7 +235,8 @@ def main():
 
     mem = load_memory()
     cands = find_candidates()
-    fresh = [c for c in cands if key_for(c["kind"], c["doc"], c["label"]) not in mem]
+    fresh = [c for c in cands
+             if not _already_properly_attempted(mem, c)]
 
     print("%d candidate(s); %d already attempted, %d fresh"
           % (len(cands), len(cands) - len(fresh), len(fresh)))
@@ -171,7 +265,7 @@ def main():
         note_all = []
         improved = False
         for mode in MODES:
-            ok, replacement, note = attempt(c, mode, dry_run=True)
+            ok, replacement, note = attempt(c, mode, dry_run=not a.run)
             note_all.append("%s: %s" % (mode, note))
             if ok:
                 improved = True
