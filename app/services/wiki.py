@@ -1720,11 +1720,23 @@ def ingest(file_path: str, session_id: str) -> dict:
 # real title ("...NDA-Tata...") only because of this character difference.
 _HYPHEN_VARIANTS_RE = re.compile('[‐‑‒–—−]')
 
+# Typographic quotation marks, folded to their ASCII equivalents. Source PDFs
+# are not consistent about these: the contracts extract with straight quotes,
+# while the court judgments carry curly ones natively. The ingest model does
+# not always reproduce whichever style the page used, so a quote that IS
+# verbatim can differ from the source in the quote characters alone - and was
+# then dropped as unverifiable. Folding both styles to ASCII compares the
+# words, which is what verbatim is meant to mean here. It cannot let narration
+# through: narration differs in the words, not the punctuation.
+_DQUOTE_VARIANTS_RE = re.compile('[“”„‟«»〝〞]')
+_SQUOTE_VARIANTS_RE = re.compile('[‘’‚‛′᾽`´]')
+
 
 def _norm_for_match(s: str) -> str:
     """Shared normalization for all quote/title verification comparisons:
     collapse whitespace, lowercase, fold unicode hyphen/dash variants to a
-    plain ASCII "-", and strip trailing/leading sentence punctuation (a
+    plain ASCII "-", fold typographic quotation marks to their ASCII
+    equivalents, and strip trailing/leading sentence punctuation (a
     citation label quoted mid-sentence often picks up a trailing comma or
     period from the surrounding prose, e.g. '"...Service Agreement,"' — that
     punctuation isn't part of the real page title, so leaving it in broke the
@@ -1736,6 +1748,8 @@ def _norm_for_match(s: str) -> str:
     found, never mask a genuine mismatch.
     """
     s = _HYPHEN_VARIANTS_RE.sub('-', s)
+    s = _DQUOTE_VARIANTS_RE.sub('"', s)
+    s = _SQUOTE_VARIANTS_RE.sub("'", s)
     s = re.sub(r'\s+', ' ', s).strip().lower()
     return s.strip('.,;:')
 
@@ -1781,11 +1795,17 @@ def _filter_verified_quotes(parsed: dict, source_text: str) -> dict:
         if not quotes:
             continue
         verified = [q for q in quotes if _norm(q) in src_norm]
-        dropped = len(quotes) - len(verified)
+        dropped = [q for q in quotes if _norm(q) not in src_norm]
         if dropped:
+            # The dropped text is logged, not just the count. A drop is either
+            # the model narrating instead of quoting (which this filter exists
+            # to catch) or a normalization gap on our side (which it does not),
+            # and the count alone cannot tell those apart after the fact.
             logger.warning(
-                "Ingest quote verification: dropped %d/%d unverifiable quote(s) for page '%s'",
-                dropped, len(quotes), title,
+                "Ingest quote verification: dropped %d/%d unverifiable quote(s) "
+                "for page '%s': %s",
+                len(dropped), len(quotes), title,
+                " || ".join((q or "")[:160] for q in dropped[:3]),
             )
         page["quotes"] = verified
     return parsed
