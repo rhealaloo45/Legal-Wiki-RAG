@@ -858,6 +858,10 @@ DOCUMENT SEGMENT:
 
 # Threshold: documents under this size are processed in one LLM call
 _SINGLE_CALL_THRESHOLD = 100000
+# Below this much text, a document that synthesizes to zero pages is
+# plausibly just a near-empty file; at or above it, zero pages means the
+# call failed and must be raised rather than stored as an empty result.
+_EMPTY_SYNTHESIS_MIN_CHARS = 2000
 # Segment size for large documents
 _INGEST_CHUNK_SIZE = 40000
 
@@ -1819,7 +1823,7 @@ def _ingest_single_call(text: str, doc_name: str, family_key: str | None = None)
         family_block=family_prompt.build_supplement(family_key),
     )
     try:
-        raw, _ = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
+        raw, usage = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
     except RuntimeError as e:
         logger.error("LLM call failed during wiki ingest: %s", e)
         return {"pages": {}, "relations": []}
@@ -1832,6 +1836,21 @@ def _ingest_single_call(text: str, doc_name: str, family_key: str | None = None)
         parsed["pages"] = {}
     if "relations" not in parsed:
         parsed["relations"] = []
+
+    # A document with real text that synthesizes to no pages at all is a
+    # failed call, not an empty document - the JSON was truncated, or it did
+    # not parse. Returning it quietly let ingest() finish "successfully"
+    # having written nothing, which is only ever noticed later and, when a
+    # re-ingest deleted the old rows first, after the old rows are gone.
+    # Raising hands that decision to the caller while the source file is
+    # still there to try again.
+    if not parsed["pages"] and len(text) >= _EMPTY_SYNTHESIS_MIN_CHARS:
+        raise RuntimeError(
+            "Ingest synthesis produced no pages for %s (%d chars of text, "
+            "finish_reason=%s, %d chars returned). The model's JSON was "
+            "unusable; the document has NOT been ingested."
+            % (doc_name, len(text), usage.get("finish_reason"), len(raw or ""))
+        )
 
     return _filter_verified_quotes(parsed, text)
 
