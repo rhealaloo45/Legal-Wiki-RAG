@@ -2572,6 +2572,50 @@ def _norm_doc_name(name: str) -> str:
     return re.sub(r'\s+', ' ', s).strip()
 
 
+# Digit runs in a filename that are NOT the document's number: dates in any of
+# the shapes this corpus uses, and hyphenated reference codes. "NDA 3" was
+# matching "...NDA_2021-10-03" and "...NDA 2023-03-03" because the number
+# search ran over the whole normalised name and the guard before "03" is a
+# hyphen, not a digit. Masking these first leaves the standalone number that
+# actually names the document ("nda nda 003", "nda nda 3") untouched.
+_DOC_NUM_NOISE_RE = re.compile(
+    r"""
+      \d+(?:-\d+)+                 # 2021-10-03, 06-10-2020, ta-2025-355
+    | \d{1,2}[a-z]{3}\d{2,4}       # 01oct2019
+    | (?:19|20)\d{2}          # a bare year
+    | \d{8}                   # 20240809
+    """,
+    re.VERBOSE,
+)
+
+
+def _strip_doc_num_noise(norm: str) -> str:
+    """Blank the digit runs that cannot be a document number, keeping length
+    irrelevant — only the number search reads this, never the type match."""
+    return _DOC_NUM_NOISE_RE.sub(" ", norm)
+
+
+def _doc_numbers_mentioned(question: str) -> int:
+    """How many distinct document numbers the question names.
+
+    The file-match cap has to scale with this: "Service Agreement 1, 2 & 3"
+    legitimately matches three documents' worth of files, and a flat cap would
+    throw the comparison away for being too broad.
+    """
+    question = question.replace('_', ' ')
+    nums: set[str] = set()
+    for m in _DOC_NAME_PATTERN.finditer(question):
+        nums.add(m.group(2))
+        tail = question[m.end():]
+        while True:
+            t = re.match(r'\s*(?:,|&|and)\s*(\d+)', tail)
+            if not t:
+                break
+            nums.add(t.group(1))
+            tail = tail[t.end():]
+    return len(nums)
+
+
 def _numbered_docs_in(question: str, doc_names) -> set[str]:
     """Which of ``doc_names`` the question names by document type + number.
 
@@ -2626,7 +2670,11 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
             num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
             for sd in doc_names:
                 norm = _norm_doc_name(sd)
-                if re.search(num_re, norm) and (not type_core or type_core in norm):
+                # The number is searched in the name with dates and reference
+                # codes blanked; the TYPE is still matched against the full
+                # name, since a type word never hides inside a date.
+                if (re.search(num_re, _strip_doc_num_noise(norm))
+                        and (not type_core or type_core in norm)):
                     matched.add(sd)
     return matched
 
@@ -8183,6 +8231,7 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
             resolved.append((name, docs))
     if not resolved:
         return set()
+
     best_name, best_docs = min(resolved, key=lambda pair: len(pair[1]))
     best_n = len(best_docs)
     pinned_precisely = False
@@ -10539,6 +10588,19 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     try:
         mentioned = _detect_mentioned_files(question, pages)
     except Exception:
+        mentioned = set()
+    # A file mention that lands on many documents is not naming a file. Left
+    # uncapped, "SA 1" pinned 20 unrelated Service Agreements as single_doc at
+    # 0.9 confidence; a pinned scope force-includes every page of every one of
+    # them, which is how a question that ended in "not present" cost 52,674
+    # prompt tokens. Falling through hands the question to the resolvers below
+    # and, failing those, to the normal retrieval path, whose context IS capped.
+    _num_cap = config.FILE_MATCH_MAX_DOCS * max(1, _doc_numbers_mentioned(question))
+    if mentioned and len(mentioned) > _num_cap:
+        logger.warning(
+            "resolve_scope: file mention matched %d documents (> %d) — too many to "
+            "be a named file, falling through to the other resolvers",
+            len(mentioned), _num_cap)
         mentioned = set()
     if mentioned:
         # A numbered reference ("SHA 1") can match BOTH the real document and a
