@@ -6297,6 +6297,19 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                         "without a retry call", _n_repaired)
 
     if _unverified_quotes or _misattributed or _unverified_ids:
+        # Why the retry fired, not just that it did. This is the single largest
+        # source of cost variance in an answer - it doubles the generation - and
+        # the same question retried on one run and not the next with nothing in
+        # the logs to say what differed. Naming the cause and the text makes a
+        # measured run tell us which check is worth tightening.
+        logger.warning(
+            "Citation retry: %d unverified quote(s), %d misattributed, "
+            "%d fabricated identifier(s) — regenerating. First: %s",
+            len(_unverified_quotes), len(_misattributed), len(_unverified_ids),
+            " || ".join(str(x)[:120] for x in
+                        (list(_unverified_quotes) + list(_misattributed)
+                         + list(_unverified_ids))[:3]),
+        )
         _flagged = list(_unverified_quotes) + list(_misattributed)
         _flag_lines = []
         for f in _flagged[:6]:

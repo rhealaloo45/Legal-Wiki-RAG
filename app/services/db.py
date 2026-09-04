@@ -2701,6 +2701,14 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
         ("review_queue", "review_queue_deleted"),
         ("collection_documents", "collection_documents_deleted"),
         ("clauses", "clauses_deleted"),
+        # defined_terms is DERIVED from the clause rows above by
+        # services/defined_terms.build(), but it is still per-document data
+        # keyed the same way, and leaving it behind outlived the document:
+        # after a 51-document re-ingest, 26 rows still described documents
+        # that no longer had a single page. A stale definition is worse than
+        # a missing one - the defined-terms fast path answers from this table
+        # directly, with no page to contradict it.
+        ("defined_terms", "defined_terms_deleted"),
     ]
     # entity_aliases and playbook_findings share the same source_doc filter
     # but have no session_id column.
