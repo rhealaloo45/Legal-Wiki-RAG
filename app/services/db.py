@@ -1784,6 +1784,32 @@ def merge_pages(wiki_id: str, session_id: str, source_title: str, target_title: 
 # Review Queue — clauses (target architecture § 02, first slice)
 # ---------------------------------------------------------------------------
 
+def source_docs_with_title_token(wiki_id: str, session_id: str, token: str) -> list[str]:
+    """Which documents carry this token in any of their PAGE TITLES.
+
+    Ingest gives each document a short identifier inside its page titles
+    ("Definitions - SA1-Vishesh-Realty (Framework Supply Agreement)"). That
+    identifier names 378 documents in this corpus and appears in no filename,
+    so scope resolution - which only ever read filenames - could not resolve a
+    question that used one, which is exactly what a reader does after seeing it
+    in an answer's citations.
+
+    Capped: the caller only accepts a token that identifies ONE document, so
+    there is no reason to drag back a long list to discover it is ambiguous.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT source_doc FROM pages
+                WHERE wiki_id = :w AND session_id = :s AND title ILIKE :tok
+                LIMIT 5
+            """),
+            {"w": wiki_id, "s": session_id, "tok": "%" + token + "%"},
+        ).fetchall()
+    return [r[0] for r in rows if r[0]]
+
+
 def insert_clauses(wiki_id: str, session_id: str, source_doc: str, clauses: list[dict]) -> int:
     """Persist clauses extracted alongside a document's ingest LLM call.
 
