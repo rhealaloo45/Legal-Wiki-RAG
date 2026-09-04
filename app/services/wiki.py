@@ -4541,6 +4541,76 @@ def _render_missing_items(items: "list[str]") -> str:
             + "\n".join("- " + i.rstrip(".") + "." for i in items))
 
 
+# A risk question that asks what the risks ARE, and not what to do about them.
+# "What are the biggest risks in this agreement" wants the risks. "Review this
+# and tell me whether to sign" wants the whole memo, and gets it.
+_RX_NARROW_RISK_Q = re.compile(
+    r"\b(?:what|which)\b[^?]{0,80}\b(?:risk|risks|exposure|exposures|concerns?)\b",
+    re.IGNORECASE)
+
+# Anything that asks for a course of action. Its presence means the full shape
+# was asked for, and nothing below is trimmed.
+_RX_ASKS_WHAT_TO_DO = re.compile(
+    r"\b(should\s+(?:we|i|they)|do\s+we\s+sign|negotiat|recommend|advise|"
+    r"accept|reject|walk\s+away|review\s+(?:this|the)\b[^?]{0,40}\bfor\s+me|"
+    r"what\s+would\s+you\s+do|redline|counter)\b",
+    re.IGNORECASE)
+
+# The headings an assessment appends after the risks themselves. Matched at the
+# start of a line, with or without markdown heading or bold syntax.
+_RX_APPENDED_SECTION = re.compile(
+    r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*)?\s*"
+    r"(?:gaps?\b[^\n]{0,60}|missing\s+protections?\b[^\n]{0,60}|"
+    r"recommendations?\b[^\n]{0,60}|recommended\s+actions?\b[^\n]{0,60}|"
+    r"next\s+steps?\b[^\n]{0,60}|suggested\s+(?:changes|amendments)\b[^\n]{0,60})"
+    r"(?:\*\*)?[ \t]*:?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE)
+
+# Below this the answer is too short for a trailing section to be padding.
+_ASSESSMENT_TRIM_FLOOR = 1200
+
+
+def _trim_appended_assessment(answer: str, question: str, intent: str) -> tuple[str, str]:
+    """Drop a gap survey and a recommendation the question did not ask for.
+
+    The assessment template already says, in as many words, that its sections
+    are the parts available rather than a checklist to complete, and that a
+    question asking what the risks ARE does not get a negotiate/accept
+    recommendation appended. Measured once, that rule took a narrow answer from
+    17,721 characters to 7,811. Measured again on a live thread, the same
+    question came back with Assumptions, Gaps and Recommendation in full.
+
+    So it goes the way the voice rule, the cross-reference rule and the
+    identifier check all went: a prompt rule competing with thirty others has a
+    residual failure rate, and the only version of it that holds every time is
+    the one that does not ask.
+
+    Deliberately narrow. It fires only on a risk-assessment answer, only when
+    the question asks what the risks are and does NOT ask what to do, and only
+    on a long answer - and it removes whole trailing sections, never a sentence
+    inside one, so a risk that happens to mention a gap keeps its wording.
+    """
+    if intent != "risk_assessment" or not answer:
+        return answer, ""
+    if len(answer) < _ASSESSMENT_TRIM_FLOOR:
+        return answer, ""
+    q = question or ""
+    if not _RX_NARROW_RISK_Q.search(q) or _RX_ASKS_WHAT_TO_DO.search(q):
+        return answer, ""
+    m = _RX_APPENDED_SECTION.search(answer)
+    if not m:
+        return answer, ""
+    head = answer[:m.start()].rstrip()
+    # Never leave a stub: if the sections start so early that the risks
+    # themselves would go with them, the answer is not the shape this targets.
+    if len(head) < _ASSESSMENT_TRIM_FLOOR:
+        return answer, ""
+    dropped = answer[m.start():]
+    first = next((ln.strip(" #*:").lower() for ln in dropped.splitlines()
+                   if ln.strip()), "appended sections")
+    return head, "%d characters, from %r onward" % (len(dropped), first[:44])
+
+
 # Phrases that name the SEARCH rather than the document. Ordered: the longer,
 # verb-carrying forms first, so "the context does not" becomes "these documents
 # do not" rather than the ungrammatical "these documents does not".
@@ -6496,6 +6566,13 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # reader sees is this file's sentence, not whatever the model reached for,
     # and the items themselves survive as structured data on the payload.
     answer, _missing_items = _extract_missing_items(answer)
+
+    # A narrow risk question does not get a gap survey and a negotiate
+    # recommendation appended to it. The template says so; measured live, the
+    # template alone does not hold. See _trim_appended_assessment.
+    answer, _trimmed = _trim_appended_assessment(answer, question, intent)
+    if _trimmed:
+        logger.info("Assessment trimmed: dropped %s", _trimmed)
 
     answer, _voice_edits = _rewrite_answer_voice(answer)
     if _voice_edits:
