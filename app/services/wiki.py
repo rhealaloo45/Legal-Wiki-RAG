@@ -3641,8 +3641,13 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 "never present it as a verbatim quote:]\n" + _struct_block + "\n"
             )
 
-    _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS
-    total_chars = sum(len(p) for p in wiki_parts)
+    # The parts are joined by a newline each, and an omission note may be
+    # appended afterwards; neither was counted, so a 60,000 cap still
+    # delivered 60,162 characters to the model.
+    # Count the separator with each part, and hold back room for the note.
+    _NOTE_RESERVE = 320
+    _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS - _NOTE_RESERVE
+    total_chars = sum(len(p) + 1 for p in wiki_parts)
     pages_omitted = 0
     _trace_pages = []
     _included_titles = []
@@ -3736,8 +3741,18 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             # referenced separators/labels that were never emitted). The label sits
             # under the "##" header so it falls inside this block for _PAGE_BLOCK_RE.
             part = f"\n---\n## {display_title}\n[From: {from_label}]\n{content}\n"
+            # Does THIS page fit, rather than: is the budget already spent?
+            # Asking the old question let the page that crossed the line be
+            # added whole, so a 60,000-char cap delivered 61,227 - the model
+            # was handed more than the limit exists to guarantee. Asking
+            # whether it fits also means a page too large no longer ends the
+            # fill: a later, smaller page can still be included, so the same
+            # budget carries more of what was selected.
+            if total_chars + len(part) + 1 > _TOTAL_CAP:
+                pages_omitted += 1
+                continue
             wiki_parts.append(part)
-            total_chars += len(part)
+            total_chars += len(part) + 1
             _included_titles.append(title)
             _trace_pages.append({
                 "title": display_title, "source_doc": from_label,
@@ -3756,8 +3771,9 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             f"on the pages shown above.]"
         )
         logger.warning(
-            "generate_answer: omitted %d/%d selected pages — total context exceeded %d chars",
-            pages_omitted, len(selected_titles), _TOTAL_CAP,
+            "generate_answer: omitted %d/%d selected pages — total context would have "
+            "exceeded %d chars",
+            pages_omitted, len(selected_titles), config.MAX_TOTAL_CONTEXT_CHARS,
         )
     wiki_content = "\n".join(wiki_parts)
 
