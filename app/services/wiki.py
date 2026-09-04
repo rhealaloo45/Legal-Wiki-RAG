@@ -7892,6 +7892,44 @@ def _narrow_by_title_hint(session_id: str, candidate_docs: set[str], question: s
     return candidate_docs
 
 
+def _with_canonical_party_names(candidates: list[str]) -> list[str]:
+    """Each candidate, plus its canonical entity name where one is recorded.
+
+    Order is preserved and the original is always kept first: the smallest-set
+    selection downstream picks by how few documents a name matches, and a
+    canonical name that matches a broader set must not displace the specific
+    string the question actually used.
+    """
+    try:
+        from services import backbone as _bb
+        wiki_id = _active_wiki_id()
+    except Exception:
+        return candidates
+    out, seen = [], set()
+    for name in candidates:
+        for n in (name, _canonical_party_name(_bb, wiki_id, name)):
+            k = (n or "").strip().lower()
+            if n and k not in seen:
+                seen.add(k)
+                out.append(n)
+    return out
+
+
+def _canonical_party_name(bb, wiki_id: str, name: str) -> str | None:
+    try:
+        row = bb.resolve_entity(wiki_id, name)
+    except Exception as e:
+        logger.debug("entity canonicalisation failed for %r: %s", name, e)
+        return None
+    if not row:
+        return None
+    canon = (row.get("canonical_name") or "").strip()
+    if not canon or canon.strip().lower() == (name or "").strip().lower():
+        return None
+    logger.info("Party name canonicalised: %r -> %r", name, canon)
+    return canon
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -7938,6 +7976,18 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         candidates = _bare_proper_noun_phrase_candidates(question) + _bare_proper_noun_candidates(question)
     if not candidates:
         return set()
+
+    # Canonicalise each candidate through the entity registry before searching.
+    # backbone.resolve_entity maps a name or a recorded spelling to the party's
+    # canonical form across 530 entities and 447 aliases; it has existed and
+    # been populated since the Phase 0 backbone and nothing in the query path
+    # ever read it, so scope resolution has been matching raw strings against
+    # page text the whole time. The canonical form is ADDED rather than
+    # substituted: an alias that resolves gives two chances to find the
+    # document, and a name the registry has never seen behaves exactly as
+    # before, so this can widen a match and cannot narrow one.
+    candidates = _with_canonical_party_names(candidates)
+
     # Scanned well above max_docs so a multi-doc match has its FULL sibling
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
