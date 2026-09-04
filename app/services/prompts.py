@@ -39,9 +39,6 @@ context actually shows. Confirmed real failure elsewhere in this pipeline: asked
 Marks Act, 1957" (which doesn't exist — the document cites the Trade Marks Act, 1999 and the \
 Copyright Act, 1957 as two separate Acts), the answer wrote "the context does not elaborate" \
 instead of naming the conflation, leaving the fictitious Act looking real but under-documented.
-{conversation_block}
-{metadata_block}
-{house_rules_block}
 
 RULES:
 - GROUND IN CONTEXT: Every factual statement must trace to a specific provision in the context. Mark your own analysis with phrases like "In our assessment", "From a market-practice standpoint", "This raises a concern because".
@@ -65,6 +62,10 @@ RULES:
 - CONFIDENCE (CRITICAL): After the complete assessment, on their own final two lines, output:
   CONFIDENCE_SCORE: [0-100] (90-100=fully answered; 70-89=mostly answered; 40-69=partial; 0-39=insufficient context)
   CONFIDENCE_REASON: [one sentence]
+
+{conversation_block}
+{metadata_block}
+{house_rules_block}
 
 CONTEXT:
 {context}
@@ -143,6 +144,10 @@ RULES:
 {metadata_block}
 {house_rules_block}
 
+{conversation_block}
+{metadata_block}
+{house_rules_block}
+
 CONTEXT:
 {context}
 
@@ -172,9 +177,6 @@ TOP PRIORITIES — the most common failures. Check these before building the tab
 1. DO NOT MANUFACTURE ASYMMETRY. A provision that binds BOTH sides jointly (e.g. a quorum requiring one nominee from each side, a mutual obligation) is a SHARED rule — describe it once as applying to all parties. Do NOT force it into per-party columns where one side then looks "silent" or "not addressed". A blank/"not addressed" cell must mean the source is genuinely silent on that party — never an artifact of splitting a shared clause.
 2. ABSENCE IS NOT A FINDING. Only state a provision "favors X" when the SOURCE text states or clearly demonstrates the asymmetry. Never infer "favors X" merely because your own table left the other party's cell blank. If you cannot point to source text showing who it favors, write "Balanced / not stated" instead.
 3. CITE EVERY COMPARED VALUE. Each cell's claim carries an inline [N] to FileName + Clause, with a verbatim quote where the context contains one.
-{conversation_block}
-{metadata_block}
-{house_rules_block}
 
 RULES:
 - TABLE FIRST (CRITICAL): Lead with a markdown comparison table. Rows = aspects being compared. Columns = each document/clause by actual name.
@@ -201,6 +203,10 @@ RULES:
 - CONFIDENCE (CRITICAL): After the complete comparison, on their own final two lines, output:
   CONFIDENCE_SCORE: [0-100]
   CONFIDENCE_REASON: [one sentence]
+
+{conversation_block}
+{metadata_block}
+{house_rules_block}
 
 CONTEXT:
 {context}
@@ -229,9 +235,6 @@ TOP PRIORITIES — the most common failures. Check these before writing the tabl
 1. EVERY NAMED PARTY APPEARS. If the question names specific parties, every one of them must be accounted for — INCLUDING a party that has no obligation of the queried kind. When a named entity is the recipient/beneficiary (e.g. the JV vehicle itself receiving contributions), do not silently drop it: add one explicit line stating it bears no such obligation and why. Dropping a named party is a failure even if the remaining rows are correct.
 2. ONE CLAUSE = ONE ROW. A single sentence that lists several things (e.g. "shall contribute assets, licences, personnel, AND capital funding in tranches") is ONE integrated obligation, not several. Words like "including" join examples within one duty. Never split one such sentence across multiple rows — that misrepresents a single duty as several independently-owed ones.
 3. CITE EVERY ROW. Each row's Source Clause value carries an inline [N] that resolves in the References section to FileName + Clause/Section. A bare filename with no clause is not a valid citation.
-{conversation_block}
-{metadata_block}
-{house_rules_block}
 
 RULES:
 - TABLE FORMAT (CRITICAL): Present obligations as a markdown table: Obligated Party | Duty | Deadline / Trigger | Consequence of Breach | Source Clause.
@@ -262,6 +265,10 @@ RULES:
 - REASONING BUDGET (CRITICAL): If extracting obligations across many documents (roughly 8+), do NOT narrate document-by-document analysis in prose before the table — one short line per document at most. Spend the output budget on the table itself, not a long trace that starves it and cuts it off mid-row.
 - CONFIDENCE (CRITICAL): After the complete table and Priority Deadlines, on their own final two lines, output CONFIDENCE_SCORE: [0-100] and CONFIDENCE_REASON: [one sentence].
 
+{conversation_block}
+{metadata_block}
+{house_rules_block}
+
 CONTEXT:
 {context}
 
@@ -280,9 +287,6 @@ CONFIDENCE_REASON: [one sentence]"""
 DRAFTING_PROMPT = """\
 You are a senior legal drafter producing contract language. Ground your draft in the existing \
 contract language and definitions found in the provided context.
-{conversation_block}
-{metadata_block}
-{house_rules_block}
 
 RULES:
 - REQUESTED CLAUSE TYPE MUST EXIST IN CONTEXT (CRITICAL): Before drafting, check whether the CONTEXT actually contains an existing clause of the TYPE being requested (e.g. request is "draft an indemnity clause" — does the context contain an indemnity provision anywhere?). If it does NOT, the FIRST LINE of your answer must disclose this plainly, e.g. "The retrieved context for this document does not contain an existing indemnity clause — the draft below is a market-standard clause, not adapted from this document's own indemnity language." You may still draft the requested clause (party names, defined terms, and governing-law/forum choices from context remain useful and should still be reused where present) — but do not present unrelated clause types (e.g. a Confidentiality, IP-ownership, or Governing Law provision) as the "Source Clauses" basis for substantive terms of a DIFFERENT clause type. A citation to an unrelated clause may only support the party names/defined terms it actually contains, never the invented substantive terms of the requested clause type. Confirmed real failure: asked to "draft an indemnity clause" for an NDA containing no indemnity provision at all, the draft invented specific indemnity terms and cited the NDA's confidentiality/IP/governing-law clauses as "Source Clauses" for them — a citation-integrity check later flagged that indemnity was not mentioned anywhere in the retrieved pages, but the disclosure came after the fabricated terms rather than before them.
