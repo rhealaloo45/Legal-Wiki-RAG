@@ -2773,6 +2773,59 @@ def _uploaded_doc_names(session_id: str) -> set[str]:
 _DOC_CODE_RE = re.compile(r'\b([A-Za-z]{2,6}(?:-[A-Za-z0-9]{1,8}){1,4})\b')
 
 
+# A page-title identifier: the short name ingest gives a document inside its
+# page titles ("Definitions - SA1-Vishesh-Realty (Framework Supply
+# Agreement)"). It names 378 documents here and appears in NO filename, so
+# a question using it - which is what a reader who has seen an answer will
+# do - resolved nothing. Strict by construction: hyphen-joined capitalised
+# parts, or an upper-case slash code. A bare word or bare number is never
+# an identifier, which is what keeps "Tata" (33 documents) out.
+_PAGE_IDENT_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9]*(?:-[A-Z][A-Za-z0-9]*)+|[A-Z]{2,}(?:/[A-Za-z0-9]+){2,})\b")
+
+
+def _resolve_docs_by_page_identifier(question: str, session_id: str) -> set[str]:
+    """Documents named by a page-title identifier the question uses.
+
+    Only an identifier that points at exactly ONE document counts. The
+    ambiguous ones are all clause headings ("Anti-Bribery" sits on 41
+    documents, "Non-Solicitation" on 22), and a clause name is not a
+    document name - they are excluded by the uniqueness test and again by
+    the clause vocabulary, so neither can pin a document on its own.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    # An explicit filename or matter code is a stronger statement than an
+    # identifier, and _detect_mentioned_files already handles both — defer to it
+    # rather than racing it. Only the NUMBERED match is weaker than an
+    # identifier, which is the case this branch exists to win: "SA1" alone
+    # matches three Service Agreements, "SA1-Vishesh-Realty" names one document.
+    if re.search(r'[\w-]+\.(?:txt|pdf|docx)\b', question, re.IGNORECASE):
+        return set()
+    if any(any(ch.isdigit() for ch in c) for c in _DOC_CODE_RE.findall(question)):
+        return set()
+    cands = {c for c in _PAGE_IDENT_RE.findall(question) if 6 <= len(c) <= 48}
+    if not cands:
+        return set()
+    try:
+        from services import clause_vocab as _cv
+        cands = {c for c in cands if not _cv.canonical(c.replace("-", " "))}
+    except Exception:
+        pass
+    out: set[str] = set()
+    for c in cands:
+        try:
+            docs = _db.source_docs_with_title_token(
+                _active_wiki_id(), session_id, c)
+        except Exception as e:
+            logger.error("resolve_scope: page-identifier lookup failed for %r: %s", c, e)
+            continue
+        # Exactly one document, or the identifier is not identifying.
+        if len(docs) == 1:
+            out |= set(docs)
+    return out
+
+
 def _detect_mentioned_files(question: str, pages: dict) -> set[str]:
     """Detect which SPECIFIC source documents the user is asking about.
 
@@ -10829,6 +10882,22 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # 1. Single specific document — a named file or a distinctive known entity.
     #    Mirrors get_context's own force-include logic; here it only records the
     #    decision (get_context still does the actual page scoping for this case).
+    # A page-title identifier the question uses, when it names exactly one
+    # document. Sits below the filename/code branch (a user naming a file or a
+    # matter code has said something stronger) and above the party branches: a
+    # single identifier that points at one document is a firmer statement than
+    # a party name that may sit on several instruments.
+    try:
+        _by_ident = _resolve_docs_by_page_identifier(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: page-identifier resolution failed: %s", e)
+        _by_ident = set()
+    if _by_ident:
+        logger.info("Page-title identifier resolved %d document(s)", len(_by_ident))
+        return {"scope": "single_doc", "target_docs": sorted(_by_ident),
+                "target_family": None, "is_broad": False,
+                "confidence": 0.88, "method": "page-identifier"}
+
     try:
         mentioned = _detect_mentioned_files(question, pages)
     except Exception:
