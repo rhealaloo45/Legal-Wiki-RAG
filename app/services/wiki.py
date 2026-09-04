@@ -686,7 +686,7 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
 }}
 
 CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
-clause as a separate entry in "clauses". "text" must be an exact verbatim quote — never paraphrase. \
+clause as a separate entry in "clauses". "text" must be an exact verbatim quote — never paraphrase. ONE DEFINED TERM PER CLAUSE (CRITICAL): a Definitions section defines several terms, and each one is its own clause. Emit a separate "clauses" entry for every defined term - type "Definition - <Term>", text being that term's own definition from its opening quotation mark to its closing full stop, and nothing of the term before or after it. Never emit one entry of type "Definitions" carrying the whole section. Measured on this corpus: of the definition clauses that carry more than one term, HALF are cut off mid-sentence, against 0.06% of those carrying one - a single long string is where the extraction breaks, and one term per clause removes the length entirely. A term whose definition you cannot reproduce in full is better omitted than stored half-written. \
 "typed_value" is an optional small object holding the clause's structured value when it has one \
 (e.g. {{"multiplier": 2, "basis": "prior 12 months' fees"}} for a liability cap) — use null when the \
 clause doesn't reduce to a simple structured value. Rate "confidence" using this rubric, the same \
@@ -836,6 +836,7 @@ OUTPUT FORMAT — respond with valid JSON only, no explanation, no markdown fenc
 
 CLAUSE EXTRACTION: In addition to the wiki pages above, extract each individually identifiable \
 clause in this segment as a separate entry in "clauses". "text" must be an exact verbatim quote — \
+ONE DEFINED TERM PER CLAUSE (CRITICAL): a Definitions section defines several terms, and each one is its own clause. Emit a separate "clauses" entry for every defined term - type "Definition - <Term>", text being that term's own definition from its opening quotation mark to its closing full stop. Never emit one entry of type "Definitions" carrying the whole section: measured on this corpus, half of the definition clauses holding more than one term are cut off mid-sentence, against 0.06% of those holding one. A term you cannot reproduce in full is better omitted than stored half-written. \
 never paraphrase. "typed_value" is an optional small object holding the clause's structured value \
 when it has one, else null. Rate "confidence" using this rubric: 1.0 = exact verbatim match with \
 no ambiguity, 0.8 = clearly stated but the exact wording required light interpretation, 0.5 = the \
