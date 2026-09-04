@@ -347,6 +347,23 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
     if not config.ENABLE_INTENT_CLASSIFIER:
         return {"intent": "factual", "confidence": 0.5, "method": "disabled"}
 
+    # The regexes did not fire, so a model call happens either way. The Enquiry
+    # Agent makes THAT call answer two questions instead of one: the intent, and
+    # a description of the document this turn is about. Cost is unchanged - one
+    # fast call, as before - and the referent is the thing the regex stack has
+    # been patched three times to get right.
+    if _enquiry_enabled():
+        try:
+            from services import enquiry as _enq
+            eq = _enq.ask(q, conversation_context)
+            if eq.get("intent"):
+                return {"intent": eq["intent"], "confidence": eq["confidence"],
+                        "method": "enquiry", "referent": eq.get("referent", ""),
+                        "referent_basis": eq.get("referent_basis", "none"),
+                        "is_followup": eq.get("is_followup", False)}
+        except Exception as e:
+            logger.error("enquiry agent failed, falling back to intent-only: %s", e)
+
     try:
         prompt = _INTENT_LLM_PROMPT.format(question=q)
         raw, _ = llm.ask(prompt, fast=True, max_tokens=config.MAX_TOKENS_INTENT_CLASSIFY)
@@ -363,6 +380,21 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
         logger.error("classify_intent LLM fallback failed: %s", e)
 
     return {"intent": "factual", "confidence": 0.5, "method": "fallback"}
+
+
+def _enquiry_enabled() -> bool:
+    """Off by default until the thread suite has passed with it on.
+
+    A model reading the conversation to decide which document a turn is about
+    is the highest-upside and highest-risk change in this pipeline. It ships
+    behind a flag so the harness can compare the same threads with it on and
+    off, rather than shipping on a judgment that it ought to help.
+    """
+    import os
+    v = os.environ.get("ENABLE_ENQUIRY_AGENT")
+    if v is None:
+        v = getattr(config, "ENABLE_ENQUIRY_AGENT", "")
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
 def get_query_strategy(intent: str) -> dict:
@@ -400,6 +432,8 @@ class QueryState(TypedDict, total=False):
     intent: str
     intent_confidence: float
     intent_method: str
+    enquiry_referent: str
+    enquiry_basis: str
     # Pre-query checks
     needs_disambiguation: bool
     disambiguation_data: dict
@@ -448,6 +482,12 @@ def classify_intent_node(state: QueryState) -> dict:
         "intent": res["intent"],
         "intent_confidence": res["confidence"],
         "intent_method": res["method"],
+        # A description of the document this turn is about, in the user's own
+        # words. Carried through state so resolve_scope_node can try it AFTER
+        # every deterministic resolver has had its turn - see there for why it
+        # is last rather than first.
+        "enquiry_referent": res.get("referent", ""),
+        "enquiry_basis": res.get("referent_basis", "none"),
     }
 
 
@@ -800,6 +840,28 @@ def resolve_scope_node(state: QueryState) -> dict:
         _scope_q = state.get("scope_question") or state["question"]
         decision = wiki.resolve_scope(_scope_q, state["session_id"],
                                       chat_session_id=state.get("chat_session_id"))
+        # Last, not first. Every deterministic resolver runs before this, and the
+        # agent's referent is consulted only where they all came back with
+        # nothing to pin - which is exactly the case the regex stack has been
+        # patched three times to cover. The referent is a DESCRIPTION; it earns
+        # its way in by resolving through the same resolver everything else
+        # uses, so a description that names nothing real changes nothing.
+        _ref = (state.get("enquiry_referent") or "").strip()
+        if _ref and (decision.get("method") or "").startswith(("default", "corpus", "error")):
+            try:
+                from services import enquiry as _enq
+                _rdocs = _enq.resolve_referent(_ref, state["session_id"],
+                                               state.get("chat_session_id", ""))
+            except Exception as _re_err:
+                logger.error("enquiry referent resolution failed: %s", _re_err)
+                _rdocs = []
+            if _rdocs:
+                logger.info("[AGENT] scope from enquiry referent %r -> %d doc(s)",
+                            _ref[:60], len(_rdocs))
+                decision = {"scope": "single_doc" if len(_rdocs) == 1 else "multi_doc",
+                            "target_docs": _rdocs, "target_family": None,
+                            "is_broad": False, "confidence": 0.5,
+                            "method": "enquiry-referent"}
     except Exception as e:
         logger.error("resolve_scope failed, defaulting to corpus: %s", e)
         decision = {"scope": "corpus", "target_docs": [], "target_family": None,
