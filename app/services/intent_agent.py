@@ -3066,6 +3066,35 @@ _RX_CLAUSE_PRESENCE = re.compile(
 _CLAUSE_PRESENCE_MIN_ROWS = 8
 
 
+def _narrow_to_named_instrument(question: str, session_id: str, wiki_id: str,
+                                docs: list) -> list:
+    """The one document whose recorded type matches the instrument named.
+
+    Returns the input unchanged when the question names no type, and an empty
+    list when several documents share the named type — in both cases the caller
+    declines, which is the point: this narrows an unambiguous case, it does not
+    pick a winner from an ambiguous one.
+    """
+    from services import db as _db
+    from sqlalchemy import text as _text
+    q = (question or "").lower()
+    try:
+        with _db.get_engine().connect() as c:
+            rows = c.execute(_text("""
+                SELECT source_doc, doc_type FROM documents
+                WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+            """), {"w": wiki_id, "s": session_id, "d": list(docs)[:8]}).fetchall()
+    except Exception as e:
+        logger.error("[AGENT] clause-presence: doc_type lookup failed: %s", e)
+        return []
+    hits = []
+    for sd, dt in rows:
+        t = re.sub(r"\s+", " ", (dt or "")).strip().lower()
+        if t and t in q:
+            hits.append(sd)
+    return hits
+
+
 def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
                             docs: "list | None") -> "dict | None":
     """Whether one named clause type is present in one named document.
@@ -3080,8 +3109,19 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
     from services import clause_vocab as _vocab
 
     m = _RX_CLAUSE_PRESENCE.search(question or "")
-    if not m or not docs or len(docs) != 1:
+    if not m or not docs:
         return None
+    if len(docs) != 1:
+        # The question names one instrument and scope resolved several — for the
+        # warranty question, the Power of Attorney, its OCR twin, and an
+        # unrelated Share Purchase Agreement. Narrow by the instrument the
+        # question actually names: presence or absence of a clause type is a
+        # statement about ONE document, and answering it from a set is how a
+        # representation of authority in a neighbouring document becomes this
+        # document's warranty clause.
+        docs = _narrow_to_named_instrument(question, session_id, wiki_id, docs)
+        if not docs:
+            return None
     asked = (m.group(1) or "").strip(" '\"‘’“”")
     # The pattern's window starts before the article, so strip it here rather
     # than complicating the match: "a 'warranty" -> "warranty".
@@ -3097,14 +3137,27 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
     if not canon:
         return None                      # not a type we canonicalise — stay out
 
+    # Read across every document still in scope, which after narrowing is one
+    # instrument and, often, its OCR twin — the same document held as two files.
+    # Presence in either is presence; absence has to hold in all of them, and is
+    # only readable at all if the best-extracted of them carries enough typed
+    # clauses for silence to mean something.
     try:
-        rows = _db.clauses_of_type(wiki_id, session_id, docs[0], canon)
-        total = _db.clause_count_for_doc(wiki_id, session_id, docs[0])
+        rows, total, best = [], 0, None
+        for d in docs[:4]:
+            r = _db.clauses_of_type(wiki_id, session_id, d, canon)
+            n = _db.clause_count_for_doc(wiki_id, session_id, d)
+            if n > total:
+                total, best = n, d
+            if r and not rows:
+                rows, best = r, d
     except Exception as e:
         logger.error("[AGENT] clause-presence lookup failed: %s", e)
         return None
+    if best is None:
+        return None
 
-    doc_label = _dp_display(docs[0], wiki_id, session_id)
+    doc_label = _dp_display(best, wiki_id, session_id)
 
     if rows:
         r = rows[0]
@@ -3118,7 +3171,7 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
             body.append("Recorded in this document as: %s" % r["clause_type"])
         payload = _canned_payload("\n".join(body), "Clause presence", "clause-presence")
         payload["meta_answer"] = False
-        payload["files_used"] = [docs[0]]
+        payload["files_used"] = [best]
         return payload
 
     if total < _CLAUSE_PRESENCE_MIN_ROWS:
@@ -3128,7 +3181,7 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
         "No — %s does not contain a %s clause." % (doc_label, asked.lower()),
         "",
         "Its %d recorded clauses cover %s." % (total, _clause_type_summary(
-            wiki_id, session_id, docs[0])),
+            wiki_id, session_id, best)),
         "",
         "A phrase such as \"represents and warrants that it has full power and "
         "authority\" appears in most instruments in this corpus and is a "
@@ -4593,8 +4646,19 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
         # which only knows its words. Reuses the scope already resolved just
         # above, so it costs nothing beyond two indexed lookups, and returns
         # None on anything it cannot read confidently.
+        # Takes a single document from the scope decision even when the decision
+        # is not labelled single_doc: a resolver can pin exactly one document and
+        # still report party-multi, and this question shape only ever needs to
+        # know that one document was pinned. Confirmed live: the warranty
+        # question resolved party-multi with one target document and skipped the
+        # path entirely, spending 21,502 tokens to answer it wrongly from prose.
+        _docs_one = _docs_dt
+        if not _docs_one:
+            _t = _scope_dt.get("target_docs") or []
+            if len(_t) == 1:
+                _docs_one = list(_t)
         try:
-            _cpres = _clause_presence_answer(question, session_id, _wid_dt, _docs_dt)
+            _cpres = _clause_presence_answer(question, session_id, _wid_dt, _docs_one)
         except Exception as _cp_err:
             logger.error("[AGENT] clause-presence fast path failed: %s", _cp_err)
             _cpres = None
