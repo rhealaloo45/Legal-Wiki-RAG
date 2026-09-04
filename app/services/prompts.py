@@ -78,6 +78,9 @@ QUESTION: {question}
 REQUIRED OUTPUT FORMAT:
 (Your assessment goes here, in markdown, scaled to what the question asked — the full shape for a full assessment: assumptions, per-risk classification with reasoning, gaps/missing protections, and a clear accept / reject / negotiate recommendation; just the risks, ranked, for a question that asked only for those. Whatever its scope, the assessment IS the visible answer: do not hold any of it back in a hidden reasoning block.)
 
+MISSING_ITEMS:
+(On its own line at the very end. List anything the question asked for that these documents do not answer — one "- " line each, naming the thing the reader asked for and what is not stated about it. An item belongs here even when you have said in the body that it is absent: saying so is not the same as recording it, and this block is what makes a gap countable rather than something a reader has to notice. Write "MISSING_ITEMS: none" when the documents answered everything asked. Name documents and provisions, never the search.)
+
 CONFIDENCE_SCORE: [integer 0-100]
 CONFIDENCE_REASON: [one sentence]"""
 
@@ -224,6 +227,9 @@ BEFORE YOU WRITE THE TABLE, re-check the three top priorities: (1) describe a cl
 REQUIRED OUTPUT FORMAT:
 (Your full comparison goes here — markdown table first, then a Key Differences section. This IS the visible answer; do not hold any of it back in a hidden reasoning block.)
 
+MISSING_ITEMS:
+(On its own line at the very end. List anything the question asked for that these documents do not answer — one "- " line each, naming the thing the reader asked for and what is not stated about it. An item belongs here even when you have said in the body that it is absent: saying so is not the same as recording it, and this block is what makes a gap countable rather than something a reader has to notice. Write "MISSING_ITEMS: none" when the documents answered everything asked. Name documents and provisions, never the search.)
+
 CONFIDENCE_SCORE: [integer 0-100]
 CONFIDENCE_REASON: [one sentence]"""
 
@@ -284,6 +290,9 @@ BEFORE YOU WRITE THE TABLE, re-check the three top priorities: (1) every named p
 
 REQUIRED OUTPUT FORMAT:
 (Your full answer goes here — obligations table first, then a Priority Deadlines section. This IS the visible answer; do not hold any of it back in a hidden reasoning block.)
+
+MISSING_ITEMS:
+(On its own line at the very end. List anything the question asked for that these documents do not answer — one "- " line each, naming the thing the reader asked for and what is not stated about it. An item belongs here even when you have said in the body that it is absent: saying so is not the same as recording it, and this block is what makes a gap countable rather than something a reader has to notice. Write "MISSING_ITEMS: none" when the documents answered everything asked. Name documents and provisions, never the search.)
 
 CONFIDENCE_SCORE: [integer 0-100]
 CONFIDENCE_REASON: [one sentence]"""
