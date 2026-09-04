@@ -59,6 +59,12 @@ _SCOPE_TRUST = (
     ("party", 60),                    # one party name, possibly shared
     ("family", 58),
     ("collection", 85),
+    # The Enquiry Agent's referent, and only where every deterministic resolver
+    # returned nothing. It is validated - the description had to resolve to a
+    # real, small document set - but it is a model's reading of the
+    # conversation, so it is scored below every resolver that read the question
+    # itself and above the corpus default it replaces.
+    ("enquiry-referent", 66),
     ("corpus", 45),
     ("default", 40),                  # nothing resolved; the corpus answered
     ("error", 30),
