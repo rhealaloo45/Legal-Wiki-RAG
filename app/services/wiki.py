@@ -8220,6 +8220,9 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
     _PARTY_SCAN_CAP = 20
+    # Wider re-scan used only to intersect several party names against each
+    # other, where a cap-truncated set makes the intersection meaningless.
+    _PARTY_INTERSECT_CAP = 200
     resolved: list[tuple[str, set[str]]] = []
     for name in candidates:
         try:
@@ -8231,6 +8234,57 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
             resolved.append((name, docs))
     if not resolved:
         return set()
+
+    # A question naming TWO parties is naming the document that mentions BOTH.
+    # Picking the single most distinctive name instead answered "the liability
+    # cap in the Lumendra-Waverock agreement" from a Tata Capital DPA whose
+    # counterparty is Waverock Metals - confidently, at 88%, about the wrong
+    # document. Exactly one document in the corpus mentions both names, and it
+    # is the one the question asked for.
+    #
+    # The intersection is only allowed to NARROW: adopted solely when it is
+    # non-empty and smaller than the most-distinctive single name's set, so the
+    # narrowing below still runs on it, and a question naming two SEPARATE
+    # documents (whose candidate sets are disjoint) intersects to nothing and
+    # is left exactly as it was.
+    # Restricted the way the secondary scan below is restricted, and for the
+    # same reason: a bare single word ("Guarantee", "Apex", "Digital") is a
+    # document type or a group prefix, not a party identity. Intersecting those
+    # pinned two unrelated amendment documents - the exact false match the
+    # secondary scan was already written to avoid. Either every candidate
+    # carries a corporate suffix, or the question named exactly two names and
+    # both are being read as the two sides of one agreement.
+    _intersectable = (len(resolved) >= 2 and
+                      (all(n in suffix_candidates for n, _ in resolved)
+                       or len(resolved) == 2))
+    if _intersectable:
+        inter = set.intersection(*[d for _, d in resolved])
+        if not inter and any(len(d) >= _PARTY_SCAN_CAP for _, d in resolved):
+            # A truncated scan cannot be intersected: "Lumendra" alone hits 26
+            # documents, the scan stopped at 20, and the one document that also
+            # mentions "Waverock" was in the 6 it never returned.
+            wide = []
+            for name, docs in resolved:
+                if len(docs) < _PARTY_SCAN_CAP:
+                    wide.append(docs)
+                    continue
+                try:
+                    wide.append({d for d in _db.find_source_docs_mentioning_phrase(
+                        _active_wiki_id(), session_id, name,
+                        cap=_PARTY_INTERSECT_CAP) if d})
+                except Exception as e:
+                    logger.error("resolve_scope: wide party lookup failed for %r: %s",
+                                 name, e)
+                    wide = []
+                    break
+            if wide:
+                inter = set.intersection(*wide)
+        _smallest = min(len(d) for _, d in resolved)
+        if inter and len(inter) < _smallest:
+            logger.info("Party-name match: %d document(s) mention every party named "
+                        "(%s) — narrowing from %d",
+                        len(inter), ", ".join(n for n, _ in resolved), _smallest)
+            resolved = [("+".join(n for n, _ in resolved), inter)]
 
     best_name, best_docs = min(resolved, key=lambda pair: len(pair[1]))
     best_n = len(best_docs)
