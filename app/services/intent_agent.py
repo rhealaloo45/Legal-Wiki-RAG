@@ -783,6 +783,47 @@ def _question_precisely_names_a_document(question: str, session_id: str) -> bool
         return False
 
 
+# "What are the biggest risks in this agreement?" asked mid-thread, after a
+# document is already established.
+_RX_RISK_SHAPE = re.compile(
+    '\\b(?:risk|risks|exposure|exposures|concerns?|red\\s+flags?)\\b', re.IGNORECASE)
+
+
+def _risk_question_on_a_settled_document(state: dict) -> bool:
+    """Whether a risk question should be answered rather than clarified.
+
+    Asked twice on the same thread, the ambiguity check answered differently:
+    once it assumed the client role and gave the risks, once it asked whose
+    perspective was wanted. Both are defensible; the inconsistency is not, and
+    the cost falls on the follow-up turn - the next question, "tell me more
+    about the second one", had no list to point at and had to ask its own
+    question back.
+
+    The assessment template already requires an assumed client role to be
+    STATED when it changes the answer, so the assumption is disclosed rather
+    than hidden. Given that, assuming and saying so is better than stopping:
+    the reader gets the risks and can see whose they are.
+
+    Deliberately narrow - only a risk-shaped question, and only where the
+    conversation has already settled on a document, which is the case where
+    the perspective question is least useful and most interrupting.
+    """
+    q = state.get("question") or ""
+    if not _RX_RISK_SHAPE.search(q):
+        return False
+    try:
+        carried = wiki._carryover_scope(
+            q, state.get("chat_session_id") or state["session_id"])
+    except Exception:
+        return False
+    if not carried:
+        return False
+    logger.info("[AGENT] clarification skipped: risk question on a document the "
+                "conversation already settled (%d doc(s))", len(carried))
+    return True
+
+
+
 @tracing.traced_node("check_clarification")
 def check_clarification_node(state: QueryState) -> dict:
     # Must read the per-thread chat session, not the shared wiki/doc session —
@@ -797,6 +838,7 @@ def check_clarification_node(state: QueryState) -> dict:
     chat_sid = state.get("chat_session_id") or state["session_id"]
     if (state.get("is_followup") or wiki._question_names_a_document(state["question"], [])
             or not config.ENABLE_CLARIFICATION
+            or _risk_question_on_a_settled_document(state)
             or _question_precisely_names_a_document(state["question"], state["session_id"])):
         conv = wiki.build_conversation_context(chat_sid)
         return {"needs_clarification": False, "conversation_context": conv}
