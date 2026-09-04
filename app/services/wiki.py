@@ -5013,6 +5013,43 @@ def _split_unverified_by_severity(unverified: list[str], context: str,
     return absent, prose_sourced
 
 
+def _repair_truncated_quotes(answer: str, flagged, context: str):
+    """Fix quotes the model cut short, without spending a generation call.
+
+    The commonest citation flag is not a paraphrase at all: the model copied the
+    document correctly and stopped mid-word ("...which expression shall, unless
+    repu"). That fails verbatim verification, and the corrective retry then
+    spends a SECOND full answer call - 9,883 prompt tokens on one live POA
+    question - asking the model to copy text the pipeline has already located.
+    Measured on that answer, the retry did not even fix it.
+
+    Repairs only the provable case: the flagged quote, normalised, is a PREFIX
+    of a span that is really in the context. Then the model's text is not wrong,
+    only short, and extending it to the span cannot change what the answer says.
+    Anything else - a genuine paraphrase, a wrong attribution, a fabricated
+    identifier - is left flagged and still goes to the retry.
+
+    Returns (answer, still_flagged, repaired_count).
+    """
+    still, repaired = [], 0
+    for q in flagged:
+        if not q or q not in answer:
+            still.append(q)
+            continue
+        span = _nearest_verbatim_span(q, context)
+        nq = _norm_for_match(q)
+        if not span or not nq:
+            still.append(q)
+            continue
+        ns = _norm_for_match(span)
+        if len(nq) >= 25 and ns.startswith(nq) and len(ns) > len(nq):
+            answer = answer.replace(q, span.strip(), 1)
+            repaired += 1
+        else:
+            still.append(q)
+    return answer, still, repaired
+
+
 def _nearest_verbatim_span(quote: str, context: str) -> str | None:
     """The context span a flagged (paraphrased) quote most closely paraphrases.
 
@@ -6126,6 +6163,15 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # just warning the user after the fact. Only retried once; if the retry
     # doesn't measurably improve things, the original answer is kept and a
     # warning is appended as before.
+    # Deterministic repair first: a quote that is merely truncated is completed
+    # from the context, costing nothing. Only what survives that needs a model.
+    if _unverified_quotes:
+        answer, _unverified_quotes, _n_repaired = _repair_truncated_quotes(
+            answer, list(_unverified_quotes), wiki_content)
+        if _n_repaired:
+            logger.info("Citation check: completed %d truncated quote(s) from context "
+                        "without a retry call", _n_repaired)
+
     if _unverified_quotes or _misattributed or _unverified_ids:
         _flagged = list(_unverified_quotes) + list(_misattributed)
         _flag_lines = []
