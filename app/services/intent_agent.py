@@ -3457,8 +3457,16 @@ def _absent_instrument_answer(question: str, session_id: str,
                 parties.append(name)
     if not parties:
         return None
-    # One party. With two, the question is about a pair and "neither has this
-    # instrument type together" is a much weaker claim than it looks.
+    # One party, strictly. The pair case was described here and then not
+    # enforced - the code took parties[0] regardless. A question naming both
+    # sides of an agreement is asking about ONE instrument between them, and
+    # answering "this party has no such instrument" from the first name alone
+    # is a different, much weaker claim. Measured live: "the Framework Supply
+    # Agreement between Apex Meridian Travel Pty Ltd and Xanthos Insurance
+    # Corp." was answered "Apex Meridian Travel Pty has no Framework Supply
+    # Agreement in this corpus" - about a document holding 25 pages.
+    if len(parties) != 1:
+        return None
     party = parties[0]
 
     try:
@@ -3472,6 +3480,21 @@ def _absent_instrument_answer(question: str, session_id: str,
         type_all = _db.count_documents_by_party(wiki_id, session_id, [], None,
                                                 limit=1, doc_type_patterns=patterns)
         if not type_all.get("total"):
+            return None
+        # Can the index even support a negative? A document of this type with
+        # no indexed parties is invisible to the intersection below, so it
+        # cannot contradict "this party has none" - and the claim would be made
+        # anyway. Silence here, and let retrieval answer from the pages.
+        try:
+            _blind = _db.count_documents_of_type_without_parties(
+                wiki_id, session_id, patterns)
+        except Exception as e:
+            logger.error("[AGENT] absent-instrument: blind-spot check failed: %s", e)
+            return None
+        if _blind:
+            logger.info("[AGENT] absent-instrument declined: %d %s document(s) "
+                        "have no indexed parties, so absence cannot be asserted",
+                        _blind, label)
             return None
         both = _db.count_documents_by_party(wiki_id, session_id, [party], None,
                                             limit=25, doc_type_patterns=patterns)
