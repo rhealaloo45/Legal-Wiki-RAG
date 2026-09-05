@@ -1654,6 +1654,7 @@ def ingest(file_path: str, session_id: str) -> dict:
         total_contradictions += tc
 
         completed_segments = 0
+        _failed_segments: list = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=config.WIKI_MAX_WORKERS) as executor:
             future_to_index = {
                 executor.submit(_ingest_detail_segment, seg, topics, doc_name,
@@ -1680,8 +1681,21 @@ def ingest(file_path: str, session_id: str) -> dict:
                     total_rels += r
                     total_contradictions += c
                 except Exception as exc:
+                    _failed_segments.append(i)
                     logger.error("Segment %d for %s generated an exception: %s", i, doc_name, exc)
                     _log_event(session_id, "ERROR", f"Doc: {doc_name} | Segment {i} failed: {exc}")
+
+        if _failed_segments:
+            # A re-ingest deletes the old rows first, so storing a document that
+            # is missing a segment is the same silent loss the single-call guard
+            # exists to prevent - it just loses part of a document instead of
+            # all of it. The caller can retry the whole document.
+            raise RuntimeError(
+                "%d of %d segments failed for %s (segments %s). The document is "
+                "incomplete and has NOT been ingested."
+                % (len(_failed_segments), len(segments), doc_name,
+                   ", ".join(str(x) for x in sorted(_failed_segments)))
+            )
 
     # --- Stage 04: reconcile + swap in the typed rows ----------------------
     _update_doc_step(session_id, doc_name, "persisting")
@@ -1825,8 +1839,17 @@ def _ingest_single_call(text: str, doc_name: str, family_key: str | None = None)
     try:
         raw, usage = llm.ask(prompt, pipeline="wiki", max_tokens=config.MAX_TOKENS_INGEST_SINGLE)
     except RuntimeError as e:
+        # A failed call is not an empty document. Returning one here bypassed
+        # the empty-synthesis guard below entirely - the guard only sees a call
+        # that came back - so a timed-out request stored a document with zero
+        # pages and reported success. Measured live: one document went 21 pages
+        # to 0 on a request timeout, silently, during a re-ingest that had
+        # already deleted its old rows.
         logger.error("LLM call failed during wiki ingest: %s", e)
-        return {"pages": {}, "relations": []}
+        raise RuntimeError(
+            "Ingest synthesis call failed for %s (%d chars): %s. The document "
+            "has NOT been ingested." % (doc_name, len(text), e)
+        ) from e
 
     parsed = _parse_json_safe(raw)
     if parsed is None:
@@ -1865,8 +1888,15 @@ def _ingest_overview(text: str, doc_name: str) -> tuple[str, list[str], dict]:
             max_tokens=config.MAX_TOKENS_INGEST_OVERVIEW,
         )
     except RuntimeError as e:
+        # Same reasoning as the single-call path: a failed call is not an empty
+        # document. Returning here left the document with no topic list and no
+        # doc_type, and every segment below then ran blind - a quietly worse
+        # ingest that still reported success.
         logger.error("LLM overview call failed: %s", e)
-        return "Unknown Document", [], {"pages": {}, "relations": []}
+        raise RuntimeError(
+            "Ingest overview call failed for %s: %s. The document has NOT "
+            "been ingested." % (doc_name, e)
+        ) from e
 
     parsed = _parse_json_safe(raw)
     if parsed is None:
@@ -1903,8 +1933,12 @@ def _ingest_detail_segment(text: str, topics: list[str], doc_name: str, doc_type
             max_tokens=config.MAX_TOKENS_INGEST_DETAIL,
         )
     except RuntimeError as e:
+        # Raised, not swallowed: the caller counts failed segments and refuses
+        # to store a partial document. Swallowing it here meant one timed-out
+        # segment silently contributed nothing while the others merged, leaving
+        # a document that looks complete and is missing a slice of itself.
         logger.error("LLM detail call failed: %s", e)
-        return {"pages": {}, "relations": []}
+        raise
 
     parsed = _parse_json_safe(raw)
     if parsed is None:
