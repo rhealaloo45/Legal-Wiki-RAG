@@ -4526,6 +4526,32 @@ def find_defined_term(wiki_id: str, session_id: str, source_docs: list[str],
              "page_num": r[3]} for r in rows]
 
 
+def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
+                                            doc_type_patterns: list) -> int:
+    """How many documents of this type have NO indexed parties at all.
+
+    A "this party has no such instrument" answer is a claim about the whole
+    corpus, and it can only be made from an index that covers the corpus. A
+    document whose parties row is NULL is invisible to that count, so it cannot
+    be used to contradict the claim - and the claim gets made anyway. Measured
+    live: a Framework Supply Agreement with 25 pages and a NULL parties row was
+    reported as not existing, because the only documents the index could see
+    for that party were of other types.
+    """
+    if not doc_type_patterns:
+        return 0
+    from sqlalchemy import text
+    clauses = " OR ".join("doc_type ILIKE :p%d" % i for i in range(len(doc_type_patterns)))
+    params = {"w": wiki_id, "s": session_id}
+    for i, pat in enumerate(doc_type_patterns):
+        params["p%d" % i] = pat
+    with get_engine().connect() as conn:
+        return conn.execute(text(
+            "SELECT count(*) FROM documents WHERE wiki_id = :w "
+            "AND (parties IS NULL OR parties::text IN ('', '[]', 'null')) "
+            "AND (%s)" % clauses), params).scalar() or 0
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
