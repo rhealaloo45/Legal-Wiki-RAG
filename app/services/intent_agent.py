@@ -2465,6 +2465,28 @@ _RX_AUTHORITY = re.compile(
     r"(?:\s+(?:of|on|for)\s+(?:[A-Z][\w'&.-]*\s*){1,4})?"
     r"(?:[,\s]+\d{4})?)",
 )
+# A procedural citation has no Act/Code/Rules head word to anchor on — "Order
+# XXXIX CPC" is a rule of court, and in a litigation corpus it is cited as
+# often as any statute. The index holds it under four spellings; the pattern
+# above could see none of them, so the citation branch declined the question
+# and it went to retrieval. Roman numerals only, which is also what keeps
+# "Purchase Order PO-2025-185" out.
+_RX_AUTHORITY_PROC = re.compile(r"\b(Order\s+[IVXLCDM]{1,7})\b", re.IGNORECASE)
+
+
+def _named_authority(question: str) -> str:
+    """The authority a citation question asks about, statutory or procedural.
+
+    Returns the shortest form that still identifies it — "Order XXXIX" rather
+    than "Order XXXIX Rules 1 & 2 CPC" — because the lookup matches on
+    containment either way, and the shorter key finds every spelling the
+    extraction recorded instead of only the one the question happened to use.
+    """
+    m = _RX_AUTHORITY.search(question or "")
+    if m:
+        return m.group(1).strip(" ,")
+    m = _RX_AUTHORITY_PROC.search(question or "")
+    return m.group(1).strip(" ,") if m else ""
 
 
 # Counting over document metadata (§ Phase 3.5b). Deliberately narrow: the
@@ -2927,7 +2949,7 @@ def _is_structural_query(question: str) -> str:
     # no statute, and returned nothing — while the amends branch below it would
     # have answered it from a recorded edge. Claiming the question here and
     # then declining it denied it to every branch that could.
-    if _RX_CITES.search(q) and _RX_AUTHORITY.search(q):
+    if _RX_CITES.search(q) and _named_authority(q):
         return "cites"
     if _RX_CITED_BY.search(q):
         return "cited_by"
@@ -3872,8 +3894,7 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         wiki_id = _wikis.active_wiki_id()
 
         if kind == "cites":
-            m = _RX_AUTHORITY.search(question)
-            authority = (m.group(1).strip() if m else "").strip(" ,")
+            authority = _named_authority(question)
             if not authority:
                 return None
             hits = _db.find_documents_citing(wiki_id, session_id, authority)
