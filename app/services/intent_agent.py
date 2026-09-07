@@ -3165,6 +3165,35 @@ _RX_CLAUSE_PRESENCE = re.compile(
     r"(?:clause|provision|section|term)\b",
     re.IGNORECASE)
 
+# The same boilerplate the comment above warns about also reaches this path a
+# second way: when the extractor's own label for it literally contains the
+# word "Warranty" ("Representation and Warranty (for avoidance of doubt)"),
+# clause_vocab's label-based canon maps it to "warranty" before this function
+# ever sees it, so the doc-type-thin guard below never fires. Confirmed live:
+# "Letter of Comfort... contain a 'warranty' clause?" answered Yes, quoting
+# "Each Party represents and warrants... full power and authority to enter
+# into and perform this Agreement... legal, valid and binding obligation" —
+# the identical capacity-and-enforceability boilerplate, filed under a label
+# that happens to say "Warranty". Content, not label, is what makes it not a
+# warranty clause, so it is checked here regardless of which canon it landed
+# under.
+_RX_CAPACITY_AUTHORITY = re.compile(
+    r"power and authority to (?:enter into|execute|perform)\b", re.IGNORECASE)
+_RX_BINDING_OBLIGATION = re.compile(
+    r"legal,?\s*valid and binding obligation|binding obligation", re.IGNORECASE)
+
+
+def _is_capacity_authority_boilerplate(text: str) -> bool:
+    """Whether a clause is the generic 'we have authority to sign this' rep.
+
+    Both signals are required so a genuine warranty clause that happens to
+    mention a binding obligation in passing is not excluded on one phrase
+    alone — this is deliberately narrow to the specific formula the corpus
+    uses for capacity and enforceability, not warranties in general.
+    """
+    t = text or ""
+    return bool(_RX_CAPACITY_AUTHORITY.search(t) and _RX_BINDING_OBLIGATION.search(t))
+
 # Below this, the document's clause extraction is too thin to read an absence
 # from. 954 of the 1,005 documents carrying any typed clause are at or above it.
 _CLAUSE_PRESENCE_MIN_ROWS = 8
@@ -3261,6 +3290,19 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
     if best is None:
         return None
 
+    boilerplate_only_canon = None
+    if rows and canon == "warranty":
+        substantive = [r for r in rows
+                       if not _is_capacity_authority_boilerplate(r.get("verbatim_text"))]
+        if not substantive:
+            # Every "warranty"-canon row on this document was the capacity
+            # boilerplate, not a real one — so the negative-branch summary
+            # below must not list "warranty" among what the document covers,
+            # or the answer would say "No warranty clause" and "covers ...
+            # warranty ..." in the same breath.
+            boilerplate_only_canon = canon
+        rows = substantive
+
     doc_label = _dp_display(best, wiki_id, session_id)
 
     if rows:
@@ -3285,7 +3327,7 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
         "No — %s does not contain a %s clause." % (doc_label, asked.lower()),
         "",
         "Its %d recorded clauses cover %s." % (total, _clause_type_summary(
-            wiki_id, session_id, best)),
+            wiki_id, session_id, best, exclude=boilerplate_only_canon)),
         "",
         "A phrase such as \"represents and warrants that it has full power and "
         "authority\" appears in most instruments in this corpus and is a "
@@ -3296,13 +3338,21 @@ def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
     payload["files_used"] = [docs[0]]
     return payload
 
-def _clause_type_summary(wiki_id: str, session_id: str, source_doc: str) -> str:
-    """The clause types a document does carry, as a readable phrase."""
+def _clause_type_summary(wiki_id: str, session_id: str, source_doc: str,
+                          exclude: str | None = None) -> str:
+    """The clause types a document does carry, as a readable phrase.
+
+    `exclude` drops one canon from the list — used when every row filed
+    under it turned out to be boilerplate, not a real clause of that type,
+    so it should not be named as something the document "covers" either.
+    """
     from services import db as _db
     try:
         types = _db.clause_types_for_doc(wiki_id, session_id, source_doc)
     except Exception:
         return "other subjects"
+    if exclude:
+        types = [t for t in types if t != exclude]
     pretty = [t.replace('_', ' ') for t in types]
     if not pretty:
         return "other subjects"
