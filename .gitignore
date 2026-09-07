@@ -222,6 +222,8 @@ __marimo__/
 # Local project data
 app/data/
 app/.env
+app/.env.optimize
+app/.env.v2
 app/sessions.json
 app/build_ui.py
 
@@ -241,7 +243,9 @@ package-lock.json
 
 # Scratch & Test Files
 check_errors.js
-test_*.py
+# Root-only: app/tests/ is a real pytest package and must stay tracked;
+# this was unanchored and silently swallowing it.
+/test_*.py
 test_*.txt
 debug.log
 lexwiki_ui_v2.html
@@ -274,6 +278,8 @@ checklist.md
 implementation_list.md
 phases.md
 questions.txt
+MERGE_V2_INTO_OPTIMIZE.md
+SYSTEM_DOCUMENTATION.md
 
 # RAG accuracy/retest/review reports — generated audit output, not source.
 # Regenerated per evaluation run, quote long stretches of corpus text, and go
@@ -332,6 +338,19 @@ backups/
 
 # Deployment working notes (same genre as PLAN.md / checklist.md above)
 deployment_test.md
+
+# Same reasoning as app/eval/ and the backups/ rule above: bulk corpus/backup
+# data, not source, and large enough to bloat the repo on its own (908MB /
+# 469MB respectively at time of writing).
+app/data.pre_v2_merge_backup/
+synthetic_realistic_legal_corpus/
+
+# Diagnostic/eval run output — regenerated on demand, quotes corpus text,
+# goes stale the moment the pipeline changes. Same genre as the rag_*.md
+# rules above.
+tools/reextract_memory.json
+tools/thread_suite_results.json
+tools/thread_suite_results_off_baseline.json
 
 # Credentials / secrets — never commit these regardless of where they land
 *.pem

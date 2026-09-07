@@ -246,6 +246,53 @@ def classify_draft(prompt: str) -> str:
         logger.error(f"Draft classification failed: {e}")
     return "clause"
 
+def get_precedent_context(session_id: str, prompt: str,
+                          limit: int | None = None) -> dict:
+    """Drafting context from clause-level precedent vectors (§ Phase 2).
+
+    Replaces the page path below, which selected up to 15 whole pages and cut
+    the result to a character budget — so what actually reached the model was
+    whichever pages sorted first and whatever survived the truncation, not the
+    clauses most relevant to the request.
+
+    Here the unit retrieved IS a clause, ranked against the request and scoped
+    to role-tagged precedent documents, so judgments and opinions can never
+    contribute drafting language. Returns has_context=False when the layer has
+    no vectors yet, which sends the caller back to the page path rather than
+    drafting from nothing.
+    """
+    try:
+        import config as _cfg
+        from services import precedent as _prec, wikis as _wikis
+
+        wiki_id = _wikis.active_wiki_id()
+        limit = limit or getattr(_cfg, "DRAFT_PRECEDENT_CLAUSES", 12)
+        hits = _prec.search_clauses(wiki_id, session_id, prompt, limit=limit)
+        if not hits:
+            return {"has_context": False, "context": "", "source_pages": [],
+                    "method": "precedent-empty"}
+
+        parts, sources = [], []
+        for h in hits:
+            parts.append(
+                f"[PRECEDENT CLAUSE]\n"
+                f"Clause type: {h['clause_type']}\n"
+                f"From: {h['source_doc']}"
+                + (f" (p. {h['page_num']})" if h.get("page_num") else "")
+                + f"\nRelevance: {h['score']}\n"
+                f"Text:\n{h['text']}\n"
+            )
+            sources.append({"title": h["clause_type"], "source": h["source_doc"],
+                            "clause_id": h["clause_id"], "score": h["score"]})
+        return {"has_context": True, "context": "\n".join(parts),
+                "source_pages": sources, "method": "precedent-clauses",
+                "clauses_used": len(hits)}
+    except Exception as e:
+        logger.error(f"Precedent context failed, falling back to pages: {e}")
+        return {"has_context": False, "context": "", "source_pages": [],
+                "method": "precedent-error"}
+
+
 def get_draft_context(session_id: str, prompt: str) -> dict:
     try:
         index = wiki._load_index(session_id)
@@ -342,7 +389,14 @@ def _run_draft_job(job_id: str, session_id: str, prompt: str, use_wiki: bool = T
             }
             
         if use_wiki:
-            context_dict = get_draft_context(session_id, prompt)
+            # Precedent layer first: clause-level vectors scoped to
+            # precedent-role documents. It returns has_context=False when no
+            # clauses are embedded yet, and only then does drafting fall back
+            # to the page path — a corpus without the layer built still drafts,
+            # it just drafts the old way.
+            context_dict = get_precedent_context(session_id, prompt)
+            if not context_dict.get("has_context"):
+                context_dict = get_draft_context(session_id, prompt)
         else:
             context_dict = {"has_context": False, "context": "", "source_pages": []}
             
