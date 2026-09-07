@@ -565,6 +565,50 @@ _RX_CALC_YEARS = re.compile(
     r"(?:after|over|in|for)\s+"
     r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*"
     r"(?:\(\d+\)\s*)?years?", re.IGNORECASE)
+# --- date arithmetic -------------------------------------------------------
+# Calendar maths was the gap this module's own docstring implied it covered and
+# did not: asked "how many days is the term" or "how many days ago did it end",
+# the pipeline fell through to retrieval, which quoted the two dates back and
+# said the day-count "is not stated in the Agreement". Literally true and
+# useless — the document states both endpoints, and subtracting them is exactly
+# the kind of work this module exists to do rather than ask a model to do.
+#
+# Sourced from `documents.effective_date` / `expiry_date`, the columns ingest
+# already normalises to ISO, not from prose in a page. Where a document has no
+# such date recorded the calculation is declined by name, the same as a missing
+# fee schedule — on this corpus only a minority of documents carry an expiry
+# date at all, so declining honestly matters more here than anywhere else.
+_RX_CALC_TERM_DAYS = re.compile(
+    r"\b(?:how\s+many\s+days|how\s+long|number\s+of\s+days|day[-\s]?count|"
+    r"length\s+in\s+days)\b[^?]{0,60}?\b(?:term|agreement|contract|period)\b"
+    r"|\b(?:term|contract)\s+length\b[^?]{0,30}\bdays?\b",
+    re.IGNORECASE)
+_RX_CALC_ELAPSED = re.compile(
+    r"\bhow\s+(?:many\s+days|long)\s+ago\b"
+    r"|\bdays?\s+(?:since|elapsed\s+since)\b"
+    r"|\bhow\s+many\s+days\b[^?]{0,40}\b(?:since|ago)\b",
+    re.IGNORECASE)
+_RX_CALC_REMAINING = re.compile(
+    r"\b(?:how\s+many\s+days|how\s+long)\b[^?]{0,40}?"
+    r"\b(?:until|till|to\s+go|remain(?:ing)?|left)\b"
+    r"|\bdays?\s+remaining\b|\bdays?\s+left\b",
+    re.IGNORECASE)
+# "When does the notice period actually end, accounting for business days?"
+# Needs a period the question or the document supplies, and a start date.
+_RX_CALC_NOTICE_END = re.compile(
+    r"\b(?:when\s+does|when\s+will)\b[^?]{0,60}?\bnotice\s+period\b[^?]{0,30}\bend\b"
+    r"|\bnotice\s+period\s+end(?:s|ing)?\s+(?:date|on)\b"
+    r"|\bend\s+of\s+the\s+notice\s+period\b",
+    re.IGNORECASE)
+_RX_CALC_BUSINESS_DAYS = re.compile(
+    r"\b(?:business|working|clear)\s+days?\b", re.IGNORECASE)
+_RX_CALC_DAYS_N = re.compile(
+    r"(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"fifteen|twenty|thirty|forty[-\s]?five|sixty|ninety)\s*"
+    r"(?:\(\d+\)\s*)?(?:calendar\s+|business\s+|working\s+)?days?\b",
+    re.IGNORECASE)
+_RX_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+
 # The one thing this agent must never attempt. Held as an explicit veto rather
 # than left to fall through, so the decline can name the missing input.
 _RX_CALC_OUT_OF_SCOPE = re.compile(
@@ -577,8 +621,143 @@ _RX_CALC_OUT_OF_SCOPE = re.compile(
     r"|\bhow\s+much\s+is\s+the\s+liability\s+cap\b", re.IGNORECASE)
 
 
+def _doc_dates(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """The document's own recorded effective/expiry dates, as date objects.
+
+    Reads the normalised columns rather than page prose: a date parsed out of a
+    sentence is a date the model chose, and the whole point of this module is
+    that every number in a computed answer came from a stored fact.
+    """
+    from datetime import date as _date
+    from services import db as _db
+    from sqlalchemy import text as _text
+
+    out = {"effective": None, "expiry": None}
+    try:
+        with _db.get_engine().connect() as conn:
+            row = conn.execute(_text("""
+                SELECT effective_date, expiry_date FROM documents
+                 WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+            """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+    except Exception as e:
+        logger.error("[CALC] date lookup failed for %r: %s", source_doc[:60], e)
+        return out
+    if not row:
+        return out
+    for key, raw in (("effective", row[0]), ("expiry", row[1])):
+        m = _RX_ISO_DATE.search(str(raw or ""))
+        if m:
+            try:
+                out[key] = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+    return out
+
+
+def _business_days_between(start, end) -> int:
+    """Weekdays strictly after `start` up to and including `end`.
+
+    Public holidays are deliberately NOT modelled: this corpus spans several
+    jurisdictions and holds no holiday calendar, so subtracting a guessed list
+    would produce a date that looks authoritative and is wrong. Stated as a
+    limitation in the rendered answer rather than silently approximated.
+    """
+    from datetime import timedelta
+    if end < start:
+        return -_business_days_between(end, start)
+    days, cur = 0, start
+    while cur < end:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
+
+
+def term_length(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """Calendar days between the document's effective and expiry dates."""
+    d = _doc_dates(wiki_id, session_id, source_doc)
+    if not d["effective"] or not d["expiry"]:
+        missing = ("an effective date" if not d["effective"] else "an expiry date")
+        if not d["effective"] and not d["expiry"]:
+            missing = "both a start and an end date"
+        return {"ok": False, "missing": missing,
+                "detail": "The term length is the difference between two dates, "
+                          "and this document records "
+                          + ("neither." if missing.startswith("both")
+                             else "only one of them.")}
+    days = (d["expiry"] - d["effective"]).days
+    if days < 0:
+        return {"ok": False, "missing": "dates in a usable order",
+                "detail": f"The recorded expiry date ({d['expiry'].isoformat()}) "
+                          f"is before the effective date "
+                          f"({d['effective'].isoformat()}), so no term length "
+                          "can be derived from them."}
+    return {"ok": True, "kind": "term_days", "days": days,
+            "inclusive_days": days + 1,
+            "start": d["effective"], "end": d["expiry"]}
+
+
+def date_delta(wiki_id: str, session_id: str, source_doc: str,
+               direction: str) -> dict:
+    """Days between today and the document's expiry (or effective) date.
+
+    `direction` is 'elapsed' (how long ago) or 'remaining' (how long until).
+    Both are computed against the real current date, and the answer states
+    which date it used so a reader can check it.
+    """
+    from datetime import date as _date
+    d = _doc_dates(wiki_id, session_id, source_doc)
+    anchor = d["expiry"] or d["effective"]
+    anchor_name = "expiry date" if d["expiry"] else "effective date"
+    if not anchor:
+        return {"ok": False, "missing": "a recorded date to measure from",
+                "detail": "This document records neither an effective date nor "
+                          "an expiry date, so nothing can be measured against "
+                          "today."}
+    today = _date.today()
+    delta = (today - anchor).days
+    return {"ok": True, "kind": direction, "anchor": anchor,
+            "anchor_name": anchor_name, "today": today,
+            "elapsed": delta, "remaining": -delta,
+            "already_passed": delta > 0}
+
+
+def notice_end(wiki_id: str, session_id: str, source_doc: str,
+               days: int, business: bool) -> dict:
+    """The date a notice period of `days` ends, counted from today.
+
+    Counted from today rather than from a date in the document: a notice period
+    runs from when notice is GIVEN, which is not a fact any contract states in
+    advance. The answer says so, so the reader can re-base it on the real date
+    notice went out.
+    """
+    from datetime import date as _date, timedelta
+    if not days or days < 0:
+        return {"ok": False, "missing": "a notice period in days",
+                "detail": "No number of days was named in the question, and the "
+                          "notice period could not be read from the document as "
+                          "a plain day count."}
+    start = _date.today()
+    if business:
+        cur, counted = start, 0
+        while counted < days:
+            cur += timedelta(days=1)
+            if cur.weekday() < 5:
+                counted += 1
+        end = cur
+        calendar_equiv = (end - start).days
+    else:
+        end = start + timedelta(days=days)
+        calendar_equiv = days
+    return {"ok": True, "kind": "notice_end", "start": start, "end": end,
+            "days": days, "business": business,
+            "calendar_span": calendar_equiv,
+            "business_days": _business_days_between(start, end)}
+
+
 def is_calculation_query(question: str) -> str:
-    """'total_value' | 'ld' | 'escalation' | 'out_of_scope' | ''."""
+    """'total_value' | 'ld' | 'escalation' | 'term_days' | 'elapsed' |
+    'remaining' | 'notice_end' | 'out_of_scope' | ''."""
     q = question or ""
     if _RX_CALC_OUT_OF_SCOPE.search(q):
         return "out_of_scope"
@@ -586,6 +765,16 @@ def is_calculation_query(question: str) -> str:
         return "ld"
     if _RX_CALC_ESC.search(q) and _RX_CALC_YEARS.search(q):
         return "escalation"
+    # Date kinds ahead of total_value: "how many days" carries no money word, so
+    # they cannot collide, and ahead of each other most-specific first.
+    if _RX_CALC_NOTICE_END.search(q):
+        return "notice_end"
+    if _RX_CALC_ELAPSED.search(q):
+        return "elapsed"
+    if _RX_CALC_REMAINING.search(q):
+        return "remaining"
+    if _RX_CALC_TERM_DAYS.search(q):
+        return "term_days"
     if _RX_CALC_TOTAL.search(q):
         return "total_value"
     return ""
@@ -678,6 +867,71 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
         lines.append(f"- Increase: {fmt_money(result['increase'], cur)}")
         lines.append("")
 
+    elif kind == "term_days":
+        lines.append(f"**Term length: {result['days']} days**")
+        lines.append("")
+        lines.append(f"- Effective date: {result['start'].isoformat()}")
+        lines.append(f"- Expiry date: {result['end'].isoformat()}")
+        lines.append(f"- {result['end'].isoformat()} − {result['start'].isoformat()} "
+                     f"= **{result['days']} days**")
+        lines.append(f"- Counting both endpoints as days of the term: "
+                     f"{result['inclusive_days']} days")
+        lines.append("")
+        lines.append("Both dates are the ones recorded for this document at "
+                     "ingest; the subtraction is exact.")
+        lines.append("")
+
+    elif kind in ("elapsed", "remaining"):
+        anchor = result["anchor"].isoformat()
+        today = result["today"].isoformat()
+        if kind == "elapsed":
+            if result["already_passed"]:
+                lines.append(f"**{result['elapsed']} days ago** "
+                             f"({anchor}, measured to {today})")
+            else:
+                lines.append(f"**That date has not passed yet — it is "
+                             f"{result['remaining']} days away** "
+                             f"({anchor}, measured from {today})")
+        else:
+            if result["already_passed"]:
+                lines.append(f"**No days remain — that date passed "
+                             f"{result['elapsed']} days ago** "
+                             f"({anchor}, measured to {today})")
+            else:
+                lines.append(f"**{result['remaining']} days remaining** "
+                             f"({anchor}, measured from {today})")
+        lines.append("")
+        lines.append(f"- Date used: {anchor} (the document's {result['anchor_name']})")
+        lines.append(f"- Today: {today}")
+        lines.append(f"- Difference: **{abs(result['elapsed'])} days**")
+        lines.append("")
+
+    elif kind == "notice_end":
+        unit = "business days" if result["business"] else "calendar days"
+        lines.append(f"**Notice of {result['days']} {unit} given today "
+                     f"({result['start'].isoformat()}) ends "
+                     f"{result['end'].isoformat()}**")
+        lines.append("")
+        lines.append(f"- Start: {result['start'].isoformat()}")
+        lines.append(f"- Period: {result['days']} {unit}")
+        lines.append(f"- End: **{result['end'].isoformat()}**")
+        if result["business"]:
+            lines.append(f"- That is {result['calendar_span']} calendar days, "
+                         f"because weekends do not count toward the period.")
+        else:
+            lines.append(f"- Of which {result['business_days']} are weekdays.")
+        lines.append("")
+        lines.append("**Counted from today, not from a date in the document** — a "
+                     "notice period runs from when notice is actually given, which "
+                     "no contract states in advance. Re-base it on the real notice "
+                     "date if that differs.")
+        lines.append("")
+        lines.append("Weekends are excluded; public holidays are **not** — this "
+                     "corpus spans several jurisdictions and holds no holiday "
+                     "calendar, and a guessed one would move this date without "
+                     "saying so.")
+        lines.append("")
+
     lines.append(f"Document: {doc_label}")
     lines.append("")
     lines.append("Computed in Python from the values this document states, not by "
@@ -740,6 +994,7 @@ def answer(question: str, wiki_id: str, session_id: str,
         return None
 
     weeks = years = 0
+    notice_days, notice_business = 0, False
     if kind == "ld":
         m = _RX_CALC_LD_WEEKS.search(question)
         weeks = parse_periods(m.group(0), "weeks?") if m else 0
@@ -750,6 +1005,14 @@ def answer(question: str, wiki_id: str, session_id: str,
         years = parse_periods(m.group(0), "years?") if m else 0
         if not years:
             return None
+    elif kind == "notice_end":
+        m = _RX_CALC_DAYS_N.search(question)
+        notice_days = parse_periods(m.group(0), "days?") if m else 0
+        notice_business = bool(_RX_CALC_BUSINESS_DAYS.search(question))
+        # Without a day count there is nothing to add to a date. Falling through
+        # to retrieval is right: the clause stating the period is the answer.
+        if not notice_days:
+            return None
 
     sections, used, any_ok = [], [], False
     for source_doc in docs[:_MAX_CALC_DOCS]:
@@ -759,6 +1022,13 @@ def answer(question: str, wiki_id: str, session_id: str,
                 result = total_contract_value(wiki_id, session_id, source_doc)
             elif kind == "ld":
                 result = ld_exposure(wiki_id, session_id, source_doc, weeks)
+            elif kind == "term_days":
+                result = term_length(wiki_id, session_id, source_doc)
+            elif kind in ("elapsed", "remaining"):
+                result = date_delta(wiki_id, session_id, source_doc, kind)
+            elif kind == "notice_end":
+                result = notice_end(wiki_id, session_id, source_doc,
+                                    notice_days, notice_business)
             else:
                 result = escalation(wiki_id, session_id, source_doc, years)
         except Exception as e:
