@@ -11154,6 +11154,46 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                 else:
                     logger.info("Date match %s discarded — mentions neither party named "
                                 "in the question", _norm_doc_name(date_doc))
+            # Still ambiguous and no date to break it — try the document this
+            # conversation is already anchored to. Two documents can share both
+            # party names (the same pair often signs an NDA AND a Service
+            # Agreement), which is exactly what leaves pair_docs with more than
+            # one member here; when the prior turn was pinned to some OTHER
+            # document that a recorded document_relations edge connects to
+            # exactly one of the candidates (e.g. an SA that amends, or is
+            # referenced by, one of the two party-pair documents but not the
+            # other), that structural link is a better tiebreak than leaving
+            # both for the answer LLM. Never on a compound question, same
+            # reasoning as the date check above.
+            if len(pair_docs) > 1:
+                try:
+                    _anchor_turn = _last_document_turn(
+                        _db.get_recent_answer_scope(chat_session_id or session_id,
+                                                     n=_CARRYOVER_LOOKBACK))
+                    anchor_docs = set((_anchor_turn or {}).get("docs") or []) - pair_docs
+                except Exception as e:
+                    logger.error("resolve_scope: anchor lookup for reference "
+                                 "tiebreak failed: %s", e)
+                    anchor_docs = set()
+                if anchor_docs:
+                    try:
+                        linked: set[str] = set()
+                        for _a in anchor_docs:
+                            _rel = _db.get_document_relations(_active_wiki_id(), session_id, _a)
+                            linked |= {r["doc"] for r in _rel["outgoing"] if r.get("doc")}
+                            linked |= {r["doc"] for r in _rel["incoming"] if r.get("doc")}
+                    except Exception as e:
+                        logger.error("resolve_scope: document_relations tiebreak "
+                                     "lookup failed: %s", e)
+                        linked = set()
+                    ref_docs = pair_docs & linked
+                    if len(ref_docs) == 1:
+                        logger.info(
+                            "Party-pair match %d document(s) pinned to 1 by a "
+                            "document_relations link to conversation anchor %s: %s",
+                            len(pair_docs), {_norm_doc_name(d) for d in anchor_docs},
+                            _norm_doc_name(next(iter(ref_docs))))
+                        pair_docs = ref_docs
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(pair_docs),
              "target_family": None, "is_broad": False,
