@@ -20,3 +20,9 @@ langchain-core
 azure-ai-evaluation
 azure-identity
 cryptography>=42.0
+# Phase 5 — Date/Deadline Agent. Public-holiday calendars for business-day
+# offsets, resolved per document from its own Business Day clause or its
+# recorded jurisdiction. Pure Python, no network call at runtime. Optional by
+# design: services/calculation.py falls back to weekday-only counting and says
+# so in the answer if the import fails.
+holidays>=0.50
