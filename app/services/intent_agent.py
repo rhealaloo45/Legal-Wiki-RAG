@@ -1242,22 +1242,26 @@ def generate_answer_node(state: QueryState) -> dict:
             f"or its distinctive counterparty."
         )
 
-    # A numbered document reference matched BOTH the real document and a synthetic
-    # Test_* stand-in of the same number — both were pinned into context and the
-    # answer may have been drawn from the fictional stand-in rather than the real
-    # document (confirmed live: a GridEdge SHA question answered from Test_SHA_01's
-    # invented parties). Warn so the reader can verify which document the facts
-    # actually came from.
+    # A numbered document reference matched BOTH the real document and a secondary
+    # stand-in of the same number — a synthetic Test_* file, or an unrelated document
+    # from the corpus's separate bulk-numbered set (a different naming convention,
+    # zero-padding to the same number) — both were pinned into context, and the
+    # answer may have been drawn from the wrong one (confirmed live: a GridEdge SHA
+    # question answered from Test_SHA_01's invented parties; separately, "Service
+    # Agreement 2" collided with the unrelated bulk-corpus "Service_Agreement_002").
+    # Warn so the reader can verify which document the facts actually came from,
+    # without asserting which kind of secondary document it was — wiki.py's own
+    # matcher prefers the real document when it can tell, so a reader seeing this
+    # warning is in the harder case where the collision was still ambiguous.
     _collisions = _scope.get("doc_collisions") or []
     if _collisions and not _scope_warning:
         _names = ", ".join(f'"{c}"' for c in _collisions[:3])
         _scope_warning = (
-            f"For {_names}, this corpus contains BOTH a real document and a "
-            f"synthetic \"Test_\" stand-in of the same number — both were searched, "
-            f"so some facts below (party names, figures, clause numbers) may come "
-            f"from the fictional stand-in rather than the real document. Verify each "
-            f"cited figure against the document named in the References section "
-            f"before relying on it."
+            f"For {_names}, this corpus contains BOTH the curated document and an "
+            f"unrelated secondary document that zero-pads to the same number — both "
+            f"were searched, so some facts below (party names, figures, clause "
+            f"numbers) may come from the wrong one. Verify each cited figure against "
+            f"the document named in the References section before relying on it."
         )
 
     try:
@@ -2685,11 +2689,106 @@ _RX_GAP_FIELD = re.compile(
     r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?)\b",
     re.IGNORECASE)
 
+# A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
+# — is an instruction about the reply, not a property being asked of documents.
+# _RX_GAP only requires a question word and a negation within 80 characters of
+# each other, so "Show … don't" satisfied it while "termination-for-convenience"
+# satisfied the field, and a precedent question was answered as a corpus gap
+# scan. Confirmed live: "Have we agreed to a 30-day termination-for-convenience
+# notice period before? Show precedent, don't draft anything new." returned
+# "416 document(s) state no termination provision" in 0.9s — fast, structured,
+# and about nothing the question asked. Fast and wrong is worse than slow.
+_RX_GAP_INSTRUCTION_VETO = re.compile(
+    r"\b(?:do\s+not|don't|doesn't|does\s+not|without|no\s+need\s+to)\s+"
+    r"(?:\w+\s+){0,2}?"
+    r"(?:draft|drafting|generate|generating|writ(?:e|ing)|creat(?:e|ing)|"
+    r"invent|inventing|produc(?:e|ing)|propos(?:e|ing)|suggest(?:ing)?|"
+    r"summaris(?:e|ing)|summariz(?:e|ing)|paraphras(?:e|ing))\b",
+    re.IGNORECASE)
+
 _RX_TREND = re.compile(
     r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend|trending|"
     r"year[- ]on[- ]year|by\s+year|changed?\s+since|historically|"
     r"getting\s+(?:longer|shorter|higher|lower|bigger|smaller))\b",
     re.IGNORECASE)
+
+# A date-range question over the corpus. Same shape of failure the aggregate and
+# gap branches exist to prevent, and confirmed live in the same way: "Which
+# Service Agreements have a term ending on or before 31 March 2026?" was
+# answered "None" from four retrieved pages, while the document that ends on
+# exactly that date was never retrieved. A range over a column is not something
+# a sample of pages can establish, least of all a negative.
+_RX_EXPIRY = re.compile(
+    r"\b(?:expir\w*|terminat\w*|end(?:s|ing)?|due|lapse[sd]?|run\s+out|"
+    r"come\s+up\s+for\s+renewal|renew\w*)\b",
+    re.IGNORECASE)
+_RX_EXPIRY_WINDOW = re.compile(
+    r"\b(?:on\s+or\s+before|before|by|prior\s+to|earlier\s+than|"
+    r"within\s+the\s+next|in\s+the\s+next|within|next|this)\b",
+    re.IGNORECASE)
+# Only a corpus-shaped question: "which/what/list/show/how many …", never a
+# question about one named instrument ("when does the Voltas NDA expire").
+_RX_EXPIRY_PLURAL = re.compile(
+    r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,60}?"
+    r"\b(?:agreements?|contracts?|documents?|ndas?|msas?|leases?|"
+    r"licen[cs]es?|sows?)\b",
+    re.IGNORECASE)
+
+_MONTHS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], start=1)}
+_RX_DATE_DMY = re.compile(
+    r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\s+(\d{4})\b")
+_RX_DATE_MDY = re.compile(
+    r"\b([A-Za-z]{3,9})\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b")
+_RX_DATE_ISO2 = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_RX_REL_DAYS = re.compile(
+    r"\b(?:next|within|in)\s+(?:the\s+)?(\d{1,4})\s*days?\b", re.IGNORECASE)
+_RX_REL_MONTHS = re.compile(
+    r"\b(?:next|within|in)\s+(?:the\s+)?(\d{1,2})\s*months?\b", re.IGNORECASE)
+
+
+def _expiry_cutoff(question: str):
+    """The ISO cutoff date a temporal question names, or None.
+
+    Absolute dates are taken as written. Relative windows are resolved against
+    today, because "the next 90 days" means nothing without a today — and the
+    rendered answer states the date it resolved to, so a reader can see which
+    day the window was measured from.
+    """
+    from datetime import date, timedelta
+    q = question or ""
+
+    def _mk(y, mo, d):
+        try:
+            return date(int(y), int(mo), int(d)).isoformat()
+        except ValueError:
+            return None
+
+    m = _RX_DATE_ISO2.search(q)
+    if m:
+        return _mk(m.group(1), m.group(2), m.group(3))
+    m = _RX_DATE_DMY.search(q)
+    if m and m.group(2).lower() in _MONTHS:
+        return _mk(m.group(3), _MONTHS[m.group(2).lower()], m.group(1))
+    m = _RX_DATE_MDY.search(q)
+    if m and m.group(1).lower() in _MONTHS:
+        return _mk(m.group(3), _MONTHS[m.group(1).lower()], m.group(2))
+
+    today = date.today()
+    m = _RX_REL_DAYS.search(q)
+    if m:
+        return (today + timedelta(days=int(m.group(1)))).isoformat()
+    m = _RX_REL_MONTHS.search(q)
+    if m:
+        return (today + timedelta(days=30 * int(m.group(1)))).isoformat()
+    if re.search(r"\bthis\s+quarter\b", q, re.I):
+        q_end_month = ((today.month - 1) // 3 + 1) * 3
+        last = 31 if q_end_month in (3, 12) else 30
+        return date(today.year, q_end_month, last).isoformat()
+    if re.search(r"\bthis\s+year\b", q, re.I):
+        return date(today.year, 12, 31).isoformat()
+    return None
 
 
 def _is_analytics_query(question: str) -> str:
@@ -2704,7 +2803,22 @@ def _is_analytics_query(question: str) -> str:
     q = question or ""
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
-    if _RX_GAP.search(q) and _RX_GAP_FIELD.search(q):
+    # Ahead of gap: "which agreements do not expire before March" would satisfy
+    # both, and the date range is the more specific reading. Needs all four
+    # signals — a corpus-shaped plural, an expiry word, a window word, and a
+    # date it can actually resolve — so a question about one named document's
+    # expiry still reaches retrieval, where the clause is the better answer.
+    if (_RX_EXPIRY_PLURAL.search(q) and _RX_EXPIRY.search(q)
+            and _RX_EXPIRY_WINDOW.search(q) and _expiry_cutoff(q)):
+        return "expiry"
+    # The clause-precedent check is the narrower, better-matched detector for
+    # "have we agreed to X before" and it runs LATER in the dispatch order, so
+    # without this veto the gap branch reaches those questions first and answers
+    # something else entirely. Vetoed here rather than reordered: the ordering
+    # above it was chosen for reasons of its own, and a veto changes one branch.
+    if (_RX_GAP.search(q) and _RX_GAP_FIELD.search(q)
+            and not _RX_GAP_INSTRUCTION_VETO.search(q)
+            and not _is_clause_precedent_query(q)):
         return "gap"
     if (_RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q)
             and not _RX_AGG_VETO.search(q)
@@ -2838,6 +2952,42 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                              "on purpose: reporting a contract as uncapped when its cap is "
                              "recorded in a schedule would be a worse error than omitting it.")
             payload = _canned_payload("\n".join(lines), "Gap analysis", "structured-analytics")
+
+        elif kind == "expiry":
+            cutoff = _expiry_cutoff(question)
+            if not cutoff:
+                return None
+            # The instrument type the question names, if any — "which SERVICE
+            # AGREEMENTS expire" should not be answered over the whole corpus.
+            _dt = None
+            _m = re.search(
+                r"\b((?:service|shareholder|joint\s+venture|licen[cs]e|lease|"
+                r"supply|employment|loan|escrow|consultancy|master\s+services)"
+                r"\s+agreements?|ndas?|msas?|sows?)\b", question or "", re.I)
+            if _m:
+                _dt = _m.group(1)
+            data = analytics.expiring_by(wiki_id, session_id, cutoff,
+                                         doc_type=_dt, parties=parties or None)
+            if data.get("error"):
+                return None
+            scope_label = f"{_dt} " if _dt else "document"
+            lines = [f"**{data['match_count']} {scope_label}(s) with a recorded "
+                     f"expiry on or before {cutoff}.**", ""]
+            for d in data["matching"][:20]:
+                lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])} — expires "
+                             f"{d['expiry_date']}")
+            if data["match_count"] > len(data["matching"][:20]):
+                lines.append(f"- …and {data['match_count'] - 20} more")
+            lines += ["", f"*{data['note']}*"]
+            if data["undated"]:
+                lines += ["", f"**Coverage, stated plainly:** {data['dated']} of "
+                              f"{data['in_scope']} document(s) in scope record an "
+                              f"expiry date at all. The other {data['undated']} are "
+                              f"not claimed to match or not match — for those this "
+                              f"question cannot be answered from stored data, and "
+                              f"a list that silently omitted them would read as "
+                              f"though they had been checked."]
+            payload = _canned_payload("\n".join(lines), "Expiry", "structured-analytics")
 
         elif kind == "trend":
             metric = ("contract_value"
