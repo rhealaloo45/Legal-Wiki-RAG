@@ -48,13 +48,19 @@ def _enabled() -> bool:
 
 
 def _neighbours(conn, text, wiki_id: str, session_id: str, doc: str,
-                labels: tuple[str, ...] | None) -> list[tuple[str, str]]:
-    """One hop out from `doc`, in both directions. Returns (doc, label) pairs.
+                labels: tuple[str, ...] | None) -> list[tuple[str, str, str]]:
+    """One hop out from `doc`, in both directions. (doc, label, direction).
 
     Both directions matter and only one of them is visible from a document's
     own text: "what does this amend" is written into this document, while
     "what amends this" exists only as a row created when the OTHER document
     was ingested.
+
+    The direction is returned, not discarded, because the label is not
+    symmetric. Walking an incoming "amends" edge and reporting it as though it
+    ran the other way turns "the amendment amends the agreement" into "the
+    agreement amends the amendment" — which the version-chain answer printed,
+    directly under the true statement, as a second bullet.
     """
     params = {"w": wiki_id, "sid": session_id, "d": doc}
     label_sql = ""
@@ -62,15 +68,15 @@ def _neighbours(conn, text, wiki_id: str, session_id: str, doc: str,
         params["labels"] = list(labels)
         label_sql = " AND label = ANY(:labels)"
     rows = conn.execute(text(f"""
-        SELECT to_doc AS other, label FROM document_relations
+        SELECT to_doc AS other, label, 'out' AS dir FROM document_relations
          WHERE wiki_id = :w AND session_id = :sid AND from_doc = :d
            AND resolved AND to_doc IS NOT NULL{label_sql}
         UNION
-        SELECT from_doc AS other, label FROM document_relations
+        SELECT from_doc AS other, label, 'in' AS dir FROM document_relations
          WHERE wiki_id = :w AND session_id = :sid AND to_doc = :d
            AND resolved AND from_doc IS NOT NULL{label_sql}
     """), params).fetchall()
-    return [(r[0], r[1]) for r in rows if r[0]]
+    return [(r[0], r[1], r[2]) for r in rows if r[0]]
 
 
 def traverse(wiki_id: str, session_id: str, source_doc: str,
@@ -93,6 +99,7 @@ def traverse(wiki_id: str, session_id: str, source_doc: str,
 
     seen: dict[str, int] = {source_doc: 0}
     edges: list[dict] = []
+    edge_keys: set = set()
     frontier_truncated = False
     hit_hop_cap = False
 
@@ -107,9 +114,18 @@ def traverse(wiki_id: str, session_id: str, source_doc: str,
                 if _neighbours(conn, text, wiki_id, session_id, doc, labels):
                     hit_hop_cap = True
                 continue
-            for other, label in _neighbours(conn, text, wiki_id, session_id, doc, labels):
-                edges.append({"from": doc, "to": other, "label": label,
-                              "hop": dist + 1})
+            for other, label, direction in _neighbours(
+                    conn, text, wiki_id, session_id, doc, labels):
+                # Recorded as the edge actually runs, not as the walk found it.
+                _e = ((doc, other) if direction == "out" else (other, doc))
+                # An undirected walk meets every edge twice, once from each
+                # end; with the orientation preserved both sightings are now
+                # the same edge, so the second is a duplicate rather than a
+                # contradictory second bullet.
+                if (_e[0], _e[1], label) not in edge_keys:
+                    edge_keys.add((_e[0], _e[1], label))
+                    edges.append({"from": _e[0], "to": _e[1], "label": label,
+                                  "hop": dist + 1})
                 if other in seen:
                     continue
                 if len(seen) >= max_docs:
