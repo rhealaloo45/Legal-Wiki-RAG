@@ -77,6 +77,20 @@ def _get_unembedded_pages(conn, session_id: str) -> list[tuple[str, str]]:
     return result
 
 
+def _session_wiki_id(conn, session_id: str) -> str:
+    """The wiki_id already stamped on this session's pages — a session never
+    spans two wikis (see services/wikis.py), so any one row's value is the
+    session's value. Falls back to the default wiki for a session with no
+    pages yet (nothing to backfill for it anyway)."""
+    from sqlalchemy import text
+    from services import db as _db
+    row = conn.execute(
+        text("SELECT wiki_id FROM pages WHERE session_id = :sid LIMIT 1"),
+        {"sid": session_id},
+    ).first()
+    return row[0] if row and row[0] else _db.DEFAULT_WIKI_ID
+
+
 def backfill(target_session: str | None = None, batch_size: int = 16) -> dict:
     import config
 
@@ -110,6 +124,7 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> dict:
     for session_id in sessions:
         with engine.connect() as conn:
             pages = _get_unembedded_pages(conn, session_id)
+            wiki_id = _session_wiki_id(conn, session_id)
 
         if not pages:
             logger.info("  [%s] already fully embedded — skipping", session_id)
@@ -137,7 +152,7 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> dict:
 
             for title, embedding in zip(titles, embeddings):
                 try:
-                    _db.upsert_embedding(session_id, title, embedding)
+                    _db.upsert_embedding(wiki_id, session_id, title, embedding)
                     session_embedded += 1
                 except Exception as e:
                     logger.error("    upsert_embedding failed for '%s': %s", title, e)
@@ -157,7 +172,7 @@ def backfill(target_session: str | None = None, batch_size: int = 16) -> dict:
         # metadata (backfill path doesn't know each page's family at embed time),
         # so family-filtered vector search works for backfilled corpora too.
         try:
-            fam_updated = _db.backfill_embedding_families(session_id)
+            fam_updated = _db.backfill_embedding_families(wiki_id, session_id)
             if fam_updated:
                 logger.info("  [%s] doc_family populated on %d embedding rows", session_id, fam_updated)
         except Exception as _fam_err:

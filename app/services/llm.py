@@ -143,6 +143,21 @@ def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None,
     return kwargs
 
 
+def _cached_prompt_tokens(response) -> int:
+    """How many prompt tokens the provider served from its cache.
+
+    Azure and OpenAI both discount a prompt prefix they have seen recently, but
+    only report it under usage.prompt_tokens_details.cached_tokens, which nothing
+    here was reading - so a cache hit and a cold call looked identical in the
+    cost figures. Returns 0 when the provider does not report the field.
+    """
+    try:
+        return int(getattr(getattr(response.usage, "prompt_tokens_details", None),
+                           "cached_tokens", 0) or 0)
+    except Exception:
+        return 0
+
+
 def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool = False,
         reasoning_effort: str = None) -> tuple[str, dict]:
     """Send a prompt to the selected LLM and return the response text and usage dict.
@@ -178,6 +193,7 @@ def ask(prompt: str, pipeline: str = "wiki", max_tokens: int = None, fast: bool 
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "cached_prompt_tokens": _cached_prompt_tokens(response),
             "finish_reason": getattr(response.choices[0], "finish_reason", None),
         }
         _trace = tracing.get_trace()
@@ -233,6 +249,7 @@ def ask_vision(image_b64: str, prompt: str, max_tokens: int = 4096, fast: bool =
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "cached_prompt_tokens": _cached_prompt_tokens(response),
         }
         return content, usage
     except RateLimitError:
@@ -279,6 +296,7 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
         usage = {
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
+            "cached_prompt_tokens": _cached_prompt_tokens(response),
         }
         return content, usage
 
