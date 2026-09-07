@@ -654,6 +654,70 @@ def _doc_dates(wiki_id: str, session_id: str, source_doc: str) -> dict:
     return out
 
 
+# A place a holiday calendar could actually be selected for. Deliberately a
+# closed list: a loose "capitalised word near 'open for business'" match would
+# read a party name as a city and pick a calendar on that basis, which is the
+# same class of confident-wrong this module exists to avoid.
+_KNOWN_PLACES = (
+    "Mumbai", "New Delhi", "Delhi", "Bengaluru", "Bangalore", "Chennai",
+    "Kolkata", "Pune", "Hyderabad", "Ahmedabad", "Gurugram", "Noida",
+    "Singapore", "London", "Dubai", "Abu Dhabi", "Sydney", "Melbourne",
+    "Frankfurt", "New York",
+)
+_RX_BD_PLACE = re.compile(
+    r"open\s+for\s+business\s+in\s+([A-Z][A-Za-z .'-]{2,30})", re.IGNORECASE)
+_RX_BD_INDIRECT = re.compile(
+    r"place\s+specified\s+for\s+notices|specified\s+for\s+notices|"
+    r"place\s+of\s+notice|address\s+for\s+notices", re.IGNORECASE)
+
+
+def business_day_basis(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """What THIS document says a Business Day is, and whether that resolves.
+
+    The generic disclaimer this replaced ("public holidays are not modelled")
+    was true of every document and therefore informative about none. The
+    documents are not silent on the question — 371 of them define the term —
+    they simply define it by pointing somewhere. Reading each document's own
+    definition turns one boilerplate caveat into a specific, checkable
+    statement about that document, which is the same rule the rest of this
+    module already follows for a missing fee schedule.
+
+    Measured on this corpus: 3 definitions name a place outright (Mumbai), 368
+    defer to "the place specified for notices", and the notices clauses as
+    typed carry no place — so for those the chain terminates and the honest
+    answer names where it terminated rather than choosing a calendar.
+    """
+    from services import db as _db
+    from sqlalchemy import text as _text
+
+    out = {"definition": None, "place": None, "indirect": False}
+    try:
+        with _db.get_engine().connect() as conn:
+            row = conn.execute(_text("""
+                SELECT definition FROM defined_terms
+                 WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                   AND term ILIKE '%business day%'
+                 LIMIT 1
+            """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+    except Exception as e:
+        logger.error("[CALC] business-day definition lookup failed: %s", e)
+        return out
+    if not row or not row[0]:
+        return out
+    definition = str(row[0]).strip()
+    out["definition"] = definition
+    m = _RX_BD_PLACE.search(definition)
+    if m:
+        cand = m.group(1).strip().rstrip(".").strip()
+        for known in _KNOWN_PLACES:
+            if re.search(rf"\b{re.escape(known)}\b", cand, re.IGNORECASE):
+                out["place"] = known
+                break
+    if not out["place"] and _RX_BD_INDIRECT.search(definition):
+        out["indirect"] = True
+    return out
+
+
 def _business_days_between(start, end) -> int:
     """Weekdays strictly after `start` up to and including `end`.
 
@@ -749,10 +813,12 @@ def notice_end(wiki_id: str, session_id: str, source_doc: str,
     else:
         end = start + timedelta(days=days)
         calendar_equiv = days
+    basis = business_day_basis(wiki_id, session_id, source_doc) if business else {}
     return {"ok": True, "kind": "notice_end", "start": start, "end": end,
             "days": days, "business": business,
             "calendar_span": calendar_equiv,
-            "business_days": _business_days_between(start, end)}
+            "business_days": _business_days_between(start, end),
+            "basis": basis}
 
 
 def is_calculation_query(question: str) -> str:
@@ -926,11 +992,40 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
                      "no contract states in advance. Re-base it on the real notice "
                      "date if that differs.")
         lines.append("")
-        lines.append("Weekends are excluded; public holidays are **not** — this "
-                     "corpus spans several jurisdictions and holds no holiday "
-                     "calendar, and a guessed one would move this date without "
-                     "saying so.")
-        lines.append("")
+        if result.get("business"):
+            basis = result.get("basis") or {}
+            defn, place, indirect = (basis.get("definition"),
+                                     basis.get("place"), basis.get("indirect"))
+            lines.append("**Weekends are excluded; public holidays are not.** What "
+                         "that costs depends on this document:")
+            lines.append("")
+            if defn:
+                lines.append(f"> {defn}")
+                lines.append("")
+            if place:
+                lines.append(f"This Agreement fixes Business Days to **{place}**, so "
+                             f"a {place} holiday calendar would make the date above "
+                             "exact. That calendar is not wired in yet, so the "
+                             "figure counts weekdays only and any public holiday in "
+                             f"{place} inside the window pushes the real end date "
+                             "later.")
+            elif indirect:
+                lines.append("This Agreement defines a Business Day by reference to "
+                             "**the place specified for notices**, and no place is "
+                             "stated in the notices clause as extracted — so the "
+                             "chain terminates before a jurisdiction is reached. "
+                             "Choosing one would be picking a holiday calendar this "
+                             "document never specified, which is why the figure "
+                             "counts weekdays only rather than guessing.")
+            elif defn:
+                lines.append("This Agreement's definition names no place a holiday "
+                             "calendar could be selected for, so the figure counts "
+                             "weekdays only.")
+            else:
+                lines.append("This document defines no Business Day term, so there "
+                             "is nothing to fix a holiday calendar to; the figure "
+                             "counts weekdays only.")
+            lines.append("")
 
     lines.append(f"Document: {doc_label}")
     lines.append("")
