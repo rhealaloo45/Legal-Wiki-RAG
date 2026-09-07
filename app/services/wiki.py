@@ -3229,6 +3229,81 @@ _DATED_RE = re.compile(
 )
 
 
+# A compliance question measured against a statute rather than against a
+# document in the corpus. The corpus holds contracts, opinions and judgments —
+# it does not hold the Acts themselves, so whether an agreement satisfies one
+# is not a question these pages can settle. Left to the prompt alone the
+# behaviour split three ways on three near-identical questions: a GDPR question
+# was declined cleanly, a DPDP Act question was answered by listing the
+# obligations that "bear on" compliance, and a Trade Marks Act question was
+# answered outright under stated assumptions. The first is right; a lawyer
+# reading the other two could reasonably come away believing the document had
+# been checked against the statute.
+_RX_STATUTE_NAMED = re.compile(
+    r"\b((?:[A-Z][\w'&.-]*\s+(?:(?:and|of|the|for|on)\s+)?){0,6}"
+    r"(?:Act|Rules|Regulations|Code|Directive|Convention|Ordinance)"
+    r"(?:[,\s]+\d{4})?)")
+_RX_STATUTE_ACRONYM = re.compile(
+    r"\b(GDPR|CCPA|HIPAA|DPDP|SOX|PCI[-\s]?DSS|FCPA|UK\s+GDPR)\b")
+_RX_COMPLIANCE_ASK = re.compile(
+    r"\b(?:compl(?:y|ies|iant|iance)|conform(?:s|ing)?|satisf(?:y|ies|ying)|"
+    r"adhere(?:s|nce)?|meet(?:s)?\s+the\s+requirements|in\s+breach\s+of|"
+    r"violat(?:e|es|ion)|permitted\s+under|lawful\s+under|valid\s+under)\b",
+    re.IGNORECASE)
+# The house playbook is a document this corpus DOES hold, so a compliance
+# question about it is answerable and must not be intercepted.
+_RX_HOUSE_STANDARD = re.compile(
+    r"\b(?:playbook|house\s+(?:standard|position|policy|rules?)|"
+    r"our\s+(?:standard|policy|template|precedent)|company\s+rules?)\b",
+    re.IGNORECASE)
+
+
+def _external_law_directive(question: str, session_id: str) -> str | None:
+    """Refuse a compliance verdict against a statute the corpus does not hold.
+
+    Deliberately does not suppress the answer. What the documents say about the
+    subject is genuinely useful and the lawyer asked for it; what they cannot
+    support is the verdict. So the directive separates the two rather than
+    turning a real question into a blanket refusal.
+    """
+    q = question or ""
+    if not _RX_COMPLIANCE_ASK.search(q) or _RX_HOUSE_STANDARD.search(q):
+        return None
+    m = _RX_STATUTE_ACRONYM.search(q) or _RX_STATUTE_NAMED.search(q)
+    if not m:
+        return None
+    statute = m.group(1).strip(" ,")
+    if len(statute) < 3:
+        return None
+
+    # If the instrument itself is in the corpus the question is answerable and
+    # this directive would be actively wrong.
+    try:
+        from services import db as _db
+        head = re.split(r"[,\d]", statute)[0].strip()
+        if head and len(head) > 4:
+            hits = _db.list_documents_matching(
+                _active_wiki_id(), session_id, None, [head], None, limit=1)
+            if hits.get("total"):
+                return None
+    except Exception:
+        pass
+
+    return (
+        f"this question asks whether something COMPLIES WITH \"{statute}\". "
+        f"That statute is not among these documents, and a contract's own text "
+        f"cannot establish whether it satisfies a law. Do NOT give a compliance "
+        f"verdict, a partial verdict, or a list of ways the document \"supports\" "
+        f"or \"bears on\" compliance — all three read as an assessment that was "
+        f"never performed. Open by saying plainly that compliance with "
+        f"\"{statute}\" cannot be determined from these documents, because the "
+        f"statute is not in this corpus. THEN, clearly under a separate heading, "
+        f"set out what the documents actually do say on the subject matter, as "
+        f"the documents' own terms and not as evidence of compliance. Do not "
+        f"state assumptions that would let you answer the compliance question "
+        f"anyway.")
+
+
 def _amendment_family_directive(question: str) -> str | None:
     """Say which of an amendment family's two documents states the value asked for.
 
@@ -5890,6 +5965,22 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         f"AMBIGUOUS DOCUMENT DESCRIPTION: {ambiguity_directive}\n\n"
     ) if ambiguity_directive else ""
 
+    # Prepended with the others, and first among them, for the same reason: it
+    # has to beat the REQUIRED OUTPUT FORMAT directive at the end of every
+    # template, which otherwise pulls the model into answering the question as
+    # asked. What may not be said is a more fundamental constraint than how the
+    # answer is laid out.
+    try:
+        _ext_law = _external_law_directive(question, session_id)
+    except Exception as _e_err:
+        logger.warning("External-law directive unavailable: %s", _e_err)
+        _ext_law = None
+    if _ext_law:
+        logger.info("External-law compliance directive applied")
+    _external_law_note = (
+        f"OUT-OF-CORPUS STANDARD: {_ext_law}\n\n"
+    ) if _ext_law else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -5927,7 +6018,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         except Exception as _p_err:
             logger.warning("Precedent clauses unavailable for drafting intent: %s",
                            _p_err)
-    prompt = (_ambiguity_directive_note + _unconfirmed_doc_note
+    prompt = (_external_law_note + _ambiguity_directive_note
+              + _unconfirmed_doc_note
               + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
         question=question,

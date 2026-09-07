@@ -4552,6 +4552,133 @@ def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
             "AND (%s)" % clauses), params).scalar() or 0
 
 
+def list_documents_matching(wiki_id: str, session_id: str,
+                            parties: list[str] | None = None,
+                            doc_type_patterns: list[str] | None = None,
+                            content_phrase: str | None = None,
+                            limit: int = 60) -> dict:
+    """Every document matching a party, a type, and optionally a phrase.
+
+    The counting function next door answers "how many"; this answers "list
+    every", and the difference matters more than it looks. Asked to show every
+    shareholders' agreement naming one company as lead strategic shareholder,
+    retrieval named one. Five hold that term. Retrieval had no way to know it
+    had stopped early — it reported what it fetched, and a set question
+    answered from a sample reads exactly like a complete answer.
+
+    `content_phrase` is matched against page text so a question about a ROLE
+    ("...is the lead strategic shareholder") is not silently widened to mere
+    party membership, which would sweep in agreements where the company is a
+    party in some other capacity.
+    """
+    from sqlalchemy import text
+    clauses = ["d.wiki_id = :w", "d.session_id = :sid"]
+    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
+
+    for i, party in enumerate(parties or []):
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                COALESCE(d.parties, '[]'::jsonb)) AS p(name)
+            WHERE p.name ILIKE :party{i})""")
+        params[f"party{i}"] = f"%{party.strip()}%"
+
+    _patterns = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if _patterns:
+        _ors = []
+        for i, pat in enumerate(_patterns):
+            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{pat}%"
+        clauses.append("(" + " OR ".join(_ors) + ")")
+
+    if content_phrase:
+        clauses.append("""EXISTS (
+            SELECT 1 FROM pages pg
+             WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
+               AND pg.source_doc = d.source_doc
+               AND pg.content ILIKE :phrase)""")
+        params["phrase"] = f"%{content_phrase.strip()}%"
+
+    where = " AND ".join(clauses)
+    with get_engine().connect() as conn:
+        total = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        rows = conn.execute(text(f"""
+            SELECT d.source_doc, d.doc_type, d.effective_date
+              FROM documents d WHERE {where}
+             ORDER BY d.source_doc LIMIT :lim
+        """), params).fetchall()
+    docs = [{"source_doc": r[0], "doc_type": r[1],
+             "effective_date": str(r[2]) if r[2] else None} for r in rows]
+    return {"total": int(total), "documents": docs,
+            "truncated": int(total) > len(docs),
+            "parties": parties or [], "content_phrase": content_phrase}
+
+
+def find_documents_by_date(wiki_id: str, session_id: str,
+                           iso_date: str) -> list[dict]:
+    """Documents carrying `iso_date` as their effective date or in their name.
+
+    A lawyer names an instrument by its date at least as often as by its title
+    — "the amendment agreement dated 24 May 2021" — and until this existed
+    nothing in the pipeline could act on that half of the reference. The
+    document was found by embedding the whole question and voting on the pages
+    that came back, which ranks on subject matter; a date contributes almost
+    nothing to a similarity score, so the vote landed on whichever document
+    talked most about amendments and the real one was never considered. Asked
+    for that agreement's amendment history the system reported the document was
+    not in the corpus, while the corpus held it and held the amends edge too.
+
+    Both storage locations are checked because the corpus populates them
+    unevenly: effective_date is authoritative where it is set, and the filename
+    carries the date on documents whose date was never extracted.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.source_doc, d.doc_type, d.effective_date, d.expiry_date
+              FROM documents d
+             WHERE d.wiki_id = :w AND d.session_id = :s
+               AND (substring(COALESCE(d.effective_date,'') from 1 for 10) = :iso
+                    OR d.source_doc LIKE :like)
+             ORDER BY d.source_doc
+             LIMIT 40
+        """), {"w": wiki_id, "s": session_id, "iso": iso_date,
+               "like": f"%{iso_date}%"}).fetchall()
+    return [{"source_doc": r[0], "doc_type": r[1],
+             "effective_date": str(r[2]) if r[2] else None,
+             "expiry_date": str(r[3]) if r[3] else None} for r in rows]
+
+
+def documents_with_relations(wiki_id: str, session_id: str,
+                             candidates: list[str]) -> set:
+    """Which of `candidates` appear at either end of a recorded relation edge.
+
+    Used only to break a tie between documents that are the same instrument
+    ingested twice — the OCR retry and the original carry identical dates and
+    types, and the edges were recorded against exactly one of them.
+    """
+    if not candidates:
+        return set()
+    from sqlalchemy import text
+    params = {"w": wiki_id, "s": session_id}
+    keys = []
+    for i, c in enumerate(candidates):
+        params[f"c{i}"] = c
+        keys.append(f":c{i}")
+    joined = ", ".join(keys)
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT DISTINCT x FROM (
+                SELECT from_doc AS x FROM document_relations
+                 WHERE wiki_id = :w AND session_id = :s AND from_doc IN ({joined})
+                UNION ALL
+                SELECT to_doc AS x FROM document_relations
+                 WHERE wiki_id = :w AND session_id = :s AND to_doc IN ({joined})
+            ) t WHERE x IS NOT NULL
+        """), params).fetchall()
+    return {r[0] for r in rows}
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,

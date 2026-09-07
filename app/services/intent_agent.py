@@ -2919,7 +2919,15 @@ def _is_structural_query(question: str) -> str:
     join answers exactly and with no LLM call.
     """
     q = question or ""
-    if _RX_CITES.search(q):
+    # The cites branch answers "which documents cite <an authority>", and it
+    # needs an authority to look up — so one has to be named for this to be
+    # that question. Without the second half the verb alone was enough, and
+    # "which documents amend or reference the cloud services agreement dated 14
+    # November 2021" classified as a citation question about a statute, found
+    # no statute, and returned nothing — while the amends branch below it would
+    # have answered it from a recorded edge. Claiming the question here and
+    # then declining it denied it to every branch that could.
+    if _RX_CITES.search(q) and _RX_AUTHORITY.search(q):
         return "cites"
     if _RX_CITED_BY.search(q):
         return "cited_by"
@@ -2935,6 +2943,11 @@ def _is_structural_query(question: str) -> str:
     # only counting them.
     if _RX_COUNT.search(q):
         return "count"
+    # After count, so "how many … are there in all" stays a count. The branch
+    # declines any question it cannot pin to a party or an instrument type, so
+    # a bare "list all the risks" is untouched.
+    if _RX_ENUMERATE.search(q):
+        return "enumerate"
     return ""
 
 
@@ -3182,6 +3195,36 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     payload["files_used"] = [d["source_doc"] for d in shown]
     payload["meta_answer"] = False
     return payload
+
+
+# The exhaustive-set question — "list every X where Y". Separated from the
+# counting branch because the failure it prevents is different in kind: a count
+# that is wrong looks wrong, while a set answered from a sample looks complete.
+# Asked to show every shareholders' agreement naming one company as lead
+# strategic shareholder, retrieval named one of the five that do, quoted it
+# accurately, and gave a reader no reason to doubt the list was the whole list.
+_RX_ENUMERATE = re.compile(
+    r"\b(?:list|show|name|give\s+me|find|identify|which|what)\b[^?]{0,30}?"
+    r"\b(?:every|all)\b",
+    re.IGNORECASE,
+)
+# The role a set question qualifies its party with — "where X is the lead
+# strategic shareholder", "with Y as the disclosing party". Party membership
+# alone is a wider set than the question asked for, so the phrase is carried
+# into the query rather than dropped.
+_RX_ENUM_ROLE = re.compile(
+    r"\b(?:is|as)\s+(?:the|a|an)\s+"
+    r"((?:[a-z]+\s+){0,3}?"
+    r"(?:shareholder|party|partner|purchaser|seller|buyer|vendor|supplier|"
+    r"licensor|licensee|lessor|lessee|borrower|lender|guarantor|"
+    r"discloser|disclosing\s+party|recipient|receiving\s+party|"
+    r"customer|client|contractor|consultant|employer))\b",
+    re.IGNORECASE,
+)
+# "where X is a party" is not a role qualifier — it is the plain membership
+# question the party filter already answers, and treating it as a phrase to
+# find in the page text would demand that those exact words appear.
+_RX_ENUM_ROLE_GENERIC = re.compile(r"^(?:a\s+)?part(?:y|ies)$", re.IGNORECASE)
 
 
 # Words that ride along on the front of a captured party name — _PARTY_NAME_RE
@@ -3854,6 +3897,9 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         if kind == "count":
             return _count_answer(question, session_id, wiki_id)
 
+        if kind == "enumerate":
+            return _enumerate_answer(question, session_id, wiki_id)
+
         # cited_by / amends / chain all need the document the question is about.
         anchor = _resolve_anchor_doc(question, session_id, wiki_id)
         if not anchor:
@@ -3919,9 +3965,177 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         return None
 
 
+def _enumerate_answer(question: str, session_id: str,
+                      wiki_id: str) -> dict | None:
+    """Answer "list every X where Y" from the index rather than from a sample.
+
+    Declines whenever the question pins neither a party nor an instrument type,
+    because without one of those the set is the whole corpus and the question
+    was almost certainly asking for something else.
+    """
+    from services import db as _db, wiki as _wiki
+
+    parties: list[str] = []
+    m = _RX_COUNT_PARTY.search(question or "")
+    if m:
+        raw = m.group(1).strip().rstrip(".,;:?")
+        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw)
+                   if len(p.strip()) > 2]
+    if not parties:
+        # "…every Shareholder Agreement WHERE Tata Electronics … is the lead
+        # strategic shareholder" puts the party after "where", which the
+        # with/for/involving pattern does not reach.
+        wm = re.search(r"\bwhere\s+((?:[A-Z][\w'&.\-]*)"
+                       r"(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+                       question or "")
+        if wm:
+            cand = wm.group(1).strip().rstrip(".,;:?")
+            if len(cand) > 2:
+                parties = [cand]
+
+    label, patterns = (None, [])
+    dm = re.search(rf"\b(?:every|all)\s+((?:[a-z]+\s+){{0,3}}?(?:{_COUNT_NOUNS}))\b",
+                   question or "", re.IGNORECASE)
+    if dm:
+        label, patterns = _resolve_doctype(dm.group(1).strip())
+
+    if not parties and not patterns:
+        return None
+
+    phrase = None
+    rm = _RX_ENUM_ROLE.search(question or "")
+    if rm and not _RX_ENUM_ROLE_GENERIC.match(rm.group(1).strip()):
+        phrase = rm.group(1).strip()
+
+    try:
+        res = _db.list_documents_matching(
+            wiki_id, session_id, parties or None, patterns or None, phrase)
+    except Exception as e:
+        logger.error("[AGENT] enumerate fast-path failed: %s", e)
+        return None
+    # An empty set has two causes that cannot be told apart from here — the set
+    # really is empty, or the party is spelled differently in the index — so
+    # retrieval gets its turn rather than being pre-empted with "none".
+    if not res["total"]:
+        return None
+
+    noun = label or "document"
+    qual = []
+    if parties:
+        qual.append(("naming " if len(parties) == 1 else "naming both ")
+                    + " and ".join(parties))
+    if phrase:
+        qual.append(f"whose text contains “{phrase}”")
+    headline = (f"**{res['total']} {noun}(s)"
+                + (" " + ", ".join(qual) if qual else " in the corpus") + ".**")
+    lines = [headline, ""]
+    for d in res["documents"]:
+        date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+        lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{date}")
+    if res["truncated"]:
+        lines.append(f"- …and {res['total'] - len(res['documents'])} more")
+    lines.append("")
+    lines.append("Listed from the document index, so this is every match rather "
+                 "than the closest ones a search returned.")
+    if phrase:
+        lines.append("")
+        lines.append(f"The phrase “{phrase}” was matched in the page text. A "
+                     f"document that states the same role in different words "
+                     f"would not appear above.")
+    payload = _canned_payload("\n".join(lines), "Document set", "document-index")
+    payload["files_used"] = [d["source_doc"] for d in res["documents"]]
+    payload["meta_answer"] = False
+    return payload
+
+
+def _question_date_iso(question: str) -> str | None:
+    """The ISO date a question names an instrument by, or None.
+
+    Only a date introduced as an identifier — "dated 24 May 2021", "of 14
+    November 2021" — counts. A date that is the subject of the question rather
+    than a name for a document ("which contracts expire before 1 January 2025")
+    must not anchor anything, or a corpus-wide range question would be answered
+    about whichever single document happens to carry that date.
+    """
+    q = question or ""
+    m = re.search(r"\b(?:dated|dating|of|from|on)\s+(?:the\s+)?"
+                  r"((?:\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\s+\d{4})"
+                  r"|(?:[A-Za-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4})"
+                  r"|(?:\d{4}-\d{1,2}-\d{1,2}))", q, re.IGNORECASE)
+    if not m:
+        return None
+    return _expiry_cutoff(m.group(1))
+
+
+def _resolve_anchor_by_date(question: str, session_id: str,
+                            wiki_id: str) -> str | None:
+    """The document a question names by date, or None if that is ambiguous.
+
+    Runs before the embedding vote because it is both exact and free: a date is
+    stored, and matching it is a lookup rather than a similarity guess. Returns
+    None the moment two candidates are equally good, so an ambiguous date falls
+    through to the vote rather than picking one of them and sounding certain.
+    """
+    iso = _question_date_iso(question)
+    if not iso:
+        return None
+    from services import db as _db
+    try:
+        cands = _db.find_documents_by_date(wiki_id, session_id, iso)
+    except Exception as e:
+        logger.error("[AGENT] date anchor lookup failed: %s", e)
+        return None
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]["source_doc"]
+
+    q = (question or "").lower()
+    _stop = {"the", "a", "an", "of", "for", "and", "dated", "agreement",
+             "document", "documents", "which", "what", "this", "that"}
+
+    def words(s: str) -> set:
+        return {w for w in re.split(r"[^a-z0-9]+", (s or "").lower())
+                if len(w) > 3 and w not in _stop}
+
+    qw = words(q)
+
+    def score(c: dict) -> tuple:
+        # The instrument word the question uses ("cloud services agreement")
+        # against the stored type is the strongest signal, and it is what
+        # separates the two documents that share a date on this corpus.
+        dt_hit = len(words(c["doc_type"]) & qw)
+        stem = c["source_doc"].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        name_hit = len(words(stem) & qw)
+        # A re-ingest of the same instrument ("…_ocr.pdf", "… - Copy.pdf") is
+        # not a different document; prefer the original, which is where the
+        # relation edges were recorded.
+        clean = 0 if re.search(r"(?:_ocr|\s-\scopy|\(\d\))\.[a-z]+$", stem,
+                               re.IGNORECASE) else 1
+        return (dt_hit, name_hit, clean)
+
+    ranked = sorted(cands, key=score, reverse=True)
+    if score(ranked[0]) > score(ranked[1]):
+        return ranked[0]["source_doc"]
+
+    # Still tied: the edges were recorded against exactly one of the copies,
+    # and the one that carries them is the one this question can be answered
+    # from. If that does not separate them either, decline.
+    tied = [c["source_doc"] for c in ranked if score(c) == score(ranked[0])]
+    try:
+        linked = _db.documents_with_relations(wiki_id, session_id, tied)
+    except Exception:
+        linked = set()
+    hit = [t for t in tied if t in linked]
+    return hit[0] if len(hit) == 1 else None
+
+
 def _resolve_anchor_doc(question: str, session_id: str, wiki_id: str) -> str | None:
     """The document a question is about, by page-vote over its own embedding."""
     from services import db as _db, embedder as _embedder
+    dated = _resolve_anchor_by_date(question, session_id, wiki_id)
+    if dated:
+        return dated
     vec = _embedder.embed(question, is_query=True)
     titles = _db.search_similar_pages(wiki_id, session_id, vec, limit=25,
                                       exclude_cached=True)
