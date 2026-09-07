@@ -2518,6 +2518,32 @@ _RX_COUNT_DOCTYPE = re.compile(
     rf"(?:{_COUNT_NOUNS}))\b",
     re.IGNORECASE,
 )
+# "How many documents are there in total in this wiki?" — no party, no
+# instrument type, and until this existed the count branch declined it and let
+# retrieval answer. Retrieval answered "There are 21 documents in the wiki" and
+# cited the header list of the pages it had just fetched: a corpus of 1,372
+# reported as 21, sourced, and wrong by a factor of sixty-five. Counting rows
+# is the one thing the index does perfectly, so a bare totality question is
+# answered from it.
+_RX_COUNT_TOTAL = re.compile(
+    r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
+    rf"(?:{_COUNT_NOUNS})\b[^?]{{0,40}}?"
+    r"\b(?:in\s+total|in\s+all|altogether|overall|"
+    r"in\s+(?:this|the)\s+(?:wiki|corpus|workspace|collection)|"
+    r"do\s+we\s+(?:have|hold)|are\s+there|have\s+we\s+got)\b",
+    re.IGNORECASE,
+)
+# Anything that narrows the count to a subset. A totality phrase can sit in a
+# filtered question too ("how many contracts do we have that mention
+# arbitration"), and answering that one with the corpus total would be the same
+# confident-and-wrong failure pointing the other way.
+_RX_COUNT_TOTAL_VETO = re.compile(
+    r"\b(?:mention\w*|contain\w*|includ\w*|reference\w*|involving|"
+    r"that|which|whose|where|with|without|missing|lack\w*|"
+    r"governed|under|signed|expir\w*|terminat\w*|before|after|since|"
+    r"between|per|each|by\s+type|by\s+year)\b",
+    re.IGNORECASE,
+)
 
 
 # --- Instrument vocabulary -------------------------------------------------
@@ -2791,6 +2817,38 @@ def _expiry_cutoff(question: str):
     return None
 
 
+def _expiry_floor(question: str):
+    """The ISO date a forward-looking expiry window starts from, or None.
+
+    A cutoff on its own cannot tell the two readings apart. "Expiring on or
+    before 31 March 2026" is open at the near end and every earlier expiry
+    genuinely belongs in the answer. "Expiring in the next 90 days" is a window
+    with two ends, and without the near one this branch answered it with a
+    contract that had expired two years earlier — technically on or before the
+    cutoff, and useless. Only relative phrasings get a floor; an absolute date
+    keeps the open-ended reading it asked for.
+
+    A named period floors at the start of that period rather than at today,
+    because "expiring this quarter" asks about the quarter, and a contract that
+    lapsed in its first week did expire this quarter.
+    """
+    from datetime import date
+    q = question or ""
+    # An explicit date in the question means the reader chose the endpoint
+    # themselves; do not impose a near end they did not ask for.
+    if (_RX_DATE_ISO2.search(q) or _RX_DATE_DMY.search(q)
+            or _RX_DATE_MDY.search(q)):
+        return None
+    today = date.today()
+    if _RX_REL_DAYS.search(q) or _RX_REL_MONTHS.search(q):
+        return today.isoformat()
+    if re.search(r"\bthis\s+quarter\b", q, re.I):
+        return date(today.year, ((today.month - 1) // 3) * 3 + 1, 1).isoformat()
+    if re.search(r"\bthis\s+year\b", q, re.I):
+        return date(today.year, 1, 1).isoformat()
+    return None
+
+
 def _is_analytics_query(question: str) -> str:
     """'aggregate' | 'gap' | 'trend' | '' — questions the normalised columns answer.
 
@@ -2966,13 +3024,17 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 r"\s+agreements?|ndas?|msas?|sows?)\b", question or "", re.I)
             if _m:
                 _dt = _m.group(1)
+            _floor = _expiry_floor(question)
             data = analytics.expiring_by(wiki_id, session_id, cutoff,
-                                         doc_type=_dt, parties=parties or None)
+                                         doc_type=_dt, parties=parties or None,
+                                         floor_iso=_floor)
             if data.get("error"):
                 return None
             scope_label = f"{_dt} " if _dt else "document"
+            _when = (f"expiry between {_floor} and {cutoff}" if _floor
+                     else f"expiry on or before {cutoff}")
             lines = [f"**{data['match_count']} {scope_label}(s) with a recorded "
-                     f"expiry on or before {cutoff}.**", ""]
+                     f"{_when}.**", ""]
             for d in data["matching"][:20]:
                 lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])} — expires "
                              f"{d['expiry_date']}")
@@ -3048,8 +3110,17 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     if dm:
         label, patterns = _resolve_doctype(dm.group(1).strip())
 
+    # No party and no instrument type is normally a question this branch cannot
+    # answer safely — but a bare totality question ("how many documents are
+    # there in total") is the exception, and the one case where the index is
+    # strictly better than anything retrieval can say.
+    _whole_corpus = False
     if not parties and not patterns:
-        return None
+        if (_RX_COUNT_TOTAL.search(question or "")
+                and not _RX_COUNT_TOTAL_VETO.search(question or "")):
+            _whole_corpus = True
+        else:
+            return None
 
     try:
         result = _db.count_documents_by_party(
@@ -3061,6 +3132,25 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         return None
 
     noun = label or "document"
+    if _whole_corpus:
+        lines = [f"**{result['total']} document(s) in this wiki.**", ""]
+        if result["by_type"]:
+            _shown_n = sum(t["count"] for t in result["by_type"])
+            lines.append("Largest document types:")
+            for t in result["by_type"]:
+                lines.append(f"- {t['doc_type']}: {t['count']}")
+            if _shown_n < result["total"]:
+                lines.append(f"- …the remaining {result['total'] - _shown_n} are "
+                             f"spread across further types not listed here")
+            lines.append("")
+        lines.append("Counted directly from the document index, so this is the "
+                     "complete total for the wiki — not a count of the pages "
+                     "retrieved for this question.")
+        payload = _canned_payload("\n".join(lines), "Count", "document-index")
+        payload["files_used"] = []
+        payload["meta_answer"] = True
+        return payload
+
     if parties:
         # "between X and Y" counts the documents naming BOTH, which is what the
         # question means - not the union of each party's paperwork.

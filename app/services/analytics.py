@@ -222,8 +222,17 @@ GAP_FIELDS = {
 
 def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
                 doc_type: str | None = None, parties: list[str] | None = None,
-                limit: int = 50) -> dict:
+                limit: int = 50, floor_iso: str | None = None) -> dict:
     """Documents whose recorded expiry date falls on or before `cutoff_iso`.
+
+    `floor_iso` bounds the window at the other end, and exists because without
+    it a forward-looking question is answered with the past. Asked "which
+    agreements expire in the next 90 days" this returned an agreement that had
+    expired two years earlier: the window resolved to a single cutoff date, and
+    every document that had ever expired satisfied it. A question about what is
+    coming up must not be answered with what is already gone. An open-ended
+    question ("expiring on or before 31 March 2026") passes no floor and keeps
+    the original behaviour, which for that phrasing is the correct one.
 
     The fourth query shape, and it exists because retrieval answered a date
     question with a corpus-wide claim it had no basis for. Asked "which Service
@@ -280,6 +289,11 @@ def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
     # rather than being coerced into a date the document never stated.
     dated_sql = "d.expiry_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
 
+    window_sql = "substring(d.expiry_date from 1 for 10) <= :cut"
+    if floor_iso:
+        params["flr"] = floor_iso
+        window_sql += " AND substring(d.expiry_date from 1 for 10) >= :flr"
+
     with db.get_engine().connect() as conn:
         total = conn.execute(text(
             f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
@@ -289,28 +303,39 @@ def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
         rows = conn.execute(text(f"""
             SELECT d.source_doc, d.doc_type, d.effective_date, d.expiry_date
               FROM documents d
-             WHERE {where} AND {dated_sql}
-               AND substring(d.expiry_date from 1 for 10) <= :cut
+             WHERE {where} AND {dated_sql} AND {window_sql}
              ORDER BY d.expiry_date ASC
              LIMIT :lim
         """), params).fetchall()
+        already = 0
+        if floor_iso:
+            already = conn.execute(text(
+                f"SELECT count(*) FROM documents d WHERE {where} AND {dated_sql} "
+                f"AND substring(d.expiry_date from 1 for 10) < :flr"),
+                params).scalar() or 0
 
     matching = [{"source_doc": r[0], "doc_type": r[1],
                  "effective_date": str(r[2]) if r[2] else None,
                  "expiry_date": str(r[3])} for r in rows]
     undated = int(total) - int(dated)
+    _window = (f"fall between {floor_iso} and {cutoff_iso}" if floor_iso
+               else f"end on or before {cutoff_iso}")
     return {
         "cutoff": cutoff_iso,
+        "floor": floor_iso,
         "in_scope": int(total),
         "dated": int(dated),
         "undated": undated,
+        "already_expired": int(already),
         "matching": matching,
         "match_count": len(matching),
         "doc_type": doc_type,
         "parties": parties or [],
         "note": (
             f"{len(matching)} of the {dated} document(s) that record an expiry "
-            f"date end on or before {cutoff_iso}."
+            f"date {_window}."
+            + (f" A further {already} had already expired before {floor_iso} and "
+               f"are excluded: they are not upcoming." if floor_iso and already else "")
             + (f" A further {undated} document(s) in scope record no expiry date "
                f"and are NOT counted either way — for those, this question "
                f"cannot be answered from stored data." if undated else "")
