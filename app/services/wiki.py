@@ -2702,6 +2702,7 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
             # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
             # keep it from bleeding into a different document number.
             num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            hits: list[str] = []
             for sd in doc_names:
                 norm = _norm_doc_name(sd)
                 # The number is searched in the name with dates and reference
@@ -2709,7 +2710,20 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
                 # name, since a type word never hides inside a date.
                 if (re.search(num_re, _strip_doc_num_noise(norm))
                         and (not type_core or type_core in norm)):
-                    matched.add(sd)
+                    hits.append(sd)
+            # Same type+number can match a curated document AND an unrelated
+            # secondary-corpus twin that merely zero-pads to the same number
+            # (see _is_secondary_numbered_doc) — a DIFFERENT document, not a
+            # richer copy of the same one. "Court Case Document 3" naming the
+            # curated "Court Case Document 3 (1).pdf" must not also force-include
+            # the bulk corpus's "Court_Case_Document_003.pdf", which is a
+            # different filing entirely. Confirmed live across a 76-question
+            # audit: unfiltered, this was the single largest source of wrong-
+            # document answers, some stated with full confidence. Only fall
+            # back to the secondary hit(s) when no curated document matched —
+            # that is the Test_* stand-in's actual, original purpose.
+            primary = [sd for sd in hits if not _is_secondary_numbered_doc(sd)]
+            matched.update(primary or hits)
     return matched
 
 
@@ -2730,6 +2744,41 @@ def _is_synthetic_test_doc(source_doc: str) -> bool:
     real corpus document."""
     base = re.sub(r'^[a-f0-9-]{36}_', '', source_doc.replace("\\", "/").rsplit("/", 1)[-1])
     return bool(_SYNTHETIC_DOC_RE.search(base))
+
+
+# A second, much larger bulk-numbered corpus (~790 of this deployment's 1,372
+# documents) sits in the SAME wiki as the named/curated ones this module's
+# other numbered-reference matching was written for — "Court_Case_Document_003
+# .pdf", "Shareholders_Agreement_067.pdf", sometimes with a "TA-YYYY-NNN"
+# matter code spliced in. Different naming convention from Test_<TYPE>_<NN>
+# (no "test" marker), so _SYNTHETIC_DOC_RE never caught it, but it is the exact
+# same collision: "Court Case Document 3" number-matches BOTH the curated
+# "Court Case Document 3 (1).pdf" AND the unrelated "Court_Case_Document_003
+# .pdf" (a different document — different doc_type, different matter — that
+# merely zero-pads to the same number). Confirmed live across a 76-question
+# audit: this collision was the cause of most of the run's wrong-document
+# answers, including confidently wrong ones, not just declines.
+#
+# Distinguished structurally, not by content: every curated document in this
+# corpus ends its filename in a parenthesised suffix — " (1).pdf", "_redacted
+# (1).pdf" — a download/upload artifact _norm_doc_name already strips as noise.
+# The bulk corpus never has one; it ends directly in the zero-padded number.
+# Confirmed with a live query: zero documents in this deployment match both
+# patterns at once, so this is a clean partition, not a heuristic guess.
+_BULK_NUMBERED_DOC_RE = re.compile(r'_\d{3}\.(?:pdf|docx?|txt)$', re.I)
+
+
+def _is_bulk_numbered_doc(source_doc: str) -> bool:
+    """True when source_doc is a bare "<Type>_NNN" bulk-corpus filename with no
+    parenthesised suffix — see _BULK_NUMBERED_DOC_RE."""
+    base = source_doc.replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(_BULK_NUMBERED_DOC_RE.search(base)) and '(' not in base
+
+
+def _is_secondary_numbered_doc(source_doc: str) -> bool:
+    """True for either flavour of numbered stand-in a curated document can
+    collide with: the Test_<TYPE>_<NN> corpus or the bulk _NNN corpus."""
+    return _is_synthetic_test_doc(source_doc) or _is_bulk_numbered_doc(source_doc)
 
 
 def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
@@ -2766,8 +2815,8 @@ def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
                 if re.search(num_re, _norm_doc_name(sd))
                 and (not type_core or type_core in _norm_doc_name(sd))
             ]
-            has_synthetic = any(_is_synthetic_test_doc(sd) for sd in hits)
-            has_real = any(not _is_synthetic_test_doc(sd) for sd in hits)
+            has_synthetic = any(_is_secondary_numbered_doc(sd) for sd in hits)
+            has_real = any(not _is_secondary_numbered_doc(sd) for sd in hits)
             if has_synthetic and has_real:
                 label = f"{t} {doc_num}"
                 if label not in collisions:
@@ -8482,17 +8531,6 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     if not candidates:
         return set()
 
-    # Canonicalise each candidate through the entity registry before searching.
-    # backbone.resolve_entity maps a name or a recorded spelling to the party's
-    # canonical form across 530 entities and 447 aliases; it has existed and
-    # been populated since the Phase 0 backbone and nothing in the query path
-    # ever read it, so scope resolution has been matching raw strings against
-    # page text the whole time. The canonical form is ADDED rather than
-    # substituted: an alias that resolves gives two chances to find the
-    # document, and a name the registry has never seen behaves exactly as
-    # before, so this can widen a match and cannot narrow one.
-    candidates = _with_canonical_party_names(candidates)
-
     # Scanned well above max_docs so a multi-doc match has its FULL sibling
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
@@ -8500,13 +8538,34 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # Wider re-scan used only to intersect several party names against each
     # other, where a cap-truncated set makes the intersection meaningless.
     _PARTY_INTERSECT_CAP = 200
+
+    # Canonicalise each candidate through the entity registry before searching.
+    # backbone.resolve_entity maps a name or a recorded spelling to the party's
+    # canonical form across 530 entities and 447 aliases; it has existed and
+    # been populated since the Phase 0 backbone and nothing in the query path
+    # ever read it, so scope resolution has been matching raw strings against
+    # page text the whole time. Widened PER CANDIDATE and kept keyed to the
+    # original name (rather than flattening original+canonical into one list
+    # of candidates, as an earlier version of this did) — the intersection
+    # gate below counts how many DISTINCT PARTIES were named, and a party
+    # whose alias resolves contributes ONE entry with a widened doc set, not
+    # two entries that make it look like a second party was named. Confirmed
+    # live: flattened, a two-party question where one name canonicalised grew
+    # `resolved` to 3 entries, silently failed the two-name intersection gate
+    # below, and fell back to "smallest single candidate" — which picked an
+    # unrelated one-document coincidental text match over the real answer.
+    _variants_by_name = {name: _with_canonical_party_names([name]) for name in candidates}
     resolved: list[tuple[str, set[str]]] = []
     for name in candidates:
-        try:
-            docs = {d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d}
-        except Exception as e:
-            logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
-            continue
+        docs: set[str] = set()
+        for variant in _variants_by_name[name]:
+            try:
+                found = {d for d in _db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, variant, cap=_PARTY_SCAN_CAP) if d}
+            except Exception as e:
+                logger.error("resolve_scope: party-content lookup failed for %r: %s", variant, e)
+                found = set()
+            docs |= found
         if docs:
             resolved.append((name, docs))
     if not resolved:
@@ -8546,9 +8605,12 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
                     wide.append(docs)
                     continue
                 try:
-                    wide.append({d for d in _db.find_source_docs_mentioning_phrase(
-                        _active_wiki_id(), session_id, name,
-                        cap=_PARTY_INTERSECT_CAP) if d})
+                    rescanned: set[str] = set()
+                    for variant in _variants_by_name[name]:
+                        rescanned |= {d for d in _db.find_source_docs_mentioning_phrase(
+                            _active_wiki_id(), session_id, variant,
+                            cap=_PARTY_INTERSECT_CAP) if d}
+                    wide.append(rescanned)
                 except Exception as e:
                     logger.error("resolve_scope: wide party lookup failed for %r: %s",
                                  name, e)
@@ -9449,6 +9511,31 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
             other_docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, other_tok, cap=200) or [])
         except Exception:
             other_docs = set()
+        # other_tok is searched as a whole PHRASE (unlike the bare anchor
+        # token above), which makes this search literal about the corporate
+        # suffix — "Pty Ltd" and "Pte. Ltd." are different phrases, and on
+        # this corpus find disjoint document sets for the same real entity
+        # (confirmed live: 1 document vs 9). The question can type either
+        # spelling; the corpus text carries whichever one ingest saw. Add the
+        # registry's canonical spelling as a second search, never substituted
+        # for the original, so a name the registry has never recorded behaves
+        # exactly as before.
+        try:
+            from services import backbone as _bb
+            canon_other = _canonical_party_name(_bb, _active_wiki_id(), other_tok)
+        except Exception:
+            canon_other = None
+        if canon_other and canon_other.strip().lower() != other_tok.strip().lower():
+            try:
+                canon_docs = set(_db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, canon_other, cap=200) or [])
+            except Exception:
+                canon_docs = set()
+            if canon_docs - other_docs:
+                logger.info("Party-pair content verification: canonical form %r "
+                            "of %r found %d additional document(s)",
+                            canon_other, other_tok, len(canon_docs - other_docs))
+            other_docs |= canon_docs
         content_verified = remainder & other_docs
     else:
         content_verified = remainder
@@ -10576,6 +10663,18 @@ def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> 
         acronym = "".join(w[0] for w in words).lower()
         if 4 <= len(acronym) <= 12:
             initialisms.add(acronym)
+    # A scope the party branch resolved from TWO OR MORE distinctly named
+    # parties (an intersection across both sides of a named matter, not one
+    # umbrella name spanning whatever it happens to span) is independently
+    # corroborated evidence — stronger than a single recorded doc_type string
+    # disagreeing with the question's wording. Gated to the party branch
+    # specifically (not date/matter-reference/family scopes, which this bug
+    # was never observed on) and to a genuine 2+-party count (not "party-multi"
+    # in general, which also covers one umbrella party spanning several of its
+    # OWN unrelated instruments — that case has no second party to corroborate
+    # anything and should keep being correctable as before).
+    _named_parties = {m.group(1).strip().lower() for m in _PARTY_NAME_RE.finditer(question or "")}
+    _party_evidence = method.startswith("party") and len(_named_parties) >= 2
     for d in targets:
         recorded = scoped_types.get(d, "")
         if not recorded.strip():
@@ -10599,6 +10698,26 @@ def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> 
         if any(a in haystack for a in initialisms):
             logger.info("Scope %s kept: %s is filed under the initialism of the "
                         "instrument the question names", method, _norm_doc_name(d))
+            return scoped
+        # Same idea as the initialism check just above, but on the ordinary
+        # words of the type rather than an acronym — and only trusted here
+        # where the party evidence backing this scope is already strong (see
+        # _party_evidence above). Confirmed live: a document whose own
+        # filename reads "...Loan Agreement_...-LoanAgt-..." was recorded in
+        # the database as "Facility Agreement" — ingest's classification and
+        # the document's own filename disagree with each other, not just with
+        # the question — and this scope had already been produced by
+        # intersecting TWO independently named parties' content matches, the
+        # strongest signal this module has. Without this check the doc-type
+        # branch discarded that match and replaced it with the one other
+        # document in the whole corpus recorded as a "Loan Agreement" —
+        # between two entirely different, unnamed parties.
+        if _party_evidence and question_core and any(w in haystack for w in question_core):
+            logger.info("Scope %s kept: %s's own filename names the instrument "
+                        "type the question asked about (recorded doc_type %r "
+                        "disagrees, but this scope is backed by %d named "
+                        "parties)", method, _norm_doc_name(d), recorded,
+                        len(_named_parties))
             return scoped
 
     narrowed = set(type_docs)
