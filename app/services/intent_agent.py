@@ -788,6 +788,43 @@ def _question_precisely_names_a_document(question: str, session_id: str) -> bool
 _RX_RISK_SHAPE = re.compile(
     '\\b(?:risk|risks|exposure|exposures|concerns?|red\\s+flags?)\\b', re.IGNORECASE)
 
+# The corpus-wide scan: "what's unusual ACROSS OUR shareholder agreements",
+# "what stands out as non-standard in OUR service agreements". Risk-shaped in
+# substance without using the word "risk", and asked about a whole class of
+# instrument rather than one document.
+_RX_SCAN_SHAPE = re.compile(
+    r"\b(?:unusual|anomalous|anomal(?:y|ies)|non-?standard|stands?\s+out|"
+    r"outlier|off-?market|surprising|worry|worried|worrying|"
+    r"should\s+we\s+(?:worry|be\s+concerned))\b", re.IGNORECASE)
+# The instrument nouns are written out rather than shared with _COUNT_NOUNS,
+# which is defined further down this module; importing it upward would make
+# the ordering load-bearing for a list that barely moves.
+_RX_SCAN_SCOPE = re.compile(
+    r"\b(?:across|in|among|throughout|within)\s+(?:our|the|all|these)\s+"
+    r"(?:[a-z]+\s+){0,2}?(?:contracts?|agreements?|documents?|portfolios?|"
+    r"ndas?|msas?|slas?|sows?|jvas?|shas?|leases?|licen[cs]es?|"
+    r"deeds?|policies|opinions?)\b", re.IGNORECASE)
+
+
+def _corpus_wide_scan(question: str) -> bool:
+    """A risk scan over a whole class of instrument, not over one document.
+
+    "Whose perspective?" is a fair question about one agreement and a useless
+    one about every service agreement in the corpus — there is no single
+    counterparty to have a perspective on. Left to the ambiguity model it was
+    answered both ways on the same archetype: "what's unusual across our
+    shareholder agreements" got a full scan, while "what stands out as
+    non-standard in our service agreements" got a clarification request. The
+    questions differ only in wording.
+
+    The assessment template already requires an assumed client role to be
+    stated when it changes the answer, so answering discloses the assumption
+    rather than hiding it — which is better than stopping to ask.
+    """
+    q = question or ""
+    return bool((_RX_RISK_SHAPE.search(q) or _RX_SCAN_SHAPE.search(q))
+                and _RX_SCAN_SCOPE.search(q))
+
 
 def _risk_question_on_a_settled_document(state: dict) -> bool:
     """Whether a risk question should be answered rather than clarified.
@@ -809,6 +846,12 @@ def _risk_question_on_a_settled_document(state: dict) -> bool:
     the perspective question is least useful and most interrupting.
     """
     q = state.get("question") or ""
+    # A scan across a whole class of instrument needs no settled document —
+    # there is no one document for the conversation to have settled on, and
+    # that is exactly why the perspective question is not worth asking.
+    if _corpus_wide_scan(q):
+        logger.info("[AGENT] clarification skipped: corpus-wide risk scan")
+        return True
     if not _RX_RISK_SHAPE.search(q):
         return False
     try:

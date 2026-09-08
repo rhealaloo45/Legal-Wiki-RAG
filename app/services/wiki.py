@@ -3315,6 +3315,42 @@ def _external_law_directive(question: str, session_id: str) -> str | None:
         f"were answered after all.")
 
 
+# A scan across a whole class of instrument — "what's unusual across our
+# shareholder agreements", "what should we worry about in our vendor service
+# agreements". These were answered correctly and at great length: up to 9,426
+# completion tokens and 78 seconds, walking document after document. The
+# finding a lawyer can act on is which patterns recur and where, not a
+# transcript of everything the retrieval returned.
+_RX_BROAD_SCAN = re.compile(
+    r"\b(?:risks?|exposures?|concerns?|red\s+flags?|unusual|anomalous|"
+    r"anomal(?:y|ies)|non-?standard|stands?\s+out|outliers?|off-?market|"
+    r"worry|worried|worrying|themes?|patterns?)\b", re.IGNORECASE)
+_RX_BROAD_SCOPE = re.compile(
+    r"\b(?:across|in|among|throughout|within)\s+(?:our|the|all|these)\s+"
+    r"(?:[a-z]+\s+){0,2}?(?:contracts?|agreements?|documents?|portfolios?|"
+    r"ndas?|msas?|slas?|sows?|jvas?|shas?|leases?|licen[cs]es?|deeds?|"
+    r"policies|opinions?|litigation|matters?)\b", re.IGNORECASE)
+
+
+def _broad_scan_directive(question: str) -> str | None:
+    """Ask a corpus-wide scan for ranked findings rather than a walkthrough."""
+    q = question or ""
+    if not (_RX_BROAD_SCAN.search(q) and _RX_BROAD_SCOPE.search(q)):
+        return None
+    return (
+        "this question scans a whole class of instrument rather than asking "
+        "about one document. Answer with RANKED FINDINGS, not a document-by-"
+        "document walkthrough. Give at most six findings, most significant "
+        "first. For each: one line stating the pattern, then the specific "
+        "documents that show it, then one line on why it matters. A pattern "
+        "that appears in a single document is a finding about that document — "
+        "say so rather than presenting it as characteristic of the class. Do "
+        "not summarise every retrieved document, and do not repeat a finding "
+        "under a second heading. If the retrieved documents are too few to "
+        "support a claim about the class, say how many you are generalising "
+        "from.")
+
+
 def _amendment_family_directive(question: str) -> str | None:
     """Say which of an amendment family's two documents states the value asked for.
 
@@ -6043,6 +6079,14 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         f"OUT-OF-CORPUS STANDARD: {_ext_law}\n\n"
     ) if _ext_law else ""
 
+    try:
+        _scan = _broad_scan_directive(question)
+    except Exception:
+        _scan = None
+    if _scan:
+        logger.info("Broad-scan directive applied")
+    _broad_scan_note = f"CORPUS-WIDE SCAN: {_scan}\n\n" if _scan else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -6052,6 +6096,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
+
+    # A corpus-wide scan classified as a comparison gets the comparison
+    # template, whose REQUIRED OUTPUT FORMAT is a side-by-side table — and that
+    # format beat the scan directive prepended above it. "What's unusual across
+    # our shareholder agreements?" came back as a two-column table comparing
+    # two of them, which is not what was asked: the question is about the class,
+    # and two documents cannot characterise a class.
+    #
+    # A scan across many documents is an assessment, so it gets the assessment
+    # template. The directive then shapes it into ranked findings instead of
+    # arguing with a table.
+    if _scan and intent == "comparison":
+        logger.info("Broad scan classified as comparison; using the assessment "
+                    "template instead")
+        prompt_template = ASSESSMENT_PROMPT
 
     # Drafting intent draws on the Precedent layer as well as the pages
     # (§ Phase 2: "Draft Mode and the Ask tab's drafting intent both switch to
@@ -6080,7 +6139,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         except Exception as _p_err:
             logger.warning("Precedent clauses unavailable for drafting intent: %s",
                            _p_err)
-    prompt = (_external_law_note + _ambiguity_directive_note
+    prompt = (_external_law_note + _broad_scan_note + _ambiguity_directive_note
               + _unconfirmed_doc_note
               + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
