@@ -4805,6 +4805,47 @@ def _is_clause_precedent_query(question: str) -> bool:
     return bool(_RX_CLAUSE_PRECEDENT.search(question or ""))
 
 
+_NUM_WORDS_PERIOD = {
+    "seven": 7, "ten": 10, "fourteen": 14, "fifteen": 15, "twenty": 20,
+    "thirty": 30, "forty": 40, "forty-five": 45, "sixty": 60, "ninety": 90,
+    "one": 1, "two": 2, "three": 3, "six": 6, "twelve": 12,
+}
+_RX_PERIOD_IN_Q = re.compile(
+    r"\b(\d{1,4}|seven|ten|fourteen|fifteen|twenty|thirty|forty-five|forty|"
+    r"sixty|ninety|one|two|three|six|twelve)[\s-]*"
+    r"(day|month|year|week)s?\b", re.IGNORECASE)
+
+
+def _question_period(question: str):
+    """(count, unit) the question names, e.g. (30, "day"), or None."""
+    m = _RX_PERIOD_IN_Q.search(question or "")
+    if not m:
+        return None
+    raw = m.group(1).lower()
+    n = _NUM_WORDS_PERIOD.get(raw)
+    if n is None:
+        try:
+            n = int(raw)
+        except ValueError:
+            return None
+    return (n, m.group(2).lower())
+
+
+def _clause_states_period(text_: str, count: int, unit: str) -> bool:
+    """Whether a clause actually states this period, in digits or in words.
+
+    The parenthetical gloss is not optional decoration in contract drafting —
+    "thirty (30) days" is how the period is normally written, and a pattern
+    that required the number to sit next to its unit called that a non-match,
+    which would have filed almost every real clause under "different period".
+    """
+    words = [w for w, n in _NUM_WORDS_PERIOD.items() if n == count]
+    alts = "|".join([str(count)] + [re.escape(w) for w in words])
+    return bool(re.search(
+        rf"\b(?:{alts})[\s-]*(?:\([^)]{{0,24}}\)[\s-]*)?(?:calendar\s+|business\s+|working\s+)?{unit}s?\b",
+        text_ or "", re.IGNORECASE))
+
+
 def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     """Rank precedent clauses matching the term the question describes.
 
@@ -4827,19 +4868,62 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     if not hits:
         return None
 
-    lines = [f"**{len(hits)} precedent clause(s) matching that term:**", ""]
-    for h in hits:
-        doc = wiki._norm_doc_name(h.get("source_doc") or "")
-        ctype = h.get("clause_type") or "Clause"
-        text_ = (h.get("verbatim_text") or h.get("text") or "").strip()
-        if len(text_) > 600:
-            text_ = text_[:600].rsplit(" ", 1)[0] + "…"
-        lines.append(f"**{ctype}** — {doc}")
-        lines.append(f"> {text_}")
-        lines.append("")
+    # A question naming a figure is asking about THAT figure. Similarity
+    # cannot see the difference between thirty days and forty-five — asked
+    # whether we had ever agreed a 30-day notice period, this branch put a
+    # 45-day clause at the top of a list headed "matching that term", which
+    # answers the question wrongly while quoting the document accurately.
+    period = _question_period(question)
+    exact, near = list(hits), []
+    if period:
+        count, unit = period
+        exact, near = [], []
+        for h in hits:
+            body = (h.get("verbatim_text") or h.get("text") or "")
+            (exact if _clause_states_period(body, count, unit) else near).append(h)
+
+    def _render(hs):
+        out = []
+        for h in hs:
+            doc = wiki._norm_doc_name(h.get("source_doc") or "")
+            ctype = h.get("clause_type") or "Clause"
+            text_ = (h.get("verbatim_text") or h.get("text") or "").strip()
+            if len(text_) > 600:
+                text_ = text_[:600].rsplit(" ", 1)[0] + "…"
+            out += [f"**{ctype}** — {doc}", f"> {text_}", ""]
+        return out
+
+    if period and not exact:
+        count, unit = period
+        lines = [f"**No precedent clause in the indexed subset states "
+                 f"{count} {unit}s.**", "",
+                 f"The clauses below are the closest matches on subject matter, "
+                 f"but each states a different period — read them as comparable "
+                 f"precedent, not as a {count}-{unit} precedent.", ""]
+        lines += _render(near)
+    elif period:
+        count, unit = period
+        lines = [f"**{len(exact)} precedent clause(s) stating "
+                 f"{count} {unit}s:**", ""]
+        lines += _render(exact)
+        if near:
+            lines += [f"---", "",
+                      f"**{len(near)} related clause(s) on the same subject "
+                      f"that state a different period:**", ""]
+            lines += _render(near)
+    else:
+        lines = [f"**{len(hits)} precedent clause(s) matching that term:**", ""]
+        lines += _render(hits)
+
     lines.append("Ranked from the precedent clause index by similarity to your "
                  "question, and quoted verbatim — these are clauses already agreed "
                  "in the documents named, not drafting suggestions.")
+    if period:
+        lines.append("")
+        lines.append(f"The {period[0]}-{period[1]} split was applied by reading "
+                     f"the figure out of each clause, so a clause expressing the "
+                     f"same period in another way would be listed as related "
+                     f"rather than exact.")
 
     payload = _canned_payload("\n".join(lines), "Precedent", "clause-precedent")
     payload["files_used"] = list({h["source_doc"] for h in hits if h.get("source_doc")})
