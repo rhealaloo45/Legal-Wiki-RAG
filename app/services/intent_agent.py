@@ -3460,6 +3460,47 @@ def _analytics_answer(kind: str, question: str, session_id: str,
     return payload
 
 
+# "How many JVAs are in the corpus in total, AND HOW MANY OF THOSE involve Tata
+# Power?" — the count branch answered the first clause from the index and
+# returned, dropping the second half without a word. Measured live on three
+# separate evaluation questions: each got a correct headline number followed by
+# a document listing that answered a question nobody had asked, and the reader
+# had no way to tell the second half had been silently discarded.
+#
+# The tail is a FILTER over the set the first clause just counted, so it is
+# answered by re-running the same count with the extra constraint ANDed in.
+_RX_COUNT_COMPOUND_TAIL = re.compile(
+    r",?\s*(?:and|&)\s+(?:of\s+(?:those|them|these)\s*,?\s*)?"
+    r"how\s+many\s+(?:of\s+(?:those|them|these)\s+)?(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+# The sub-clause names its constraint as a party ("involve Tata Power as a
+# party") or as an instrument type ("are Joint Venture Agreements").
+_RX_COMPOUND_PARTY = re.compile(
+    r"\b(?:involve|involving|name|naming|with|for|between|from|against)\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+)
+_RX_COMPOUND_DOCTYPE = re.compile(
+    rf"\b(?:are|is|were|was)\s+((?:{_COUNT_MODIFIER}\s+){{0,3}}?(?:{_COUNT_NOUNS}))\b",
+    re.IGNORECASE,
+)
+
+
+def _compound_subcount(tail: str):
+    """(parties, doc_type_patterns, label) the trailing clause constrains by."""
+    parties: list[str] = []
+    pm = _RX_COMPOUND_PARTY.search(tail or "")
+    if pm:
+        raw = pm.group(1).strip().rstrip(".,;:?")
+        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw)
+                   if len(p.strip()) > 2]
+    label, patterns = (None, [])
+    dm = _RX_COMPOUND_DOCTYPE.search(tail or "")
+    if dm:
+        label, patterns = _resolve_doctype(dm.group(1).strip())
+    return parties, patterns, label
+
+
 def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     """Answer "how many contracts do we have with X" by counting, not retrieving.
 
@@ -3510,7 +3551,20 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
             return None
         noun = label or "document"
         qual = f" naming {' and '.join(parties)}" if parties else ""
-        lines = [f"**{res['total']} {noun}(s){qual} whose text contains "
+        # The denominator, when the question named an instrument type. "44 NDAs
+        # mention model training" answers half of "how many NDAs are there, and
+        # how many of them mention model training" — the reader needs the set
+        # being counted against, and it is one more indexed count to get it.
+        _base_total = None
+        if patterns:
+            try:
+                _base_total = _db.count_documents_by_party(
+                    wiki_id, session_id, parties or [], None,
+                    doc_type_patterns=patterns).get("total")
+            except Exception as e:
+                logger.error("[AGENT] predicate denominator failed: %s", e)
+        _of = f" of {_base_total}" if _base_total else ""
+        lines = [f"**{res['total']}{_of} {noun}(s){qual} whose text contains "
                  f"“{_predicate}”.**", ""]
         for d in res["documents"]:
             date = f" — {d['effective_date']}" if d.get("effective_date") else ""
@@ -3545,6 +3599,51 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     if not result["total"]:
         return None
 
+    # The second half of a compound count, answered against the same set the
+    # first half just counted. Computed here so both render branches below can
+    # append it, and kept advisory: if the sub-count cannot be resolved the
+    # first answer still stands, with the gap stated rather than hidden.
+    _sub_lines: list[str] = []
+    _tail_m = _RX_COUNT_COMPOUND_TAIL.search(question or "")
+    if _tail_m:
+        _tail = _tail_m.group(1).strip()
+        _sub_parties, _sub_patterns, _sub_label = _compound_subcount(_tail)
+        if _sub_parties or _sub_patterns:
+            try:
+                _sub = _db.count_documents_by_party(
+                    wiki_id, session_id,
+                    (parties or []) + _sub_parties,
+                    None,
+                    doc_type_patterns=(_sub_patterns or patterns or None))
+            except Exception as e:
+                logger.error("[AGENT] compound sub-count failed: %s", e)
+                _sub = None
+            # A zero here fails the same way it does for the main count: the
+            # constraint genuinely matches nothing, or it was not resolvable to
+            # anything the index stores ("litigation documents" is a doc_family
+            # on this corpus, not a doc_type). The two are indistinguishable
+            # from here, and a confident "of those, 0" is the worse error, so a
+            # zero is reported as unanswered rather than as none.
+            if _sub is not None and _sub.get("total"):
+                _what = (" and ".join(_sub_parties) if _sub_parties
+                         else (_sub_label or "that type"))
+                _sub_lines = [
+                    "", f"**Of those, {_sub['total']} "
+                        f"{'name ' + _what if _sub_parties else 'are ' + str(_what) + '(s)'}.**",
+                ]
+            else:
+                _sub_lines = [
+                    "", "*The second part of this question — “" + _tail.rstrip("?") +
+                    "” — could not be counted from the document index and is not "
+                    "answered above.*",
+                ]
+        else:
+            _sub_lines = [
+                "", "*The second part of this question — “" + _tail.rstrip("?") +
+                "” — could not be counted from the document index and is not "
+                "answered above.*",
+            ]
+
     noun = label or "document"
     if _whole_corpus:
         lines = [f"**{result['total']} document(s) in this wiki.**", ""]
@@ -3560,6 +3659,7 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         lines.append("Counted directly from the document index, so this is the "
                      "complete total for the wiki — not a count of the pages "
                      "retrieved for this question.")
+        lines += _sub_lines
         payload = _canned_payload("\n".join(lines), "Count", "document-index")
         payload["files_used"] = []
         payload["meta_answer"] = True
@@ -3591,6 +3691,7 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     lines.append("")
     lines.append("Counted directly from the document index rather than from a text "
                  "search, so this is the complete total, not the closest matches.")
+    lines += _sub_lines
 
     payload = _canned_payload("\n".join(lines), "Count", "document-index")
     payload["files_used"] = [d["source_doc"] for d in shown]
@@ -3660,9 +3761,17 @@ _RX_PRED_VERB = re.compile(
 # Where a predicate ends. Everything after one of these belongs to the NEXT
 # condition, not this one.
 _PRED_CUT = {"and", "or", "as", "that", "which", "but", "while", "where"}
-# Words a phrase may contain but must not begin or end on.
+# Words a phrase may contain but must not begin or end on. The locative and
+# emphatic adverbs are here because a lawyer writes the scope of the search
+# into the question — "how many NDAs mention model training ANYWHERE in their
+# text" — and that word is not part of the phrase being searched for. Confirmed
+# live: the predicate came out as "model training anywhere", matched literally
+# against page text, found nothing, and the whole count declined on a question
+# whose true answer is 44.
 _PRED_EDGE = {"on", "in", "by", "to", "for", "of", "the", "a", "an", "with",
-              "any", "all", "its", "their", "our", "is", "are", "be"}
+              "any", "all", "its", "their", "our", "is", "are", "be",
+              "anywhere", "everywhere", "somewhere", "ever", "at", "also",
+              "even", "still", "only", "just", "text", "wording", "language"}
 
 # Two shapes, kept as separate branches because they end differently:
 # "governed by the laws of India" is terminated by the jurisdiction itself,
