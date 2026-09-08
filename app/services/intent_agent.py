@@ -4063,7 +4063,16 @@ _RX_DEFINED_TERM_Q = re.compile(
     r"(?:how\s+is|what\s+is|what\s+does|where\s+is)\b[^?]{0,40}?"
     r"\bterm\s+[\"“']([^\"”']{2,48})[\"”']"
     r"|\bwhat\s+does\s+[\"“']([^\"”']{2,48})[\"”']\s+mean\b"
-    r"|\bdefinition\s+of\s+[\"“']([^\"”']{2,48})[\"”']",
+    r"|\bdefinition\s+of\s+[\"“']([^\"”']{2,48})[\"”']"
+    # The plain verb form, which is how the question is usually put: "how does
+    # the Data Processing Agreement between X and Y define "Affiliate"?" The
+    # three patterns above all require the noun ("the term", "the definition
+    # of"), so the verb form missed the index entirely and was answered by the
+    # model from whatever pages retrieval had fetched. Confirmed live: it
+    # replied that the DPA "does not define the term Affiliate" while that
+    # document's own definition sat in defined_terms, quoted verbatim — a
+    # false absence, which for a legal tool is the worst way to be wrong.
+    r"|\bdefine[sd]?\s+(?:the\s+term\s+)?[\"“']([^\"”']{2,48})[\"”']",
     re.IGNORECASE)
 
 # Beyond this the question is asking about a set of documents, and quoting one
