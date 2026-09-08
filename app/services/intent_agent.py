@@ -2760,6 +2760,29 @@ _RX_TREND = re.compile(
     r"getting\s+(?:longer|shorter|higher|lower|bigger|smaller))\b",
     re.IGNORECASE)
 
+# A trend question about something the corpus does not hold as a typed column.
+# "Are our termination notice periods getting longer over time?" is a perfectly
+# reasonable question and the answer is that we cannot tell — notice period was
+# never extracted as its own field. Left to retrieval it cost 26,874 prompt
+# tokens to reply "Needs clarification", which is the same refusal at roughly
+# nine seconds and a real price. Worse, retrieval might instead have answered
+# it: a direction-of-travel claim inferred from whichever handful of pages came
+# back is exactly the unfounded trend the analytics branches exist to prevent.
+#
+# The subject is matched, not guessed, so a metric the system DOES hold still
+# reaches the real trend branch above.
+_TREND_UNTYPED_SUBJECTS = (
+    (re.compile(r"\b(?:termination\s+)?notice\s+periods?\b", re.I),
+     "notice period",
+     "termination", "record a termination provision as free text"),
+    (re.compile(r"\bpayment\s+terms?\b", re.I), "payment terms", None, None),
+    (re.compile(r"\bindemnit(?:y|ies)\b", re.I), "indemnity", None, None),
+    (re.compile(r"\bexclusivit(?:y|ies)\b", re.I), "exclusivity", None, None),
+    (re.compile(r"\brenewal\s+(?:terms?|periods?)\b", re.I),
+     "renewal terms", "renewal_terms", "record renewal terms as free text"),
+    (re.compile(r"\bcure\s+periods?\b", re.I), "cure period", None, None),
+)
+
 # A date-range question over the corpus. Same shape of failure the aggregate and
 # gap branches exist to prevent, and confirmed live in the same way: "Which
 # Service Agreements have a term ending on or before 31 March 2026?" was
@@ -2883,6 +2906,12 @@ def _is_analytics_query(question: str) -> str:
     q = question or ""
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
+    # Checked straight after, and only when the question is unambiguously about
+    # a trend: the subject is one this corpus has no typed column for, so the
+    # honest answer is short and there is nothing for retrieval to add.
+    if _RX_TREND.search(q) and any(rx.search(q)
+                                   for rx, _, _, _ in _TREND_UNTYPED_SUBJECTS):
+        return "trend_untyped"
     # Ahead of gap: "which agreements do not expire before March" would satisfy
     # both, and the date range is the more specific reading. Needs all four
     # signals — a corpus-shaped plural, an expiry word, a window word, and a
@@ -3091,6 +3120,44 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                               f"a list that silently omitted them would read as "
                               f"though they had been checked."]
             payload = _canned_payload("\n".join(lines), "Expiry", "structured-analytics")
+
+        elif kind == "trend_untyped":
+            subject = fallback = column = None
+            for rx, name, col, phrasing in _TREND_UNTYPED_SUBJECTS:
+                if rx.search(question or ""):
+                    subject, column, fallback = name, col, phrasing
+                    break
+            if not subject:
+                return None
+            lines = [f"**A trend in {subject} cannot be computed from this "
+                     f"corpus.**", "",
+                     f"{subject.capitalize()} is not extracted as a structured "
+                     f"field, so there is no per-document value to bucket by "
+                     f"year. Any direction of travel reported here would be "
+                     f"inferred from whichever documents a search happened to "
+                     f"return, not measured across the corpus."]
+            if column:
+                try:
+                    from sqlalchemy import text as _text
+                    from services import db as _db
+                    with _db.get_engine().connect() as _c:
+                        n = _c.execute(_text(
+                            f"SELECT count(*) FROM contracts WHERE wiki_id = :w "
+                            f"AND session_id = :s AND {column} IS NOT NULL "
+                            f"AND btrim({column}) <> ''"),
+                            {"w": wiki_id, "s": session_id}).scalar() or 0
+                    if n:
+                        lines += ["", f"What is held instead: {n} document(s) "
+                                      f"{fallback}. That can be read per "
+                                      f"document, but it is prose, not a number "
+                                      f"that can be averaged or trended."]
+                except Exception:
+                    pass
+            lines += ["", "Liability cap and contract value are the two metrics "
+                          "this corpus does hold as typed values, and both can "
+                          "be trended by year."]
+            payload = _canned_payload("\n".join(lines), "Trend unavailable",
+                                      "structured-analytics")
 
         elif kind == "trend":
             metric = ("contract_value"
