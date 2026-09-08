@@ -2838,9 +2838,15 @@ _RX_COUNT_TOTAL = re.compile(
 # filtered question too ("how many contracts do we have that mention
 # arbitration"), and answering that one with the corpus total would be the same
 # confident-and-wrong failure pointing the other way.
+# "carry no dispute resolution clause" is a question about a SUBSET, and the
+# whole-corpus total is never its answer. The veto listed "without", "missing"
+# and "lack" but not a bare "no", so that phrasing reached the total branch and
+# was answered 1372 -- the size of the wiki, to a question about part of it.
+# Guarded against decimals ("no. 5") the same way _RX_GAP is.
 _RX_COUNT_TOTAL_VETO = re.compile(
     r"\b(?:mention\w*|contain\w*|includ\w*|reference\w*|involving|"
     r"that|which|whose|where|with|without|missing|lack\w*|"
+    r"no(?!\s*\.?\s*\d)|absent|fail\s+to|"
     r"governed|under|signed|expir\w*|terminat\w*|before|after|since|"
     r"between|per|each|by\s+type|by\s+year)\b",
     re.IGNORECASE,
@@ -3013,7 +3019,8 @@ _RX_GAP = re.compile(
     r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b",
     re.IGNORECASE)
 _RX_GAP_FIELD = re.compile(
-    r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?)\b",
+    r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?|"
+    r"dispute\s+resolution(?:\s+(?:clause|provision))?|arbitration\s+clause)\b",
     re.IGNORECASE)
 
 # A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
@@ -3346,7 +3353,15 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             payload = _canned_payload("\n".join(lines), "Aggregate", "structured-analytics")
 
         elif kind == "gap":
-            field = ("governing_law" if re.search(r"governing\s+law", question or "", re.I)
+            # Checked before termination because "dispute resolution" questions
+            # often also say "terminate", and before the liability-cap default
+            # because that default is what a question naming neither falls to —
+            # a dispute-resolution question reaching it was answered with the
+            # liability cap gap, a real number about the wrong field.
+            field = ("dispute_resolution"
+                     if re.search(r"dispute\s+resolution|arbitration\s+clause",
+                                  question or "", re.I)
+                     else "governing_law" if re.search(r"governing\s+law", question or "", re.I)
                      else "termination" if re.search(r"terminat", question or "", re.I)
                      else "liability_cap")
             data = analytics.find_gaps(wiki_id, session_id, field, parties)
