@@ -3322,6 +3322,39 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     # answer safely — but a bare totality question ("how many documents are
     # there in total") is the exception, and the one case where the index is
     # strictly better than anything retrieval can say.
+    # A text predicate is a third way to pin a count, alongside a party and an
+    # instrument type, and it is the one that was missing.
+    _predicate = _count_predicate_phrase(question)
+    if _predicate:
+        try:
+            res = _db.list_documents_matching(
+                wiki_id, session_id, parties or None, patterns or None,
+                content_phrases=[_predicate], limit=25)
+        except Exception as e:
+            logger.error("[AGENT] predicate count failed: %s", e)
+            return None
+        if not res["total"]:
+            return None
+        noun = label or "document"
+        qual = f" naming {' and '.join(parties)}" if parties else ""
+        lines = [f"**{res['total']} {noun}(s){qual} whose text contains "
+                 f"“{_predicate}”.**", ""]
+        for d in res["documents"]:
+            date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+            lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{date}")
+        if res["truncated"]:
+            lines.append(f"- …and {res['total'] - len(res['documents'])} more")
+        lines += ["", "Counted over every document in the wiki, not over the "
+                      "pages a search returned — the figure is the total, and "
+                      "the documents above are the first of them.",
+                  "", f"The phrase “{_predicate}” was matched literally in the "
+                      f"page text. A document expressing the same thing in "
+                      f"other words is not counted."]
+        payload = _canned_payload("\n".join(lines), "Count", "document-index")
+        payload["files_used"] = [d["source_doc"] for d in res["documents"]]
+        payload["meta_answer"] = False
+        return payload
+
     _whole_corpus = False
     if not parties and not patterns:
         if (_RX_COUNT_TOTAL.search(question or "")
@@ -4497,6 +4530,60 @@ def _compound_answer(question: str, session_id: str,
     payload["files_used"] = [d["source_doc"] for d in res["documents"]]
     payload["meta_answer"] = False
     return payload
+
+
+# "How many contracts do we have that mention arbitration?" — a count whose
+# subject is a text predicate rather than a party or an instrument type. The
+# count branch could pin neither, declined, and retrieval answered from the
+# pages it had fetched: fifteen. Seven hundred and one documents mention
+# arbitration. It is the same failure as the corpus total answered as "21",
+# reached by a different route, and it is worse — fifteen is a plausible
+# enough number that nobody would question it.
+_RX_COUNT_PREDICATE = re.compile(
+    r"\b(?:that|which|who)?\s*"
+    r"(?:mention|mentions|contain|contains|reference|references|"
+    r"include|includes|state|states|say|says|cover|covers|"
+    r"address|addresses|require|requires|prohibit|prohibits|"
+    r"allow|allows|permit|permits|impose|imposes|carry|carries|"
+    r"refer\s+to|talk\s+about)\s+(.{2,70})",
+    re.IGNORECASE)
+# Words that are the thing being counted, not the thing being looked for.
+_COUNT_PREDICATE_GENERIC = {
+    "document", "documents", "contract", "contracts", "agreement",
+    "agreements", "clause", "clauses", "provision", "provisions", "term",
+    "terms", "it", "them", "this", "that", "these", "those", "one", "ones",
+}
+
+
+def _count_predicate_phrase(question: str) -> str:
+    """The text a counting question is looking for, or "".
+
+    A single word counts here where it would not in a compound question:
+    "mention arbitration" names its subject in one word, and requiring two
+    would decline the commonest form of the question.
+    """
+    m = _RX_COUNT_PREDICATE.search(question or "")
+    if not m:
+        return ""
+    words = [w for w in re.split(r"[^A-Za-z'-]+", m.group(1)) if w]
+    out = []
+    for w in words[:6]:
+        if w.lower() in _PRED_CUT:
+            break
+        out.append(w)
+    out = out[:4]
+    while out and out[0].lower() in _PRED_EDGE:
+        out.pop(0)
+    while out and out[-1].lower() in _PRED_EDGE:
+        out.pop()
+    if not out:
+        return ""
+    if any(w.lower() in _COUNT_PREDICATE_GENERIC for w in out):
+        return ""
+    phrase = " ".join(out)
+    if len(out) == 1:
+        return phrase if len(phrase) >= 5 else ""
+    return phrase if len(phrase) >= 8 else ""
 
 
 def _enumerate_answer(question: str, session_id: str,
