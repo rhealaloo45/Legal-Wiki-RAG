@@ -2616,8 +2616,8 @@ _DOC_NUM_NOISE_RE = re.compile(
     r"""
       \d+(?:-\d+)+                 # 2021-10-03, 06-10-2020, ta-2025-355
     | \d{1,2}[a-z]{3}\d{2,4}       # 01oct2019
-    | (?:19|20)\d{2}          # a bare year
-    | \d{8}                   # 20240809
+    | \b(?:19|20)\d{2}\b          # a bare year
+    | \b\d{8}\b                   # 20240809
     """,
     re.VERBOSE,
 )
@@ -2702,6 +2702,7 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
             # "01" and "1" but NOT "10"/"11"/"21" — the surrounding digit guards
             # keep it from bleeding into a different document number.
             num_re = rf'(?<!\d)0*{re.escape(doc_num)}(?!\d)'
+            hits: list[str] = []
             for sd in doc_names:
                 norm = _norm_doc_name(sd)
                 # The number is searched in the name with dates and reference
@@ -2709,7 +2710,20 @@ def _numbered_docs_in(question: str, doc_names) -> set[str]:
                 # name, since a type word never hides inside a date.
                 if (re.search(num_re, _strip_doc_num_noise(norm))
                         and (not type_core or type_core in norm)):
-                    matched.add(sd)
+                    hits.append(sd)
+            # Same type+number can match a curated document AND an unrelated
+            # secondary-corpus twin that merely zero-pads to the same number
+            # (see _is_secondary_numbered_doc) — a DIFFERENT document, not a
+            # richer copy of the same one. "Court Case Document 3" naming the
+            # curated "Court Case Document 3 (1).pdf" must not also force-include
+            # the bulk corpus's "Court_Case_Document_003.pdf", which is a
+            # different filing entirely. Confirmed live across a 76-question
+            # audit: unfiltered, this was the single largest source of wrong-
+            # document answers, some stated with full confidence. Only fall
+            # back to the secondary hit(s) when no curated document matched —
+            # that is the Test_* stand-in's actual, original purpose.
+            primary = [sd for sd in hits if not _is_secondary_numbered_doc(sd)]
+            matched.update(primary or hits)
     return matched
 
 
@@ -2730,6 +2744,41 @@ def _is_synthetic_test_doc(source_doc: str) -> bool:
     real corpus document."""
     base = re.sub(r'^[a-f0-9-]{36}_', '', source_doc.replace("\\", "/").rsplit("/", 1)[-1])
     return bool(_SYNTHETIC_DOC_RE.search(base))
+
+
+# A second, much larger bulk-numbered corpus (~790 of this deployment's 1,372
+# documents) sits in the SAME wiki as the named/curated ones this module's
+# other numbered-reference matching was written for — "Court_Case_Document_003
+# .pdf", "Shareholders_Agreement_067.pdf", sometimes with a "TA-YYYY-NNN"
+# matter code spliced in. Different naming convention from Test_<TYPE>_<NN>
+# (no "test" marker), so _SYNTHETIC_DOC_RE never caught it, but it is the exact
+# same collision: "Court Case Document 3" number-matches BOTH the curated
+# "Court Case Document 3 (1).pdf" AND the unrelated "Court_Case_Document_003
+# .pdf" (a different document — different doc_type, different matter — that
+# merely zero-pads to the same number). Confirmed live across a 76-question
+# audit: this collision was the cause of most of the run's wrong-document
+# answers, including confidently wrong ones, not just declines.
+#
+# Distinguished structurally, not by content: every curated document in this
+# corpus ends its filename in a parenthesised suffix — " (1).pdf", "_redacted
+# (1).pdf" — a download/upload artifact _norm_doc_name already strips as noise.
+# The bulk corpus never has one; it ends directly in the zero-padded number.
+# Confirmed with a live query: zero documents in this deployment match both
+# patterns at once, so this is a clean partition, not a heuristic guess.
+_BULK_NUMBERED_DOC_RE = re.compile(r'_\d{3}\.(?:pdf|docx?|txt)$', re.I)
+
+
+def _is_bulk_numbered_doc(source_doc: str) -> bool:
+    """True when source_doc is a bare "<Type>_NNN" bulk-corpus filename with no
+    parenthesised suffix — see _BULK_NUMBERED_DOC_RE."""
+    base = source_doc.replace("\\", "/").rsplit("/", 1)[-1]
+    return bool(_BULK_NUMBERED_DOC_RE.search(base)) and '(' not in base
+
+
+def _is_secondary_numbered_doc(source_doc: str) -> bool:
+    """True for either flavour of numbered stand-in a curated document can
+    collide with: the Test_<TYPE>_<NN> corpus or the bulk _NNN corpus."""
+    return _is_synthetic_test_doc(source_doc) or _is_bulk_numbered_doc(source_doc)
 
 
 def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
@@ -2766,8 +2815,8 @@ def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
                 if re.search(num_re, _norm_doc_name(sd))
                 and (not type_core or type_core in _norm_doc_name(sd))
             ]
-            has_synthetic = any(_is_synthetic_test_doc(sd) for sd in hits)
-            has_real = any(not _is_synthetic_test_doc(sd) for sd in hits)
+            has_synthetic = any(_is_secondary_numbered_doc(sd) for sd in hits)
+            has_real = any(not _is_secondary_numbered_doc(sd) for sd in hits)
             if has_synthetic and has_real:
                 label = f"{t} {doc_num}"
                 if label not in collisions:
@@ -3178,6 +3227,136 @@ _DATED_RE = re.compile(
     r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
     re.IGNORECASE,
 )
+
+
+# A compliance question measured against a statute rather than against a
+# document in the corpus. The corpus holds contracts, opinions and judgments —
+# it does not hold the Acts themselves, so whether an agreement satisfies one
+# is not a question these pages can settle. Left to the prompt alone the
+# behaviour split three ways on three near-identical questions: a GDPR question
+# was declined cleanly, a DPDP Act question was answered by listing the
+# obligations that "bear on" compliance, and a Trade Marks Act question was
+# answered outright under stated assumptions. The first is right; a lawyer
+# reading the other two could reasonably come away believing the document had
+# been checked against the statute.
+_RX_STATUTE_NAMED = re.compile(
+    r"\b((?:[A-Z][\w'&.-]*\s+(?:(?:and|of|the|for|on)\s+)?){0,6}"
+    r"(?:Act|Rules|Regulations|Code|Directive|Convention|Ordinance)"
+    r"(?:[,\s]+\d{4})?)")
+_RX_STATUTE_ACRONYM = re.compile(
+    r"\b(GDPR|CCPA|HIPAA|DPDP|SOX|PCI[-\s]?DSS|FCPA|UK\s+GDPR)\b")
+_RX_COMPLIANCE_ASK = re.compile(
+    r"\b(?:compl(?:y|ies|iant|iance)|conform(?:s|ing)?|satisf(?:y|ies|ying)|"
+    r"adhere(?:s|nce)?|meet(?:s)?\s+the\s+requirements|in\s+breach\s+of|"
+    r"violat(?:e|es|ion)|permitted\s+under|lawful\s+under|valid\s+under)\b",
+    re.IGNORECASE)
+# The house playbook is a document this corpus DOES hold, so a compliance
+# question about it is answerable and must not be intercepted.
+_RX_HOUSE_STANDARD = re.compile(
+    r"\b(?:playbook|house\s+(?:standard|position|policy|rules?)|"
+    r"our\s+(?:standard|policy|template|precedent)|company\s+rules?)\b",
+    re.IGNORECASE)
+
+
+def _external_law_directive(question: str, session_id: str) -> str | None:
+    """Refuse a compliance verdict against a statute the corpus does not hold.
+
+    Deliberately does not suppress the answer. What the documents say about the
+    subject is genuinely useful and the lawyer asked for it; what they cannot
+    support is the verdict. So the directive separates the two rather than
+    turning a real question into a blanket refusal.
+    """
+    q = question or ""
+    if not _RX_COMPLIANCE_ASK.search(q) or _RX_HOUSE_STANDARD.search(q):
+        return None
+    m = _RX_STATUTE_ACRONYM.search(q) or _RX_STATUTE_NAMED.search(q)
+    if not m:
+        return None
+    statute = m.group(1).strip(" ,")
+    if len(statute) < 3:
+        return None
+
+    # If the instrument itself is in the corpus the question is answerable and
+    # this directive would be actively wrong.
+    try:
+        from services import db as _db
+        head = re.split(r"[,\d]", statute)[0].strip()
+        if head and len(head) > 4:
+            hits = _db.list_documents_matching(
+                _active_wiki_id(), session_id, None, [head], None, limit=1)
+            if hits.get("total"):
+                return None
+    except Exception:
+        pass
+
+    return (
+        f"this question asks whether something COMPLIES WITH \"{statute}\". "
+        f"That statute is not among these documents, and a contract's own text "
+        f"cannot establish whether it satisfies a law. Do NOT give a compliance "
+        f"verdict, a partial verdict, or a list of ways the document \"supports\" "
+        f"or \"bears on\" compliance — all three read as an assessment that was "
+        f"never performed. Open by saying plainly that compliance with "
+        f"\"{statute}\" cannot be determined from these documents, because the "
+        f"statute is not in this corpus. THEN, clearly under a separate heading, "
+        f"set out what the documents actually do say on the subject matter, as "
+        f"the documents' own terms and not as evidence of compliance. Do not "
+        f"state assumptions that would let you answer the compliance question "
+        f"anyway. "
+        # Length is part of the instruction, not a style note. Without it this
+        # directive turned a clean 16-second refusal into a 66-second one that
+        # inventoried the agreement clause by clause — the decline was still
+        # correct, but a reader who asked a yes/no question and received four
+        # screens of provisions will read the volume as the answer. The point
+        # is what cannot be concluded; the extract is supporting detail.
+        f"Keep that second section SHORT — the handful of provisions that bear "
+        f"on the subject, in a few lines or a small table, not a clause-by-"
+        f"clause review of the document. The reader asked a yes/no question and "
+        f"is being told it cannot be answered; length will read as though it "
+        f"were answered after all.")
+
+
+# A scan across a whole class of instrument — "what's unusual across our
+# shareholder agreements", "what should we worry about in our vendor service
+# agreements". These were answered correctly and at great length: up to 9,426
+# completion tokens and 78 seconds, walking document after document. The
+# finding a lawyer can act on is which patterns recur and where, not a
+# transcript of everything the retrieval returned.
+_RX_BROAD_SCAN = re.compile(
+    r"\b(?:risks?|exposures?|concerns?|red\s+flags?|unusual|anomalous|"
+    r"anomal(?:y|ies)|non-?standard|stands?\s+out|outliers?|off-?market|"
+    r"worry|worried|worrying|themes?|patterns?)\b", re.IGNORECASE)
+_RX_BROAD_SCOPE = re.compile(
+    r"\b(?:across|in|among|throughout|within)\s+(?:our|the|all|these)\s+"
+    r"(?:[a-z]+\s+){0,2}?(?:contracts?|agreements?|documents?|portfolios?|"
+    r"ndas?|msas?|slas?|sows?|jvas?|shas?|leases?|licen[cs]es?|deeds?|"
+    r"policies|opinions?|litigation|matters?)\b", re.IGNORECASE)
+
+
+def _broad_scan_directive(question: str) -> str | None:
+    """Ask a corpus-wide scan for ranked findings rather than a walkthrough."""
+    q = question or ""
+    if not (_RX_BROAD_SCAN.search(q) and _RX_BROAD_SCOPE.search(q)):
+        return None
+    return (
+        "this question scans a whole class of instrument rather than asking "
+        "about one document. Answer with RANKED FINDINGS, not a document-by-"
+        "document walkthrough. Give at most six findings, most significant "
+        "first. For each: one line stating the pattern, then the specific "
+        "documents that show it, then one line on why it matters. A pattern "
+        "that appears in a single document is a finding about that document — "
+        "say so rather than presenting it as characteristic of the class. Do "
+        "not summarise every retrieved document, and do not repeat a finding "
+        "under a second heading. If the retrieved documents are too few to "
+        "support a claim about the class, say how many you are generalising "
+        "from. "
+        # Two runs of the same archetype came back in two different layouts —
+        # one numbered with bold sub-labels, one bold headings with prose — so
+        # the structure is specified rather than left to the model.
+        "Use exactly this layout for each finding, and no other: a numbered "
+        "line \"N. <the pattern in one sentence>\", then a line beginning "
+        "\"Documents: \" listing them, then a line beginning \"Why it matters: "
+        "\". Do not bold the numbered line. Do not add a per-finding heading "
+        "on top of the numbered line.")
 
 
 def _amendment_family_directive(question: str) -> str | None:
@@ -3734,6 +3913,21 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     # Count the separator with each part, and hold back room for the note.
     _NOTE_RESERVE = 320
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS - _NOTE_RESERVE
+
+    # A corpus-wide scan is the one question shape that reliably fills the
+    # whole budget, because it matches many similar documents and the fill
+    # order keeps taking one more page from one more of them. It is also the
+    # shape that needs the pages least: the answer names patterns and cites a
+    # handful of documents per pattern, so the last 20,000 characters bought
+    # breadth the answer never used and paid for it on every call — these ran
+    # to 43,000 and 49,000 tokens a question.
+    #
+    # Cut to two thirds for that shape only. Everything that quotes a clause,
+    # compares two documents or answers about one instrument keeps the full
+    # budget, because those answers do read what they are given.
+    if _broad_scan_directive(question):
+        _TOTAL_CAP = int(_TOTAL_CAP * 0.66)
+        logger.info("Broad scan: context budget reduced to %d chars", _TOTAL_CAP)
     total_chars = sum(len(p) + 1 for p in wiki_parts)
     pages_omitted = 0
     _trace_pages = []
@@ -4896,14 +5090,75 @@ _VOICE_SUBS = (
 
 # Cleanups for what the substitutions above can leave behind.
 _VOICE_FIXUPS = (
+    # Ordered first, because the collapse below is what lets the agreement
+    # rules that follow reach their verb.
+    #
+    # "The context for this document does contain existing confidentiality
+    # clauses" became "These documents for this document does contain…" — the
+    # substitution replaced the head noun and left the qualifier that belonged
+    # to it, and the plural then sat four words away from its verb, where the
+    # adjacency rules below could not see it. That sentence opened a drafting
+    # answer, so the first thing a lawyer read was broken English.
+    #
+    # The qualifier is redundant once the head noun is "these documents", so
+    # collapsing it is both the grammatical fix and the right meaning.
+    (re.compile(r"\bthese documents\s+(?:for|in|of|regarding|about)\s+"
+                r"(?:this|the)\s+(?:document|agreement|contract|matter|"
+                r"instrument)s?\b", re.IGNORECASE), "these documents"),
     (re.compile(r"\bthese documents does\b", re.IGNORECASE), "these documents do"),
     (re.compile(r"\bthese documents is\b", re.IGNORECASE), "these documents are"),
     (re.compile(r"\bthese documents was\b", re.IGNORECASE), "these documents were"),
     (re.compile(r"\bthese documents contains\b", re.IGNORECASE), "these documents contain"),
-    (re.compile(r"\bthese documents (?:only )?(?:contains|holds)\b", re.IGNORECASE),
-     "these documents contain"),
+    # A rule here previously matched "these documents only contains" and
+    # replaced the whole span with "these documents contain", deleting the
+    # "only". That is a change of meaning, not of voice: "only contains two
+    # NDAs" is a statement about the limits of the corpus and "contains two
+    # NDAs" is not. The general agreement rule below fixes the verb and keeps
+    # the qualifier, so the lossy rule is gone rather than repaired.
     (re.compile(r"\bThese documents\b(?=[^.]*\bhere\b)"), "These documents"),
 )
+
+# The rules above name one verb each, and the list was never going to be
+# complete — "the context says" came through as "these documents says". The
+# subject became plural, so every third-person-singular verb agreeing with the
+# old subject is now wrong, which is a rule rather than a list.
+_DOCS_VERB_PLURAL = {
+    "says": "say", "has": "have", "does": "do", "is": "are", "was": "were",
+    "contains": "contain", "holds": "hold", "shows": "show", "omits": "omit",
+    "provides": "provide", "states": "state", "addresses": "address",
+    "appears": "appear", "includes": "include", "refers": "refer",
+    "indicates": "indicate", "describes": "describe", "mentions": "mention",
+    "records": "record", "confirms": "confirm", "lacks": "lack",
+    "specifies": "specify", "covers": "cover", "supports": "support",
+}
+_RX_DOCS_VERB = re.compile(
+    r"\b(these\s+documents)\s+((?:only\s+|also\s+|not\s+)?)("
+    + "|".join(_DOCS_VERB_PLURAL) + r")\b", re.IGNORECASE)
+
+
+def _fix_docs_verb(m: re.Match) -> str:
+    verb = _DOCS_VERB_PLURAL[m.group(3).lower()]
+    return f"{m.group(1)} {m.group(2)}{verb}"
+
+
+# The plural subject can govern a SECOND verb further along the same sentence,
+# which the adjacency rule above cannot reach: "The context is about shareholder
+# agreements and is appropriate to the question" became "These documents are
+# about shareholder agreements and IS appropriate" — the opening line of a risk
+# scan. Bounded to the same clause, and to a conjunction with no new subject
+# after it, so "these documents are about the agreement and it is fine" is left
+# alone.
+_RX_DOCS_SECOND_VERB = re.compile(
+    r"\b(these\s+documents\s+(?:are|do|have|were)\b[^.;:]{0,90}?\band\s+)"
+    r"(is|was|has|does|contains|states|appears|includes)\b", re.IGNORECASE)
+_SECOND_VERB_PLURAL = {"is": "are", "was": "were", "has": "have",
+                       "does": "do", "contains": "contain",
+                       "states": "state", "appears": "appear",
+                       "includes": "include"}
+
+
+def _fix_docs_second_verb(m: re.Match) -> str:
+    return f"{m.group(1)}{_SECOND_VERB_PLURAL[m.group(2).lower()]}"
 
 
 def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
@@ -4954,8 +5209,45 @@ def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
             for m in re.finditer(r'^\s*>.*$', out, re.M):
                 protected.append((m.start(), m.end()))
     for rx, repl in _VOICE_FIXUPS:
-        out = rx.sub(repl, out)
+        # Capitalisation is preserved the same way the substitutions above do
+        # it. Without this a fixup at the head of a sentence lowercased it, so
+        # correcting the grammar of an opening line broke its capitalisation
+        # instead — trading one visible defect for another.
+        def _sub(m, _repl=repl):
+            text = _repl
+            if m.group(0)[:1].isupper():
+                text = text[:1].upper() + text[1:]
+            return text
+        out = rx.sub(_sub, out)
+    out = _RX_DOCS_VERB.sub(_fix_docs_verb, out)
+    out = _RX_DOCS_SECOND_VERB.sub(_fix_docs_second_verb, out)
+    out = _tidy_emphasis(out)
     return out, changed
+
+
+# Markdown will not close an emphasis span whose delimiter is preceded by a
+# space, so "**Pattern: ... SPVs. **" renders as literal asterisks in the
+# reader's answer. It happened at the head of a ranked-findings list, where the
+# first thing on screen was "**Pattern:" in raw markup.
+_RX_EMPHASIS_SLACK = re.compile(r"\*\*(\s*)(.+?)(\s*)\*\*", re.DOTALL)
+# A heading line the model bolded AND numbered ("**1) Pattern — …**") reads as
+# two competing structures; the numbering is enough.
+_RX_EMPHASIS_EMPTY = re.compile(r"\*\*\s*\*\*")
+
+
+def _tidy_emphasis(text: str) -> str:
+    """Move stray whitespace outside emphasis delimiters so they render."""
+    if not text or "**" not in text:
+        return text
+
+    def _fix(m: re.Match) -> str:
+        body = m.group(2).strip()
+        if not body:
+            return ""
+        return f"{m.group(1)}**{body}**{m.group(3)}"
+
+    out = _RX_EMPHASIS_SLACK.sub(_fix, text)
+    return _RX_EMPHASIS_EMPTY.sub("", out)
 
 
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:
@@ -5841,6 +6133,30 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         f"AMBIGUOUS DOCUMENT DESCRIPTION: {ambiguity_directive}\n\n"
     ) if ambiguity_directive else ""
 
+    # Prepended with the others, and first among them, for the same reason: it
+    # has to beat the REQUIRED OUTPUT FORMAT directive at the end of every
+    # template, which otherwise pulls the model into answering the question as
+    # asked. What may not be said is a more fundamental constraint than how the
+    # answer is laid out.
+    try:
+        _ext_law = _external_law_directive(question, session_id)
+    except Exception as _e_err:
+        logger.warning("External-law directive unavailable: %s", _e_err)
+        _ext_law = None
+    if _ext_law:
+        logger.info("External-law compliance directive applied")
+    _external_law_note = (
+        f"OUT-OF-CORPUS STANDARD: {_ext_law}\n\n"
+    ) if _ext_law else ""
+
+    try:
+        _scan = _broad_scan_directive(question)
+    except Exception:
+        _scan = None
+    if _scan:
+        logger.info("Broad-scan directive applied")
+    _broad_scan_note = f"CORPUS-WIDE SCAN: {_scan}\n\n" if _scan else ""
+
     # Pick prompt based on the classified lawyer intent (intent_agent upstream)
     _intent_prompt_map = {
         "factual": ANSWER_PROMPT,
@@ -5850,6 +6166,21 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         "drafting": DRAFTING_PROMPT,
     }
     prompt_template = _intent_prompt_map.get(intent, ANSWER_PROMPT)
+
+    # A corpus-wide scan classified as a comparison gets the comparison
+    # template, whose REQUIRED OUTPUT FORMAT is a side-by-side table — and that
+    # format beat the scan directive prepended above it. "What's unusual across
+    # our shareholder agreements?" came back as a two-column table comparing
+    # two of them, which is not what was asked: the question is about the class,
+    # and two documents cannot characterise a class.
+    #
+    # A scan across many documents is an assessment, so it gets the assessment
+    # template. The directive then shapes it into ranked findings instead of
+    # arguing with a table.
+    if _scan and intent == "comparison":
+        logger.info("Broad scan classified as comparison; using the assessment "
+                    "template instead")
+        prompt_template = ASSESSMENT_PROMPT
 
     # Drafting intent draws on the Precedent layer as well as the pages
     # (§ Phase 2: "Draft Mode and the Ask tab's drafting intent both switch to
@@ -5878,7 +6209,8 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         except Exception as _p_err:
             logger.warning("Precedent clauses unavailable for drafting intent: %s",
                            _p_err)
-    prompt = (_ambiguity_directive_note + _unconfirmed_doc_note
+    prompt = (_external_law_note + _broad_scan_note + _ambiguity_directive_note
+              + _unconfirmed_doc_note
               + _clause_directive_note) + prompt_template.format(
         context=wiki_content,
         question=question,
@@ -8482,17 +8814,6 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     if not candidates:
         return set()
 
-    # Canonicalise each candidate through the entity registry before searching.
-    # backbone.resolve_entity maps a name or a recorded spelling to the party's
-    # canonical form across 530 entities and 447 aliases; it has existed and
-    # been populated since the Phase 0 backbone and nothing in the query path
-    # ever read it, so scope resolution has been matching raw strings against
-    # page text the whole time. The canonical form is ADDED rather than
-    # substituted: an alias that resolves gives two chances to find the
-    # document, and a name the registry has never seen behaves exactly as
-    # before, so this can widen a match and cannot narrow one.
-    candidates = _with_canonical_party_names(candidates)
-
     # Scanned well above max_docs so a multi-doc match has its FULL sibling
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
@@ -8500,13 +8821,34 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # Wider re-scan used only to intersect several party names against each
     # other, where a cap-truncated set makes the intersection meaningless.
     _PARTY_INTERSECT_CAP = 200
+
+    # Canonicalise each candidate through the entity registry before searching.
+    # backbone.resolve_entity maps a name or a recorded spelling to the party's
+    # canonical form across 530 entities and 447 aliases; it has existed and
+    # been populated since the Phase 0 backbone and nothing in the query path
+    # ever read it, so scope resolution has been matching raw strings against
+    # page text the whole time. Widened PER CANDIDATE and kept keyed to the
+    # original name (rather than flattening original+canonical into one list
+    # of candidates, as an earlier version of this did) — the intersection
+    # gate below counts how many DISTINCT PARTIES were named, and a party
+    # whose alias resolves contributes ONE entry with a widened doc set, not
+    # two entries that make it look like a second party was named. Confirmed
+    # live: flattened, a two-party question where one name canonicalised grew
+    # `resolved` to 3 entries, silently failed the two-name intersection gate
+    # below, and fell back to "smallest single candidate" — which picked an
+    # unrelated one-document coincidental text match over the real answer.
+    _variants_by_name = {name: _with_canonical_party_names([name]) for name in candidates}
     resolved: list[tuple[str, set[str]]] = []
     for name in candidates:
-        try:
-            docs = {d for d in _db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, name, cap=_PARTY_SCAN_CAP) if d}
-        except Exception as e:
-            logger.error("resolve_scope: party-content lookup failed for %r: %s", name, e)
-            continue
+        docs: set[str] = set()
+        for variant in _variants_by_name[name]:
+            try:
+                found = {d for d in _db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, variant, cap=_PARTY_SCAN_CAP) if d}
+            except Exception as e:
+                logger.error("resolve_scope: party-content lookup failed for %r: %s", variant, e)
+                found = set()
+            docs |= found
         if docs:
             resolved.append((name, docs))
     if not resolved:
@@ -8546,9 +8888,12 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
                     wide.append(docs)
                     continue
                 try:
-                    wide.append({d for d in _db.find_source_docs_mentioning_phrase(
-                        _active_wiki_id(), session_id, name,
-                        cap=_PARTY_INTERSECT_CAP) if d})
+                    rescanned: set[str] = set()
+                    for variant in _variants_by_name[name]:
+                        rescanned |= {d for d in _db.find_source_docs_mentioning_phrase(
+                            _active_wiki_id(), session_id, variant,
+                            cap=_PARTY_INTERSECT_CAP) if d}
+                    wide.append(rescanned)
                 except Exception as e:
                     logger.error("resolve_scope: wide party lookup failed for %r: %s",
                                  name, e)
@@ -9449,6 +9794,31 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
             other_docs = set(_db.find_source_docs_mentioning_phrase(_active_wiki_id(), session_id, other_tok, cap=200) or [])
         except Exception:
             other_docs = set()
+        # other_tok is searched as a whole PHRASE (unlike the bare anchor
+        # token above), which makes this search literal about the corporate
+        # suffix — "Pty Ltd" and "Pte. Ltd." are different phrases, and on
+        # this corpus find disjoint document sets for the same real entity
+        # (confirmed live: 1 document vs 9). The question can type either
+        # spelling; the corpus text carries whichever one ingest saw. Add the
+        # registry's canonical spelling as a second search, never substituted
+        # for the original, so a name the registry has never recorded behaves
+        # exactly as before.
+        try:
+            from services import backbone as _bb
+            canon_other = _canonical_party_name(_bb, _active_wiki_id(), other_tok)
+        except Exception:
+            canon_other = None
+        if canon_other and canon_other.strip().lower() != other_tok.strip().lower():
+            try:
+                canon_docs = set(_db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, canon_other, cap=200) or [])
+            except Exception:
+                canon_docs = set()
+            if canon_docs - other_docs:
+                logger.info("Party-pair content verification: canonical form %r "
+                            "of %r found %d additional document(s)",
+                            canon_other, other_tok, len(canon_docs - other_docs))
+            other_docs |= canon_docs
         content_verified = remainder & other_docs
     else:
         content_verified = remainder
@@ -10279,8 +10649,93 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     if not last:
         return []
     if _is_carryover_method(last.get("method")) and last.get("docs"):
-        return list(last["docs"])
+        _docs = list(last["docs"])
+        if _carryover_subject_pivot(question, _docs):
+            logger.info("_carryover_scope: question names a subject absent from "
+                        "the carried document(s); not inheriting")
+            return []
+        return _docs
     return []
+
+
+# Words that are capitalised in a legal question without naming anything —
+# statute furniture, party roles, and the days and months.
+_PIVOT_STOPWORDS = {
+    "act", "acts", "rules", "rule", "code", "codes", "regulation",
+    "regulations", "clause", "clauses", "section", "sections", "schedule",
+    "schedules", "annexure", "agreement", "agreements", "contract",
+    "contracts", "document", "documents", "party", "parties", "company",
+    "limited", "private", "ltd", "plc", "inc", "gmbh", "llp",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "indian", "india", "english", "european", "union",
+    "does", "what", "which", "where", "when", "should", "would", "could",
+    "trade", "marks", "data", "protection", "personal", "digital", "general",
+}
+# A question pointing back at the pinned document keeps it, whatever else it
+# names: "does THIS comply with the Companies Act" is about the pinned
+# agreement, and the Act is what it is being measured against.
+_RX_PIVOT_BACKREF = re.compile(
+    r"\b(?:it|its|this|that|these|those|the\s+(?:same|above|document|agreement|"
+    r"contract)|therein|thereunder|hereunder)\b", re.IGNORECASE)
+
+
+def _carryover_subject_pivot(question: str, carried: list) -> bool:
+    """Whether the question is about something the carried documents are not.
+
+    Confirmed live: asked "Does our Croma litigation strategy satisfy the
+    Indian Trade Marks Act requirements?" one turn after an NDA was pinned, the
+    thread inherited that NDA and answered about a confidentiality agreement
+    with nothing to do with Croma — declining the statute correctly, then
+    describing the wrong document at 25% confidence.
+
+    A pivot needs all three of these, so an ordinary follow-up is untouched:
+      * the question points back at nothing (no "it", "this", "that"),
+      * it names a token that identifies documents ELSEWHERE in this corpus,
+        so the pivot leads somewhere real rather than to a typo,
+      * that token appears nowhere in the carried documents — not in their
+        names, not in their parties, not in their text.
+    """
+    if not carried or not config.USE_DATABASE:
+        return False
+    q = question or ""
+    if _RX_PIVOT_BACKREF.search(q):
+        return False
+
+    # Sentence-initial capitals say nothing about the word.
+    words = re.findall(r"\b([A-Z][A-Za-z'&-]{3,})\b", q[1:] if q else "")
+    cands = [w for w in dict.fromkeys(words)
+             if w.lower() not in _PIVOT_STOPWORDS]
+    if not cands:
+        return False
+
+    from sqlalchemy import text as _text
+    try:
+        with _db.get_engine().connect() as conn:
+            for tok in cands[:4]:
+                like = f"%{tok}%"
+                names = conn.execute(_text(
+                    "SELECT count(*) FROM documents WHERE wiki_id = :w "
+                    "AND (source_doc ILIKE :t OR parties::text ILIKE :t)"),
+                    {"w": _active_wiki_id(), "t": like}).scalar() or 0
+                if not names:
+                    continue          # not an identifier in this corpus
+                hit = conn.execute(_text(
+                    "SELECT 1 FROM pages WHERE source_doc = ANY(:docs) "
+                    "AND content ILIKE :t LIMIT 1"),
+                    {"docs": list(carried), "t": like}).fetchone()
+                if hit:
+                    continue          # the carried documents do discuss it
+                if any(tok.lower() in (d or "").lower() for d in carried):
+                    continue
+                logger.info("_carryover_scope: %r names %d document(s) elsewhere "
+                            "and none of the carried ones", tok, names)
+                return True
+    except Exception as e:
+        logger.warning("_carryover_subject_pivot check failed: %s", e)
+        return False
+    return False
 
 
 # Explicit references back to a set the conversation just established —
@@ -10576,6 +11031,18 @@ def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> 
         acronym = "".join(w[0] for w in words).lower()
         if 4 <= len(acronym) <= 12:
             initialisms.add(acronym)
+    # A scope the party branch resolved from TWO OR MORE distinctly named
+    # parties (an intersection across both sides of a named matter, not one
+    # umbrella name spanning whatever it happens to span) is independently
+    # corroborated evidence — stronger than a single recorded doc_type string
+    # disagreeing with the question's wording. Gated to the party branch
+    # specifically (not date/matter-reference/family scopes, which this bug
+    # was never observed on) and to a genuine 2+-party count (not "party-multi"
+    # in general, which also covers one umbrella party spanning several of its
+    # OWN unrelated instruments — that case has no second party to corroborate
+    # anything and should keep being correctable as before).
+    _named_parties = {m.group(1).strip().lower() for m in _PARTY_NAME_RE.finditer(question or "")}
+    _party_evidence = method.startswith("party") and len(_named_parties) >= 2
     for d in targets:
         recorded = scoped_types.get(d, "")
         if not recorded.strip():
@@ -10599,6 +11066,26 @@ def _enforce_question_doc_type(scoped: dict, question: str, session_id: str) -> 
         if any(a in haystack for a in initialisms):
             logger.info("Scope %s kept: %s is filed under the initialism of the "
                         "instrument the question names", method, _norm_doc_name(d))
+            return scoped
+        # Same idea as the initialism check just above, but on the ordinary
+        # words of the type rather than an acronym — and only trusted here
+        # where the party evidence backing this scope is already strong (see
+        # _party_evidence above). Confirmed live: a document whose own
+        # filename reads "...Loan Agreement_...-LoanAgt-..." was recorded in
+        # the database as "Facility Agreement" — ingest's classification and
+        # the document's own filename disagree with each other, not just with
+        # the question — and this scope had already been produced by
+        # intersecting TWO independently named parties' content matches, the
+        # strongest signal this module has. Without this check the doc-type
+        # branch discarded that match and replaced it with the one other
+        # document in the whole corpus recorded as a "Loan Agreement" —
+        # between two entirely different, unnamed parties.
+        if _party_evidence and question_core and any(w in haystack for w in question_core):
+            logger.info("Scope %s kept: %s's own filename names the instrument "
+                        "type the question asked about (recorded doc_type %r "
+                        "disagrees, but this scope is backed by %d named "
+                        "parties)", method, _norm_doc_name(d), recorded,
+                        len(_named_parties))
             return scoped
 
     narrowed = set(type_docs)
@@ -11154,6 +11641,46 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                 else:
                     logger.info("Date match %s discarded — mentions neither party named "
                                 "in the question", _norm_doc_name(date_doc))
+            # Still ambiguous and no date to break it — try the document this
+            # conversation is already anchored to. Two documents can share both
+            # party names (the same pair often signs an NDA AND a Service
+            # Agreement), which is exactly what leaves pair_docs with more than
+            # one member here; when the prior turn was pinned to some OTHER
+            # document that a recorded document_relations edge connects to
+            # exactly one of the candidates (e.g. an SA that amends, or is
+            # referenced by, one of the two party-pair documents but not the
+            # other), that structural link is a better tiebreak than leaving
+            # both for the answer LLM. Never on a compound question, same
+            # reasoning as the date check above.
+            if len(pair_docs) > 1:
+                try:
+                    _anchor_turn = _last_document_turn(
+                        _db.get_recent_answer_scope(chat_session_id or session_id,
+                                                     n=_CARRYOVER_LOOKBACK))
+                    anchor_docs = set((_anchor_turn or {}).get("docs") or []) - pair_docs
+                except Exception as e:
+                    logger.error("resolve_scope: anchor lookup for reference "
+                                 "tiebreak failed: %s", e)
+                    anchor_docs = set()
+                if anchor_docs:
+                    try:
+                        linked: set[str] = set()
+                        for _a in anchor_docs:
+                            _rel = _db.get_document_relations(_active_wiki_id(), session_id, _a)
+                            linked |= {r["doc"] for r in _rel["outgoing"] if r.get("doc")}
+                            linked |= {r["doc"] for r in _rel["incoming"] if r.get("doc")}
+                    except Exception as e:
+                        logger.error("resolve_scope: document_relations tiebreak "
+                                     "lookup failed: %s", e)
+                        linked = set()
+                    ref_docs = pair_docs & linked
+                    if len(ref_docs) == 1:
+                        logger.info(
+                            "Party-pair match %d document(s) pinned to 1 by a "
+                            "document_relations link to conversation anchor %s: %s",
+                            len(pair_docs), {_norm_doc_name(d) for d in anchor_docs},
+                            _norm_doc_name(next(iter(ref_docs))))
+                        pair_docs = ref_docs
         return _enforce_question_family(
             {"scope": "single_doc", "target_docs": sorted(pair_docs),
              "target_family": None, "is_broad": False,

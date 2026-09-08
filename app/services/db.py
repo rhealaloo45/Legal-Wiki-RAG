@@ -4552,6 +4552,219 @@ def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
             "AND (%s)" % clauses), params).scalar() or 0
 
 
+def list_documents_matching(wiki_id: str, session_id: str,
+                            parties: list[str] | None = None,
+                            doc_type_patterns: list[str] | None = None,
+                            content_phrase: str | None = None,
+                            limit: int = 60,
+                            content_phrases: list[str] | None = None,
+                            governing_law: str | None = None,
+                            term_min_months: int | None = None,
+                            term_max_months: int | None = None) -> dict:
+    """Every document matching a party, a type, and optionally a phrase.
+
+    The counting function next door answers "how many"; this answers "list
+    every", and the difference matters more than it looks. Asked to show every
+    shareholders' agreement naming one company as lead strategic shareholder,
+    retrieval named one. Five hold that term. Retrieval had no way to know it
+    had stopped early — it reported what it fetched, and a set question
+    answered from a sample reads exactly like a complete answer.
+
+    `content_phrase` is matched against page text so a question about a ROLE
+    ("...is the lead strategic shareholder") is not silently widened to mere
+    party membership, which would sweep in agreements where the company is a
+    party in some other capacity.
+    """
+    from sqlalchemy import text
+    clauses = ["d.wiki_id = :w", "d.session_id = :sid"]
+    params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
+
+    for i, party in enumerate(parties or []):
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                COALESCE(d.parties, '[]'::jsonb)) AS p(name)
+            WHERE p.name ILIKE :party{i})""")
+        params[f"party{i}"] = f"%{party.strip()}%"
+
+    _patterns = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if _patterns:
+        _ors = []
+        for i, pat in enumerate(_patterns):
+            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{pat}%"
+        clauses.append("(" + " OR ".join(_ors) + ")")
+
+    # Each phrase is ANDed as its own EXISTS, not concatenated into one LIKE:
+    # a compound question asks for documents that satisfy BOTH predicates, and
+    # the two phrases will not sit next to each other in the text.
+    _phrases = [p.strip() for p in (content_phrases or []) if p and p.strip()]
+    if content_phrase and content_phrase.strip() not in _phrases:
+        _phrases.append(content_phrase.strip())
+    for i, ph in enumerate(_phrases):
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM pages pg
+             WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
+               AND pg.source_doc = d.source_doc
+               AND pg.content ILIKE :phrase{i})""")
+        params[f"phrase{i}"] = f"%{ph}%"
+
+    # Governing law and term live on the typed contracts row, not on the
+    # document, and both are populated on only part of the corpus — so the
+    # count of documents that could be TESTED for them is reported alongside
+    # the matches. A compound filter silently dropping every document whose
+    # term was never extracted would report a small set as though it were the
+    # whole answer, which is the failure this branch exists to prevent.
+    if governing_law:
+        clauses.append("""EXISTS (
+            SELECT 1 FROM contracts ct
+             WHERE ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+               AND ct.source_doc = d.source_doc
+               AND ct.governing_law ILIKE :gl)""")
+        params["gl"] = f"%{governing_law.strip()}%"
+
+    if term_min_months is not None or term_max_months is not None:
+        _bounds = []
+        if term_min_months is not None:
+            _bounds.append("_m.months > :tmin")
+            params["tmin"] = int(term_min_months)
+        if term_max_months is not None:
+            _bounds.append("_m.months <= :tmax")
+            params["tmax"] = int(term_max_months)
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM (
+                SELECT CASE
+                    WHEN ct.term_length ~ '"unit"\s*:\s*"year"'
+                        THEN (substring(ct.term_length from '"count"\s*:\s*([0-9]+)'))::int * 12
+                    WHEN ct.term_length ~ '"unit"\s*:\s*"month"'
+                        THEN (substring(ct.term_length from '"count"\s*:\s*([0-9]+)'))::int
+                    WHEN ct.term_length ~* '([0-9]+)\s*year'
+                        THEN (substring(ct.term_length from '([0-9]+)\s*[Yy]ear'))::int * 12
+                    WHEN ct.term_length ~* '([0-9]+)\s*month'
+                        THEN (substring(ct.term_length from '([0-9]+)\s*[Mm]onth'))::int
+                    ELSE NULL END AS months
+                  FROM contracts ct
+                 WHERE ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+                   AND ct.source_doc = d.source_doc
+                   AND ct.term_length IS NOT NULL) _m
+             WHERE _m.months IS NOT NULL AND {' AND '.join(_bounds)})""")
+
+    where = " AND ".join(clauses)
+    with get_engine().connect() as conn:
+        total = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        rows = conn.execute(text(f"""
+            SELECT d.source_doc, d.doc_type, d.effective_date
+              FROM documents d WHERE {where}
+             ORDER BY d.source_doc LIMIT :lim
+        """), params).fetchall()
+    docs = [{"source_doc": r[0], "doc_type": r[1],
+             "effective_date": str(r[2]) if r[2] else None} for r in rows]
+
+    # Coverage for the predicates that read a typed column, so the answer can
+    # say how much of the scope it was actually able to test.
+    coverage: dict = {}
+    if governing_law is not None or term_min_months is not None or term_max_months is not None:
+        base = [c for c in clauses
+                if "contracts ct" not in c and "_m.months" not in c]
+        base_where = " AND ".join(base)
+        base_params = {k: v for k, v in params.items()
+                       if k not in ("gl", "tmin", "tmax")}
+        with get_engine().connect() as conn:
+            coverage["in_scope"] = conn.execute(text(
+                f"SELECT count(*) FROM documents d WHERE {base_where}"),
+                base_params).scalar() or 0
+            if governing_law is not None:
+                coverage["with_governing_law"] = conn.execute(text(f"""
+                    SELECT count(*) FROM documents d WHERE {base_where}
+                      AND EXISTS (SELECT 1 FROM contracts ct
+                           WHERE ct.wiki_id=d.wiki_id AND ct.session_id=d.session_id
+                             AND ct.source_doc=d.source_doc
+                             AND ct.governing_law IS NOT NULL
+                             AND btrim(ct.governing_law) <> '')"""),
+                    base_params).scalar() or 0
+            if term_min_months is not None or term_max_months is not None:
+                coverage["with_term"] = conn.execute(text(f"""
+                    SELECT count(*) FROM documents d WHERE {base_where}
+                      AND EXISTS (SELECT 1 FROM contracts ct
+                           WHERE ct.wiki_id=d.wiki_id AND ct.session_id=d.session_id
+                             AND ct.source_doc=d.source_doc
+                             AND ct.term_length IS NOT NULL
+                             AND btrim(ct.term_length) <> '')"""),
+                    base_params).scalar() or 0
+
+    return {"total": int(total), "documents": docs,
+            "truncated": int(total) > len(docs),
+            "parties": parties or [], "content_phrase": content_phrase,
+            "content_phrases": _phrases, "governing_law": governing_law,
+            "term_min_months": term_min_months,
+            "term_max_months": term_max_months, "coverage": coverage}
+
+
+def find_documents_by_date(wiki_id: str, session_id: str,
+                           iso_date: str) -> list[dict]:
+    """Documents carrying `iso_date` as their effective date or in their name.
+
+    A lawyer names an instrument by its date at least as often as by its title
+    — "the amendment agreement dated 24 May 2021" — and until this existed
+    nothing in the pipeline could act on that half of the reference. The
+    document was found by embedding the whole question and voting on the pages
+    that came back, which ranks on subject matter; a date contributes almost
+    nothing to a similarity score, so the vote landed on whichever document
+    talked most about amendments and the real one was never considered. Asked
+    for that agreement's amendment history the system reported the document was
+    not in the corpus, while the corpus held it and held the amends edge too.
+
+    Both storage locations are checked because the corpus populates them
+    unevenly: effective_date is authoritative where it is set, and the filename
+    carries the date on documents whose date was never extracted.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT d.source_doc, d.doc_type, d.effective_date, d.expiry_date
+              FROM documents d
+             WHERE d.wiki_id = :w AND d.session_id = :s
+               AND (substring(COALESCE(d.effective_date,'') from 1 for 10) = :iso
+                    OR d.source_doc LIKE :like)
+             ORDER BY d.source_doc
+             LIMIT 40
+        """), {"w": wiki_id, "s": session_id, "iso": iso_date,
+               "like": f"%{iso_date}%"}).fetchall()
+    return [{"source_doc": r[0], "doc_type": r[1],
+             "effective_date": str(r[2]) if r[2] else None,
+             "expiry_date": str(r[3]) if r[3] else None} for r in rows]
+
+
+def documents_with_relations(wiki_id: str, session_id: str,
+                             candidates: list[str]) -> set:
+    """Which of `candidates` appear at either end of a recorded relation edge.
+
+    Used only to break a tie between documents that are the same instrument
+    ingested twice — the OCR retry and the original carry identical dates and
+    types, and the edges were recorded against exactly one of them.
+    """
+    if not candidates:
+        return set()
+    from sqlalchemy import text
+    params = {"w": wiki_id, "s": session_id}
+    keys = []
+    for i, c in enumerate(candidates):
+        params[f"c{i}"] = c
+        keys.append(f":c{i}")
+    joined = ", ".join(keys)
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(f"""
+            SELECT DISTINCT x FROM (
+                SELECT from_doc AS x FROM document_relations
+                 WHERE wiki_id = :w AND session_id = :s AND from_doc IN ({joined})
+                UNION ALL
+                SELECT to_doc AS x FROM document_relations
+                 WHERE wiki_id = :w AND session_id = :s AND to_doc IN ({joined})
+            ) t WHERE x IS NOT NULL
+        """), params).fetchall()
+    return {r[0] for r in rows}
+
+
 def count_documents_by_party(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
                              doc_type_hint: str | None = None,
