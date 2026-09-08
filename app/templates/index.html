@@ -491,12 +491,26 @@
 
     /* --- Query progress stage tiles (vertical stack) --- */
     .query-stages { display:flex; flex-direction:column; gap:6px; width:100%; max-width:340px }
-    /* A one-time expectation-setting note, distinct from the stage tiles below
-       it: no spinner, no checkmark, no "done" state, because it never
-       completes — it just stays visible for the duration of the wait it
-       described. Deliberately lighter than an active tile so it doesn't
-       compete with the thing actually spinning. */
-    .query-hint { display:flex; align-items:flex-start; gap:8px; padding:8px 12px; background:var(--bg-surface); border:0.5px dashed var(--border); border-radius:var(--radius-md); font-size:11.5px; line-height:1.4; color:var(--text-muted); opacity:0; animation:stageSlideIn 0.22s ease forwards }
+    /* A one-time expectation-setting note, distinct from the stage tiles
+       below it: no spinner, no checkmark, no "done" state — it fades out on
+       its own a few seconds after appearing (see the JS setTimeout in
+       renderQueryHint) rather than sitting through the whole wait, so it
+       reads as a passing note rather than a status competing with the tile
+       that is actually spinning. Deliberately lighter than an active tile
+       for the same reason while it is visible. */
+    .query-hint { display:flex; align-items:flex-start; gap:8px; padding:8px 12px; background:var(--bg-surface); border:0.5px dashed var(--border); border-radius:var(--radius-md); font-size:11.5px; line-height:1.4; color:var(--text-muted); opacity:0; transform:translateY(4px); animation:stageSlideIn 0.22s ease forwards }
+    /* Added by JS 4s after the hint appears. A `transition` here does NOT
+       work — measured, not assumed: `animation-fill-mode: forwards` on the
+       intro animation above keeps overriding opacity at animation-level
+       cascade priority even after the animation itself has finished, which
+       outranks a later `transition` on the same property. The element sat
+       pinned at opacity:1 for the whole fade window in testing and was only
+       ever removed by the JS fallback timer — an instant pop, exactly the
+       abruptness this was built to avoid, just relocated to the exit. A
+       second, distinct keyframe animation replaces the first cleanly instead
+       of layering under it. */
+    @keyframes queryHintFadeOut { from { opacity:1; transform:translateY(0) } to { opacity:0; transform:translateY(-4px) } }
+    .query-hint.query-hint-fade { animation:queryHintFadeOut .35s ease forwards }
     .query-hint .ti { margin-top:1px; flex-shrink:0; font-size:13px }
     .stage-tile { display:flex; align-items:center; gap:10px; padding:8px 12px; background:var(--bg-surface); border:0.5px solid var(--border); border-left:2px solid var(--border); border-radius:var(--radius-md); font-size:12px; color:var(--text-muted); opacity:0; transform:translateY(4px); animation:stageSlideIn 0.22s ease forwards }
     @keyframes stageSlideIn { to { opacity:1; transform:translateY(0) } }
@@ -9010,13 +9024,52 @@
       const div = document.createElement('div');
       div.className = 'chat-msg chat-msg-assistant';
       div.id = 'query-stages-wrap';
+      div.dataset.shownAt = String(Date.now());
       div.innerHTML = '<div class="query-stages" id="query-stages"></div>';
       $chatThread.appendChild(div);
       scrollChatToBottom();
+      // Shown the instant the question is sent, before the network round
+      // trip even starts — otherwise the gap between clicking Ask and the
+      // first real SSE event is a blank pause with nothing on screen. Reuses
+      // the SAME tile slot the real "classifying" event updates (see
+      // STAGE_TILE_MAP below), so it becomes "Classifying intent…" in place
+      // the moment that event arrives rather than sitting beside it as a
+      // second tile.
+      updateStage({ stage: 'connecting', status: 'active', message: 'Sending your question…' });
     }
     function removeProgressStages() {
       const el = document.getElementById('query-stages-wrap');
       if (el) el.remove();
+    }
+    // The zero-token fast paths (index lookups, SQL counts, deterministic
+    // calculation) emit no stage events at all before their answer — scope
+    // resolution and retrieval genuinely do not run for them, there is
+    // nothing honest to show in between. Without this, the "Sending your
+    // question…" tile from appendProgressStages() would flash for a few tens
+    // of milliseconds and vanish, which reads as a glitch, not as the system
+    // having done anything. A short floor holds it visible long enough to
+    // register before the answer replaces it. On every slower path this
+    // floor has already elapsed by the time the real answer arrives, so it
+    // changes nothing there — it only ever adds a pause on the questions that
+    // were about to feel instantaneous anyway.
+    const MIN_STAGE_DISPLAY_MS = 380;
+    function finishProgressStages(onDone) {
+      const wrap = document.getElementById('query-stages-wrap');
+      const shownAt = wrap ? Number(wrap.dataset.shownAt || 0) : 0;
+      const elapsed = shownAt ? Date.now() - shownAt : MIN_STAGE_DISPLAY_MS;
+      const remaining = Math.max(0, MIN_STAGE_DISPLAY_MS - elapsed);
+      const finish = () => { removeProgressStages(); onDone(); };
+      if (remaining <= 0) { finish(); return; }
+      // Mark whatever tile is still mid-spin as complete before the pause,
+      // so the wait reads as "that step finished, then the answer arrived"
+      // rather than a spinner getting cut off mid-motion.
+      const active = wrap && wrap.querySelector('.stage-tile.active');
+      if (active) {
+        active.classList.remove('active'); active.classList.add('done');
+        const icon = active.querySelector('.stage-icon');
+        if (icon) icon.innerHTML = '<i class="ti ti-check"></i>';
+      }
+      setTimeout(finish, remaining);
     }
     function ensureStagesContainer() {
       let c = document.getElementById('query-stages');
@@ -9024,6 +9077,7 @@
       return c;
     }
     const STAGE_TILE_MAP = {
+      connecting:'intent',
       classifying:'intent', intent_identified:'intent',
       disambiguation:'disambiguation', clarification:'clarification',
       retrieving:'retrieve', pages_retrieved:'retrieve',
@@ -9037,6 +9091,13 @@
     // reads as normal rather than as something that has gone wrong. Rendered
     // once per query — the server only ever emits it once, right after intent
     // classification, before any of the slow work begins.
+    //
+    // Fades in, sits briefly, fades out on its own. It must not still be on
+    // screen competing with the stage tiles for the rest of a 60-second
+    // wait — it is a one-time framing of what's about to happen, not a
+    // running status, and the tiles plus the heartbeat already carry that
+    // once generation actually starts.
+    const QUERY_HINT_VISIBLE_MS = 4000;
     function renderQueryHint(message) {
       const container = ensureStagesContainer();
       if (container.querySelector('.query-hint')) return;
@@ -9045,6 +9106,16 @@
       div.innerHTML = `<i class="ti ti-clock-hour-4"></i><span>${message}</span>`;
       container.insertBefore(div, container.firstChild);
       scrollChatToBottom();
+      setTimeout(() => {
+        div.classList.add('query-hint-fade');
+        div.addEventListener('animationend', () => div.remove(), { once: true });
+        // Fallback for when the query already finished and
+        // removeProgressStages() detached this node before the timeout
+        // fired — remove() on an already-detached node is a silent no-op,
+        // so this never double-removes anything, it just guarantees the
+        // listener above isn't the only way the node goes away.
+        setTimeout(() => div.remove(), 450);
+      }, QUERY_HINT_VISIBLE_MS);
     }
 
     function updateStage(ev) {
@@ -9542,7 +9613,7 @@
           _pendingClarifyMode = 'clarification';
           appendClarificationMsg(ev.message, ev.options);
         } else if (t === 'answer') {
-          removeProgressStages(); appendAnswerMsg(ev.wiki);
+          finishProgressStages(() => appendAnswerMsg(ev.wiki));
         } else if (ev.stage === 'estimate') {
           renderQueryHint(ev.message);
         } else {

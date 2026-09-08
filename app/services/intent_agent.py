@@ -566,9 +566,14 @@ def _call_with_heartbeat(fn, *args, stage: str = "generating",
         th.join(timeout=_HEARTBEAT_INTERVAL_S)
         if th.is_alive():
             tick += 1
+            # No elapsed time in the rendered message on purpose — a reader
+            # watching a number climb past 30, 40, 50 seconds counts every
+            # tick as evidence something is wrong, even though the phrase
+            # rotation alone already proves the tile is alive. elapsed_s
+            # stays on the payload for anything server-side that wants it;
+            # only the text shown to the user drops it.
             phrase = _HEARTBEAT_PHRASES[(tick - 1) % len(_HEARTBEAT_PHRASES)]
-            _emit({"stage": stage, "status": "active",
-                   "message": f"{phrase} ({tick * _HEARTBEAT_INTERVAL_S}s)",
+            _emit({"stage": stage, "status": "active", "message": phrase,
                    "elapsed_s": tick * _HEARTBEAT_INTERVAL_S})
     if "error" in result:
         raise result["error"]
