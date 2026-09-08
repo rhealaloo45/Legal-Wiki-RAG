@@ -4693,6 +4693,19 @@ _COUNT_PREDICATE_GENERIC = {
     "agreements", "clause", "clauses", "provision", "provisions", "term",
     "terms", "it", "them", "this", "that", "these", "those", "one", "ones",
 }
+# "carry the same type label AS X" is not a phrase to search page text for —
+# it is a comparison against another document's metadata, and "carry" only
+# hit the predicate trigger list because the same word means "contains a
+# clause" in "how many documents carry a liability cap". Confirmed live: "how
+# many legal opinions exist in total, and how many carry the exact same type
+# label as the Apex Meridian Alloys opinion" extracted the predicate "exact
+# same type", searched every legal opinion's page text for that literal
+# string, found none, and the branch gave up on the whole question rather
+# than falling back to the doctype-only count sitting right there — 139 legal
+# opinions reported as 1. A "same ... as" construct right after the trigger
+# verb is the tell; when it appears, this is not a content predicate.
+_RX_COUNT_PREDICATE_COMPARISON = re.compile(
+    r"^\s*(?:the\s+)?(?:\w+\s+){0,2}same\b.{0,30}?\bas\b", re.IGNORECASE)
 
 
 def _count_predicate_phrase(question: str) -> str:
@@ -4704,6 +4717,8 @@ def _count_predicate_phrase(question: str) -> str:
     """
     m = _RX_COUNT_PREDICATE.search(question or "")
     if not m:
+        return ""
+    if _RX_COUNT_PREDICATE_COMPARISON.match(m.group(1)):
         return ""
     words = [w for w in re.split(r"[^A-Za-z'-]+", m.group(1)) if w]
     out = []
