@@ -2965,6 +2965,12 @@ def _is_structural_query(question: str) -> str:
     # only counting them.
     if _RX_COUNT.search(q):
         return "count"
+    # Before enumerate: "list every X that does A and B" is both, and the
+    # compound reading is the stricter one. Needs an explicit conjunction, so
+    # a single-condition question stays with enumerate, and the branch itself
+    # declines unless it understood two filters.
+    if _RX_COMPOUND_JOIN.search(q):
+        return "compound"
     # After count, so "how many … are there in all" stays a count. The branch
     # declines any question it cannot pin to a party or an instrument type, so
     # a bare "list all the risks" is untouched.
@@ -3247,6 +3253,117 @@ _RX_ENUM_ROLE = re.compile(
 # question the party filter already answers, and treating it as a phrase to
 # find in the page text would demand that those exact words appear.
 _RX_ENUM_ROLE_GENERIC = re.compile(r"^(?:a\s+)?part(?:y|ies)$", re.IGNORECASE)
+
+
+# The compound question — two or more filters at once, joined by "and". It is
+# the archetype the system was worst at, and the reason is structural rather
+# than a bad answer: retrieval applies ONE notion of relevance, so a question
+# with two conditions gets documents that match whichever condition the
+# embedding weighted, with no check that the other holds. Asked which joint
+# ventures involve Tata Power AND list sanctions exposure as an exit trigger,
+# it answered that none expressly list it. Seven do, two of them the curated
+# agreements the question was really about.
+_RX_COMPOUND_JOIN = re.compile(
+    r"\b(?:and\s+(?:also\s+)?|that\s+also\s+|which\s+also\s+|"
+    r"and\s+are\s+|and\s+have\s+|and\s+that\s+)",
+    re.IGNORECASE)
+# The verbs a predicate hangs off. "…prohibit model training", "…list
+# sanctions exposure", "…allow termination for convenience".
+_RX_PRED_VERB = re.compile(
+    r"\b(?:list|lists|include|includes|contain|contains|prohibit|prohibits|"
+    r"allow|allows|permit|permits|require|requires|mention|mentions|"
+    r"state|states|specify|specifies|impose|imposes|carry|carries)\s+",
+    re.IGNORECASE)
+# Where a predicate ends. Everything after one of these belongs to the NEXT
+# condition, not this one.
+_PRED_CUT = {"and", "or", "as", "that", "which", "but", "while", "where"}
+# Words a phrase may contain but must not begin or end on.
+_PRED_EDGE = {"on", "in", "by", "to", "for", "of", "the", "a", "an", "with",
+              "any", "all", "its", "their", "our", "is", "are", "be"}
+
+# Two shapes, kept as separate branches because they end differently:
+# "governed by the laws of India" is terminated by the jurisdiction itself,
+# while "governed by Indian law" is terminated by the word "law". A single
+# pattern that tried to cover both ran past the jurisdiction and captured
+# "English law and have" as the name of a country.
+_RX_GOVERNING_OF = re.compile(
+    r"\bgoverned\s+by\s+(?:the\s+)?laws?\s+of\s+(?:the\s+)?"
+    r"([A-Za-z][\w'&.-]*(?:\s+[A-Za-z][\w'&.-]*){0,2})",
+    re.IGNORECASE)
+_RX_GOVERNING_ADJ = re.compile(
+    r"\bgoverned\s+by\s+(?:the\s+)?"
+    r"([A-Za-z][\w'&.-]*(?:\s+[A-Za-z][\w'&.-]*){0,1}?)\s+laws?\b",
+    re.IGNORECASE)
+# "Indian law" names the jurisdiction as an adjective; the column stores it as
+# "India", "laws of India", "the Republic of India". Searching the stem finds
+# every one of those, and finds "Indian" too.
+_LAW_ADJECTIVE = {"indian": "India", "english": "English",
+                  "american": "America", "japanese": "Japan",
+                  "german": "Germany", "french": "France",
+                  "singaporean": "Singapore", "australian": "Australia"}
+_TERM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+               "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12}
+_RX_TERM_CMP = re.compile(
+    r"\bterm\s+(?:of\s+)?(?:that\s+is\s+)?"
+    r"(longer|greater|more|shorter|less|under|over)\s+than\s+"
+    r"(\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|twelve)\s*"
+    r"(year|month)s?\b",
+    re.IGNORECASE)
+
+
+def _predicate_phrase(fragment: str) -> str:
+    """The distinctive phrase a predicate is about, or "" if there is none.
+
+    Cut at the first conjunction because that word starts the next condition,
+    then trimmed of edge words — "termination for convenience on" keeps its
+    internal "for" but loses the trailing "on", which is the start of a
+    detail the phrase search should not carry.
+    """
+    words = [w for w in re.split(r"[^A-Za-z'-]+", fragment or "") if w]
+    out: list[str] = []
+    for w in words[:6]:
+        if w.lower() in _PRED_CUT:
+            break
+        out.append(w)
+    out = out[:4]
+    while out and out[0].lower() in _PRED_EDGE:
+        out.pop(0)
+    while out and out[-1].lower() in _PRED_EDGE:
+        out.pop()
+    phrase = " ".join(out)
+    return phrase if len(out) >= 2 and len(phrase) >= 8 else ""
+
+
+def _compound_predicates(question: str) -> dict:
+    """Every filter a compound question states, as a structured query spec."""
+    q = question or ""
+    spec: dict = {"phrases": [], "governing_law": None,
+                  "term_min_months": None, "term_max_months": None}
+
+    m = _RX_TERM_CMP.search(q)
+    if m:
+        n = m.group(2).lower()
+        n = _TERM_WORDS.get(n, n)
+        months = int(n) * (12 if m.group(3).lower() == "year" else 1)
+        if m.group(1).lower() in ("longer", "greater", "more", "over"):
+            spec["term_min_months"] = months
+        else:
+            spec["term_max_months"] = months
+        q = q[:m.start()] + " " + q[m.end():]
+
+    m = _RX_GOVERNING_OF.search(q) or _RX_GOVERNING_ADJ.search(q)
+    if m:
+        law = m.group(1).strip().rstrip(",.")
+        law = _LAW_ADJECTIVE.get(law.lower(), law)
+        if len(law) > 2:
+            spec["governing_law"] = law
+            q = q[:m.start()] + " " + q[m.end():]
+
+    for vm in _RX_PRED_VERB.finditer(q):
+        ph = _predicate_phrase(q[vm.end():])
+        if ph and ph.lower() not in [p.lower() for p in spec["phrases"]]:
+            spec["phrases"].append(ph)
+    return spec
 
 
 # Words that ride along on the front of a captured party name — _PARTY_NAME_RE
@@ -3921,6 +4038,13 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         if kind == "enumerate":
             return _enumerate_answer(question, session_id, wiki_id)
 
+        if kind == "compound":
+            # Falls back to the set branch when only one filter was
+            # understood: a partly-parsed compound question is still a set
+            # question, and answering it as one beats dropping to retrieval.
+            return (_compound_answer(question, session_id, wiki_id)
+                    or _enumerate_answer(question, session_id, wiki_id))
+
         # cited_by / amends / chain all need the document the question is about.
         anchor = _resolve_anchor_doc(question, session_id, wiki_id)
         if not anchor:
@@ -3986,6 +4110,212 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
         return None
 
 
+# Words that sit in front of the instrument noun and are not part of its name.
+# "Which service agreements…" resolved to the doc_type "Which Service", which
+# matches nothing, so a question with a perfectly clear type filtered the
+# corpus down to zero and the branch declined.
+_RX_DOCTYPE_LEAD = re.compile(
+    r"^(?:which|what|whose|list|show|find|name|identify|all|every|any|the|our|"
+    r"of|do|does|are|is|there|in|corpus|how|many|number|count|we|hold|have)\s+",
+    re.IGNORECASE)
+# The instrument nouns a set or compound question names. Wider than the
+# counting vocabulary, which deliberately excludes bare "ventures".
+_RX_DOCTYPE_NOUN = re.compile(
+    rf"\b((?:[a-z][a-z-]*\s+){{0,3}}?"
+    rf"(?:{_COUNT_NOUNS}|ventures?|jvs?|shas?))\b", re.IGNORECASE)
+
+
+def _doctype_from_question(question: str):
+    """(label, patterns) for the instrument a question names, or (None, [])."""
+    m = _RX_DOCTYPE_NOUN.search(question or "")
+    if not m:
+        return (None, [])
+    raw = m.group(1).strip()
+    prev = None
+    while prev != raw:
+        prev = raw
+        raw = _RX_DOCTYPE_LEAD.sub("", raw).strip()
+    if not raw:
+        return (None, [])
+    # A bare corpus noun is not a type filter. "Which documents…" means the
+    # whole corpus, and filtering doc_type on "%document%" would quietly
+    # answer about the handful whose type happens to contain the word.
+    if re.fullmatch(r"(?:document|contract|agreement)s?", raw, re.IGNORECASE):
+        return (None, [])
+
+    label, patterns = _resolve_doctype(raw)
+    # A term the vocabulary does not know is handed back unchanged, which looks
+    # like a successful match rather than the miss it is: "joint ventures"
+    # filtered on the literal string "joint ventures", which no doc_type
+    # contains, so a question the corpus could answer found nothing. Whether
+    # the singular is better is not decidable from the string — "joint venture"
+    # is also handed back unchanged, and it is the correct pattern — so ask the
+    # corpus which one actually names documents.
+    if _pattern_hits(patterns) == 0:
+        singular = re.sub(r"s\b", "", raw).strip()
+        if singular and singular != raw:
+            s_label, s_patterns = _resolve_doctype(singular)
+            if _pattern_hits(s_patterns) > 0:
+                return (s_label, s_patterns)
+    return (label, patterns)
+
+
+def _pattern_hits(patterns) -> int:
+    """How many distinct doc_type spellings these patterns actually match."""
+    if not patterns:
+        return 0
+    try:
+        from services import db as _db, wikis as _wikis
+        types = _doc_type_vocabulary(_wikis.active_wiki_id())
+    except Exception:
+        return 1  # cannot check — assume usable rather than discard a filter
+    return sum(1 for t in types
+               if any(p.lower() in t for p in patterns))
+
+
+_DOC_TYPE_VOCAB_CACHE: dict = {}
+
+
+def _doc_type_vocabulary(wiki_id: str) -> list:
+    """Every distinct doc_type in the wiki, lowercased. Cached per wiki."""
+    if wiki_id in _DOC_TYPE_VOCAB_CACHE:
+        return _DOC_TYPE_VOCAB_CACHE[wiki_id]
+    from sqlalchemy import text
+    from services import db as _db
+    with _db.get_engine().connect() as conn:
+        rows = conn.execute(text(
+            "SELECT DISTINCT lower(doc_type) FROM documents "
+            "WHERE wiki_id = :w AND doc_type IS NOT NULL"),
+            {"w": wiki_id}).fetchall()
+    vocab = [r[0] for r in rows if r[0]]
+    _DOC_TYPE_VOCAB_CACHE[wiki_id] = vocab
+    return vocab
+
+
+def _question_parties(question: str) -> list[str]:
+    """The party names a set or compound question filters on.
+
+    Two shapes, because a lawyer writes both: "…agreements WITH Tata Steel"
+    and "…agreements WHERE Tata Electronics is the lead strategic
+    shareholder". The second puts the name after a relative pronoun, which the
+    with/for/involving pattern never reaches.
+    """
+    m = _RX_COUNT_PARTY.search(question or "")
+    if m:
+        raw = m.group(1).strip().rstrip(".,;:?")
+        # "X and Y" is two parties; "Tata Sons and Company Limited" is one.
+        # A bad split narrows the result rather than inflating it, which is
+        # the safe direction to fail in.
+        parts = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw)
+                 if len(p.strip()) > 2]
+        if parts:
+            return parts
+    wm = re.search(r"\b(?:where|involving|involve|involves)\s+"
+                   r"((?:[A-Z][\w'&.\-]*)"
+                   r"(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+                   question or "")
+    if wm:
+        cand = wm.group(1).strip().rstrip(".,;:?")
+        # The run may end on the conjunction that starts the NEXT condition —
+        # "involve Tata Power and also list…" captured "Tata Power and", which
+        # matches no party at all and silently emptied the result.
+        cand = re.sub(r"\s+(?:and|&|of|the)$", "", cand, flags=re.IGNORECASE).strip()
+        parts = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", cand)
+                 if len(p.strip()) > 2]
+        if parts:
+            return parts
+    return []
+
+
+def _compound_answer(question: str, session_id: str,
+                     wiki_id: str) -> dict | None:
+    """Answer a two-condition question by applying both conditions.
+
+    Declines unless at least two independent filters were understood, because
+    one filter is not a compound question and the enumerate branch above
+    already answers it better.
+    """
+    from services import db as _db
+
+    spec = _compound_predicates(question)
+    parties = _question_parties(question)
+
+    label, patterns = _doctype_from_question(question)
+
+    filters = (len(spec["phrases"]) + (1 if parties else 0)
+               + (1 if patterns else 0)
+               + (1 if spec["governing_law"] else 0)
+               + (1 if spec["term_min_months"] or spec["term_max_months"] else 0))
+    if filters < 2 or not (spec["phrases"] or spec["governing_law"]
+                           or spec["term_min_months"] or spec["term_max_months"]):
+        return None
+
+    try:
+        res = _db.list_documents_matching(
+            wiki_id, session_id, parties or None, patterns or None,
+            content_phrases=spec["phrases"],
+            governing_law=spec["governing_law"],
+            term_min_months=spec["term_min_months"],
+            term_max_months=spec["term_max_months"])
+    except Exception as e:
+        logger.error("[AGENT] compound fast-path failed: %s", e)
+        return None
+    if not res["total"]:
+        return None
+
+    noun = label or "document"
+    conds = []
+    if parties:
+        conds.append("naming " + " and ".join(parties))
+    for ph in spec["phrases"]:
+        conds.append(f"whose text contains “{ph}”")
+    if spec["governing_law"]:
+        conds.append(f"governed by the law of {spec['governing_law']}")
+    if spec["term_min_months"]:
+        conds.append(f"with a term longer than {spec['term_min_months']} months")
+    if spec["term_max_months"]:
+        conds.append(f"with a term of {spec['term_max_months']} months or less")
+
+    lines = [f"**{res['total']} {noun}(s) meeting all "
+             f"{len(conds)} condition(s).**", ""]
+    lines.append("Conditions applied: " + "; ".join(conds) + ".")
+    lines.append("")
+    for d in res["documents"]:
+        date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+        lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{date}")
+    if res["truncated"]:
+        lines.append(f"- …and {res['total'] - len(res['documents'])} more")
+    lines.append("")
+    lines.append("Every condition was applied as a filter over the whole corpus, "
+                 "so a document is listed only if it satisfies all of them.")
+
+    cov = res.get("coverage") or {}
+    notes = []
+    if "with_governing_law" in cov:
+        missing = cov["in_scope"] - cov["with_governing_law"]
+        if missing > 0:
+            notes.append(f"{missing} of the {cov['in_scope']} document(s) "
+                         f"otherwise in scope record no governing law and could "
+                         f"not be tested against that condition")
+    if "with_term" in cov:
+        missing = cov["in_scope"] - cov["with_term"]
+        if missing > 0:
+            notes.append(f"{missing} of the {cov['in_scope']} document(s) "
+                         f"otherwise in scope record no term length and could "
+                         f"not be tested against that condition")
+    if spec["phrases"]:
+        notes.append("the text conditions were matched literally, so a document "
+                     "stating the same thing in different words would not appear")
+    if notes:
+        lines += ["", "**Coverage, stated plainly:** "
+                      + "; ".join(notes) + "."]
+
+    payload = _canned_payload("\n".join(lines), "Compound filter", "document-index")
+    payload["files_used"] = [d["source_doc"] for d in res["documents"]]
+    payload["meta_answer"] = False
+    return payload
+
+
 def _enumerate_answer(question: str, session_id: str,
                       wiki_id: str) -> dict | None:
     """Answer "list every X where Y" from the index rather than from a sample.
@@ -3996,29 +4326,9 @@ def _enumerate_answer(question: str, session_id: str,
     """
     from services import db as _db, wiki as _wiki
 
-    parties: list[str] = []
-    m = _RX_COUNT_PARTY.search(question or "")
-    if m:
-        raw = m.group(1).strip().rstrip(".,;:?")
-        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw)
-                   if len(p.strip()) > 2]
-    if not parties:
-        # "…every Shareholder Agreement WHERE Tata Electronics … is the lead
-        # strategic shareholder" puts the party after "where", which the
-        # with/for/involving pattern does not reach.
-        wm = re.search(r"\bwhere\s+((?:[A-Z][\w'&.\-]*)"
-                       r"(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
-                       question or "")
-        if wm:
-            cand = wm.group(1).strip().rstrip(".,;:?")
-            if len(cand) > 2:
-                parties = [cand]
+    parties = _question_parties(question)
 
-    label, patterns = (None, [])
-    dm = re.search(rf"\b(?:every|all)\s+((?:[a-z]+\s+){{0,3}}?(?:{_COUNT_NOUNS}))\b",
-                   question or "", re.IGNORECASE)
-    if dm:
-        label, patterns = _resolve_doctype(dm.group(1).strip())
+    label, patterns = _doctype_from_question(question)
 
     if not parties and not patterns:
         return None

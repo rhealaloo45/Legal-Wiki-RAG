@@ -4556,7 +4556,11 @@ def list_documents_matching(wiki_id: str, session_id: str,
                             parties: list[str] | None = None,
                             doc_type_patterns: list[str] | None = None,
                             content_phrase: str | None = None,
-                            limit: int = 60) -> dict:
+                            limit: int = 60,
+                            content_phrases: list[str] | None = None,
+                            governing_law: str | None = None,
+                            term_min_months: int | None = None,
+                            term_max_months: int | None = None) -> dict:
     """Every document matching a party, a type, and optionally a phrase.
 
     The counting function next door answers "how many"; this answers "list
@@ -4590,13 +4594,59 @@ def list_documents_matching(wiki_id: str, session_id: str,
             params[f"dt{i}"] = f"%{pat}%"
         clauses.append("(" + " OR ".join(_ors) + ")")
 
-    if content_phrase:
-        clauses.append("""EXISTS (
+    # Each phrase is ANDed as its own EXISTS, not concatenated into one LIKE:
+    # a compound question asks for documents that satisfy BOTH predicates, and
+    # the two phrases will not sit next to each other in the text.
+    _phrases = [p.strip() for p in (content_phrases or []) if p and p.strip()]
+    if content_phrase and content_phrase.strip() not in _phrases:
+        _phrases.append(content_phrase.strip())
+    for i, ph in enumerate(_phrases):
+        clauses.append(f"""EXISTS (
             SELECT 1 FROM pages pg
              WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
                AND pg.source_doc = d.source_doc
-               AND pg.content ILIKE :phrase)""")
-        params["phrase"] = f"%{content_phrase.strip()}%"
+               AND pg.content ILIKE :phrase{i})""")
+        params[f"phrase{i}"] = f"%{ph}%"
+
+    # Governing law and term live on the typed contracts row, not on the
+    # document, and both are populated on only part of the corpus — so the
+    # count of documents that could be TESTED for them is reported alongside
+    # the matches. A compound filter silently dropping every document whose
+    # term was never extracted would report a small set as though it were the
+    # whole answer, which is the failure this branch exists to prevent.
+    if governing_law:
+        clauses.append("""EXISTS (
+            SELECT 1 FROM contracts ct
+             WHERE ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+               AND ct.source_doc = d.source_doc
+               AND ct.governing_law ILIKE :gl)""")
+        params["gl"] = f"%{governing_law.strip()}%"
+
+    if term_min_months is not None or term_max_months is not None:
+        _bounds = []
+        if term_min_months is not None:
+            _bounds.append("_m.months > :tmin")
+            params["tmin"] = int(term_min_months)
+        if term_max_months is not None:
+            _bounds.append("_m.months <= :tmax")
+            params["tmax"] = int(term_max_months)
+        clauses.append(f"""EXISTS (
+            SELECT 1 FROM (
+                SELECT CASE
+                    WHEN ct.term_length ~ '"unit"\s*:\s*"year"'
+                        THEN (substring(ct.term_length from '"count"\s*:\s*([0-9]+)'))::int * 12
+                    WHEN ct.term_length ~ '"unit"\s*:\s*"month"'
+                        THEN (substring(ct.term_length from '"count"\s*:\s*([0-9]+)'))::int
+                    WHEN ct.term_length ~* '([0-9]+)\s*year'
+                        THEN (substring(ct.term_length from '([0-9]+)\s*[Yy]ear'))::int * 12
+                    WHEN ct.term_length ~* '([0-9]+)\s*month'
+                        THEN (substring(ct.term_length from '([0-9]+)\s*[Mm]onth'))::int
+                    ELSE NULL END AS months
+                  FROM contracts ct
+                 WHERE ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+                   AND ct.source_doc = d.source_doc
+                   AND ct.term_length IS NOT NULL) _m
+             WHERE _m.months IS NOT NULL AND {' AND '.join(_bounds)})""")
 
     where = " AND ".join(clauses)
     with get_engine().connect() as conn:
@@ -4609,9 +4659,45 @@ def list_documents_matching(wiki_id: str, session_id: str,
         """), params).fetchall()
     docs = [{"source_doc": r[0], "doc_type": r[1],
              "effective_date": str(r[2]) if r[2] else None} for r in rows]
+
+    # Coverage for the predicates that read a typed column, so the answer can
+    # say how much of the scope it was actually able to test.
+    coverage: dict = {}
+    if governing_law is not None or term_min_months is not None or term_max_months is not None:
+        base = [c for c in clauses
+                if "contracts ct" not in c and "_m.months" not in c]
+        base_where = " AND ".join(base)
+        base_params = {k: v for k, v in params.items()
+                       if k not in ("gl", "tmin", "tmax")}
+        with get_engine().connect() as conn:
+            coverage["in_scope"] = conn.execute(text(
+                f"SELECT count(*) FROM documents d WHERE {base_where}"),
+                base_params).scalar() or 0
+            if governing_law is not None:
+                coverage["with_governing_law"] = conn.execute(text(f"""
+                    SELECT count(*) FROM documents d WHERE {base_where}
+                      AND EXISTS (SELECT 1 FROM contracts ct
+                           WHERE ct.wiki_id=d.wiki_id AND ct.session_id=d.session_id
+                             AND ct.source_doc=d.source_doc
+                             AND ct.governing_law IS NOT NULL
+                             AND btrim(ct.governing_law) <> '')"""),
+                    base_params).scalar() or 0
+            if term_min_months is not None or term_max_months is not None:
+                coverage["with_term"] = conn.execute(text(f"""
+                    SELECT count(*) FROM documents d WHERE {base_where}
+                      AND EXISTS (SELECT 1 FROM contracts ct
+                           WHERE ct.wiki_id=d.wiki_id AND ct.session_id=d.session_id
+                             AND ct.source_doc=d.source_doc
+                             AND ct.term_length IS NOT NULL
+                             AND btrim(ct.term_length) <> '')"""),
+                    base_params).scalar() or 0
+
     return {"total": int(total), "documents": docs,
             "truncated": int(total) > len(docs),
-            "parties": parties or [], "content_phrase": content_phrase}
+            "parties": parties or [], "content_phrase": content_phrase,
+            "content_phrases": _phrases, "governing_law": governing_law,
+            "term_min_months": term_min_months,
+            "term_max_months": term_max_months, "coverage": coverage}
 
 
 def find_documents_by_date(wiki_id: str, session_id: str,
