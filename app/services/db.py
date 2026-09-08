@@ -4526,6 +4526,20 @@ def find_defined_term(wiki_id: str, session_id: str, source_docs: list[str],
              "page_num": r[3]} for r in rows]
 
 
+# A doc_type names the instrument first and its SUBJECT MATTER after a
+# connector: "Legal Opinion on Financing Structure - Non-Disclosure Agreement"
+# is a Legal Opinion ABOUT an NDA, not an NDA. Matching the raw doc_type with a
+# substring counts it under both types — confirmed live on this corpus, where
+# that one document inflated the NDA total by one and would equally have shown
+# up in "list every NDA". Matching the LEADING segment instead keeps a document
+# under the instrument it actually is. Documents whose type carries no
+# connector (the overwhelming majority) are unaffected, because the leading
+# segment is then the whole string.
+_PRIMARY_DOC_TYPE_SQL = (
+    "split_part(split_part(split_part(d.doc_type, ' - ', 1), ' on ', 1), ' re ', 1)"
+)
+
+
 def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
                                             doc_type_patterns: list) -> int:
     """How many documents of this type have NO indexed parties at all.
@@ -4590,7 +4604,7 @@ def list_documents_matching(wiki_id: str, session_id: str,
     if _patterns:
         _ors = []
         for i, pat in enumerate(_patterns):
-            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            _ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
             params[f"dt{i}"] = f"%{pat}%"
         clauses.append("(" + " OR ".join(_ors) + ")")
 
@@ -4818,7 +4832,7 @@ def count_documents_by_party(wiki_id: str, session_id: str,
     if _patterns:
         _ors = []
         for i, pat in enumerate(_patterns):
-            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            _ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
             params[f"dt{i}"] = f"%{pat}%"
         clauses.append("(" + " OR ".join(_ors) + ")")
 

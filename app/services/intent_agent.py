@@ -2784,9 +2784,19 @@ _COUNT_NOUNS = (
     "slas?|dpas?|ndas?|msas?|spas?|ssas?|shas?|sows?|poas?|lois?|"
     "jvas?|jvs?|keras?|mous?|tsas?"
 )
+# The modifier words in front of the noun are matched with [a-z][a-z'&-]* and
+# not [a-z]+: a bare [a-z]+ stops dead at the hyphen in "Non-Disclosure
+# Agreements", so the whole count branch declined the single most common
+# instrument type in this corpus and let retrieval answer instead. Confirmed
+# live: "how many Non-Disclosure Agreements are there in total in the corpus"
+# reported 30 against a true 147, while the identically-shaped Joint Venture,
+# Legal Opinion and IP Assignment questions all answered exactly from the
+# document index. Apostrophes are in the class for the same reason
+# ("Shareholders' Agreements") and & for "R&D".
+_COUNT_MODIFIER = r"[a-z][a-z'&-]*"
 _RX_COUNT = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
-    rf"(?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    rf"(?:(?!(?:{_COUNT_BLOCKERS})\b){_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS})\b",
     re.IGNORECASE,
 )
@@ -2799,7 +2809,7 @@ _RX_COUNT_PARTY = re.compile(
 )
 _RX_COUNT_DOCTYPE = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
-    rf"((?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    rf"((?:(?!(?:{_COUNT_BLOCKERS})\b){_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS}))\b",
     re.IGNORECASE,
 )
