@@ -3301,7 +3301,18 @@ def _external_law_directive(question: str, session_id: str) -> str | None:
         f"set out what the documents actually do say on the subject matter, as "
         f"the documents' own terms and not as evidence of compliance. Do not "
         f"state assumptions that would let you answer the compliance question "
-        f"anyway.")
+        f"anyway. "
+        # Length is part of the instruction, not a style note. Without it this
+        # directive turned a clean 16-second refusal into a 66-second one that
+        # inventoried the agreement clause by clause — the decline was still
+        # correct, but a reader who asked a yes/no question and received four
+        # screens of provisions will read the volume as the answer. The point
+        # is what cannot be concluded; the extract is supporting detail.
+        f"Keep that second section SHORT — the handful of provisions that bear "
+        f"on the subject, in a few lines or a small table, not a clause-by-"
+        f"clause review of the document. The reader asked a yes/no question and "
+        f"is being told it cannot be answered; length will read as though it "
+        f"were answered after all.")
 
 
 def _amendment_family_directive(question: str) -> str | None:
