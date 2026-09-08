@@ -217,6 +217,15 @@ GAP_FIELDS = {
         "label": "termination provision",
         "table": "contracts", "plain_col": "termination",
     },
+    # Backed by the typed clause rows rather than a contracts column, because
+    # dispute resolution is not extracted into one. Asked "how many contracts
+    # carry no dispute resolution clause at all", the pipeline had no gap field
+    # to match, fell through to the whole-corpus count, and answered 1372 --
+    # the size of the wiki, to a question about a subset of it.
+    "dispute_resolution": {
+        "label": "dispute resolution clause",
+        "table": "contracts", "clause_type": "dispute_resolution",
+    },
 }
 
 
@@ -372,7 +381,16 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
                      AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc
                      AND d2.doc_type ILIKE :dt)"""
 
-    if spec.get("status_col"):
+    if spec.get("clause_type"):
+        # Absence of a typed clause row. There is no "recorded elsewhere"
+        # state to separate out here: the clause was either extracted for this
+        # document or it was not, so nothing is reported as indeterminate.
+        params["ct"] = spec["clause_type"]
+        missing_sql = ("NOT EXISTS (SELECT 1 FROM clauses cl "
+                       "WHERE cl.wiki_id = c.wiki_id AND cl.session_id = c.session_id "
+                       "AND cl.source_doc = c.source_doc AND cl.clause_type_canon = :ct)")
+        unknown_sql = "FALSE"
+    elif spec.get("status_col"):
         col = spec["status_col"]
         missing_sql = f"c.{col} = '{ABSENT}'"
         # Everything that is neither present nor genuinely absent: reported
