@@ -8609,6 +8609,44 @@ def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
                 _span = []
             if len(_span) == 1:
                 return set(_span)
+        # Two dates that are not a span are two documents, and the original
+        # behaviour here was to resolve neither — which left a question naming
+        # both with nothing pinned at all. Where each date identifies exactly
+        # one document, returning BOTH is the answer to the question actually
+        # asked: "how many days separate the Board Resolution of 30 March 2023
+        # from the Legal Opinion of 13 February 2023" needs the pair. Still
+        # silent unless every date resolves uniquely, so an ambiguous date
+        # cannot drag in a document nobody asked about.
+        # A date shared by two documents is not on its own an identifier, but
+        # the question usually says which one it means. "the Legal Opinion
+        # addressed to Apex Meridian Alloys ... dated 13 February 2023" shares
+        # that date with an unrelated NDA, and the party name separates them.
+        _party_docs: set[str] | None = None
+        _each: set[str] = set()
+        for _d in _parsed_all:
+            try:
+                _hits = _db.find_documents_by_effective_date(
+                    _active_wiki_id(), session_id, _d.isoformat(), cap=5)
+            except Exception as e:
+                logger.error("resolve_scope: multi-date lookup failed: %s", e)
+                return set()
+            if len(_hits) > 1:
+                if _party_docs is None:
+                    try:
+                        _party_docs = set(_resolve_docs_by_party(question, session_id))
+                    except Exception:
+                        _party_docs = set()
+                _narrowed = [h for h in _hits if h in _party_docs] if _party_docs else []
+                if len(_narrowed) != 1:
+                    return set()
+                _hits = _narrowed
+            if len(_hits) != 1:
+                return set()
+            _each |= set(_hits)
+        if len(_each) == len(_parsed_all) >= 2:
+            logger.info("Scope pinned to %d documents, one per date recited",
+                        len(_each))
+            return _each
         return set()
     for date_str in matches:
         parsed = _db.parse_effective_date(date_str)
