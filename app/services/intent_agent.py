@@ -62,6 +62,20 @@ INTENT_LABELS = {
 # Order encodes priority: a query matching several buckets resolves to the
 # most specific lawyer task (drafting > comparison > risk > obligation).
 # ---------------------------------------------------------------------------
+# "Draft a one-sentence board-pack summary of the conclusion in the Apex
+# Meridian Alloys opinion" hit "draft" and got the full DRAFTING_PROMPT — three
+# labelled Aggressive/Balanced/Conservative clause formulations, 1,074
+# completion tokens, for a request that asked for one sentence of prose and
+# named no clause type at all. DRAFTING_PROMPT exists to negotiate CONTRACT
+# LANGUAGE; "draft" is also the ordinary English verb for writing a summary,
+# memo, or briefing note, which is a factual/summarisation request wearing the
+# same word. Vetoed ahead of the drafting match rather than folded into it —
+# the two need different prompts entirely, not a shared one with a flag.
+_RX_DRAFTING_SUMMARY_VETO = re.compile(
+    r'\bdraft\w*\b[^.?!]{0,40}\b(?:summary|summaries|synopsis|overview|memo|'
+    r'briefing|abstract|board[-\s]?pack)\b',
+    re.IGNORECASE,
+)
 _RX_DRAFTING = re.compile(
     r'\b(draft|re-?draft|redline|re-?write|suggest(?:ed)?\s+(?:language|wording|clause)|'
     r'counter[- ]?proposal|alternative\s+(?:wording|language|clause)|'
@@ -333,7 +347,7 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
     """
     q = question or ""
 
-    if _RX_DRAFTING.search(q):
+    if _RX_DRAFTING.search(q) and not _RX_DRAFTING_SUMMARY_VETO.search(q):
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
     if _RX_COMPARISON.search(q) and not _is_case_caption_vs_only(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
