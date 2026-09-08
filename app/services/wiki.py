@@ -10649,8 +10649,93 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
     if not last:
         return []
     if _is_carryover_method(last.get("method")) and last.get("docs"):
-        return list(last["docs"])
+        _docs = list(last["docs"])
+        if _carryover_subject_pivot(question, _docs):
+            logger.info("_carryover_scope: question names a subject absent from "
+                        "the carried document(s); not inheriting")
+            return []
+        return _docs
     return []
+
+
+# Words that are capitalised in a legal question without naming anything —
+# statute furniture, party roles, and the days and months.
+_PIVOT_STOPWORDS = {
+    "act", "acts", "rules", "rule", "code", "codes", "regulation",
+    "regulations", "clause", "clauses", "section", "sections", "schedule",
+    "schedules", "annexure", "agreement", "agreements", "contract",
+    "contracts", "document", "documents", "party", "parties", "company",
+    "limited", "private", "ltd", "plc", "inc", "gmbh", "llp",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+    "sunday", "indian", "india", "english", "european", "union",
+    "does", "what", "which", "where", "when", "should", "would", "could",
+    "trade", "marks", "data", "protection", "personal", "digital", "general",
+}
+# A question pointing back at the pinned document keeps it, whatever else it
+# names: "does THIS comply with the Companies Act" is about the pinned
+# agreement, and the Act is what it is being measured against.
+_RX_PIVOT_BACKREF = re.compile(
+    r"\b(?:it|its|this|that|these|those|the\s+(?:same|above|document|agreement|"
+    r"contract)|therein|thereunder|hereunder)\b", re.IGNORECASE)
+
+
+def _carryover_subject_pivot(question: str, carried: list) -> bool:
+    """Whether the question is about something the carried documents are not.
+
+    Confirmed live: asked "Does our Croma litigation strategy satisfy the
+    Indian Trade Marks Act requirements?" one turn after an NDA was pinned, the
+    thread inherited that NDA and answered about a confidentiality agreement
+    with nothing to do with Croma — declining the statute correctly, then
+    describing the wrong document at 25% confidence.
+
+    A pivot needs all three of these, so an ordinary follow-up is untouched:
+      * the question points back at nothing (no "it", "this", "that"),
+      * it names a token that identifies documents ELSEWHERE in this corpus,
+        so the pivot leads somewhere real rather than to a typo,
+      * that token appears nowhere in the carried documents — not in their
+        names, not in their parties, not in their text.
+    """
+    if not carried or not config.USE_DATABASE:
+        return False
+    q = question or ""
+    if _RX_PIVOT_BACKREF.search(q):
+        return False
+
+    # Sentence-initial capitals say nothing about the word.
+    words = re.findall(r"\b([A-Z][A-Za-z'&-]{3,})\b", q[1:] if q else "")
+    cands = [w for w in dict.fromkeys(words)
+             if w.lower() not in _PIVOT_STOPWORDS]
+    if not cands:
+        return False
+
+    from sqlalchemy import text as _text
+    try:
+        with _db.get_engine().connect() as conn:
+            for tok in cands[:4]:
+                like = f"%{tok}%"
+                names = conn.execute(_text(
+                    "SELECT count(*) FROM documents WHERE wiki_id = :w "
+                    "AND (source_doc ILIKE :t OR parties::text ILIKE :t)"),
+                    {"w": _active_wiki_id(), "t": like}).scalar() or 0
+                if not names:
+                    continue          # not an identifier in this corpus
+                hit = conn.execute(_text(
+                    "SELECT 1 FROM pages WHERE source_doc = ANY(:docs) "
+                    "AND content ILIKE :t LIMIT 1"),
+                    {"docs": list(carried), "t": like}).fetchone()
+                if hit:
+                    continue          # the carried documents do discuss it
+                if any(tok.lower() in (d or "").lower() for d in carried):
+                    continue
+                logger.info("_carryover_scope: %r names %d document(s) elsewhere "
+                            "and none of the carried ones", tok, names)
+                return True
+    except Exception as e:
+        logger.warning("_carryover_subject_pivot check failed: %s", e)
+        return False
+    return False
 
 
 # Explicit references back to a set the conversation just established —
