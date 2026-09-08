@@ -4569,6 +4569,34 @@ _PRIMARY_DOC_TYPE_SQL = (
 )
 
 
+def find_documents_by_date_span(wiki_id: str, session_id: str,
+                                date_a: str, date_b: str) -> list[str]:
+    """Documents whose recorded effective AND expiry dates are these two dates.
+
+    Two dates in a question usually mean two documents, and the date resolver
+    rightly refuses to pin one. But "effective 1 June 2025 with a recorded
+    expiry of 31 March 2026" is one document's SPAN, and the pair is a stronger
+    identifier than either date alone. Order is not assumed: the question may
+    recite them either way round.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc, effective_date, expiry_date FROM documents
+             WHERE wiki_id = :w AND session_id = :s
+               AND effective_date IS NOT NULL AND expiry_date IS NOT NULL
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+    want = {date_a, date_b}
+    out = []
+    for src, eff, exp in rows:
+        e1 = parse_effective_date(str(eff or ""))
+        e2 = parse_effective_date(str(exp or ""))
+        got = {e1.isoformat() if e1 else None, e2.isoformat() if e2 else None}
+        if want <= got:
+            out.append(src)
+    return sorted(set(out))
+
+
 def find_documents_by_case_number(wiki_id: str, session_id: str,
                                   case_number: str) -> list[str]:
     """Documents whose litigation record carries this case number.

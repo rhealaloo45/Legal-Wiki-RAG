@@ -8103,8 +8103,16 @@ _CORP_SUFFIX_RE_STR = (
     r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
     r'LLP|LLC|FZE|FZC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
 )
+# The "&" is allowed as a word of its own, not only inside one. Every token in
+# the sequence otherwise has to begin with a capital, so "Apex Bhumika Hotels &
+# Resorts Limited" broke at the ampersand and the name came out as "Resorts" —
+# which matches no party, so the document resolved to nothing and the question
+# was answered "not present in these documents" about an agreement the corpus
+# holds. Ampersands are common in real company names ("Hotels & Resorts",
+# "Johnson & Johnson"), and "and" is deliberately NOT accepted here: "X and Y
+# Limited" is usually two parties, while "X & Y Limited" is usually one.
 _PARTY_NAME_RE = re.compile(
-    r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
+    r'\b((?:(?:[A-Z][A-Za-z0-9&.\-]+|&)\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
 )
 
 # A company name typed in shorthand ALL-CAPS carries no corporate suffix at all
@@ -8530,6 +8538,15 @@ _CASE_NUMBER_RES = [
 ]
 
 
+# The words that make two dates one document's span rather than two documents.
+_RX_DATE_SPAN = re.compile(
+    r"\b(?:effective|commenc\w+|start\w*|runs?|running|term)\b[^?]{0,80}?"
+    r"\b(?:expir\w+|end\w*|until|through|to)\b"
+    r"|\bfrom\b[^?]{0,40}?\bto\b"
+    r"|\bbetween\b[^?]{0,30}?\band\b[^?]{0,20}?\b(?:inclusive|term)\b",
+    re.IGNORECASE)
+
+
 def _resolve_docs_by_case_number(question: str, session_id: str) -> set[str]:
     """Documents a case number in the question names, via litigation_facts."""
     if not config.USE_DATABASE:
@@ -8571,7 +8588,27 @@ def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
     # would otherwise be pinned to whichever of them happens to have a unique
     # date, turning a two-document comparison into a one-document answer —
     # a worse failure than the one this resolver exists to fix.
-    if len({_db.parse_effective_date(m) for m in matches} - {None}) > 1:
+    _parsed_all = sorted({d for d in (_db.parse_effective_date(m) for m in matches)
+                          if d})
+    if len(_parsed_all) > 1:
+        # ...unless the two dates are one document's own span. "effective
+        # 1 June 2025 with a recorded expiry of 31 March 2026" recites a start
+        # and an end, not two instruments, and the pair identifies the document
+        # more strongly than either date alone. Measured live: the guard below
+        # was refusing to pin anything for exactly this question, scope widened
+        # to 179 documents, and the answer came back "not present in these
+        # documents" about an agreement the corpus holds with both dates
+        # recorded.
+        if len(_parsed_all) == 2 and _RX_DATE_SPAN.search(question or ""):
+            try:
+                _span = _db.find_documents_by_date_span(
+                    _active_wiki_id(), session_id,
+                    _parsed_all[0].isoformat(), _parsed_all[1].isoformat())
+            except Exception as e:
+                logger.error("resolve_scope: date-span lookup failed: %s", e)
+                _span = []
+            if len(_span) == 1:
+                return set(_span)
         return set()
     for date_str in matches:
         parsed = _db.parse_effective_date(date_str)
