@@ -609,6 +609,78 @@ _RX_CALC_DAYS_N = re.compile(
     r"fifteen|twenty|thirty|forty[-\s]?five|sixty|ninety)\s*"
     r"(?:\(\d+\)\s*)?(?:calendar\s+|business\s+|working\s+)?days?\b",
     re.IGNORECASE)
+# "Expressed in days, how long is that retention period?" — the period is in
+# the question, so this needs no document dates. Kept separate from
+# _RX_CALC_TERM_DAYS, which is about a document's own recorded term.
+_RX_CALC_IN_DAYS = re.compile(
+    r"\b(?:expressed|stated|measured|converted?)\s+in\s+(?:whole\s+)?days\b"
+    r"|\bin\s+(?:whole\s+)?days\b[^?]{0,40}\bhow\s+(?:long|many)\b"
+    r"|\bhow\s+(?:long|many\s+days)\b[^?]{0,60}?\bin\s+(?:whole\s+)?days\b",
+    re.IGNORECASE)
+# The period the question itself states, as (count, unit). Hours are included
+# because a 72-hour notice window is the same question in a smaller unit.
+_RX_STATED_PERIOD = re.compile(
+    r"\b(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"fifteen|twenty|thirty|forty[-\s]?five|sixty|ninety)\s*"
+    r"(?:\(\d+\)\s*)?(year|month|week|day|hour)s?\b",
+    re.IGNORECASE)
+_PERIOD_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "fifteen": 15, "twenty": 20, "thirty": 30, "forty-five": 45,
+    "forty five": 45, "sixty": 60, "ninety": 90,
+}
+# A year is 365 days and a month 30. Both are conventions, and the answer says
+# so rather than implying a calendar-exact figure: the source clause says "not
+# less than 7 years", which is itself a duration and not a pair of dates.
+_PERIOD_IN_DAYS = {"year": 365, "month": 30, "week": 7, "day": 1}
+
+
+def _period_stated_in_question(question: str):
+    """(count, unit) the question states, or None. Longest period wins.
+
+    A question can carry several numbers — "not less than 7 years following
+    expiry" alongside a clause number or a date — so the largest period is
+    taken rather than the first, which is the one the question is asking to
+    convert.
+    """
+    best = None
+    for m in _RX_STATED_PERIOD.finditer(question or ""):
+        raw = m.group(1).lower().replace(" ", "-")
+        n = _PERIOD_WORDS.get(raw)
+        if n is None:
+            try:
+                n = int(raw)
+            except ValueError:
+                continue
+        unit = m.group(2).lower()
+        days = n / 24 if unit == "hour" else n * _PERIOD_IN_DAYS[unit]
+        if best is None or days > best[2]:
+            best = (n, unit, days)
+    if not best:
+        return None
+    return (best[0], best[1])
+
+
+def period_days(question: str) -> dict:
+    """A period the question states, converted to whole days."""
+    p = _period_stated_in_question(question)
+    if not p:
+        return {"ok": False, "missing": "a period to convert",
+                "detail": "No number and unit (days, weeks, months, years) "
+                          "could be read from the question."}
+    count, unit = p
+    if unit == "hour":
+        days = count / 24
+        whole = int(days) if float(days).is_integer() else round(days, 2)
+        return {"ok": True, "kind": "period_days", "count": count, "unit": unit,
+                "days": whole, "basis": f"{count} hours ÷ 24"}
+    per = _PERIOD_IN_DAYS[unit]
+    return {"ok": True, "kind": "period_days", "count": count, "unit": unit,
+            "days": count * per,
+            "basis": f"{count} {unit}{'s' if count != 1 else ''} × {per} days"}
+
+
 _RX_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 # Notice periods are written in round numbers this list covers and _NUM_WORDS,
 # built for weeks and years, does not. Kept separate rather than widening the
@@ -929,10 +1001,19 @@ def notice_end(wiki_id: str, session_id: str, source_doc: str,
 
 def is_calculation_query(question: str) -> str:
     """'total_value' | 'ld' | 'escalation' | 'term_days' | 'elapsed' |
-    'remaining' | 'notice_end' | 'out_of_scope' | ''."""
+    'remaining' | 'notice_end' | 'period_days' | 'out_of_scope' | ''."""
     q = question or ""
     if _RX_CALC_OUT_OF_SCOPE.search(q):
         return "out_of_scope"
+    # Ahead of term_days, which reads the two recorded date columns and declines
+    # when a document has no expiry: a question that STATES its own period
+    # ("retain records for not less than 7 years -- expressed in days, how long
+    # is that?") needs no document dates at all, and answering it from the
+    # question's own words is not estimating. Confirmed live: three separate
+    # evaluation questions of this shape were declined as "needs an expiry date"
+    # while the period sat in the question itself.
+    if _RX_CALC_IN_DAYS.search(q) and _period_stated_in_question(q):
+        return "period_days"
     if _RX_CALC_LD.search(q) and _RX_CALC_LD_WEEKS.search(q):
         return "ld"
     if _RX_CALC_ESC.search(q) and _RX_CALC_YEARS.search(q):
@@ -1052,6 +1133,20 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
         lines.append("Both dates are the ones recorded for this document at "
                      "ingest; the subtraction is exact.")
         lines.append("")
+
+    elif kind == "period_days":
+        lines.append(f"**{result['days']} days**")
+        lines.append("")
+        lines.append(f"- Period stated in the question: {result['count']} "
+                     f"{result['unit']}{'s' if result['count'] != 1 else ''}")
+        lines.append(f"- {result['basis']} = **{result['days']} days**")
+        lines.append("")
+        if result["unit"] in ("year", "month"):
+            lines.append("Converted at the usual convention of 365 days to a "
+                         "year and 30 days to a month. The source period is a "
+                         "duration, not a pair of dates, so this is a "
+                         "conversion rather than a calendar count.")
+            lines.append("")
 
     elif kind in ("elapsed", "remaining"):
         anchor = result["anchor"].isoformat()
@@ -1215,6 +1310,23 @@ def answer(question: str, wiki_id: str, session_id: str,
     if not docs:
         # Only now, and only for an identifier that names exactly one document.
         docs = resolve_by_identifier(wiki_id, session_id, question)
+
+    # Answered before the scope gate below, because it needs no document: the
+    # period being converted is stated in the question itself. Scope resolution
+    # on a purely descriptive reference ("Apex Veyra Digital Limited must retain
+    # records ... expressed in days") often resolves to nothing or to the wrong
+    # sibling, and declining a stated 5-years-to-days conversion on that basis
+    # was measured as a wrong answer three times in one evaluation run.
+    if kind == "period_days":
+        result = period_days(question)
+        if not result.get("ok"):
+            return None
+        label = ", ".join(_label_for(d, wiki_id, session_id)
+                          for d in docs[:_MAX_CALC_DOCS])
+        body = render(kind, result, label or "stated in the question")
+        p = _payload(body, "Calculation")
+        p["files_used"] = docs[:_MAX_CALC_DOCS]
+        return p
 
     if kind == "out_of_scope":
         label = ", ".join(_label_for(d, wiki_id, session_id)
