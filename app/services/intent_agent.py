@@ -824,6 +824,39 @@ def _explicitly_corpus_wide(question: str) -> bool:
     return bool(_RX_CORPUS_WIDE.search(question or ""))
 
 
+# Words by which a question leans on the turn before it. "Which of THOSE expire
+# in the next 90 days" cannot be answered without the previous answer; "which
+# agreements expire in the next 90 days" can, and asking it second does not
+# change that.
+_RX_ANAPHORA = re.compile(
+    r"\b(?:it|its|they|them|their|theirs|those|"
+    r"that\s+one|these\s+(?:ones?|two|three|four)|the\s+ones?|"
+    r"the\s+(?:first|second|third|fourth|fifth|last|above|former|latter|same|other)\b|"
+    r"this\s+(?:one|document|agreement|contract|matter)|"
+    r"same\s+(?:document|agreement|contract)|as\s+above|mentioned\s+above|"
+    r"of\s+these|of\s+those|from\s+(?:these|those)|among\s+(?:these|those))\b",
+    re.IGNORECASE)
+
+
+def _self_contained_question(question: str) -> bool:
+    """Whether a question can be answered without the previous turn.
+
+    The deterministic branches are all gated on the turn not being a follow-up,
+    which is right for a question that genuinely refers back and wrong for one
+    that merely arrives second. Asked third in a thread, "Which agreements
+    expire in the next 90 days?" skipped the expiry branch, was answered by
+    retrieval over the twelve documents the conversation happened to be
+    holding, and opened by repeating the PREVIOUS answer — fifteen contracts
+    mention arbitration — before reporting that none of those twelve expire.
+    It cost 49,210 tokens to get wrong what the index answers exactly, for
+    nothing, in under a second.
+
+    The branches themselves already demand a corpus-shaped question, so the
+    only thing left to check is that this one is not leaning on the last.
+    """
+    return not _RX_ANAPHORA.search(question or "")
+
+
 def _corpus_wide_scan(question: str) -> bool:
     """A risk scan over a whole class of instrument, not over one document.
 
@@ -5898,7 +5931,9 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                        "payload": _calc, "message": "Done"}
                 return
 
-    if not is_followup and not collection_id:
+    # Position in the thread does not make a corpus-wide question a follow-up.
+    if ((not is_followup or _self_contained_question(question))
+            and not collection_id):
         _akind = _is_analytics_query(question)
         if _akind:
             from services import wikis as _wikis_a
@@ -5947,7 +5982,9 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
                    "payload": _absent, "message": "Done"}
             return
 
-    if not is_followup and not collection_id:
+    # Position in the thread does not make a corpus-wide question a follow-up.
+    if ((not is_followup or _self_contained_question(question))
+            and not collection_id):
         _kind = _is_structural_query(question)
         if _kind:
             _structural = _structural_answer(_kind, question, session_id)
