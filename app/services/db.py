@@ -4569,6 +4569,40 @@ _PRIMARY_DOC_TYPE_SQL = (
 )
 
 
+def find_documents_by_case_number(wiki_id: str, session_id: str,
+                                  case_number: str) -> list[str]:
+    """Documents whose litigation record carries this case number.
+
+    litigation_facts holds a case number for 251 documents and nothing read it
+    when resolving scope. A case number is the most precise identifier a
+    litigation question can carry — more precise than a party name, which on
+    this corpus routinely spans dozens of matters — and asked about
+    "CS(COMM) 91/2024" the pipeline retrieved an unrelated filing and reported
+    that the suit's disposition was not stated. It was, in a document the
+    number names exactly.
+
+    Compared on digits and letters only, so "CS(COMM) 91/2024",
+    "CS (COMM) 91/2024" and "CS(COMM) No. 91/2024" are one identifier.
+    """
+    from sqlalchemy import text
+    key = re.sub(r"[^a-z0-9]", "", (case_number or "").lower())
+    key = re.sub(r"^(?:no|case|matter)+", "", key)
+    if len(key) < 5:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc, case_number FROM litigation_facts
+             WHERE wiki_id = :w AND session_id = :s AND case_number IS NOT NULL
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+    out = []
+    for src, num in rows:
+        k = re.sub(r"[^a-z0-9]", "", (num or "").lower())
+        k = re.sub(r"^(?:no|case|matter)+", "", k)
+        if k and (k == key or (len(k) >= 5 and (k in key or key in k))):
+            out.append(src)
+    return sorted(set(out))
+
+
 def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
                                             doc_type_patterns: list) -> int:
     """How many documents of this type have NO indexed parties at all.

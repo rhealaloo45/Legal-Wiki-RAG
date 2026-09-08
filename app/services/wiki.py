@@ -8519,6 +8519,35 @@ _QUESTION_DATE_RE = re.compile(
 )
 
 
+# The case-number shapes this corpus files matters under: "CS(COMM) 91/2024",
+# "Arb. Pet. No. 473/2026", "C.P. No. 499/2023", "Appeal No. 113/2024",
+# "W.P.(C) 456/2023", and the internal "COM-2025-185" form. The number/year
+# pair is what makes it an identifier, so the pattern requires it.
+_CASE_NUMBER_RES = [
+    re.compile(r"\b([A-Z][A-Za-z.]{0,6}\s*\([A-Za-z]{1,6}\)\s*(?:No\.?\s*)?\d{1,5}\s*/\s*\d{4})"),
+    re.compile(r"\b((?:[A-Z][A-Za-z.]{0,5}\.?\s*){1,3}No\.?\s*\d{1,5}\s*/\s*\d{4})"),
+    re.compile(r"\b(COM-\d{4}-\d{2,4})\b", re.IGNORECASE),
+]
+
+
+def _resolve_docs_by_case_number(question: str, session_id: str) -> set[str]:
+    """Documents a case number in the question names, via litigation_facts."""
+    if not config.USE_DATABASE:
+        return set()
+    q = question or ""
+    found: set[str] = set()
+    for rx in _CASE_NUMBER_RES:
+        for m in rx.finditer(q):
+            try:
+                hits = _db.find_documents_by_case_number(
+                    _active_wiki_id(), session_id, m.group(1))
+            except Exception as e:
+                logger.error("case-number lookup failed for %r: %s", m.group(1), e)
+                continue
+            found |= set(hits)
+    return found
+
+
 def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
     """The one document whose stored effective_date is the date the question recites.
 
@@ -11422,6 +11451,22 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # Still only fires on a unique hit. A date shared by several documents is
     # not an identifier, which is precisely why the party name outranks it
     # everywhere else.
+    # A case number is the most precise identifier a litigation question can
+    # carry, so it is tried before the date and well before any party name —
+    # "Tata Sons" alone spans dozens of matters on this corpus. Measured live:
+    # asked for the disposition of CS(COMM) 91/2024, scope resolution had
+    # nothing to pin on, retrieval returned an unrelated impersonation filing,
+    # and the answer reported the disposition as not stated. The judgment
+    # recording it was indexed the whole time under that number.
+    try:
+        _case = _resolve_docs_by_case_number(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: case-number resolution failed: %s", e)
+        _case = set()
+    if _case:
+        return {"scope": "single_doc", "target_docs": sorted(_case),
+                "target_family": None, "is_broad": len(_case) > 1,
+                "confidence": 0.9, "method": "case-number"}
     try:
         _dated = _resolve_docs_by_effective_date(question, session_id)
     except Exception as e:
