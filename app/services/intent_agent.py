@@ -909,8 +909,6 @@ def _risk_question_on_a_settled_document(state: dict) -> bool:
         logger.info("[AGENT] clarification skipped: question states corpus-wide "
                     "scope")
         return True
-    if not _RX_RISK_SHAPE.search(q):
-        return False
     try:
         carried = wiki._carryover_scope(
             q, state.get("chat_session_id") or state["session_id"])
@@ -918,7 +916,29 @@ def _risk_question_on_a_settled_document(state: dict) -> bool:
         return False
     if not carried:
         return False
-    logger.info("[AGENT] clarification skipped: risk question on a document the "
+    if _RX_RISK_SHAPE.search(q):
+        logger.info("[AGENT] clarification skipped: risk question on a document "
+                    "the conversation already settled (%d doc(s))", len(carried))
+        return True
+
+    # Widened past risk questions, because the inconsistency is not particular
+    # to them. "What is the notice period?", asked straight after Clause 8 of
+    # Service Agreement 2 had been quoted — including its thirty-day notice —
+    # came back "Needs clarification" on one run and answered correctly on the
+    # next, from the same thread and the same preceding turn. The check is a
+    # model call, and on a short follow-up it decides both ways.
+    #
+    # Carryover has already resolved a document from the conversation, and the
+    # question introduces no subject that document lacks (the same test that
+    # stops an unrelated question inheriting one). There is nothing left to ask
+    # about, so asking is the worse of the two answers — it costs the user a
+    # turn to say what the thread already said.
+    try:
+        if wiki._carryover_subject_pivot(q, carried):
+            return False
+    except Exception:
+        return False
+    logger.info("[AGENT] clarification skipped: follow-up on a document the "
                 "conversation already settled (%d doc(s))", len(carried))
     return True
 
