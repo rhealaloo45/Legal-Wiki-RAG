@@ -20,6 +20,9 @@ Five lawyer intents drive prompt selection in wiki.generate_answer():
 
 import re
 import logging
+import threading
+import time
+import contextvars
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
@@ -460,6 +463,75 @@ def _emit(event: dict) -> None:
         writer(event)
     except Exception:
         pass
+
+
+_HEARTBEAT_INTERVAL_S = 4
+# Rotates rather than repeating "Generating…" verbatim, so a reader watching
+# the tile for thirty seconds sees it change rather than wondering if it is
+# frozen. Deliberately says nothing about internal steps this call is not
+# actually taking (no claim of "checking citations" mid-generation, which
+# only happens afterwards, in validate) — the tile must stay honest about
+# what is happening, not just alive-looking.
+_HEARTBEAT_PHRASES = [
+    "Still generating the answer…",
+    "This one's taking a bit — still generating…",
+    "Still working on it…",
+    "Longer answer in progress…",
+]
+
+
+def _call_with_heartbeat(fn, *args, stage: str = "generating",
+                         base_message: str = "Generating…", **kwargs):
+    """Run a blocking call on a worker thread, emitting stage ticks while it runs.
+
+    Exists because the generating stage previously emitted exactly one "active"
+    event before the blocking model call and nothing again until it returned —
+    on the slowest archetypes (open discovery, risk-scan) that is a single
+    static tile sitting still for 65-77 seconds, which reads as hung even
+    though the pipeline is working.
+
+    The call itself still runs synchronously from the caller's point of view —
+    this function blocks until it finishes and returns its result or re-raises
+    its exception, so callers do not need to change. Only the WAITING becomes
+    visible: the model call runs on a worker thread purely to let this thread
+    keep control long enough to emit at a fixed interval, and _emit is called
+    only from this thread — the one already running inside the LangGraph node,
+    so its context-var-based stream writer resolves as it always has.
+
+    The worker thread runs inside a COPY of the calling context
+    (contextvars.copy_context()), not bare. A plain threading.Thread starts
+    with an empty context, and this codebase keeps two live contextvars that
+    depend on inheriting it: LangGraph's stream writer, and tracing._current —
+    the trace that tracing.get_trace() reads inside llm.ask() to record every
+    call's tokens. Without the copy, generate_answer's own LLM call (and any
+    retry it fires) would run against no trace at all, silently dropping its
+    tokens from tracing.get_trace().to_dict() with no error raised anywhere —
+    exactly the kind of gap the token-accounting fixes elsewhere in this
+    codebase exist to close, and one that would have shipped invisibly here.
+    """
+    result: dict = {}
+    ctx = contextvars.copy_context()
+
+    def _run():
+        try:
+            result["value"] = ctx.run(fn, *args, **kwargs)
+        except Exception as e:
+            result["error"] = e
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    tick = 0
+    while th.is_alive():
+        th.join(timeout=_HEARTBEAT_INTERVAL_S)
+        if th.is_alive():
+            tick += 1
+            phrase = _HEARTBEAT_PHRASES[(tick - 1) % len(_HEARTBEAT_PHRASES)]
+            _emit({"stage": stage, "status": "active",
+                   "message": f"{phrase} ({tick * _HEARTBEAT_INTERVAL_S}s)",
+                   "elapsed_s": tick * _HEARTBEAT_INTERVAL_S})
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 
 # ---------------------------------------------------------------------------
@@ -1385,7 +1457,8 @@ def generate_answer_node(state: QueryState) -> dict:
         )
 
     try:
-        wr = wiki.generate_answer(
+        wr = _call_with_heartbeat(
+            wiki.generate_answer,
             state["question"], state.get("wiki_context", ""),
             state.get("selected_titles", []), state["session_id"],
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
