@@ -10,11 +10,42 @@ Standard RAG retrieves raw document chunks at query time and asks the LLM to rea
 
 | | Standard RAG | Legal Wiki |
 |---|---|---|
-| Query cost | ~2,000–5,500 tokens | ~5,000–6,000 tokens |
+| Query cost | ~2,000–5,500 tokens | 21,007 prompt / 1,091 completion, mean over 2,527 traced queries — **0 tokens** on the 14 deterministic paths |
 | Cross-doc synthesis quality | Weak | Strong (pre-built) |
 | At 20k docs | Recall degrades | Consistent (compaction keeps pages coherent) |
 | Ingest cost | Near zero | LLM calls per doc (paid once, queried many times) |
 | Hallucination surface | Raw chunks, no pre-filtering | Pre-synthesised + 20 answer-prompt rules |
+
+The query-cost row is measured, not estimated, and it is higher than the figure
+this table used to carry. The interesting number is the second half: on a
+48-question suite spanning sixteen question shapes, **28 of 48 answers cost
+nothing at all**, because the question was one the database answers exactly.
+
+---
+
+## Current state — what is on, what is off
+
+Every flag below is read at runtime; the defaults are what ships. Nothing here
+is aspirational — a feature that is off is described as off, and why.
+
+| | State | Notes |
+|---|---|---|
+| `ENABLE_INTENT_CLASSIFIER` | **on** | Five-intent routing; regex fast path first, fast model for the rest |
+| `ENABLE_CLARIFICATION` | **on** | Skipped for corpus-wide questions and for follow-ups on a settled document — it is a model call and it decided borderline follow-ups both ways |
+| `ENABLE_ANSWER_VALIDATION` | **on** | Deterministic grounding first; escalates to a judge only when inconclusive |
+| `ENABLE_TERM_CHECK` | **on** | Defined-term drafting-defect check |
+| `ENABLE_GENERAL_KNOWLEDGE` / `ENABLE_GK_LLM_FALLBACK` | **on** | Answers outside the corpus, clearly separated from document answers |
+| `ENABLE_META_LLM_FALLBACK` | **on** | Questions about the corpus itself |
+| `USE_QUESTION_EMBEDDINGS` | **on** | Third retrieval channel — hypothetical questions per page |
+| `PII_REDACTION_ENABLED` | **on** | |
+| `AUTH_ENABLED` | **on** | |
+| `ENABLE_QUERY_DECOMPOSITION` | **on** | Runs in one place only: *after* the whole-question route has already declined. Sub-questions route through the zero-LLM structured paths, so a rescue costs nothing beyond its SQL. Placed there deliberately — anywhere earlier it could hand a fragment to a resolver that has lost the party pair it needed |
+| `ENABLE_RERANK` | **off** | The reranker orders candidates by `title: summary` — metadata, not content — so it cannot break the ties that actually matter. Enabling it adds a model call without addressing the failure. A cross-encoder scoring question and passage jointly is the thing that would |
+| `ENABLE_ENQUIRY_AGENT` | **off** | Built, works, and measured twice as contributing nothing. On a 49-turn thread suite, carryover had already resolved 36 of 39 follow-ups, so the gate never opened — zero enquiry referents used, 20.4 minutes against 16.5. A 76-question run agreed independently. Kept as insurance for referent shapes the deterministic resolvers do not cover, not because it is believed to help |
+| `ENABLE_ANSWER_CACHE` | **off** | |
+| `STRUCTURAL_VISION_ENABLED` | **off** | Vision pass for structural parsing; not needed at this corpus's quality |
+| `DISABLE_INGEST` | **off** | Ingest is available |
+| HNSW vector index | **unavailable** | Not a flag. pgvector indexes at most 2,000 dimensions and these are 3,072, so every dense search is an exact cosine scan — perfect recall, no tuning, and fine at this corpus size |
 
 ---
 
@@ -27,6 +58,41 @@ Standard RAG retrieves raw document chunks at query time and asks the LLM to rea
 - **Hybrid retrieval**: pgvector cosine search + BM25 keyword ranking fused via Reciprocal Rank Fusion (RRF) at query time; a wider candidate pool + per-document diversification kicks in for broad/family questions, with an optional (off by default) LLM rerank pass
 - **Page compaction**: pages that grow through repeated merges are re-synthesised by the LLM, keeping the wiki coherent at scale
 - **D3.js knowledge graph** visualisation of pages and relations
+
+### Deterministic paths — questions the database answers, not the model
+
+Before the query graph runs, the question is tested against **14 fast paths**.
+Each answers from SQL or an index lookup and returns immediately, at zero
+tokens. This is not an optimisation bolted on for speed: routing these through
+retrieval produced answers that were specific, sourced and wrong, because
+retrieval answers from what it fetched and cannot report that it stopped early.
+
+| Path | Answers | Was |
+|---|---|---|
+| **Counting** | "How many Shareholder Agreements do we hold?" · "How many contracts mention arbitration?" | Retrieval counted its own retrieved pages: *"There are 21 documents"* against a corpus of 1,372; *"fifteen"* contracts mention arbitration where 701 do |
+| **Document set** | "Show every Shareholder Agreement where X is the lead strategic shareholder" | Named one of the five that match — and a set answered from a sample reads exactly like a complete set |
+| **Compound filter** | "Which joint ventures involve X *and* list sanctions exposure as an exit trigger?" | Reported none; seven match. Retrieval ranks by one notion of relevance, so a two-condition question gets whichever condition the embedding weighted |
+| **Analytics** | Aggregates, gaps ("which contracts state no governing law"), trends by year, expiry windows | A negative over a corpus cannot be established from a sample of pages |
+| **Relations** | Amendment chains and incoming/outgoing edges, reachable by date as well as title | Reported a document was not in the corpus while holding both it and its `amends` edge |
+| **Citations** | "Which documents cite the Trade Marks Act, 1999?" — statutes *and* procedural authorities like `Order XXXIX CPC` | Ranked documents *about* injunctions over the ones carrying the citation |
+| **Calculation / date math** | Term lengths, elapsed and remaining days, business-day offsets against a per-document holiday calendar | |
+| **Clause precedent** | "Have we agreed to a 30-day notice period before?" — split into clauses that state that figure and clauses that state a different one | Headed a 45-day clause as "matching" a 30-day question |
+| **Playbook compliance** | "Does this comply with our house standard?" | |
+| Plus | social, meta, defined terms, conflation, absent-instrument | |
+
+Every one of these reports the denominator it could not test — documents with
+no recorded expiry date, no governing law, no term length — rather than
+dropping them silently. A filter that quietly discards what it could not
+evaluate reports a small set as though it were the whole answer.
+
+**Position in a thread does not change what a question is.** These paths were
+originally skipped on any follow-up turn. Asked third in a thread, "which
+agreements expire in the next 90 days" bypassed the expiry index, was answered
+over the twelve documents the conversation happened to hold, and opened by
+repeating the previous answer — 49,210 tokens to get wrong what the index
+answers exactly, free, in under a second. A question carrying no anaphora now
+reaches the index whatever its position; "which of *those* expire…" still takes
+the conversational path, because it needs it.
 
 ### Query Mode (Ask) — Conversational Chat
 - **Chat interface** with persistent message history (PostgreSQL-backed). Full conversation thread with user messages, assistant answers, disambiguation prompts, and clarification questions
@@ -237,6 +303,47 @@ cd app
 python app.py
 # Open http://localhost:5001
 ```
+
+---
+
+## Testing
+
+Three suites, each answering a question the others cannot. None is sufficient
+alone, and that has been demonstrated rather than argued.
+
+**Deterministic checks — no model calls, seconds.** 37 assertions over the fast
+paths: does each answer with the right value, and — nine of the 37 — does it
+correctly *decline* to capture a question it should leave to retrieval. This
+catches the largest class of regression, a fast path swallowing a question it
+should not. A party-pair lookup ("what is the term of the NDA between X and Y")
+was captured mid-review by the compound branch through the bare "and" joining
+two party names, and answered with a list of NDAs instead of the term; it is now
+pinned by test.
+
+**Conversation suite — `tools/conversation_suite.py`, about five minutes.** Six
+scripted conversations asserting, per turn, which path answered, whether it cost
+anything, what the text must and must not say, and which document it must still
+be about. Turns marked *free* must cost zero tokens: each is a question the
+index answers exactly, and one that starts costing tokens has stopped reaching
+the index and is about to start being wrong.
+
+**Thread suite — `tools/thread_suite.py`.** Generates threads from
+single-document seeds and checks one thing: does a follow-up stay on the
+document the thread pinned. Older, complementary, and would not have caught any
+of the three defects the conversation suite exists for.
+
+Above these sit the graded runs — a 200-question set, a fresh 300-question set,
+a 76-question run over this deployment's own documents, and a 48-question set
+covering sixteen question *shapes* rather than sixteen questions.
+
+> **What a benchmark of independent questions cannot see.** The 48-question
+> suite scored 9.1/10, and three defects reached a real session immediately
+> afterwards — every one requiring a second turn to exist at all, because the
+> suite starts a fresh thread per question. Suite size does not help; only
+> testing sequences does. That is what the conversation suite is for.
+
+Suite output files are gitignored: they carry corpus document names and answer
+text, and this repository is public.
 
 ---
 

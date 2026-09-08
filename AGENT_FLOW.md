@@ -18,6 +18,53 @@ Each node emits real-time **stage events** via LangGraph's custom stream writer.
 
 ---
 
+## 1.5 Before the graph — the deterministic paths
+
+**Most questions never reach the graph below.** `run_query_stream` first tests
+the question against **14 fast paths**, each answering from SQL or an index
+lookup and returning immediately at zero tokens. On a 48-question suite
+covering sixteen question shapes, 28 of 48 answers came from these.
+
+This is a correctness mechanism before it is a cost one. Retrieval answers from
+the pages it fetched and has no way to report that it stopped early, so a
+question the database answers exactly was answered *plausibly* instead:
+"how many documents are in this wiki" returned 21 against a corpus of 1,372,
+citing the header list of its own retrieved pages; "how many contracts mention
+arbitration" returned 15 where 701 do.
+
+The paths, in dispatch order: **social** · **meta** · **analytics** (aggregate,
+gap, trend, expiry, and an explicit decline for trend subjects the corpus does
+not type) · **counting** (by party, by instrument type, whole-corpus total, or
+by a text predicate) · **document set** · **compound filter** · **precedent**
+(clause-level, split by any figure the question names) · **compliance**
+(playbook) · **calculation** · **defined terms** · **conflation** ·
+**citations** · **relations** · **structural** (amendment chain, amends,
+cited-by).
+
+Each branch declines rather than guesses: an empty result returns `None` and the
+graph runs, because an empty set and a party spelled differently in the index
+are indistinguishable from inside the branch.
+
+### Follow-up gating — fixed
+
+These branches were originally gated on `not is_followup`. That is right for a
+question leaning on the one before it and wrong for one that merely *arrives*
+after it. Asked third in a thread, *"which agreements expire in the next 90
+days"* skipped the expiry index entirely, was answered by retrieval over the
+twelve documents the conversation happened to hold, and opened by repeating the
+**previous** turn's answer — 49,210 tokens and 45 seconds to get wrong what the
+index answers exactly, free, in under a second.
+
+A question is now treated as self-contained when it carries no anaphora — no
+"those", "them", "the second one", "the same" — and reaches the analytics and
+structural branches whatever its position in the thread. *"Which of those
+expire in the next 90 days?"* still takes the conversational path, because it
+genuinely needs the previous turn. The calculation branch is deliberately left
+gated: it resolves a document scope, and inheriting the conversation's document
+is correct there.
+
+---
+
 ## 2. Graph Topology
 
 ```mermaid
@@ -219,6 +266,21 @@ Calls `wiki.classify_query(question, session_id)` which:
 - `is_followup` is true
 - `_question_names_a_document()` matches
 - `ENABLE_CLARIFICATION` is false
+- **the question states its own scope as the whole corpus** — "in the corpus", "in this wiki", "in total", "do we hold". Naming the corpus already answers the only thing this check asks
+- **a corpus-wide risk scan** — "what's unusual across our shareholder agreements". There is no single counterparty for a perspective question to be about
+- **a follow-up on a document the conversation has already settled**, provided the question introduces no subject that document lacks
+
+**Why those last three exist:** `check_ambiguity` is a model call, and on
+borderline questions it decided both ways across runs. *"Which documents in the
+corpus are Notices Invoking Arbitration?"* returned "Needs clarification" after
+four model calls and 26,675 prompt tokens, having been answered on the previous
+run. *"What is the notice period?"*, asked straight after Clause 8 of a Service
+Agreement had been quoted *including its thirty-day notice*, asked for
+clarification on one run and answered correctly on the next, from the same
+thread and the same preceding turn. Two questions differing only in wording —
+"what's unusual across our shareholder agreements" and "what stands out as
+non-standard in our service agreements" — got a full scan and a clarification
+request respectively.
 
 **When it runs:**
 Calls `wiki.check_ambiguity(question, session_id, conversation_context)` — fast LLM call that determines if the question could mean multiple very different things.
@@ -458,3 +520,65 @@ SSE answer: intent=comparison conf=92%
 | `_emit()` fails (no stream writer) | Silently skipped — answer still produced, just no SSE tiles |
 
 The graph never crashes. Every node has try/except with a safe fallback. The worst case is a generic factual answer with no progress tiles — functionally identical to the pre-agent system.
+
+---
+
+## 10. Built but switched off
+
+Both are implemented, tested and wired. Neither runs by default, and the
+reasons are measurements rather than preferences.
+
+### Enquiry Agent — `ENABLE_ENQUIRY_AGENT`, **off**
+
+Resolving a referent — what "in this agreement", "the second one", "and if they
+don't cure" point at — is language understanding rather than rule-following, and
+the regex stack that does it was patched three times in one day for three
+unrelated reasons. So the agent widens the fast-model `classify_intent` call to
+return the intent *and* a description of the document the turn concerns. The
+model never returns a document: it returns a **description**, which must resolve
+through the same deterministic resolver as everything else, and a description
+naming nothing real is discarded. It is consulted last, only where every
+deterministic resolver returned `default` or `corpus`.
+
+It works — 10/10 on parser validation, 7/7 on referent resolution. It also
+contributes nothing. On a 49-turn thread suite, deterministic carryover had
+already resolved **36 of 39** follow-ups, so the gate never opened: zero enquiry
+referents used, same zero drift, **20.4 minutes against 16.5** — a 24% latency
+cost for no measured gain. A separate 76-question run over this deployment's own
+documents agreed independently: 64 of 75 scored rows tied, and where they
+differed the wins split without pattern.
+
+It stays as insurance for referent shapes the deterministic resolvers do not
+cover, not because it is believed to help. Turning it on is one env var; the
+thread suite is the way to tell whether it has started earning its latency.
+
+### LLM reranker — `ENABLE_RERANK`, **off**
+
+Orders the fused candidate list with a fast-model call. It ranks on
+`title: summary` — metadata, not passage text — so it cannot separate the
+candidates that actually collide: when seventeen documents match the same two
+party names, every channel ranks them alike and the reranker sees seventeen
+near-identical titles. Enabling it adds `MAX_TOKENS_RERANK` (2048) per broad
+query without addressing the failure.
+
+The thing that would address it is a **cross-encoder** scoring question and
+passage jointly — not to retrieve differently, but to decide which retrieved
+pages survive the context budget. That is a different component, not this flag.
+
+### Also off
+
+| Flag | State | Note |
+|---|---|---|
+| `ENABLE_ANSWER_CACHE` | off | |
+| `STRUCTURAL_VISION_ENABLED` | off | Vision pass for structural parsing |
+| HNSW vector index | unavailable | Not a flag — pgvector indexes ≤2,000 dimensions, these are 3,072, so dense search is an exact cosine scan |
+
+### On, but easy to misread as off
+
+`ENABLE_QUERY_DECOMPOSITION` defaults to **on**. It runs in exactly one place:
+*after* the whole-question route has already returned a decline. Every question
+that resolves normally reaches that point with an answer and never enters the
+branch, so decomposition sits in front of nothing and cannot hand a fragment to
+a resolver that has lost the party pair it needed — the failure that makes the
+feature dangerous anywhere earlier. Sub-questions route through the zero-LLM
+structured paths only, so a rescue costs nothing beyond the SQL it runs.
