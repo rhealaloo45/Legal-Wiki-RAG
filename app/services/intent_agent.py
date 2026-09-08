@@ -3373,9 +3373,19 @@ _RX_ENUM_ROLE_GENERIC = re.compile(r"^(?:a\s+)?part(?:y|ies)$", re.IGNORECASE)
 # ventures involve Tata Power AND list sanctions exposure as an exit trigger,
 # it answered that none expressly list it. Seven do, two of them the curated
 # agreements the question was really about.
+# The conjunction must join two PREDICATES, not two nouns. A bare "and" does
+# not: "the NDA between Tata Steel Limited and NordForge Metallurgy GmbH" is a
+# point lookup with one party pair, and matching its "and" routed it here,
+# where it was answered with a list of NDAs instead of the term it asked for.
+# Requiring a verb (or "also") after the conjunction is what separates "A and
+# B" from "does A and does B".
 _RX_COMPOUND_JOIN = re.compile(
-    r"\b(?:and\s+(?:also\s+)?|that\s+also\s+|which\s+also\s+|"
-    r"and\s+are\s+|and\s+have\s+|and\s+that\s+)",
+    r"\b(?:(?:and|but)\s+also\b"
+    r"|(?:that|which)\s+also\b"
+    r"|and\s+(?:are|is|was|were|have|has|had|do|does|did|that|which|"
+    r"list|lists|include|includes|contain|contains|prohibit|prohibits|"
+    r"allow|allows|permit|permits|require|requires|mention|mentions|"
+    r"state|states|specify|specifies|carry|carries|impose|imposes)\b)",
     re.IGNORECASE)
 # The verbs a predicate hangs off. "…prohibit model training", "…list
 # sanctions exposure", "…allow termination for convenience".
@@ -4149,11 +4159,17 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
             return _enumerate_answer(question, session_id, wiki_id)
 
         if kind == "compound":
-            # Falls back to the set branch when only one filter was
-            # understood: a partly-parsed compound question is still a set
-            # question, and answering it as one beats dropping to retrieval.
-            return (_compound_answer(question, session_id, wiki_id)
-                    or _enumerate_answer(question, session_id, wiki_id))
+            # Falls back to the set branch only when the question also ASKS for
+            # a set. Falling back unconditionally turned a point lookup into a
+            # document list: "what is the term of the NDA between X and Y" has
+            # a party pair and an instrument type, which is enough for the set
+            # branch to answer, and listing NDAs is not an answer to it.
+            out = _compound_answer(question, session_id, wiki_id)
+            if out:
+                return out
+            if _RX_ENUMERATE.search(question or ""):
+                return _enumerate_answer(question, session_id, wiki_id)
+            return None
 
         # cited_by / amends / chain all need the document the question is about.
         anchor = _resolve_anchor_doc(question, session_id, wiki_id)
