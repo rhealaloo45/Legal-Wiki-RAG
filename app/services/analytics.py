@@ -30,6 +30,7 @@ reported separately, as "not established here" rather than as absence.
 """
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,129 @@ GAP_FIELDS = {
         "table": "contracts", "plain_col": "termination",
     },
 }
+
+
+def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
+                doc_type: str | None = None, parties: list[str] | None = None,
+                limit: int = 50, floor_iso: str | None = None) -> dict:
+    """Documents whose recorded expiry date falls on or before `cutoff_iso`.
+
+    `floor_iso` bounds the window at the other end, and exists because without
+    it a forward-looking question is answered with the past. Asked "which
+    agreements expire in the next 90 days" this returned an agreement that had
+    expired two years earlier: the window resolved to a single cutoff date, and
+    every document that had ever expired satisfied it. A question about what is
+    coming up must not be answered with what is already gone. An open-ended
+    question ("expiring on or before 31 March 2026") passes no floor and keeps
+    the original behaviour, which for that phrasing is the correct one.
+
+    The fourth query shape, and it exists because retrieval answered a date
+    question with a corpus-wide claim it had no basis for. Asked "which Service
+    Agreements have a term ending on or before 31 March 2026", the pipeline
+    embedded the question, read four Service Agreements that came back, and
+    answered "None" — while Service Agreement 2, which ends on exactly that
+    date, was never retrieved. The failure is not the model's: a date range is
+    a property of a column, and no sample of pages can establish a negative
+    over a corpus.
+
+    Governed by the same rule as every function here: an undated document is
+    reported as undated, never as one that does not match. On this corpus that
+    distinction is the whole answer — only a minority of documents record an
+    expiry date at all, so "none match" and "none of the few we can date match"
+    are very different statements, and only the second one is true.
+    """
+    if not _enabled():
+        return {"error": "database not configured"}
+    from sqlalchemy import text
+    from services import db
+
+    params: dict = {"w": wiki_id, "sid": session_id,
+                    "cut": cutoff_iso, "lim": limit}
+    where = "d.wiki_id = :w AND d.session_id = :sid"
+    if doc_type:
+        # Matched word by word, singularised, not as one phrase: this corpus
+        # records the type as "Services Agreement" while a lawyer asks about a
+        # "Service Agreement", and a whole-phrase ILIKE finds nothing at all —
+        # which would report an empty scope as though the corpus held no such
+        # documents. Generic words are dropped so "Agreement" alone cannot
+        # match every contract in the corpus.
+        _generic = {"agreement", "agreements", "contract", "contracts",
+                    "document", "documents", "the", "a", "an", "of"}
+        _words = [w for w in re.split(r"[^A-Za-z0-9]+", doc_type) if w]
+        _core = [w[:-1] if len(w) > 3 and w.lower().endswith("s") else w
+                 for w in _words if w.lower() not in _generic]
+        for i, w in enumerate(_core[:3]):
+            key = f"dt{i}"
+            params[key] = f"%{w}%"
+            where += f" AND (d.doc_type ILIKE :{key} OR d.doc_family ILIKE :{key})"
+        if not _core:
+            params["dt"] = f"%{doc_type}%"
+            where += " AND (d.doc_type ILIKE :dt OR d.doc_family ILIKE :dt)"
+    if parties:
+        for i, p in enumerate(parties):
+            key = f"exp_party{i}"
+            params[key] = f"%{p.strip()}%"
+            where += f""" AND EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(
+                    COALESCE(d.parties,'[]'::jsonb)) AS pp(name)
+                WHERE pp.name ILIKE :{key})"""
+
+    # Only an ISO-shaped value can be compared; anything else counts as undated
+    # rather than being coerced into a date the document never stated.
+    dated_sql = "d.expiry_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'"
+
+    window_sql = "substring(d.expiry_date from 1 for 10) <= :cut"
+    if floor_iso:
+        params["flr"] = floor_iso
+        window_sql += " AND substring(d.expiry_date from 1 for 10) >= :flr"
+
+    with db.get_engine().connect() as conn:
+        total = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        dated = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where} AND {dated_sql}"),
+            params).scalar() or 0
+        rows = conn.execute(text(f"""
+            SELECT d.source_doc, d.doc_type, d.effective_date, d.expiry_date
+              FROM documents d
+             WHERE {where} AND {dated_sql} AND {window_sql}
+             ORDER BY d.expiry_date ASC
+             LIMIT :lim
+        """), params).fetchall()
+        already = 0
+        if floor_iso:
+            already = conn.execute(text(
+                f"SELECT count(*) FROM documents d WHERE {where} AND {dated_sql} "
+                f"AND substring(d.expiry_date from 1 for 10) < :flr"),
+                params).scalar() or 0
+
+    matching = [{"source_doc": r[0], "doc_type": r[1],
+                 "effective_date": str(r[2]) if r[2] else None,
+                 "expiry_date": str(r[3])} for r in rows]
+    undated = int(total) - int(dated)
+    _window = (f"fall between {floor_iso} and {cutoff_iso}" if floor_iso
+               else f"end on or before {cutoff_iso}")
+    return {
+        "cutoff": cutoff_iso,
+        "floor": floor_iso,
+        "in_scope": int(total),
+        "dated": int(dated),
+        "undated": undated,
+        "already_expired": int(already),
+        "matching": matching,
+        "match_count": len(matching),
+        "doc_type": doc_type,
+        "parties": parties or [],
+        "note": (
+            f"{len(matching)} of the {dated} document(s) that record an expiry "
+            f"date {_window}."
+            + (f" A further {already} had already expired before {floor_iso} and "
+               f"are excluded: they are not upcoming." if floor_iso and already else "")
+            + (f" A further {undated} document(s) in scope record no expiry date "
+               f"and are NOT counted either way — for those, this question "
+               f"cannot be answered from stored data." if undated else "")
+        ),
+    }
 
 
 def find_gaps(wiki_id: str, session_id: str, field: str,

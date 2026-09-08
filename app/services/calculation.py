@@ -565,6 +565,55 @@ _RX_CALC_YEARS = re.compile(
     r"(?:after|over|in|for)\s+"
     r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*"
     r"(?:\(\d+\)\s*)?years?", re.IGNORECASE)
+# --- date arithmetic -------------------------------------------------------
+# Calendar maths was the gap this module's own docstring implied it covered and
+# did not: asked "how many days is the term" or "how many days ago did it end",
+# the pipeline fell through to retrieval, which quoted the two dates back and
+# said the day-count "is not stated in the Agreement". Literally true and
+# useless — the document states both endpoints, and subtracting them is exactly
+# the kind of work this module exists to do rather than ask a model to do.
+#
+# Sourced from `documents.effective_date` / `expiry_date`, the columns ingest
+# already normalises to ISO, not from prose in a page. Where a document has no
+# such date recorded the calculation is declined by name, the same as a missing
+# fee schedule — on this corpus only a minority of documents carry an expiry
+# date at all, so declining honestly matters more here than anywhere else.
+_RX_CALC_TERM_DAYS = re.compile(
+    r"\b(?:how\s+many\s+days|how\s+long|number\s+of\s+days|day[-\s]?count|"
+    r"length\s+in\s+days)\b[^?]{0,60}?\b(?:term|agreement|contract|period)\b"
+    r"|\b(?:term|contract)\s+length\b[^?]{0,30}\bdays?\b",
+    re.IGNORECASE)
+_RX_CALC_ELAPSED = re.compile(
+    r"\bhow\s+(?:many\s+days|long)\s+ago\b"
+    r"|\bdays?\s+(?:since|elapsed\s+since)\b"
+    r"|\bhow\s+many\s+days\b[^?]{0,40}\b(?:since|ago)\b",
+    re.IGNORECASE)
+_RX_CALC_REMAINING = re.compile(
+    r"\b(?:how\s+many\s+days|how\s+long)\b[^?]{0,40}?"
+    r"\b(?:until|till|to\s+go|remain(?:ing)?|left)\b"
+    r"|\bdays?\s+remaining\b|\bdays?\s+left\b",
+    re.IGNORECASE)
+# "When does the notice period actually end, accounting for business days?"
+# Needs a period the question or the document supplies, and a start date.
+_RX_CALC_NOTICE_END = re.compile(
+    r"\b(?:when\s+does|when\s+will)\b[^?]{0,60}?\bnotice\s+period\b[^?]{0,30}\bend\b"
+    r"|\bnotice\s+period\s+end(?:s|ing)?\s+(?:date|on)\b"
+    r"|\bend\s+of\s+the\s+notice\s+period\b",
+    re.IGNORECASE)
+_RX_CALC_BUSINESS_DAYS = re.compile(
+    r"\b(?:business|working|clear)\s+days?\b", re.IGNORECASE)
+_RX_CALC_DAYS_N = re.compile(
+    r"(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|"
+    r"fifteen|twenty|thirty|forty[-\s]?five|sixty|ninety)\s*"
+    r"(?:\(\d+\)\s*)?(?:calendar\s+|business\s+|working\s+)?days?\b",
+    re.IGNORECASE)
+_RX_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+# Notice periods are written in round numbers this list covers and _NUM_WORDS,
+# built for weeks and years, does not. Kept separate rather than widening the
+# shared map, which the LD and escalation kinds also read.
+_EXTRA_NUM_WORDS = {"thirty": 30, "forty-five": 45, "forty five": 45,
+                    "sixty": 60, "ninety": 90}
+
 # The one thing this agent must never attempt. Held as an explicit veto rather
 # than left to fall through, so the decline can name the missing input.
 _RX_CALC_OUT_OF_SCOPE = re.compile(
@@ -577,8 +626,308 @@ _RX_CALC_OUT_OF_SCOPE = re.compile(
     r"|\bhow\s+much\s+is\s+the\s+liability\s+cap\b", re.IGNORECASE)
 
 
+def _doc_dates(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """The document's own recorded effective/expiry dates, as date objects.
+
+    Reads the normalised columns rather than page prose: a date parsed out of a
+    sentence is a date the model chose, and the whole point of this module is
+    that every number in a computed answer came from a stored fact.
+    """
+    from datetime import date as _date
+    from services import db as _db
+    from sqlalchemy import text as _text
+
+    out = {"effective": None, "expiry": None}
+    try:
+        with _db.get_engine().connect() as conn:
+            row = conn.execute(_text("""
+                SELECT effective_date, expiry_date FROM documents
+                 WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+            """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+    except Exception as e:
+        logger.error("[CALC] date lookup failed for %r: %s", source_doc[:60], e)
+        return out
+    if not row:
+        return out
+    for key, raw in (("effective", row[0]), ("expiry", row[1])):
+        m = _RX_ISO_DATE.search(str(raw or ""))
+        if m:
+            try:
+                out[key] = _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+    return out
+
+
+# A place a holiday calendar could actually be selected for. Deliberately a
+# closed list: a loose "capitalised word near 'open for business'" match would
+# read a party name as a city and pick a calendar on that basis, which is the
+# same class of confident-wrong this module exists to avoid.
+_KNOWN_PLACES = (
+    "Mumbai", "New Delhi", "Delhi", "Bengaluru", "Bangalore", "Chennai",
+    "Kolkata", "Pune", "Hyderabad", "Ahmedabad", "Gurugram", "Noida",
+    "Singapore", "London", "Dubai", "Abu Dhabi", "Sydney", "Melbourne",
+    "Frankfurt", "New York",
+)
+_RX_BD_PLACE = re.compile(
+    r"open\s+for\s+business\s+in\s+([A-Z][A-Za-z .'-]{2,30})", re.IGNORECASE)
+_RX_BD_INDIRECT = re.compile(
+    r"place\s+specified\s+for\s+notices|specified\s+for\s+notices|"
+    r"place\s+of\s+notice|address\s+for\s+notices", re.IGNORECASE)
+
+
+# Jurisdiction text -> a holiday calendar, most specific first. Ordered so a
+# state or city named alongside the country wins over the bare country: "High
+# Court of Judicature at Bombay" should select Maharashtra, not national-only.
+#
+# Bare "India" deliberately resolves to national holidays WITHOUT a subdivision
+# rather than defaulting to Maharashtra because most documents here are Mumbai-
+# flavoured. National holidays are the subset that applies in every Indian
+# state, so the answer is short by any state-specific days and says so — which
+# is a knowable error in one direction, not a guess that could be wrong in
+# either.
+_JURISDICTION_CALENDARS = (
+    (r"\b(?:bombay|mumbai|maharashtra)\b", "IN", "MH", "Maharashtra, India"),
+    (r"\b(?:delhi|new\s+delhi)\b", "IN", "DL", "Delhi, India"),
+    (r"\b(?:karnataka|bengaluru|bangalore)\b", "IN", "KA", "Karnataka, India"),
+    (r"\b(?:tamil\s*nadu|chennai|madras)\b", "IN", "TN", "Tamil Nadu, India"),
+    (r"\b(?:telangana|hyderabad)\b", "IN", "TS", "Telangana, India"),
+    (r"\b(?:west\s+bengal|kolkata|calcutta)\b", "IN", "WB", "West Bengal, India"),
+    (r"\b(?:gujarat|ahmedabad)\b", "IN", "GJ", "Gujarat, India"),
+    (r"\bindia\b", "IN", None, "India — national holidays only"),
+    (r"\bsingapore\b", "SG", None, "Singapore"),
+    (r"\b(?:england|wales|united\s+kingdom|london)\b", "GB", None, "United Kingdom"),
+    (r"\b(?:emirate|u\.?a\.?e\.?|united\s+arab|dubai|abu\s+dhabi)\b", "AE", None,
+     "United Arab Emirates"),
+    (r"\b(?:australia|sydney|melbourne)\b", "AU", None, "Australia"),
+    (r"\b(?:germany|frankfurt)\b", "DE", None, "Germany"),
+)
+
+
+def resolve_calendar(jurisdiction: str | None) -> dict | None:
+    """A holiday calendar for a stored jurisdiction string, or None.
+
+    Returns None rather than a default. There is no sensible fallback calendar:
+    a wrong one moves a date silently, which is the failure this module refuses
+    everywhere else.
+    """
+    j = (jurisdiction or "").strip()
+    if not j:
+        return None
+    for pattern, country, subdiv, label in _JURISDICTION_CALENDARS:
+        if re.search(pattern, j, re.IGNORECASE):
+            return {"country": country, "subdiv": subdiv, "label": label,
+                    "national_only": subdiv is None and country == "IN"}
+    return None
+
+
+def _holidays_in(country: str, subdiv, start, end) -> list:
+    """Public holidays between two dates, or [] if the calendar is unavailable.
+
+    Import is local and failure is silent-but-total: if the holiday package is
+    missing the caller falls back to weekday-only counting and says so, which
+    is the previous behaviour rather than an error.
+    """
+    try:
+        import holidays as _h
+    except Exception:
+        return []
+    try:
+        years = list(range(start.year, end.year + 1))
+        cal = _h.country_holidays(country, subdiv=subdiv, years=years)
+        return sorted(d for d in cal if start < d <= end and d.weekday() < 5)
+    except Exception as e:
+        logger.error("[CALC] holiday calendar %s/%s failed: %s", country, subdiv, e)
+        return []
+
+
+def business_day_basis(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """What THIS document says a Business Day is, and whether that resolves.
+
+    The generic disclaimer this replaced ("public holidays are not modelled")
+    was true of every document and therefore informative about none. The
+    documents are not silent on the question — 371 of them define the term —
+    they simply define it by pointing somewhere. Reading each document's own
+    definition turns one boilerplate caveat into a specific, checkable
+    statement about that document, which is the same rule the rest of this
+    module already follows for a missing fee schedule.
+
+    Measured on this corpus: 3 definitions name a place outright (Mumbai), 368
+    defer to "the place specified for notices", and the notices clauses as
+    typed carry no place — so for those the chain terminates and the honest
+    answer names where it terminated rather than choosing a calendar.
+    """
+    from services import db as _db
+    from sqlalchemy import text as _text
+
+    out = {"definition": None, "place": None, "indirect": False,
+           "jurisdiction": None, "calendar": None}
+    try:
+        with _db.get_engine().connect() as conn:
+            row = conn.execute(_text("""
+                SELECT definition FROM defined_terms
+                 WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+                   AND term ILIKE '%business day%'
+                 LIMIT 1
+            """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+            jrow = conn.execute(_text("""
+                SELECT jurisdiction FROM documents
+                 WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+            """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchone()
+    except Exception as e:
+        logger.error("[CALC] business-day definition lookup failed: %s", e)
+        return out
+    # The jurisdiction is read even when the document defines no Business Day:
+    # the offset still needs a calendar, and this column is populated on 930 of
+    # 1,372 documents here where a recoverable notice address is populated on
+    # almost none.
+    if jrow and jrow[0]:
+        out["jurisdiction"] = str(jrow[0]).strip()
+        out["calendar"] = resolve_calendar(out["jurisdiction"])
+    if not row or not row[0]:
+        return out
+    definition = str(row[0]).strip()
+    out["definition"] = definition
+    m = _RX_BD_PLACE.search(definition)
+    if m:
+        cand = m.group(1).strip().rstrip(".").strip()
+        for known in _KNOWN_PLACES:
+            if re.search(rf"\b{re.escape(known)}\b", cand, re.IGNORECASE):
+                out["place"] = known
+                break
+    if not out["place"] and _RX_BD_INDIRECT.search(definition):
+        out["indirect"] = True
+    # A place named in the Business Day clause itself outranks the recorded
+    # jurisdiction: it is what the definition actually points at, where the
+    # jurisdiction is only the closest available proxy for it. Overrides even
+    # when both resolve, and the renderer then asks the reader to check the two
+    # agree rather than hiding that a choice was made.
+    if out["place"]:
+        from_place = resolve_calendar(out["place"])
+        if from_place:
+            out["calendar"] = from_place
+            out["calendar_from"] = "definition"
+    elif out.get("calendar"):
+        out["calendar_from"] = "jurisdiction"
+    return out
+
+
+def _business_days_between(start, end) -> int:
+    """Weekdays strictly after `start` up to and including `end`.
+
+    Public holidays are deliberately NOT modelled: this corpus spans several
+    jurisdictions and holds no holiday calendar, so subtracting a guessed list
+    would produce a date that looks authoritative and is wrong. Stated as a
+    limitation in the rendered answer rather than silently approximated.
+    """
+    from datetime import timedelta
+    if end < start:
+        return -_business_days_between(end, start)
+    days, cur = 0, start
+    while cur < end:
+        cur += timedelta(days=1)
+        if cur.weekday() < 5:
+            days += 1
+    return days
+
+
+def term_length(wiki_id: str, session_id: str, source_doc: str) -> dict:
+    """Calendar days between the document's effective and expiry dates."""
+    d = _doc_dates(wiki_id, session_id, source_doc)
+    if not d["effective"] or not d["expiry"]:
+        missing = ("an effective date" if not d["effective"] else "an expiry date")
+        if not d["effective"] and not d["expiry"]:
+            missing = "both a start and an end date"
+        return {"ok": False, "missing": missing,
+                "detail": "The term length is the difference between two dates, "
+                          "and this document records "
+                          + ("neither." if missing.startswith("both")
+                             else "only one of them.")}
+    days = (d["expiry"] - d["effective"]).days
+    if days < 0:
+        return {"ok": False, "missing": "dates in a usable order",
+                "detail": f"The recorded expiry date ({d['expiry'].isoformat()}) "
+                          f"is before the effective date "
+                          f"({d['effective'].isoformat()}), so no term length "
+                          "can be derived from them."}
+    return {"ok": True, "kind": "term_days", "days": days,
+            "inclusive_days": days + 1,
+            "start": d["effective"], "end": d["expiry"]}
+
+
+def date_delta(wiki_id: str, session_id: str, source_doc: str,
+               direction: str) -> dict:
+    """Days between today and the document's expiry (or effective) date.
+
+    `direction` is 'elapsed' (how long ago) or 'remaining' (how long until).
+    Both are computed against the real current date, and the answer states
+    which date it used so a reader can check it.
+    """
+    from datetime import date as _date
+    d = _doc_dates(wiki_id, session_id, source_doc)
+    anchor = d["expiry"] or d["effective"]
+    anchor_name = "expiry date" if d["expiry"] else "effective date"
+    if not anchor:
+        return {"ok": False, "missing": "a recorded date to measure from",
+                "detail": "This document records neither an effective date nor "
+                          "an expiry date, so nothing can be measured against "
+                          "today."}
+    today = _date.today()
+    delta = (today - anchor).days
+    return {"ok": True, "kind": direction, "anchor": anchor,
+            "anchor_name": anchor_name, "today": today,
+            "elapsed": delta, "remaining": -delta,
+            "already_passed": delta > 0}
+
+
+def notice_end(wiki_id: str, session_id: str, source_doc: str,
+               days: int, business: bool) -> dict:
+    """The date a notice period of `days` ends, counted from today.
+
+    Counted from today rather than from a date in the document: a notice period
+    runs from when notice is GIVEN, which is not a fact any contract states in
+    advance. The answer says so, so the reader can re-base it on the real date
+    notice went out.
+    """
+    from datetime import date as _date, timedelta
+    if not days or days < 0:
+        return {"ok": False, "missing": "a notice period in days",
+                "detail": "No number of days was named in the question, and the "
+                          "notice period could not be read from the document as "
+                          "a plain day count."}
+    start = _date.today()
+    basis = business_day_basis(wiki_id, session_id, source_doc) if business else {}
+    cal = (basis or {}).get("calendar")
+    hol_used: list = []
+    if business:
+        # Where a calendar resolves, a public holiday is skipped exactly as a
+        # weekend is. Where it does not, the loop is weekday-only and the
+        # rendered answer says which of the two happened.
+        hol_set = set()
+        if cal:
+            horizon = start + timedelta(days=days * 3 + 30)
+            hol_set = set(_holidays_in(cal["country"], cal["subdiv"], start, horizon))
+        cur, counted = start, 0
+        while counted < days:
+            cur += timedelta(days=1)
+            if cur.weekday() < 5 and cur not in hol_set:
+                counted += 1
+        end = cur
+        calendar_equiv = (end - start).days
+        hol_used = sorted(d for d in hol_set if start < d <= end)
+    else:
+        end = start + timedelta(days=days)
+        calendar_equiv = days
+    return {"ok": True, "kind": "notice_end", "start": start, "end": end,
+            "days": days, "business": business,
+            "calendar_span": calendar_equiv,
+            "business_days": _business_days_between(start, end),
+            "basis": basis, "holidays_excluded": hol_used}
+
+
 def is_calculation_query(question: str) -> str:
-    """'total_value' | 'ld' | 'escalation' | 'out_of_scope' | ''."""
+    """'total_value' | 'ld' | 'escalation' | 'term_days' | 'elapsed' |
+    'remaining' | 'notice_end' | 'out_of_scope' | ''."""
     q = question or ""
     if _RX_CALC_OUT_OF_SCOPE.search(q):
         return "out_of_scope"
@@ -586,6 +935,16 @@ def is_calculation_query(question: str) -> str:
         return "ld"
     if _RX_CALC_ESC.search(q) and _RX_CALC_YEARS.search(q):
         return "escalation"
+    # Date kinds ahead of total_value: "how many days" carries no money word, so
+    # they cannot collide, and ahead of each other most-specific first.
+    if _RX_CALC_NOTICE_END.search(q):
+        return "notice_end"
+    if _RX_CALC_ELAPSED.search(q):
+        return "elapsed"
+    if _RX_CALC_REMAINING.search(q):
+        return "remaining"
+    if _RX_CALC_TERM_DAYS.search(q):
+        return "term_days"
     if _RX_CALC_TOTAL.search(q):
         return "total_value"
     return ""
@@ -678,6 +1037,142 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
         lines.append(f"- Increase: {fmt_money(result['increase'], cur)}")
         lines.append("")
 
+    elif kind == "term_days":
+        lines.append(f"**Term length: {result['days']} days**")
+        lines.append("")
+        lines.append(f"- Effective date: {result['start'].isoformat()}")
+        lines.append(f"- Expiry date: {result['end'].isoformat()}")
+        lines.append(f"- {result['end'].isoformat()} − {result['start'].isoformat()} "
+                     f"= **{result['days']} days**")
+        lines.append(f"- Counting both endpoints as days of the term: "
+                     f"{result['inclusive_days']} days")
+        lines.append("")
+        lines.append("Both dates are the ones recorded for this document at "
+                     "ingest; the subtraction is exact.")
+        lines.append("")
+
+    elif kind in ("elapsed", "remaining"):
+        anchor = result["anchor"].isoformat()
+        today = result["today"].isoformat()
+        if kind == "elapsed":
+            if result["already_passed"]:
+                lines.append(f"**{result['elapsed']} days ago** "
+                             f"({anchor}, measured to {today})")
+            else:
+                lines.append(f"**That date has not passed yet — it is "
+                             f"{result['remaining']} days away** "
+                             f"({anchor}, measured from {today})")
+        else:
+            if result["already_passed"]:
+                lines.append(f"**No days remain — that date passed "
+                             f"{result['elapsed']} days ago** "
+                             f"({anchor}, measured to {today})")
+            else:
+                lines.append(f"**{result['remaining']} days remaining** "
+                             f"({anchor}, measured from {today})")
+        lines.append("")
+        lines.append(f"- Date used: {anchor} (the document's {result['anchor_name']})")
+        lines.append(f"- Today: {today}")
+        lines.append(f"- Difference: **{abs(result['elapsed'])} days**")
+        lines.append("")
+
+    elif kind == "notice_end":
+        unit = "business days" if result["business"] else "calendar days"
+        lines.append(f"**Notice of {result['days']} {unit} given today "
+                     f"({result['start'].isoformat()}) ends "
+                     f"{result['end'].isoformat()}**")
+        lines.append("")
+        lines.append(f"- Start: {result['start'].isoformat()}")
+        lines.append(f"- Period: {result['days']} {unit}")
+        lines.append(f"- End: **{result['end'].isoformat()}**")
+        if result["business"]:
+            lines.append(f"- That is {result['calendar_span']} calendar days, "
+                         f"because weekends do not count toward the period.")
+        else:
+            lines.append(f"- Of which {result['business_days']} are weekdays.")
+        lines.append("")
+        lines.append("**Counted from today, not from a date in the document** — a "
+                     "notice period runs from when notice is actually given, which "
+                     "no contract states in advance. Re-base it on the real notice "
+                     "date if that differs.")
+        lines.append("")
+        if result.get("business"):
+            basis = result.get("basis") or {}
+            defn, place, indirect = (basis.get("definition"),
+                                     basis.get("place"), basis.get("indirect"))
+            cal, juris = basis.get("calendar"), basis.get("jurisdiction")
+            hols = result.get("holidays_excluded") or []
+            if defn:
+                lines.append("**How this document defines a Business Day:**")
+                lines.append("")
+                lines.append(f"> {defn}")
+                lines.append("")
+            if cal:
+                lines.append(f"**Holiday calendar applied: {cal['label']}.** "
+                             f"Weekends and public holidays are both excluded from "
+                             f"the count.")
+                if hols:
+                    lines.append("")
+                    lines.append(f"Holidays falling inside this window ({len(hols)}), "
+                                 "each of which pushed the end date out by a day:")
+                    for d in hols[:12]:
+                        lines.append(f"- {d.isoformat()}")
+                else:
+                    lines.append("")
+                    lines.append("No public holiday falls inside this window, so the "
+                                 "result equals the weekday-only count.")
+                lines.append("")
+                # The substitution is the part a reader has to be able to reject.
+                if place and basis.get("calendar_from") == "definition":
+                    lines.append(f"Calendar taken from the Business Day clause "
+                                 f"itself, which names **{place}** — the document's "
+                                 f"own statement of the place, not a proxy for it."
+                                 + (f" Its recorded jurisdiction is *{juris}*; check "
+                                    f"the two agree." if juris else ""))
+                elif place:
+                    lines.append(f"The definition fixes Business Days to **{place}**, "
+                                 f"and the calendar above was selected from this "
+                                 f"document's recorded jurisdiction ({juris}). Check "
+                                 f"they agree.")
+                elif indirect:
+                    lines.append(f"**This is a substitution, and it is the one thing "
+                                 f"to check.** The definition fixes Business Days to "
+                                 f"*the place specified for notices*, and no place is "
+                                 f"recoverable from the notices clause as extracted. "
+                                 f"The calendar above comes from this document's "
+                                 f"recorded jurisdiction instead ({juris}) — the "
+                                 f"closest defensible proxy, not what the clause "
+                                 f"says. If notices go somewhere else, this date is "
+                                 f"wrong and should be recomputed against that place.")
+                else:
+                    lines.append(f"Calendar selected from this document's recorded "
+                                 f"jurisdiction ({juris}).")
+                if cal.get("national_only"):
+                    lines.append("")
+                    lines.append("The jurisdiction names India without a state, so "
+                                 "only national holidays are applied. State-declared "
+                                 "holidays are not — the count can therefore be short "
+                                 "by those, never long.")
+            else:
+                lines.append("**Weekends are excluded; public holidays are not.**")
+                lines.append("")
+                if juris:
+                    lines.append(f"This document records its jurisdiction as "
+                                 f"*{juris}*, which no holiday calendar here covers, "
+                                 f"so the figure counts weekdays only.")
+                elif indirect:
+                    lines.append("This Agreement defines a Business Day by reference "
+                                 "to **the place specified for notices**, no place is "
+                                 "recoverable from that clause, and the document "
+                                 "records no jurisdiction either — so there is "
+                                 "nothing to select a calendar from and the figure "
+                                 "counts weekdays only.")
+                else:
+                    lines.append("This document records no jurisdiction and defines "
+                                 "no place a calendar could be selected for, so the "
+                                 "figure counts weekdays only.")
+            lines.append("")
+
     lines.append(f"Document: {doc_label}")
     lines.append("")
     lines.append("Computed in Python from the values this document states, not by "
@@ -740,6 +1235,7 @@ def answer(question: str, wiki_id: str, session_id: str,
         return None
 
     weeks = years = 0
+    notice_days, notice_business = 0, False
     if kind == "ld":
         m = _RX_CALC_LD_WEEKS.search(question)
         weeks = parse_periods(m.group(0), "weeks?") if m else 0
@@ -750,6 +1246,25 @@ def answer(question: str, wiki_id: str, session_id: str,
         years = parse_periods(m.group(0), "years?") if m else 0
         if not years:
             return None
+    elif kind == "notice_end":
+        # Read from this pattern's own capture group rather than through
+        # parse_periods, which requires the number to sit immediately against
+        # the unit word: "30 business days" puts a qualifier in between and
+        # parsed as None, which silently dropped the whole branch to retrieval.
+        # parse_periods is shared with the weeks/years kinds and is left alone.
+        m = _RX_CALC_DAYS_N.search(question)
+        notice_days = 0
+        if m:
+            tok = m.group(1).strip().lower()
+            if tok.isdigit():
+                notice_days = int(tok)
+            else:
+                notice_days = _NUM_WORDS.get(tok, _EXTRA_NUM_WORDS.get(tok, 0))
+        notice_business = bool(_RX_CALC_BUSINESS_DAYS.search(question))
+        # Without a day count there is nothing to add to a date. Falling through
+        # to retrieval is right: the clause stating the period is the answer.
+        if not notice_days:
+            return None
 
     sections, used, any_ok = [], [], False
     for source_doc in docs[:_MAX_CALC_DOCS]:
@@ -759,6 +1274,13 @@ def answer(question: str, wiki_id: str, session_id: str,
                 result = total_contract_value(wiki_id, session_id, source_doc)
             elif kind == "ld":
                 result = ld_exposure(wiki_id, session_id, source_doc, weeks)
+            elif kind == "term_days":
+                result = term_length(wiki_id, session_id, source_doc)
+            elif kind in ("elapsed", "remaining"):
+                result = date_delta(wiki_id, session_id, source_doc, kind)
+            elif kind == "notice_end":
+                result = notice_end(wiki_id, session_id, source_doc,
+                                    notice_days, notice_business)
             else:
                 result = escalation(wiki_id, session_id, source_doc, years)
         except Exception as e:
