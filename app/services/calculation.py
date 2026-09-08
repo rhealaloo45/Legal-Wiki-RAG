@@ -586,7 +586,9 @@ _RX_CALC_TERM_DAYS = re.compile(
 _RX_CALC_ELAPSED = re.compile(
     r"\bhow\s+(?:many\s+days|long)\s+ago\b"
     r"|\bdays?\s+(?:since|elapsed\s+since)\b"
-    r"|\bhow\s+many\s+days\b[^?]{0,40}\b(?:since|ago)\b",
+    r"|\bhow\s+many\s+days\b[^?]{0,40}\b(?:since|ago|outstanding|pending|open)\b"
+    r"|\bhow\s+long\b[^?]{0,40}\b(?:outstanding|pending|open)\b"
+    r"|\bbeen\s+outstanding\b",
     re.IGNORECASE)
 _RX_CALC_REMAINING = re.compile(
     r"\b(?:how\s+many\s+days|how\s+long)\b[^?]{0,40}?"
