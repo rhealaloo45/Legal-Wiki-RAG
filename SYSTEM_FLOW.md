@@ -1,5 +1,17 @@
 # System Flow: Legal Wiki RAG
 
+
+> **Currency note.** This document predates the deterministic query paths and
+> the archetype work. Its ingestion, storage and component descriptions still
+> hold; its account of how a *question* is answered is incomplete — 14 fast
+> paths now answer roughly 28 of every 48 questions from SQL or an index,
+> without reaching the query graph described here.
+>
+> For the current query path see `AGENT_FLOW.md` §1.5 and §10; for what is
+> switched off and why, `SYSTEM_DOCUMENTATION.md` §0 or the README's
+> "Current state" table. The Enquiry Agent and the LLM reranker are both
+> **off**, by measurement rather than oversight.
+
 Step-by-step technical walkthrough of every pipeline in the system.
 
 For component descriptions, see `SYSTEM_OVERVIEW.md`.
