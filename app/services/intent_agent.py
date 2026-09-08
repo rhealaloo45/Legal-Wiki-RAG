@@ -806,6 +806,24 @@ _RX_SCAN_SCOPE = re.compile(
     r"deeds?|policies|opinions?)\b", re.IGNORECASE)
 
 
+# A question that scopes itself to the whole corpus has already answered the
+# only thing the ambiguity check asks: which document is meant. "Which
+# documents in the corpus are Notices Invoking Arbitration?" came back as
+# "Needs clarification" after four model calls and 26,675 prompt tokens,
+# having previously been answered — the check is a model call and it decides
+# this shape inconsistently.
+_RX_CORPUS_WIDE = re.compile(
+    r"\b(?:in|across|throughout|within)\s+(?:the|this|our)\s+"
+    r"(?:corpus|wiki|portfolio|collection|workspace|document\s+set)\b"
+    r"|\bcorpus-wide\b|\bin\s+total\b|\bdo\s+we\s+(?:have|hold)\b",
+    re.IGNORECASE)
+
+
+def _explicitly_corpus_wide(question: str) -> bool:
+    """Whether the question states its own scope as the whole corpus."""
+    return bool(_RX_CORPUS_WIDE.search(question or ""))
+
+
 def _corpus_wide_scan(question: str) -> bool:
     """A risk scan over a whole class of instrument, not over one document.
 
@@ -851,6 +869,12 @@ def _risk_question_on_a_settled_document(state: dict) -> bool:
     # that is exactly why the perspective question is not worth asking.
     if _corpus_wide_scan(q):
         logger.info("[AGENT] clarification skipped: corpus-wide risk scan")
+        return True
+    # Naming the corpus as the scope is itself the answer to "which document
+    # did you mean", so there is nothing left for the check to ask about.
+    if _explicitly_corpus_wide(q):
+        logger.info("[AGENT] clarification skipped: question states corpus-wide "
+                    "scope")
         return True
     if not _RX_RISK_SHAPE.search(q):
         return False
