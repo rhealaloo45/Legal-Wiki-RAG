@@ -5118,6 +5118,26 @@ def _fix_docs_verb(m: re.Match) -> str:
     return f"{m.group(1)} {m.group(2)}{verb}"
 
 
+# The plural subject can govern a SECOND verb further along the same sentence,
+# which the adjacency rule above cannot reach: "The context is about shareholder
+# agreements and is appropriate to the question" became "These documents are
+# about shareholder agreements and IS appropriate" — the opening line of a risk
+# scan. Bounded to the same clause, and to a conjunction with no new subject
+# after it, so "these documents are about the agreement and it is fine" is left
+# alone.
+_RX_DOCS_SECOND_VERB = re.compile(
+    r"\b(these\s+documents\s+(?:are|do|have|were)\b[^.;:]{0,90}?\band\s+)"
+    r"(is|was|has|does|contains|states|appears|includes)\b", re.IGNORECASE)
+_SECOND_VERB_PLURAL = {"is": "are", "was": "were", "has": "have",
+                       "does": "do", "contains": "contain",
+                       "states": "state", "appears": "appear",
+                       "includes": "include"}
+
+
+def _fix_docs_second_verb(m: re.Match) -> str:
+    return f"{m.group(1)}{_SECOND_VERB_PLURAL[m.group(2).lower()]}"
+
+
 def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
     """Say "these documents", never "the retrieved context".
 
@@ -5177,6 +5197,7 @@ def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
             return text
         out = rx.sub(_sub, out)
     out = _RX_DOCS_VERB.sub(_fix_docs_verb, out)
+    out = _RX_DOCS_SECOND_VERB.sub(_fix_docs_second_verb, out)
     return out, changed
 
 
