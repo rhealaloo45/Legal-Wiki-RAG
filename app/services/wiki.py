@@ -3348,7 +3348,15 @@ def _broad_scan_directive(question: str) -> str | None:
         "not summarise every retrieved document, and do not repeat a finding "
         "under a second heading. If the retrieved documents are too few to "
         "support a claim about the class, say how many you are generalising "
-        "from.")
+        "from. "
+        # Two runs of the same archetype came back in two different layouts —
+        # one numbered with bold sub-labels, one bold headings with prose — so
+        # the structure is specified rather than left to the model.
+        "Use exactly this layout for each finding, and no other: a numbered "
+        "line \"N. <the pattern in one sentence>\", then a line beginning "
+        "\"Documents: \" listing them, then a line beginning \"Why it matters: "
+        "\". Do not bold the numbered line. Do not add a per-finding heading "
+        "on top of the numbered line.")
 
 
 def _amendment_family_directive(question: str) -> str | None:
@@ -3905,6 +3913,21 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
     # Count the separator with each part, and hold back room for the note.
     _NOTE_RESERVE = 320
     _TOTAL_CAP = config.MAX_TOTAL_CONTEXT_CHARS - _NOTE_RESERVE
+
+    # A corpus-wide scan is the one question shape that reliably fills the
+    # whole budget, because it matches many similar documents and the fill
+    # order keeps taking one more page from one more of them. It is also the
+    # shape that needs the pages least: the answer names patterns and cites a
+    # handful of documents per pattern, so the last 20,000 characters bought
+    # breadth the answer never used and paid for it on every call — these ran
+    # to 43,000 and 49,000 tokens a question.
+    #
+    # Cut to two thirds for that shape only. Everything that quotes a clause,
+    # compares two documents or answers about one instrument keeps the full
+    # budget, because those answers do read what they are given.
+    if _broad_scan_directive(question):
+        _TOTAL_CAP = int(_TOTAL_CAP * 0.66)
+        logger.info("Broad scan: context budget reduced to %d chars", _TOTAL_CAP)
     total_chars = sum(len(p) + 1 for p in wiki_parts)
     pages_omitted = 0
     _trace_pages = []
@@ -5198,7 +5221,33 @@ def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
         out = rx.sub(_sub, out)
     out = _RX_DOCS_VERB.sub(_fix_docs_verb, out)
     out = _RX_DOCS_SECOND_VERB.sub(_fix_docs_second_verb, out)
+    out = _tidy_emphasis(out)
     return out, changed
+
+
+# Markdown will not close an emphasis span whose delimiter is preceded by a
+# space, so "**Pattern: ... SPVs. **" renders as literal asterisks in the
+# reader's answer. It happened at the head of a ranked-findings list, where the
+# first thing on screen was "**Pattern:" in raw markup.
+_RX_EMPHASIS_SLACK = re.compile(r"\*\*(\s*)(.+?)(\s*)\*\*", re.DOTALL)
+# A heading line the model bolded AND numbered ("**1) Pattern — …**") reads as
+# two competing structures; the numbering is enough.
+_RX_EMPHASIS_EMPTY = re.compile(r"\*\*\s*\*\*")
+
+
+def _tidy_emphasis(text: str) -> str:
+    """Move stray whitespace outside emphasis delimiters so they render."""
+    if not text or "**" not in text:
+        return text
+
+    def _fix(m: re.Match) -> str:
+        body = m.group(2).strip()
+        if not body:
+            return ""
+        return f"{m.group(1)}**{body}**{m.group(3)}"
+
+    out = _RX_EMPHASIS_SLACK.sub(_fix, text)
+    return _RX_EMPHASIS_EMPTY.sub("", out)
 
 
 def _verify_answer_citations(answer: str, context: str, question: str = "") -> list[str]:

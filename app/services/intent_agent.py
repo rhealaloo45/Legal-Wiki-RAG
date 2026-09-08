@@ -4984,6 +4984,21 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     if not hits:
         return None
 
+    # The same clause can be indexed more than once for a document — the
+    # 30-day list showed "ranveer autocomponents amdt agreement 2022-02-02"
+    # twice, with identical text, which reads as two precedents where there is
+    # one. Deduplicated on the document and the clause text together, so a
+    # document that genuinely carries two different clauses keeps both.
+    _seen, _uniq = set(), []
+    for h in hits:
+        key = ((h.get("source_doc") or "").strip().lower(),
+               " ".join((h.get("verbatim_text") or h.get("text") or "").split()).lower()[:400])
+        if key in _seen:
+            continue
+        _seen.add(key)
+        _uniq.append(h)
+    hits = _uniq
+
     # A question naming a figure is asking about THAT figure. Similarity
     # cannot see the difference between thirty days and forty-five — asked
     # whether we had ever agreed a 30-day notice period, this branch put a
