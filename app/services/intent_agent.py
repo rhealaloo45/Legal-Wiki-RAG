@@ -480,6 +480,47 @@ _HEARTBEAT_PHRASES = [
 ]
 
 
+# Both grounded in the measured 48-question archetype suite, not a guess: a
+# corpus-wide scan (open discovery, risk-scan) is the single most expensive
+# shape at 39,127-76,714 tokens and up to 77s; drafting runs three clause
+# variants against precedent at 16,365-41,392 tokens. Every other archetype
+# either answers from an index at zero cost or sits in an unremarkable middle
+# that a hint would misdescribe as often as not — comparison-to-standard, for
+# instance, is usually a ~1,200-token playbook lookup and only occasionally the
+# expensive miss case, so hinting it "slow" would be wrong most of the time.
+_SLOW_PATH_HINTS = {
+    "scan": "This looks like a broad question across many documents — it can take "
+            "up to a minute, because it reads a sample of them rather than one.",
+    "drafting": "Drafting grounded in precedent — this usually runs three clause "
+                "variants against retrieved examples, which takes longer than a "
+                "single lookup.",
+}
+
+
+def _emit_slow_path_hint(question: str, intent: str) -> None:
+    """Say up front that this one will take longer, before the wait starts.
+
+    Exists because the alternative is a spinner doing all the talking for up
+    to 77 seconds with no indication whether that is normal for the question
+    just asked or something has gone wrong. Both signals here are computed
+    elsewhere in the pipeline anyway — wiki._broad_scan_directive shapes the
+    generation prompt for exactly this shape, and intent is always classified —
+    so the hint cannot drift from what actually happens next: it is reading the
+    same check that gates the real behaviour, not a separate estimate.
+    """
+    try:
+        if wiki._broad_scan_directive(question):
+            kind = "scan"
+        elif intent == "drafting":
+            kind = "drafting"
+        else:
+            return
+        _emit({"stage": "estimate", "status": "info",
+              "message": _SLOW_PATH_HINTS[kind]})
+    except Exception:
+        pass
+
+
 def _call_with_heartbeat(fn, *args, stage: str = "generating",
                          base_message: str = "Generating…", **kwargs):
     """Run a blocking call on a worker thread, emitting stage ticks while it runs.
@@ -550,6 +591,7 @@ def classify_intent_node(state: QueryState) -> dict:
         "intent_confidence": res["confidence"], "intent_method": res["method"],
         "message": f"Intent: {label}",
     })
+    _emit_slow_path_hint(state["question"], res["intent"])
     return {
         "intent": res["intent"],
         "intent_confidence": res["confidence"],
