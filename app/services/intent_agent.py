@@ -3379,6 +3379,27 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append("The indeterminate documents are excluded from the list above "
                              "on purpose: reporting a contract as uncapped when its cap is "
                              "recorded in a schedule would be a worse error than omitting it.")
+            # "...and of those, how many are Joint Venture Agreements?" — the
+            # same trailing filter the count branch handles, over the gap set
+            # rather than the whole index. find_gaps already narrows by
+            # instrument type, so the sub-count is the same query once more.
+            _gtail = _RX_COUNT_COMPOUND_TAIL.search(question or "")
+            if _gtail:
+                _t = _gtail.group(1).strip()
+                _sp, _spat, _slabel = _compound_subcount(_t)
+                _sub = None
+                if _spat:
+                    try:
+                        _sub = analytics.find_gaps(wiki_id, session_id, field,
+                                                   parties, doc_type=_spat[0])
+                    except Exception as e:
+                        logger.error("[AGENT] gap sub-count failed: %s", e)
+                if _sub and not _sub.get("error") and _sub.get("missing"):
+                    lines += ["", f"**Of those, {_sub['missing']} are "
+                                  f"{_slabel or 'that type'}(s).**"]
+                else:
+                    lines += ["", "*The second part of this question — “"
+                                  + _t.rstrip("?") + "” — is not answered above.*"]
             payload = _canned_payload("\n".join(lines), "Gap analysis", "structured-analytics")
 
         elif kind == "expiry":
