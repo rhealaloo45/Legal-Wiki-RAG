@@ -10835,8 +10835,31 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     return family, docs
 
 
+# "Have we used the same qualification language as in the Apex Meridian
+# Alloys opinion elsewhere in our legal opinions?" resolved single_doc to
+# that one opinion (a clean entity match) and _enforce_question_family saw
+# full overlap with the "Legal Opinion" family it also detected, so it left
+# scope untouched — the model then had only the one document and correctly,
+# uselessly, reported that "these documents do not include other legal
+# opinions for comparison." The named document was never wrong, it was just
+# the wrong SCOPE for a question that explicitly asks to compare it against
+# the rest of its own family. Requires both signals together so an ordinary
+# single-document question ("the same clause as before" with no comparison
+# target) is never widened on the word "other" alone.
+_RX_FAMILY_COMPARISON_SAME = re.compile(r"\bsame\b.{0,60}?\bas\b", re.IGNORECASE)
+_RX_FAMILY_COMPARISON_ELSEWHERE = re.compile(
+    r"\belsewhere\b|\banywhere\s+else\b|\bin\s+(?:any\s+)?other\b|"
+    r"\bacross\s+(?:our|the)\s+other\b", re.IGNORECASE)
+
+
+def _is_cross_family_comparison(question: str) -> bool:
+    q = question or ""
+    return bool(_RX_FAMILY_COMPARISON_SAME.search(q)
+                and _RX_FAMILY_COMPARISON_ELSEWHERE.search(q))
+
+
 def _enforce_question_family(scoped: dict, family: str | None,
-                             fam_docs: set[str]) -> dict:
+                             fam_docs: set[str], question: str = "") -> dict:
     """Reconcile a party/entity resolution with the INSTRUMENT the question names.
 
     The party, party-pair and entity resolvers match on party NAMES alone. A
@@ -10866,6 +10889,15 @@ def _enforce_question_family(scoped: dict, family: str | None,
         return scoped
     kept = [d for d in targets if d in fam_docs]
     if len(kept) == len(targets):
+        if (len(fam_docs) > len(targets)
+                and _is_cross_family_comparison(question)):
+            method = scoped.get("method", "")
+            logger.info("Scope %s asks to compare against the rest of the %s "
+                        "family it already sits inside — widening from %d to "
+                        "%d doc(s)", method, family, len(targets), len(fam_docs))
+            return {**scoped, "scope": "family", "target_docs": sorted(fam_docs),
+                    "target_family": family, "is_broad": True,
+                    "method": f"{method}-family-comparison"}
         return scoped
     method = scoped.get("method", "")
     if kept:
@@ -11313,15 +11345,24 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     single branch's — that the documents resolved are actually of the
     instrument type the question asked about (see _enforce_question_doc_type).
 
-    Two exemptions. A question naming a FILE outright has said something
+    Three exemptions. A question naming a FILE outright has said something
     stronger than a type and must never be overridden by one. A carried-over
     scope names no instrument at all — the type words belong to the earlier
     turn, not this one, so applying them here would silently re-scope a
-    follow-up onto a different document.
+    follow-up onto a different document. A family widened for cross-document
+    comparison already resolved its members through _question_family_scope's
+    doc_family + folder_hint union (the same mechanism the count fast path
+    relies on to get the corpus's true family membership) — re-narrowing that
+    with _resolve_docs_by_doc_type's stricter, recorded-doc_type-string match
+    would drop real members whose ingest-time classification used unusual
+    wording. Confirmed live: it dropped 6 of 9 Legal Opinions that genuinely
+    share the exact hedge phrase a precedent-comparison question needed,
+    including the anchor document the question named outright.
     """
     scoped = _resolve_scope_uncorrected(question, session_id, pages, chat_session_id)
     method = (scoped or {}).get("method", "")
-    if not scoped or method == "file" or "carryover" in method:
+    if (not scoped or method == "file" or "carryover" in method
+            or "family-comparison" in method):
         return scoped
     scoped = _enforce_question_doc_type(scoped, question, session_id)
     # Last, so it adds the amendment back whatever narrowing ran above: the two
@@ -11516,7 +11557,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(compound_docs),
              "target_family": None, "is_broad": False,
              "confidence": 0.8, "method": "party-pair-compound"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
@@ -11542,7 +11583,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                  "target_family": None, "is_broad": False,
                  "confidence": 0.85 if len(party_docs) == 1 else 0.8,
                  "method": "party" if len(party_docs) == 1 else "party-multi"},
-                _fam_name, _fam_docs)
+                _fam_name, _fam_docs, question)
         # Party spans several documents. If the question ALSO names exactly one
         # instrument type ("the SOW with Cindercast"), narrow to that specific
         # document within the resolved family — sharper than answering across
@@ -11555,6 +11596,24 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             fam_docs = set()
         narrowed = party_docs & fam_docs
         if len(narrowed) == 1:
+            # "Have we used the same X as in Y elsewhere in our <family>?"
+            # narrows to Y by party+type exactly as intended, but Y is the
+            # ANCHOR of an explicit request to compare it against the rest of
+            # its own family, not the whole answer. Widen to the family
+            # instead of narrowing to the one document that started it.
+            if len(fam_docs) > 1 and _is_cross_family_comparison(question):
+                # get_documents_by_family alone (unlike _question_family_scope,
+                # which unions in folder_hint) misses documents whose ingest-time
+                # content classification came out generic — same gap noted on
+                # _question_family_scope above. Widening for an explicit
+                # comparison question should use the same complete membership
+                # the count fast path relies on, not the narrower one this
+                # branch already had lying around for a plain narrow-to-1 check.
+                _fam2, _fam2_docs = _question_family_scope(question, session_id)
+                _comparison_docs = _fam2_docs if _fam2_docs else fam_docs
+                return {"scope": "family", "target_docs": sorted(_comparison_docs),
+                        "target_family": fam, "is_broad": True,
+                        "confidence": 0.75, "method": "party-family-comparison"}
             return {"scope": "single_doc", "target_docs": sorted(narrowed),
                     "target_family": None, "is_broad": False,
                     "confidence": 0.8, "method": "party"}
@@ -11577,7 +11636,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(party_docs),
              "target_family": None, "is_broad": False,
              "confidence": 0.75, "method": "party-multi"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
     # Energy Corporation"). The single-party resolver above cannot reach this:
@@ -11686,7 +11745,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
              "target_family": None, "is_broad": False,
              "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
              "method": "party-pair"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # A matter/reference number the question recites ("MAT-2021-7750")
     # resolving to exactly one document. Runs after every party-name signal,
@@ -11735,7 +11794,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(named_one),
              "target_family": None, "is_broad": False,
              "confidence": 0.78, "method": "named-instrument-single"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # A party pair that shares a whole document family. The title- and
     # content-intersection resolvers above both decline here, because sixteen
@@ -11778,7 +11837,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                 {"scope": "single_doc", "target_docs": ent_targets,
                  "target_family": None, "is_broad": False,
                  "confidence": 0.72, "method": "entity"},
-                _fam_name, _fam_docs)
+                _fam_name, _fam_docs, question)
         return {"scope": "single_doc", "target_docs": [],
                 "target_family": None, "is_broad": False,
                 "confidence": 0.7, "method": "entity"}
