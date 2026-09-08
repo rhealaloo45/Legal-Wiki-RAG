@@ -2701,8 +2701,14 @@ _RX_ACK = re.compile(
 )
 
 
+# "How many" belongs here alongside "which": the branch below already answers
+# from the citation index and renders a count headline, so the counting form of
+# the question is the same lookup. Without it, "how many documents cite the
+# Arbitration and Conciliation Act, 1996" fell through to ordinary retrieval
+# and answered 9 against a true 37 — the listing form of the identical question
+# was exact at the same moment.
 _RX_CITES = re.compile(
-    r"\b(?:which|what)\s+(?:documents?|agreements?|contracts?|judgments?)\b[^?]*"
+    r"\b(?:which|what|how\s+many)\s+(?:documents?|agreements?|contracts?|judgments?)\b[^?]*"
     r"\b(?:cite|cites|citing|rely\s+on|relies\s+on|reference|references|invoke)\b",
     re.IGNORECASE,
 )

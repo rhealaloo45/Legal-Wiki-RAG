@@ -3098,6 +3098,35 @@ def _cite_key(s: str) -> str:
     return _re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
+_RX_CITE_YEAR = re.compile(r"(18|19|20)\d{2}")
+# A pleading citing "section 34 of the Arbitration and Conciliation Act" is
+# citing the same Act as a judgment citing "Arbitration and Conciliation Act,
+# 1996" — a lawyer drops the year once the Act is obvious. Containment alone
+# cannot see that: one key ends "1996", the other ends "s34", so neither
+# contains the other and the citation was missed. Confirmed live: the count
+# came out one short of the citation table's own distinct-document total.
+#
+# The years are compared rather than discarded. Stripping them outright would
+# equate the Companies Act 1956 with the Companies Act 2013, which are
+# different statutes and the one case this must never get wrong. So: a
+# year-less citation matches a year-bearing authority on the name alone, and
+# two year-bearing ones must agree on the year.
+def _cite_same_act(key_a: str, key_b: str) -> bool:
+    ya, yb = _RX_CITE_YEAR.search(key_a), _RX_CITE_YEAR.search(key_b)
+    if ya and yb and ya.group(0) != yb.group(0):
+        return False
+    if not ya and not yb:
+        return False          # containment above already covers this case
+    stem_a = _RX_CITE_YEAR.sub("", key_a)
+    stem_b = _RX_CITE_YEAR.sub("", key_b)
+    # Section suffixes ("s34", "section9") are not part of the Act's name.
+    stem_a = re.sub(r"(?:section|sec|s)\d+$", "", stem_a)
+    stem_b = re.sub(r"(?:section|sec|s)\d+$", "", stem_b)
+    if len(stem_a) < 12 or len(stem_b) < 12:
+        return False          # too short to be a distinctive statute name
+    return stem_a in stem_b or stem_b in stem_a
+
+
 def find_documents_citing(wiki_id: str, session_id: str, authority: str,
                           limit: int = 50) -> list[dict]:
     """Documents that cite a given statute/rule/authority — a SQL join, no LLM.
@@ -3126,7 +3155,7 @@ def find_documents_citing(wiki_id: str, session_id: str, authority: str,
     for r in rows:
         for cand in (r.normalized_form, r.citation_text):
             ck = _cite_key(cand)
-            if ck and (key in ck or ck in key):
+            if ck and (key in ck or ck in key or _cite_same_act(key, ck)):
                 cur = hits.setdefault(r.source_doc, {
                     "source_doc": r.source_doc,
                     "citation_text": (r.citation_text or r.normalized_form or "").strip(),
