@@ -5020,14 +5020,55 @@ _VOICE_SUBS = (
 
 # Cleanups for what the substitutions above can leave behind.
 _VOICE_FIXUPS = (
+    # Ordered first, because the collapse below is what lets the agreement
+    # rules that follow reach their verb.
+    #
+    # "The context for this document does contain existing confidentiality
+    # clauses" became "These documents for this document does contain…" — the
+    # substitution replaced the head noun and left the qualifier that belonged
+    # to it, and the plural then sat four words away from its verb, where the
+    # adjacency rules below could not see it. That sentence opened a drafting
+    # answer, so the first thing a lawyer read was broken English.
+    #
+    # The qualifier is redundant once the head noun is "these documents", so
+    # collapsing it is both the grammatical fix and the right meaning.
+    (re.compile(r"\bthese documents\s+(?:for|in|of|regarding|about)\s+"
+                r"(?:this|the)\s+(?:document|agreement|contract|matter|"
+                r"instrument)s?\b", re.IGNORECASE), "these documents"),
     (re.compile(r"\bthese documents does\b", re.IGNORECASE), "these documents do"),
     (re.compile(r"\bthese documents is\b", re.IGNORECASE), "these documents are"),
     (re.compile(r"\bthese documents was\b", re.IGNORECASE), "these documents were"),
     (re.compile(r"\bthese documents contains\b", re.IGNORECASE), "these documents contain"),
-    (re.compile(r"\bthese documents (?:only )?(?:contains|holds)\b", re.IGNORECASE),
-     "these documents contain"),
+    # A rule here previously matched "these documents only contains" and
+    # replaced the whole span with "these documents contain", deleting the
+    # "only". That is a change of meaning, not of voice: "only contains two
+    # NDAs" is a statement about the limits of the corpus and "contains two
+    # NDAs" is not. The general agreement rule below fixes the verb and keeps
+    # the qualifier, so the lossy rule is gone rather than repaired.
     (re.compile(r"\bThese documents\b(?=[^.]*\bhere\b)"), "These documents"),
 )
+
+# The rules above name one verb each, and the list was never going to be
+# complete — "the context says" came through as "these documents says". The
+# subject became plural, so every third-person-singular verb agreeing with the
+# old subject is now wrong, which is a rule rather than a list.
+_DOCS_VERB_PLURAL = {
+    "says": "say", "has": "have", "does": "do", "is": "are", "was": "were",
+    "contains": "contain", "holds": "hold", "shows": "show", "omits": "omit",
+    "provides": "provide", "states": "state", "addresses": "address",
+    "appears": "appear", "includes": "include", "refers": "refer",
+    "indicates": "indicate", "describes": "describe", "mentions": "mention",
+    "records": "record", "confirms": "confirm", "lacks": "lack",
+    "specifies": "specify", "covers": "cover", "supports": "support",
+}
+_RX_DOCS_VERB = re.compile(
+    r"\b(these\s+documents)\s+((?:only\s+|also\s+|not\s+)?)("
+    + "|".join(_DOCS_VERB_PLURAL) + r")\b", re.IGNORECASE)
+
+
+def _fix_docs_verb(m: re.Match) -> str:
+    verb = _DOCS_VERB_PLURAL[m.group(3).lower()]
+    return f"{m.group(1)} {m.group(2)}{verb}"
 
 
 def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
@@ -5078,7 +5119,17 @@ def _rewrite_answer_voice(answer: str) -> tuple[str, int]:
             for m in re.finditer(r'^\s*>.*$', out, re.M):
                 protected.append((m.start(), m.end()))
     for rx, repl in _VOICE_FIXUPS:
-        out = rx.sub(repl, out)
+        # Capitalisation is preserved the same way the substitutions above do
+        # it. Without this a fixup at the head of a sentence lowercased it, so
+        # correcting the grammar of an opening line broke its capitalisation
+        # instead — trading one visible defect for another.
+        def _sub(m, _repl=repl):
+            text = _repl
+            if m.group(0)[:1].isupper():
+                text = text[:1].upper() + text[1:]
+            return text
+        out = rx.sub(_sub, out)
+    out = _RX_DOCS_VERB.sub(_fix_docs_verb, out)
     return out, changed
 
 
