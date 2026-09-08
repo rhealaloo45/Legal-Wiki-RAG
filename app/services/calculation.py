@@ -1033,6 +1033,32 @@ def is_calculation_query(question: str) -> str:
     return ""
 
 
+def _recorded_cap_text(wiki_id: str, session_id: str, docs: list) -> str:
+    """The liability cap as the contracts row records it, quoted, or "".
+
+    Only non-numeric caps reach here (a numeric one is not out_of_scope), so
+    this is the "cap agreed in Schedule IV" shape: a real answer to what the
+    cap is, in the document's own words, and better than explaining in the
+    abstract why no rupee figure can be produced.
+    """
+    from sqlalchemy import text as _text
+    from services import db as _db
+    out = []
+    try:
+        with _db.get_engine().connect() as conn:
+            for d in docs:
+                row = conn.execute(_text(
+                    "SELECT liability_cap FROM contracts WHERE wiki_id = :w "
+                    "AND session_id = :s AND source_doc = :d"),
+                    {"w": wiki_id, "s": session_id, "d": d}).fetchone()
+                if row and (row[0] or "").strip():
+                    out.append(f"> {str(row[0]).strip()}")
+    except Exception as e:
+        logger.error("[CALC] recorded cap lookup failed: %s", e)
+        return ""
+    return "\n\n".join(dict.fromkeys(out))
+
+
 def _decline(kind: str, missing: str, detail: str, doc_label: str) -> str:
     return (f"**Cannot compute this — the calculation needs {missing}, which "
             f"this document does not state.**\n\n{detail}\n\n"
@@ -1329,16 +1355,37 @@ def answer(question: str, wiki_id: str, session_id: str,
         return p
 
     if kind == "out_of_scope":
+        # Nothing resolved: say only that, and make no claim about how this
+        # corpus drafts liability caps. The generic explanation below is true
+        # of the fee-multiple caps it was written for, and was measured being
+        # served for a document that was never read -- an assertion about a
+        # document the answer had not seen is exactly the failure the rest of
+        # this module exists to prevent.
+        if not docs:
+            return None
         label = ", ".join(_label_for(d, wiki_id, session_id)
-                          for d in docs[:_MAX_CALC_DOCS]) or "not resolved"
-        body = _decline(
-            "out_of_scope", "fees actually invoiced under the contract",
-            "The liability cap in this corpus is expressed as a multiple of fees "
-            "paid or payable over a rolling window. That is billing data held in "
-            "a finance system, not a term any agreement states, so no figure "
-            "computed from the document alone would be the real cap.\n\nThe cap as "
-            "drafted can be quoted instead - ask what the liability cap clause "
-            "says.", label)
+                          for d in docs[:_MAX_CALC_DOCS])
+        # Where the document records its cap as drafted, quote that rather than
+        # explain in the abstract why a number cannot be produced: "the cap
+        # agreed in Schedule IV" IS the answer to what the cap is, and it is
+        # the document's own words.
+        _drafted = _recorded_cap_text(wiki_id, session_id, docs[:_MAX_CALC_DOCS])
+        if _drafted:
+            body = (f"**No monetary amount is stated — the cap is recorded as "
+                    f"drafted.**\n\n{_drafted}\n\nDocument assessed: {label}\n\n"
+                    "Reported as drafted rather than converted to a figure: the "
+                    "clause states the cap by reference, and any rupee amount "
+                    "would have to come from billing data this corpus does not "
+                    "hold.")
+        else:
+            body = _decline(
+                "out_of_scope", "fees actually invoiced under the contract",
+                "The liability cap in this document is expressed as a multiple of "
+                "fees paid or payable over a rolling window. That is billing data "
+                "held in a finance system, not a term the agreement states, so no "
+                "figure computed from the document alone would be the real cap."
+                "\n\nThe cap as drafted can be quoted instead - ask what the "
+                "liability cap clause says.", label)
         p = _payload(body, "Calculation")
         p["files_used"] = docs[:_MAX_CALC_DOCS]
         return p

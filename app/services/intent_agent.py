@@ -3033,9 +3033,15 @@ _RX_GAP_INSTRUCTION_VETO = re.compile(
     r"summaris(?:e|ing)|summariz(?:e|ing)|paraphras(?:e|ing))\b",
     re.IGNORECASE)
 
+# "trended" and "year over year" were both misses: \btrend\b does not match the
+# past tense, and only the "year on year" spelling was listed. A question
+# reading "has the average liability cap trended up or down year over year"
+# therefore classified as a plain corpus aggregate and answered with one
+# overall mean instead of the by-year table it asked for.
 _RX_TREND = re.compile(
-    r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend|trending|"
-    r"year[- ]on[- ]year|by\s+year|changed?\s+since|historically|"
+    r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend(?:s|ed|ing)?|"
+    r"year[-\s](?:on|over)[-\s]year|by\s+year|year\s+by\s+year|"
+    r"changed?\s+since|historically|"
     r"getting\s+(?:longer|shorter|higher|lower|bigger|smaller))\b",
     re.IGNORECASE)
 
@@ -6323,7 +6329,17 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # clause is a better answer to a lookup than a number.
     if not is_followup:
         from services import calculation as _calc_mod
-        if _calc_mod.is_calculation_query(question):
+        _calc_kind = _calc_mod.is_calculation_query(question)
+        # The liability-cap veto refuses to compute one document's cap in
+        # rupees from billing data the corpus does not hold, which is right.
+        # It must not also swallow a CORPUS-WIDE cap question: "has the average
+        # liability cap trended up or down year over year" is answered from the
+        # typed liability_cap_amount column by the analytics branch below, and
+        # was measured being declined by this veto instead, with a canned
+        # explanation about fee multiples that answered nothing.
+        if _calc_kind == "out_of_scope" and _is_analytics_query(question):
+            _calc_kind = ""
+        if _calc_kind:
             from services import wikis as _wikis_k
             try:
                 _wid_k = _wikis_k.active_wiki_id()
