@@ -397,3 +397,10 @@ test_nvidia/
 # the repo root only, so an output file written next to the script it came from
 # (app/q85_out.json) went straight past them.
 *_out.json
+
+# Suite and tool outputs. Untracked by convention already, but named here
+# because they contain corpus document names and answer text, and this repo
+# is public.
+tools/*_results*.json
+tools/*_memory.json
+tools/*.log
