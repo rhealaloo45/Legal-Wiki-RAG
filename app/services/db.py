@@ -4592,6 +4592,37 @@ _PRIMARY_DOC_TYPE_SQL = (
 )
 
 
+def count_documents_with_clause_text(wiki_id: str, session_id: str,
+                                     phrases: list) -> int:
+    """How many documents carry a clause containing ALL of these phrases.
+
+    A precedent search returns the closest few clauses, which answers "have we
+    agreed this before" but not "in how many agreements". Matching a slice of
+    the closest clause's own text gives the corpus figure, and matching CLAUSE
+    text rather than the obligations table matters: the same wording sat in 65
+    documents' clauses and only 35 obligation rows.
+
+    Every phrase must appear, because the shared part of a templated clause is
+    not what distinguishes it. The retention boilerplate alone
+    ("shall maintain true and complete records relating to this Agreement")
+    sits in 175 documents whatever period each states; requiring the period too
+    is what makes the figure mean "documents with a FIVE-year retention".
+    """
+    from sqlalchemy import text
+    ps = [p.strip() for p in (phrases or []) if p and len(p.strip()) >= 4]
+    if not ps or not any(len(p) >= 25 for p in ps):
+        return 0
+    clauses, params = [], {"w": wiki_id, "s": session_id}
+    for i, p in enumerate(ps):
+        clauses.append(f"verbatim_text ILIKE '%' || :p{i} || '%'")
+        params[f"p{i}"] = p
+    with get_engine().connect() as conn:
+        return conn.execute(text(
+            "SELECT count(DISTINCT source_doc) FROM clauses "
+            "WHERE wiki_id = :w AND session_id = :s AND "
+            + " AND ".join(clauses)), params).scalar() or 0
+
+
 def count_documents_with_clause_type(wiki_id: str, session_id: str,
                                      clause_type_canon: str,
                                      doc_type_patterns: list | None = None) -> dict:
