@@ -4795,12 +4795,24 @@ def list_documents_matching(wiki_id: str, session_id: str,
     _phrases = [p.strip() for p in (content_phrases or []) if p and p.strip()]
     if content_phrase and content_phrase.strip() not in _phrases:
         _phrases.append(content_phrase.strip())
+    # Matched against page text OR extracted clause text, because neither
+    # table is complete on its own. Measured on this corpus: "Project
+    # Tamarind" appears in 45 documents' page text and 17 documents' clause
+    # text, and the union is 48 — page text misses wording that only survived
+    # as an extracted clause, and clause text misses wording that sits in a
+    # part of the document no clause was cut from. Searching one table and
+    # calling the result a corpus figure understates it either way.
     for i, ph in enumerate(_phrases):
-        clauses.append(f"""EXISTS (
+        clauses.append(f"""(EXISTS (
             SELECT 1 FROM pages pg
              WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
                AND pg.source_doc = d.source_doc
-               AND pg.content ILIKE :phrase{i})""")
+               AND pg.content ILIKE :phrase{i})
+          OR EXISTS (
+            SELECT 1 FROM clauses cx
+             WHERE cx.wiki_id = d.wiki_id AND cx.session_id = d.session_id
+               AND cx.source_doc = d.source_doc
+               AND cx.verbatim_text ILIKE :phrase{i}))""")
         params[f"phrase{i}"] = f"%{ph}%"
 
     # Governing law and term live on the typed contracts row, not on the

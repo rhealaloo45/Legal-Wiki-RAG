@@ -3490,10 +3490,19 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                      else "governing_law" if re.search(r"governing\s+law", question or "", re.I)
                      else "termination" if re.search(r"terminat", question or "", re.I)
                      else "liability_cap")
-            data = analytics.find_gaps(wiki_id, session_id, field, parties)
+            # The instrument type the question named, honoured rather than
+            # dropped. "How many NDAs record no liability cap at all" and "how
+            # many NDAs carry no dispute resolution clause" both ran
+            # corpus-wide and answered 511 and 659, against true figures of 142
+            # and 82 - right analytic, wrong population, and no sign in the
+            # output that the word "NDA" had been ignored.
+            _gap_label, _gap_pats = _doctype_from_question(question)
+            data = analytics.find_gaps(wiki_id, session_id, field, parties,
+                                       doc_type_patterns=_gap_pats or None)
             if data.get("error"):
                 return None
-            lines = [f"**{data['missing']} document(s) state no {data['label']}.**", ""]
+            _scope = f" {_gap_label}(s)" if _gap_label else " document(s)"
+            lines = [f"**{data['missing']}{_scope} state no {data['label']}.**", ""]
             # "which instrument types make up the largest share" asks about the
             # shape of the gap, not its members. Led with the breakdown when
             # that is what was asked, because a list of twenty filenames is not
@@ -5334,6 +5343,22 @@ _COUNT_PREDICATE_GENERIC = {
 # verb is the tell; when it appears, this is not a content predicate.
 _RX_COUNT_PREDICATE_COMPARISON = re.compile(
     r"^\s*(?:the\s+)?(?:\w+\s+){0,2}same\b.{0,30}?\bas\b", re.IGNORECASE)
+# A named thing a counting question is asking about: a project code name, a
+# programme, a defined term. Anchored on the words that introduce one so an
+# ordinary capitalised party name at the start of a sentence is not mistaken
+# for it — the party path already handles those, and searching page text for a
+# company name would count every document that merely mentions it in passing.
+_RX_COUNT_PROPER_NOUN = re.compile(
+    r"\b(?:codenamed|code-named|code\s+named|known\s+as|called|"
+    r"named|titled|designated|under\s+the\s+name|project)\s+"
+    r"[\"“']?((?:[A-Z][\w&.\-]*)(?:\s+[A-Z][\w&.\-]*){0,3})[\"”']?",
+)
+# Words that are capitalised because they start a sentence or label a document
+# class, not because they name anything.
+_COUNT_PROPER_NOUN_STOP = {
+    "the", "this", "that", "agreement", "agreements", "contract", "contracts",
+    "document", "documents", "party", "parties", "company", "corpus", "wiki",
+}
 
 
 def _count_predicate_phrase(question: str) -> str:
@@ -5343,6 +5368,18 @@ def _count_predicate_phrase(question: str) -> str:
     "mention arbitration" names its subject in one word, and requiring two
     would decline the commonest form of the question.
     """
+    # A capitalised name is the thing being looked for, and it beats the words
+    # around it. "How many documents refer to a project codenamed Project
+    # Tamarind" cut the first four words after the trigger verb and searched
+    # for "project codenamed Project" — a phrase no document contains, because
+    # it describes the name rather than being it. The proper noun is both more
+    # precise and unambiguous, so it is preferred when the question carries one.
+    _proper = _RX_COUNT_PROPER_NOUN.search(question or "")
+    if _proper:
+        _name = _proper.group(1).strip()
+        if _name.lower() not in _COUNT_PROPER_NOUN_STOP and len(_name) >= 6:
+            return _name
+
     m = _RX_COUNT_PREDICATE.search(question or "")
     if not m:
         return ""
@@ -5574,7 +5611,16 @@ _RX_CLAUSE_PRECEDENT = re.compile(
     # been used in more than one agreement?" None of the active patterns above
     # match it, so it reached ordinary retrieval and was answered from the
     # handful of documents that came back.
-    r"|(?:has|have)\s+[\w\s,'-]{0,50}?\bbeen\s+(?:used|agreed|accepted|adopted|included)"
+    # The span between "has" and "been" is a noun phrase a lawyer writes at
+    # whatever length the clause needs. 50 characters fitted "a five-year
+    # records-retention period" and nothing longer: "has the clause excluding
+    # third-party enforcement rights been used" (51 characters) and "has the
+    # publicity restriction wording used in these agreements - barring a press
+    # release or public statement referring to the other party - been used"
+    # (110) both fell out of this pattern and were answered from whatever
+    # retrieval happened to return — 15 and 23 documents against true figures
+    # of 172 and 179.
+    r"|(?:has|have)\s+[\w\s,'–—-]{0,160}?\bbeen\s+(?:used|agreed|accepted|adopted|included)"
     r")\b",
     re.IGNORECASE,
 )
