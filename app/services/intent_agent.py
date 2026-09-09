@@ -3297,6 +3297,28 @@ def _expiry_floor(question: str):
     return None
 
 
+_RX_CONSISTENCY = re.compile(
+    r"\b(?:consistent|consistency|uniform|the\s+same|vary|varies|varied|"
+    r"differ|different|standardi[sz]ed|aligned)\b",
+    re.IGNORECASE)
+# The typed columns a consistency question can be answered from exactly.
+_CONSISTENCY_FIELDS = (
+    (re.compile(r"governing\s+law|choice\s+of\s+law|applicable\s+law", re.I),
+     "governing_law", "governing law"),
+    (re.compile(r"liability\s+cap", re.I), "liability_cap", "liability cap"),
+    (re.compile(r"\bterm\s+length|length\s+of\s+(?:the\s+)?term", re.I),
+     "term_length", "term length"),
+)
+
+
+def _consistency_field(question: str):
+    """(column, label) a consistency question asks about, or None."""
+    for rx, col, label in _CONSISTENCY_FIELDS:
+        if rx.search(question or ""):
+            return (col, label)
+    return None
+
+
 def _is_analytics_query(question: str) -> str:
     """'aggregate' | 'gap' | 'trend' | '' — questions the normalised columns answer.
 
@@ -3307,6 +3329,14 @@ def _is_analytics_query(question: str) -> str:
     average over an arbitrary sample.
     """
     q = question or ""
+    # "Are the Service Level Agreements consistent in their choice of governing
+    # law?" is a question about the shape of a whole population, and it was
+    # answered by comparing the five agreements a search happened to return out
+    # of 17 — right by luck, and wrong the moment the sixteenth differs. It is
+    # checked first because a consistency question about a typed column has an
+    # exact answer and nothing else here is a better match.
+    if _RX_CONSISTENCY.search(q) and _consistency_field(q):
+        return "consistency"
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
     # Checked straight after, and only when the question is unambiguously about
@@ -3435,12 +3465,8 @@ def _analytics_answer(kind: str, question: str, session_id: str,
     statement about those contracts, not about the corpus, and a reader shown
     a bare figure will reasonably assume the latter.
     """
-    from services import analytics, wiki as _wiki
-    parties = []
-    m = _RX_COUNT_PARTY.search(question or "")
-    if m:
-        raw = m.group(1).strip().rstrip(".,;:?")
-        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw) if len(p.strip()) > 2]
+    from services import analytics, db as _db, wiki as _wiki
+    parties = _count_party_names(question)
 
     try:
         if kind == "aggregate":
@@ -3628,6 +3654,35 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                           "this corpus does hold as typed values, and both can "
                           "be trended by year."]
             payload = _canned_payload("\n".join(lines), "Trend unavailable",
+                                      "structured-analytics")
+
+        elif kind == "consistency":
+            _col, _flabel = _consistency_field(question)
+            _cs_label, _cs_pats = _doctype_from_question(question)
+            _bd = _db.breakdown_by_typed_field(
+                wiki_id, session_id, _col, doc_type_patterns=_cs_pats or None)
+            if not _bd.get("recorded"):
+                return None
+            _noun = f"{_cs_label}(s)" if _cs_label else "document(s)"
+            _top = _bd["values"][0]
+            if _bd["distinct"] == 1:
+                _head = (f"**Yes — every one of the {_bd['recorded']} {_noun} that "
+                         f"records a {_flabel} states the same one: {_top['value']}.**")
+            else:
+                _head = (f"**No — the {_bd['recorded']} {_noun} that record a "
+                         f"{_flabel} split across {_bd['distinct']} different "
+                         f"values.**")
+            _lines = [_head, "", f"| {_flabel.title()} | Documents |",
+                      "| --- | --- |"]
+            for _v in _bd["values"]:
+                _lines.append(f"| {_v['value']} | {_v['count']} |")
+            _lines += ["", f"Counted over all {_bd['in_scope']} {_noun} in the "
+                           f"index, not over the documents a search returned."]
+            if _bd["unrecorded"]:
+                _lines.append(f"{_bd['unrecorded']} of them record no {_flabel} at "
+                              f"all and are outside the comparison — they are not "
+                              f"evidence either way.")
+            payload = _canned_payload("\n".join(_lines), "Consistency",
                                       "structured-analytics")
 
         elif kind == "trend":
