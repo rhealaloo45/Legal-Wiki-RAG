@@ -3630,6 +3630,35 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         payload["meta_answer"] = False
         return payload
 
+    # A governing law is a third way to pin a count, alongside a party and an
+    # instrument type. The compound branch already filters by it but demands
+    # two filters, so "how many contracts are governed by the laws of England
+    # and Wales" — one filter, and a perfectly ordinary question — had no
+    # deterministic path and was answered by retrieval, which found 4 of the 5.
+    _gov = _compound_predicates(question or "").get("governing_law")
+    if _gov and _RX_COUNT.search(question or ""):
+        try:
+            _gres = _db.list_documents_matching(
+                wiki_id, session_id, parties or None, patterns or None,
+                governing_law=_gov, limit=25)
+        except Exception as e:
+            logger.error("[AGENT] governing-law count failed: %s", e)
+            _gres = None
+        if _gres and _gres["total"]:
+            _noun = label or "document"
+            _lines = [f"**{_gres['total']} {_noun}(s) governed by {_gov}.**", ""]
+            for d in _gres["documents"]:
+                _date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+                _lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{_date}")
+            if _gres["truncated"]:
+                _lines.append(f"- …and {_gres['total'] - len(_gres['documents'])} more")
+            _lines += ["", "Counted from the recorded governing law of every document "
+                           "in the wiki, not from the pages a search returned."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = [d["source_doc"] for d in _gres["documents"]]
+            _p["meta_answer"] = False
+            return _p
+
     _whole_corpus = False
     if not parties and not patterns:
         if (_RX_COUNT_TOTAL.search(question or "")
@@ -4197,6 +4226,89 @@ def _narrow_to_named_instrument(question: str, session_id: str, wiki_id: str,
         if t and t in q:
             hits.append(sd)
     return hits
+
+
+# "Is a deadlock-resolution clause a common feature of Joint Venture Agreements
+# in this corpus?" is a question about how often a clause TYPE appears, and the
+# typed clause rows answer it exactly. Without this it was declined as needing
+# every other JVA to be read one by one, while the index knew 227 documents
+# carry the clause.
+_RX_CLAUSE_COMMONALITY = re.compile(
+    r"\b(?:is|are|how)\s+(?:an?\s+|the\s+)?[\w\s-]{0,40}?"
+    r"\b(?:common|commonplace|typical|standard|usual|widespread|prevalent)\b"
+    r"|\bhow\s+many\s+[\w\s-]{0,30}?\b(?:carry|contain|include|have)\b"
+    r"[^?]{0,40}?\bclause\b",
+    re.IGNORECASE)
+# The clause the question is asking about, as the words before "clause".
+_RX_COMMONALITY_CLAUSE = re.compile(
+    r"\b((?:[a-z][\w-]*\s+){0,3}?[a-z][\w-]*)[-\s]+(?:resolution\s+)?clauses?\b",
+    re.IGNORECASE)
+
+
+def _clause_commonality_answer(question: str, session_id: str,
+                               wiki_id: str) -> "dict | None":
+    """How many documents carry a clause TYPE, out of how many in scope.
+
+    Answered from clause_type_canon, so it counts the clause the question names
+    rather than documents whose prose happens to use the same word. Returns
+    None whenever the clause words do not map to the controlled vocabulary —
+    an unmatched label is left to retrieval rather than guessed at.
+    """
+    from services import db as _db
+    from services import clause_vocab as _vocab
+
+    if not _RX_CLAUSE_COMMONALITY.search(question or ""):
+        return None
+    canon, _after = None, ""
+    for m in _RX_COMMONALITY_CLAUSE.finditer(question or ""):
+        phrase = m.group(1).strip()
+        canon = _vocab.canonical(phrase) or _vocab.canonical(phrase.split()[-1])
+        if canon:
+            # The instrument type lives AFTER the clause words ("...clause a
+            # common feature of Joint Venture Agreements"). Reading the whole
+            # question instead produced doctypes like "Indemnity Clause
+            # Service", which match nothing and emptied the scope.
+            _after = (question or "")[m.end():]
+            break
+    if not canon:
+        return None
+    # "a common FEATURE OF Joint Venture Agreements" — the doctype extractor
+    # reads the whole run and returns "Feature Of Joint Venture", which matches
+    # no document at all, so the scope came back empty and the branch declined.
+    # The commonality wording is removed before the instrument type is read.
+    _q_for_type = re.sub(
+        r"\b(?:an?\s+|the\s+)?(?:common|commonplace|typical|standard|usual|"
+        r"widespread|prevalent)\s+(?:feature|element|term|provision)\s+(?:of|in)\s+",
+        " ", _after, flags=re.IGNORECASE)
+    label, patterns = _doctype_from_question(_q_for_type)
+    try:
+        data = _db.count_documents_with_clause_type(
+            wiki_id, session_id, canon, doc_type_patterns=patterns or None)
+    except Exception as e:
+        logger.error("[AGENT] clause-commonality failed: %s", e)
+        return None
+    if not data or not data.get("in_scope"):
+        return None
+    n, total = data["with_clause"], data["in_scope"]
+    pct = (n / total * 100) if total else 0
+    scope_label = f"{label}(s)" if label else "documents in the corpus"
+    verdict = ("a common feature" if pct >= 50 else
+               "present in a substantial minority" if pct >= 20 else
+               "uncommon")
+    lines = [
+        f"**Yes — {canon.replace('_', ' ')} clauses are {verdict}: "
+        f"{n} of {total} {scope_label} carry one ({pct:.0f}%).**" if pct >= 20 else
+        f"**{canon.replace('_', ' ')} clauses are {verdict}: {n} of {total} "
+        f"{scope_label} carry one ({pct:.0f}%).**",
+        "",
+        f"Counted from the typed clause index over every {scope_label.rstrip('(s)')} "
+        f"in the wiki, not from the documents a search returned. A document is "
+        f"counted once however many such clauses it contains.",
+    ]
+    payload = _canned_payload("\n".join(lines), "Clause frequency", "document-index")
+    payload["files_used"] = data.get("examples", [])
+    payload["meta_answer"] = False
+    return payload
 
 
 def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
@@ -6467,6 +6579,26 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
             logger.info("[AGENT] precedent fast-path: %r", (question or "")[:70])
             yield {"stage": "complete", "status": "done", "type": "answer",
                    "payload": _prec, "message": "Done"}
+            return
+
+    # "Is a deadlock clause a common feature of JVAs here?" — a frequency
+    # question about a clause TYPE, answered from the typed clause index.
+    # Ahead of clause precedent because that branch searches for clauses
+    # resembling a described term, which is a different question and answers
+    # this one with a sample rather than a proportion.
+    if not is_followup and not collection_id:
+        from services import wikis as _wikis_ct
+        try:
+            _ccom = _clause_commonality_answer(question, session_id,
+                                               _wikis_ct.active_wiki_id())
+        except Exception as _cc_err:
+            logger.error("[AGENT] clause-commonality fast path failed: %s", _cc_err)
+            _ccom = None
+        if _ccom:
+            logger.info("[AGENT] clause-commonality fast path (0 tokens): %r",
+                        (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _ccom, "message": "Done"}
             return
 
     # Clause-level precedent — "have we agreed to this before". Checked after
