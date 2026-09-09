@@ -3634,12 +3634,16 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             metric = ("contract_value"
                       if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
                       else "liability_cap")
-            data = analytics.trend_over_time(wiki_id, session_id, metric, parties)
+            _tr_label, _tr_pats = _doctype_from_question(question)
+            data = analytics.trend_over_time(wiki_id, session_id, metric, parties,
+                                             doc_type_patterns=_tr_pats or None)
             if data.get("error") or not data.get("buckets"):
                 return None
             label = "contract value" if metric == "contract_value" else "liability cap"
-            head = (f"**{label.title()} by year — {data['direction']}**"
-                    if data.get("direction") else f"**{label.title()} by year**")
+            _scope_txt = f" across {_tr_label}(s)" if _tr_label else ""
+            head = (f"**{label.title()} by year{_scope_txt} — {data['direction']}**"
+                    if data.get("direction")
+                    else f"**{label.title()} by year{_scope_txt}**")
             lines = [head, "", "| Year | Documents | With a readable value | Median |",
                      "| --- | --- | --- | --- |"]
             for b in data["buckets"]:
@@ -3710,6 +3714,38 @@ def _compound_subcount(tail: str):
     if dm:
         label, patterns = _resolve_doctype(dm.group(1).strip())
     return parties, patterns, label
+
+
+# A trailing filter can name a typed FIELD rather than a clause type: "how
+# many of those record a readable rupee liability cap" is answered from
+# contracts.liability_cap_amount, which either parsed to a number or did not.
+# Measured live, that half of the question was reported unanswerable while the
+# column sat there holding the answer.
+_RX_COMPOUND_TYPED_FIELD = re.compile(
+    r"\b(?:record|records|recorded|state|states|stated|carry|carries|have|has|"
+    r"with)\b[^?]{0,40}?\b(?:readable|parsed|numeric|rupee|inr|monetary|"
+    r"stated)\b[^?]{0,30}?\b(liability\s+cap|contract\s+value|"
+    r"governing\s+law|effective\s+date|expiry\s+date)\b"
+    r"|\b(?:readable|numeric|rupee)\s+(liability\s+cap|contract\s+value)\b",
+    re.IGNORECASE)
+_TYPED_FIELD_SQL = {
+    "liability cap": ("contracts", "liability_cap_amount"),
+    "contract value": ("contracts", "liability_cap_amount"),
+    "governing law": ("contracts", "governing_law"),
+    "effective date": ("documents", "effective_date"),
+    "expiry date": ("documents", "expiry_date"),
+}
+
+
+def _compound_typed_field(tail: str):
+    """(table, column, label) a trailing filter names as a typed field, or None."""
+    m = _RX_COMPOUND_TYPED_FIELD.search(tail or "")
+    if not m:
+        return None
+    name = (m.group(1) or m.group(2) or "").strip().lower()
+    name = re.sub(r"\s+", " ", name)
+    spec = _TYPED_FIELD_SQL.get(name)
+    return (spec[0], spec[1], name) if spec else None
 
 
 def _compound_clause_type(tail: str) -> str:
@@ -3949,7 +3985,27 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         _tail = _tail_m.group(1).strip()
         _sub_parties, _sub_patterns, _sub_label = _compound_subcount(_tail)
         _sub_clause = _compound_clause_type(_tail)
-        if _sub_clause and not _sub_parties:
+        _sub_field = _compound_typed_field(_tail)
+        if _sub_field and not _sub_parties:
+            # A typed column, not a clause: "how many of those record a
+            # readable rupee liability cap" is a coverage question and the
+            # column answers it. This half used to come back as uncountable.
+            _tbl, _col, _fname = _sub_field
+            try:
+                _fd = _db.count_documents_with_typed_field(
+                    wiki_id, session_id, _tbl, _col,
+                    doc_type_patterns=patterns or None)
+            except Exception as e:
+                logger.error("[AGENT] typed-field sub-count failed: %s", e)
+                _fd = None
+            if _fd and _fd.get("with_value"):
+                _sub_lines = ["", f"**Of those, {_fd['with_value']} record a "
+                                  f"readable {_fname}.**"]
+            else:
+                _sub_lines = ["", "*The second part of this question — “"
+                              + _tail.rstrip("?.") + "” — could not be counted "
+                              "and is not answered above.*"]
+        elif _sub_clause and not _sub_parties:
             # A clause-type filter over the set just counted, answered from the
             # typed clause index rather than left unanswered.
             try:
