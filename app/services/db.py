@@ -4569,6 +4569,42 @@ _PRIMARY_DOC_TYPE_SQL = (
 )
 
 
+def count_documents_with_clause_type(wiki_id: str, session_id: str,
+                                     clause_type_canon: str,
+                                     doc_type_patterns: list | None = None) -> dict:
+    """How many documents carry a clause of this canonical type, out of how many.
+
+    Both halves matter: "227 documents have a deadlock clause" says nothing
+    without the denominator, and a commonality question is exactly a question
+    about the ratio. Counted per DOCUMENT, not per clause row, so a document
+    with three deadlock clauses counts once.
+    """
+    from sqlalchemy import text
+    params = {"w": wiki_id, "s": session_id, "ct": clause_type_canon}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    has = ("EXISTS (SELECT 1 FROM clauses cl WHERE cl.wiki_id = d.wiki_id "
+           "AND cl.session_id = d.session_id AND cl.source_doc = d.source_doc "
+           "AND cl.clause_type_canon = :ct)")
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        with_clause = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where} AND {has}"),
+            params).scalar() or 0
+        examples = [r[0] for r in conn.execute(text(
+            f"SELECT d.source_doc FROM documents d WHERE {where} AND {has} LIMIT 5"),
+            params).fetchall()]
+    return {"clause_type": clause_type_canon, "in_scope": int(in_scope),
+            "with_clause": int(with_clause), "examples": examples}
+
+
 def find_documents_by_date_span(wiki_id: str, session_id: str,
                                 date_a: str, date_b: str) -> list[str]:
     """Documents whose recorded effective AND expiry dates are these two dates.
