@@ -3580,9 +3580,22 @@ _RX_COUNT_COMPOUND_TAIL = re.compile(
 )
 # The sub-clause names its constraint as a party ("involve Tata Power as a
 # party") or as an instrument type ("are Joint Venture Agreements").
+# The determiner is optional and skipped: "how many of them name AN APEX
+# entity as a party" put "an" between the verb and the name, so the pattern
+# matched nothing and the second half of the question was reported unanswered.
 _RX_COMPOUND_PARTY = re.compile(
     r"\b(?:involve|involving|name|naming|with|for|between|from|against)\s+"
+    r"(?:an?\s+|the\s+)?"
     r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+)
+# "...and how many of them carry an exit clause?" — the trailing filter names a
+# clause TYPE rather than a party or an instrument, and the typed clause index
+# answers it exactly.
+_RX_COMPOUND_CLAUSE = re.compile(
+    r"\b(?:carry|carries|contain|contains|include|includes|have|has|with)\s+"
+    r"(?:an?\s+|the\s+)?((?:[a-z][\w-]*\s+){0,3}?[a-z][\w-]*)[-\s]+"
+    r"(?:resolution\s+)?clauses?\b",
+    re.IGNORECASE,
 )
 _RX_COMPOUND_DOCTYPE = re.compile(
     rf"\b(?:are|is|were|was)\s+((?:{_COUNT_MODIFIER}\s+){{0,3}}?(?:{_COUNT_NOUNS}))\b",
@@ -3603,6 +3616,17 @@ def _compound_subcount(tail: str):
     if dm:
         label, patterns = _resolve_doctype(dm.group(1).strip())
     return parties, patterns, label
+
+
+def _compound_clause_type(tail: str) -> str:
+    """The canonical clause type a trailing filter names, or ""."""
+    from services import clause_vocab as _vocab
+    for m in _RX_COMPOUND_CLAUSE.finditer(tail or ""):
+        phrase = m.group(1).strip()
+        canon = _vocab.canonical(phrase) or _vocab.canonical(phrase.split()[-1])
+        if canon:
+            return canon
+    return ""
 
 
 def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
@@ -3800,7 +3824,26 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     if _tail_m:
         _tail = _tail_m.group(1).strip()
         _sub_parties, _sub_patterns, _sub_label = _compound_subcount(_tail)
-        if _sub_parties or _sub_patterns:
+        _sub_clause = _compound_clause_type(_tail)
+        if _sub_clause and not _sub_parties:
+            # A clause-type filter over the set just counted, answered from the
+            # typed clause index rather than left unanswered.
+            try:
+                _cdata = _db.count_documents_with_clause_type(
+                    wiki_id, session_id, _sub_clause,
+                    doc_type_patterns=patterns or None)
+            except Exception as e:
+                logger.error("[AGENT] compound clause sub-count failed: %s", e)
+                _cdata = None
+            if _cdata and _cdata.get("with_clause"):
+                _sub_lines = ["", f"**Of those, {_cdata['with_clause']} carry "
+                                  f"{'an' if _sub_clause[0] in 'aeiou' else 'a'} "
+                                  f"{_sub_clause.replace('_', ' ')} clause.**"]
+            else:
+                _sub_lines = ["", "*The second part of this question — “"
+                              + _tail.rstrip("?.") + "” — could not be counted "
+                              "from the clause index and is not answered above.*"]
+        elif _sub_parties or _sub_patterns:
             try:
                 _sub = _db.count_documents_by_party(
                     wiki_id, session_id,
@@ -5409,6 +5452,12 @@ _RX_CLAUSE_PRECEDENT = re.compile(
     r"|do\s+we\s+have\s+precedent"
     r"|(?:any|show\s+me)\s+precedent\s+for"
     r"|where\s+else\s+have\s+we\s+(?:agreed|used|accepted)"
+    # The passive form, which is how the question is put when the subject is
+    # the TERM rather than the firm: "has a five-year records-retention period
+    # been used in more than one agreement?" None of the active patterns above
+    # match it, so it reached ordinary retrieval and was answered from the
+    # handful of documents that came back.
+    r"|(?:has|have)\s+[\w\s,'-]{0,50}?\bbeen\s+(?:used|agreed|accepted|adopted|included)"
     r")\b",
     re.IGNORECASE,
 )
@@ -5631,14 +5680,18 @@ def _is_clause_precedent_query(question: str) -> bool:
     return bool(_RX_CLAUSE_PRECEDENT.search(question or ""))
 
 
+# "five" and its neighbours were missing, so "a five-year records-retention
+# period" parsed as no period at all and the corpus count could not be narrowed
+# to five-year clauses.
 _NUM_WORDS_PERIOD = {
     "seven": 7, "ten": 10, "fourteen": 14, "fifteen": 15, "twenty": 20,
     "thirty": 30, "forty": 40, "forty-five": 45, "sixty": 60, "ninety": 90,
-    "one": 1, "two": 2, "three": 3, "six": 6, "twelve": 12,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "eight": 8, "nine": 9, "eleven": 11, "twelve": 12,
 }
 _RX_PERIOD_IN_Q = re.compile(
-    r"\b(\d{1,4}|seven|ten|fourteen|fifteen|twenty|thirty|forty-five|forty|"
-    r"sixty|ninety|one|two|three|six|twelve)[\s-]*"
+    r"\b(\d{1,4}|seven|ten|eleven|twelve|fourteen|fifteen|twenty|thirty|"
+    r"forty-five|forty|sixty|ninety|one|two|three|four|five|six|eight|nine)[\s-]*"
     r"(day|month|year|week)s?\b", re.IGNORECASE)
 
 
@@ -5755,6 +5808,45 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     else:
         lines = [f"**{len(hits)} precedent clause(s) matching that term:**", ""]
         lines += _render(hits)
+
+    # "...and in how many?" — the ranked list above is a SAMPLE, and a question
+    # asking how widely a term is used needs the corpus figure. Measured live:
+    # the sample listed a handful against 65 documents actually carrying the
+    # wording, and nothing said the list was partial. Counted by matching a
+    # distinctive slice of the closest clause's own text, so the figure is the
+    # documents carrying that wording rather than a similarity score.
+    _how_many = re.search(r"\bin\s+how\s+many\b|\bhow\s+many\s+(?:agreements?|"
+                          r"documents?|contracts?)\b", question or "", re.IGNORECASE)
+    if _how_many and hits:
+        _top = " ".join((hits[0].get("verbatim_text")
+                         or hits[0].get("text") or "").split())
+        # A clause opens with the obligated party's name, which is unique to
+        # that one document — slicing from the start counted 1. The shared
+        # wording begins at the operative verb, so the slice starts there when
+        # there is one ("Trent Limited SHALL MAINTAIN true and complete
+        # records ...").
+        _anchor = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b",
+                            _top, re.IGNORECASE)
+        _slice = (_top[_anchor.start():] if _anchor else _top)[:70]
+        if len(_slice) >= 25:
+            # The period is required alongside the boilerplate: the shared part
+            # of a templated clause is not what distinguishes it, and counting
+            # on it alone would report every retention clause whatever its term.
+            _phrases = [_slice]
+            if period:
+                _phrases.append(f"{period[0]} {period[1]}s")
+            try:
+                from services import db as _db_pc
+                _n_docs = _db_pc.count_documents_with_clause_text(
+                    wiki_id, session_id, _phrases)
+            except Exception as e:
+                logger.error("[AGENT] precedent corpus count failed: %s", e)
+                _n_docs = 0
+            if _n_docs:
+                lines.insert(0, f"**{_n_docs} document(s) in the corpus carry this "
+                                f"wording.** The clauses below are the closest "
+                                f"matches, not the whole list.")
+                lines.insert(1, "")
 
     lines.append("Ranked from the precedent clause index by similarity to your "
                  "question, and quoted verbatim — these are clauses already agreed "
