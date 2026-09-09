@@ -4587,8 +4587,22 @@ def find_defined_term(wiki_id: str, session_id: str, source_docs: list[str],
 # under the instrument it actually is. Documents whose type carries no
 # connector (the overwhelming majority) are unaffected, because the leading
 # segment is then the whole string.
+# The instrument this document IS, with the matter suffix cut off — a
+# "Legal Opinion on Acquisition Risk - Shareholders' Agreement" is an opinion,
+# not a shareholders' agreement, and counting it as one inflated every
+# instrument total it touched.
+#
+# Whitespace around the hyphen is then normalised, because extraction does not
+# spell the same instrument the same way twice. This corpus files 147 NDAs as
+# "Non-Disclosure Agreement" and one as "Non- Disclosure Agreement", and that
+# stray space made the 148th invisible to every count, gap and compound query
+# that named NDAs. Split first and normalise after: doing it the other way
+# round would weld "Judgment - Appeal No. 511/2026" into one token and defeat
+# the suffix trim above.
 _PRIMARY_DOC_TYPE_SQL = (
+    "regexp_replace("
     "split_part(split_part(split_part(d.doc_type, ' - ', 1), ' on ', 1), ' re ', 1)"
+    ", '\\s*-\\s*', '-', 'g')"
 )
 
 
