@@ -4623,6 +4623,48 @@ def count_documents_with_clause_text(wiki_id: str, session_id: str,
             + " AND ".join(clauses)), params).scalar() or 0
 
 
+def breakdown_by_typed_field(wiki_id: str, session_id: str,
+                             column: str,
+                             doc_type_patterns: list | None = None,
+                             limit: int = 12) -> dict:
+    """How the documents in scope split across the values of a typed column.
+
+    A consistency question - "are the Service Level Agreements consistent in
+    their choice of governing law" - is answered by the shape of the whole
+    population, not by comparing whichever five documents a search returned.
+    Measured live, that question was answered from five agreements out of 17,
+    which happened to agree, so the answer was right for the wrong reason and
+    would have been wrong had the sixteenth differed.
+    """
+    from sqlalchemy import text
+    if not re.fullmatch(r"[a-z_]{3,40}", column or ""):
+        raise ValueError(f"unsupported column {column!r}")
+    params = {"w": wiki_id, "s": session_id, "lim": int(limit)}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        rows = conn.execute(text(f"""
+            SELECT ct.{column} AS v, count(*) AS n
+              FROM documents d JOIN contracts ct
+                ON ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+               AND ct.source_doc = d.source_doc
+             WHERE {where} AND ct.{column} IS NOT NULL AND ct.{column}::text <> ''
+             GROUP BY 1 ORDER BY 2 DESC LIMIT :lim"""), params).fetchall()
+    values = [{"value": r[0], "count": int(r[1])} for r in rows]
+    recorded = sum(v["count"] for v in values)
+    return {"in_scope": int(in_scope), "recorded": recorded,
+            "unrecorded": int(in_scope) - recorded, "values": values,
+            "distinct": len(values), "column": column}
+
+
 def count_documents_with_typed_field(wiki_id: str, session_id: str,
                                     table: str, column: str,
                                     doc_type_patterns: list | None = None) -> dict:

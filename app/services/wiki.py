@@ -6954,7 +6954,50 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"Check the References section names the document you actually meant.]"
         )
 
-    # The question named a counterparty that couldn't be pinned to one document —
+    # A question asking for a number over the corpus, in any of the forms a lawyer
+# writes it.
+_RX_IS_COUNTING = re.compile(
+    r"\bhow\s+many\b|\bin\s+how\s+many\b|\bnumber\s+of\b"
+    r"|\bcount\s+(?:of|the)\b",
+    re.IGNORECASE)
+# Words that turn a bare number into a claim about a whole population. A
+# sentence saying "eight of the documents retrieved" is already honest; one
+# saying "eight documents in the corpus" is not.
+_RX_STATES_TOTAL = re.compile(
+    r"\b(?:\d{1,5}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b"
+    r"[^.\n]{0,60}?\b(?:document|contract|agreement|clause|NDA|"
+    r"petition|judgment|opinion)s?\b",
+    re.IGNORECASE)
+# The deterministic paths say where their figure came from. When one of these
+# phrases is present the number was counted, not sampled, and no warning is due.
+_COUNT_TRUSTED_MARKERS = (
+    "counted directly from the document index",
+    "counted from the document index",
+    "counted over every document in the wiki",
+    "counted from the typed clause index",
+    "counted from the recorded governing law",
+    "not from the pages a search returned",
+)
+
+
+def _is_counting_question(question: str) -> bool:
+    return bool(_RX_IS_COUNTING.search(question or ""))
+
+
+def _answer_states_a_total(answer: str) -> bool:
+    """True when the answer asserts a number of documents without saying it counted."""
+    a = answer or ""
+    if any(m in a.lower() for m in _COUNT_TRUSTED_MARKERS):
+        return False
+    # Only the prose matters. A References block naturally lists numbered
+    # sources and would otherwise trip this on every cited answer.
+    head = re.split(r"\n\s*(?:References|Sources)\b", a, maxsplit=1)[0]
+    return bool(_RX_STATES_TOTAL.search(head))
+
+
+# The question named a counterparty that couldn't be pinned to one document —
     # the answer came from a broad search that may have surfaced a sibling of the
     # same type. Warn deterministically (the model can't see that its source was a
     # best-guess rather than the document the user meant).
@@ -6964,6 +7007,27 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # Scope was inferred rather than stated by the question — say so, always.
     if scope_note:
         answer += f"\n\n[SCOPE NOTE: {scope_note}]"
+
+    # A counting question answered from retrieved pages can only report what
+    # was retrieved. Every deterministic count path returns long before this
+    # point, so anything reaching here counted a sample and, left alone, states
+    # it as a corpus figure: "Fifteen documents refer to Project Tamarind"
+    # against a true 48, "sixteen carry a typed IP ownership clause" against
+    # 302, "the publicity restriction appears in 23 documents" against 179.
+    # The documents listed are real every time; only the total is invented, and
+    # nothing in the wording tells the reader which is which.
+    try:
+        if _is_counting_question(question) and _answer_states_a_total(answer):
+            answer += (
+                "\n\n[COUNT WARNING: this answer was assembled from the documents "
+                "retrieved for your question, not from a count over the corpus. Any "
+                "total above is a floor, not the figure — there may be more that "
+                "were not retrieved. The documents named are real; the number is "
+                "not reliable. Asking for the count by instrument type, party or "
+                "clause type gets one taken from the index instead.]"
+            )
+    except Exception as e:
+        logger.error("Count-sample check failed: %s", e)
 
     # Map each selected page to its real document identifier — the SOURCE_DOC
     # filename (e.g. "...Legal Opinions (1)_Legal Opinion 6 (1).pdf"), not the
