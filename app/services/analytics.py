@@ -420,8 +420,24 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
             LIMIT :lim
         """), params).fetchall()
 
+    # Which instrument types the gap falls on. "Among contracts that record no
+    # governing law, which types make up the largest share?" is a question
+    # about the SHAPE of the gap, and answering it from retrieval means
+    # answering it from a sample. One more grouped query over the same
+    # predicate gives it exactly.
+    with db.get_engine().connect() as conn:
+        by_type = conn.execute(text(f"""
+            SELECT COALESCE(NULLIF(d2.doc_type, ''), 'Unclassified') AS t, count(*)
+              FROM contracts c
+              LEFT JOIN documents d2 ON d2.wiki_id = c.wiki_id
+                   AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc
+             WHERE {where} AND {missing_sql}
+             GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """), params).fetchall()
+
     return {
         "field": field, "label": spec["label"],
+        "by_type": [{"doc_type": r[0], "count": int(r[1])} for r in by_type],
         "in_scope": int(total),
         "missing": int(missing),
         "indeterminate": int(unknown),
