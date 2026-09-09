@@ -489,7 +489,8 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
 
 def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap",
                     parties: list[str] | None = None,
-                    doc_type: str | None = None) -> dict:
+                    doc_type: str | None = None,
+                    doc_type_patterns: list | None = None) -> dict:
     """Year-bucketed aggregate over documents.effective_date.
 
     Buckets with too few documents to mean anything are still returned, with
@@ -517,9 +518,19 @@ def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap"
     if metric == "contract_value":
         where += " AND c.clause_type_canon = 'contract_value'"
     where += _party_clause(parties, params)
-    if doc_type:
-        params["dt"] = f"%{doc_type}%"
-        where += " AND d2.doc_type ILIKE :dt"
+    # Same reason as find_gaps: one word in the question, several spellings in
+    # the corpus. "Have the liability caps recorded in Service Level Agreements
+    # risen over time" ran over all 1372 documents and labelled the whole
+    # corpus "decreasing" - a real table about a population nobody asked about.
+    _pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if not _pats and doc_type:
+        _pats = [doc_type]
+    if _pats:
+        _ors = []
+        for _i, _p in enumerate(_pats):
+            params[f"dt{_i}"] = f"%{_p}%"
+            _ors.append(f"{db._PRIMARY_DOC_TYPE_SQL.replace('d.', 'd2.')} ILIKE :dt{_i}")
+        where += " AND (" + " OR ".join(_ors) + ")"
 
     # documents.effective_date is TEXT, and 76 values on this corpus are not in
     # ISO form — a date cast throws on them and takes the whole query down.
@@ -552,13 +563,30 @@ def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap"
                 "median": float(r[4]) if r[4] is not None else None} for r in rows]
     usable = [b for b in buckets if b["with_value"] >= 3]
     direction = None
-    if len(usable) >= 2 and usable[0]["median"] and usable[-1]["median"]:
+    # Two endpoints are not a trend. The direction used to be read from the
+    # first and last usable bucket alone, which labelled the corpus
+    # "decreasing" over medians that ran 243 - 175 - 300 - 252 - 167 - 238 -
+    # 186 (up and down, four reversals), and labelled Service Level Agreements
+    # "increasing" from two usable buckets. So a direction is named only when
+    # there are at least three usable buckets AND most of the steps between
+    # them move the same way; otherwise the honest label is that the years do
+    # not point one way, with the table left in place to show why.
+    if len(usable) >= 3 and usable[0]["median"] and usable[-1]["median"]:
         first, last = usable[0]["median"], usable[-1]["median"]
         change = (last - first) / first if first else 0
-        if abs(change) >= 0.10:
+        _meds = [b["median"] for b in usable if b["median"]]
+        _steps = [b - a for a, b in zip(_meds, _meds[1:])]
+        _up = sum(1 for d in _steps if d > 0)
+        _down = sum(1 for d in _steps if d < 0)
+        _consistent = _steps and max(_up, _down) >= 0.67 * len(_steps)
+        if abs(change) < 0.10:
+            direction = "broadly flat"
+        elif _consistent and ((change > 0) == (_up > _down)):
             direction = "increasing" if change > 0 else "decreasing"
         else:
-            direction = "broadly flat"
+            direction = "no consistent direction"
+    elif len(usable) == 2:
+        direction = "too few years to call a direction"
     return {
         "metric": metric, "buckets": buckets,
         "years_with_enough_data": len(usable),

@@ -4623,6 +4623,46 @@ def count_documents_with_clause_text(wiki_id: str, session_id: str,
             + " AND ".join(clauses)), params).scalar() or 0
 
 
+def count_documents_with_typed_field(wiki_id: str, session_id: str,
+                                    table: str, column: str,
+                                    doc_type_patterns: list | None = None) -> dict:
+    """How many documents in scope carry a readable value in a typed column.
+
+    "How many Service Level Agreements record a readable rupee liability cap"
+    is a question about extraction coverage, not about wording, and the column
+    answers it exactly: a value either parsed to a number or it did not. The
+    compound branch used to report this half of the question as uncountable.
+    """
+    from sqlalchemy import text
+    if table not in ("contracts", "documents"):
+        raise ValueError(f"unsupported table {table!r}")
+    if not re.fullmatch(r"[a-z_]{3,40}", column or ""):
+        raise ValueError(f"unsupported column {column!r}")
+    params = {"w": wiki_id, "s": session_id}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    if table == "documents":
+        has = f"d.{column} IS NOT NULL AND d.{column}::text <> ''"
+    else:
+        has = (f"EXISTS (SELECT 1 FROM contracts ct WHERE ct.wiki_id = d.wiki_id "
+               f"AND ct.session_id = d.session_id AND ct.source_doc = d.source_doc "
+               f"AND ct.{column} IS NOT NULL AND ct.{column}::text <> '')")
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        with_value = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where} AND {has}"),
+            params).scalar() or 0
+    return {"in_scope": int(in_scope), "with_value": int(with_value),
+            "table": table, "column": column}
+
+
 def count_documents_with_clause_type(wiki_id: str, session_id: str,
                                      clause_type_canon: str,
                                      doc_type_patterns: list | None = None) -> dict:
