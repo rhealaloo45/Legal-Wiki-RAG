@@ -5979,6 +5979,70 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
+# A question asking for a number over the corpus, in any of the forms a lawyer
+# writes it.
+_RX_IS_COUNTING = re.compile(
+    r"\bhow\s+many\b|\bin\s+how\s+many\b|\bnumber\s+of\b"
+    r"|\bcount\s+(?:of|the)\b",
+    re.IGNORECASE)
+# Words that turn a bare number into a claim about a whole population. A
+# sentence saying "eight of the documents retrieved" is already honest; one
+# saying "eight documents in the corpus" is not.
+_RX_STATES_TOTAL = re.compile(
+    r"\b(?:\d{1,5}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b"
+    r"[^.\n]{0,60}?\b(?:document|contract|agreement|clause|NDA|"
+    r"petition|judgment|opinion)s?\b",
+    re.IGNORECASE)
+# The deterministic paths say where their figure came from. When one of these
+# phrases is present the number was counted, not sampled, and no warning is due.
+_COUNT_TRUSTED_MARKERS = (
+    "counted directly from the document index",
+    "counted from the document index",
+    "counted over every document in the wiki",
+    "counted from the typed clause index",
+    "counted from the recorded governing law",
+    "not from the pages a search returned",
+)
+
+
+# A reference line names its document before the first comma or pipe:
+# "[1] pdfs_by_category_generated_NDA_Foo.pdf, Clause 4 | Quote: ..."
+_RX_REF_LINE = re.compile(r"^\s*\[\d{1,2}\]\s*([^,|\n]{6,160})", re.MULTILINE)
+
+
+def _sole_cited_document(answer: str) -> str | None:
+    """The one document an answer cites, or None when it cites none or several."""
+    names = set()
+    for m in _RX_REF_LINE.finditer(answer or ""):
+        raw = m.group(1).strip().rstrip(".")
+        raw = re.sub(r"\.(pdf|docx?|txt)$", "", raw, flags=re.IGNORECASE)
+        if raw:
+            names.add(_norm_doc_name(raw))
+    if len(names) != 1:
+        return None
+    only = next(iter(names))
+    return only if 3 <= len(only) <= 120 else None
+
+
+def _is_counting_question(question: str) -> bool:
+    return bool(_RX_IS_COUNTING.search(question or ""))
+
+
+def _answer_states_a_total(answer: str) -> bool:
+    """True when the answer asserts a number of documents without saying it counted."""
+    a = answer or ""
+    if any(m in a.lower() for m in _COUNT_TRUSTED_MARKERS):
+        return False
+    # Only the prose matters. A References block naturally lists numbered
+    # sources and would otherwise trip this on every cited answer.
+    head = re.split(r"\n\s*(?:References|Sources)\b", a, maxsplit=1)[0]
+    return bool(_RX_STATES_TOTAL.search(head))
+
+
+
+
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "", clause_directive: str = "", ambiguity_directive: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
@@ -6954,69 +7018,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             f"Check the References section names the document you actually meant.]"
         )
 
-    # A question asking for a number over the corpus, in any of the forms a lawyer
-# writes it.
-_RX_IS_COUNTING = re.compile(
-    r"\bhow\s+many\b|\bin\s+how\s+many\b|\bnumber\s+of\b"
-    r"|\bcount\s+(?:of|the)\b",
-    re.IGNORECASE)
-# Words that turn a bare number into a claim about a whole population. A
-# sentence saying "eight of the documents retrieved" is already honest; one
-# saying "eight documents in the corpus" is not.
-_RX_STATES_TOTAL = re.compile(
-    r"\b(?:\d{1,5}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
-    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
-    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b"
-    r"[^.\n]{0,60}?\b(?:document|contract|agreement|clause|NDA|"
-    r"petition|judgment|opinion)s?\b",
-    re.IGNORECASE)
-# The deterministic paths say where their figure came from. When one of these
-# phrases is present the number was counted, not sampled, and no warning is due.
-_COUNT_TRUSTED_MARKERS = (
-    "counted directly from the document index",
-    "counted from the document index",
-    "counted over every document in the wiki",
-    "counted from the typed clause index",
-    "counted from the recorded governing law",
-    "not from the pages a search returned",
-)
-
-
-# A reference line names its document before the first comma or pipe:
-# "[1] pdfs_by_category_generated_NDA_Foo.pdf, Clause 4 | Quote: ..."
-_RX_REF_LINE = re.compile(r"^\s*\[\d{1,2}\]\s*([^,|\n]{6,160})", re.MULTILINE)
-
-
-def _sole_cited_document(answer: str) -> str | None:
-    """The one document an answer cites, or None when it cites none or several."""
-    names = set()
-    for m in _RX_REF_LINE.finditer(answer or ""):
-        raw = m.group(1).strip().rstrip(".")
-        raw = re.sub(r"\.(pdf|docx?|txt)$", "", raw, flags=re.IGNORECASE)
-        if raw:
-            names.add(_norm_doc_name(raw))
-    if len(names) != 1:
-        return None
-    only = next(iter(names))
-    return only if 3 <= len(only) <= 120 else None
-
-
-def _is_counting_question(question: str) -> bool:
-    return bool(_RX_IS_COUNTING.search(question or ""))
-
-
-def _answer_states_a_total(answer: str) -> bool:
-    """True when the answer asserts a number of documents without saying it counted."""
-    a = answer or ""
-    if any(m in a.lower() for m in _COUNT_TRUSTED_MARKERS):
-        return False
-    # Only the prose matters. A References block naturally lists numbered
-    # sources and would otherwise trip this on every cited answer.
-    head = re.split(r"\n\s*(?:References|Sources)\b", a, maxsplit=1)[0]
-    return bool(_RX_STATES_TOTAL.search(head))
-
-
-# The question named a counterparty that couldn't be pinned to one document —
+    # The question named a counterparty that couldn't be pinned to one document —
     # the answer came from a broad search that may have surfaced a sibling of the
     # same type. Warn deterministically (the model can't see that its source was a
     # best-guess rather than the document the user meant).

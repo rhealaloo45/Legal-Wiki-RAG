@@ -1544,6 +1544,22 @@ def generate_answer_node(state: QueryState) -> dict:
               "scope_method": "", "scope_docs": [],
               "pages_used": [], "files_used": [], "confidence_score": 0}
 
+    # A generator that returns nothing raises no exception, so the except above
+    # never sees it and every line below assigns into None — which surfaced to
+    # the user as "TypeError: 'NoneType' object does not support item
+    # assignment" followed by "No answer was produced", with no clue which
+    # function had gone quiet. One malformed edit to generate_answer put its
+    # tail outside the function body and took down every question that reaches
+    # the graph. Cheap to check, and it turns a dead request into a named fault.
+    if not isinstance(wr, dict):
+        logger.error("Answer generation returned %s, not a payload dict",
+                     type(wr).__name__)
+        wr = {"answer": "The answer generator returned nothing. This is a fault in "
+                        "the pipeline rather than a gap in the documents — the "
+                        "question was not answered and should be retried.",
+              "scope_method": "", "scope_docs": [],
+              "pages_used": [], "files_used": [], "confidence_score": 0}
+
     wr["intent"] = intent
     wr["intent_label"] = label
     wr["intent_confidence"] = state.get("intent_confidence", 0.0)
