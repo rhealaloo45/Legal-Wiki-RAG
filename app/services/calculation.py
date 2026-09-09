@@ -662,6 +662,55 @@ def _period_stated_in_question(question: str):
     return (best[0], best[1])
 
 
+# "How many days separate the decision of 4 November 2025 from the decision of
+# 4 July 2025?" — both dates are in the question, so this needs no document at
+# all. Measured live: the pipeline dated both decisions correctly from their
+# case numbers and then said the number of days between them "is not stated in
+# these judgments", which is true and useless.
+_RX_CALC_DATE_GAP = re.compile(
+    r"\bhow\s+(?:many\s+days|long)\b[^?]{0,60}?\b(?:separate|between|apart|"
+    r"elapsed?\s+between|from)\b"
+    r"|\bdays?\s+(?:between|separating)\b",
+    re.IGNORECASE)
+# The unit a conversion question asks for, when it is not days.
+_RX_CALC_TARGET_UNIT = re.compile(
+    r"\b(?:expressed|stated|measured|converted?|rounded)\b[^?]{0,30}?"
+    r"\bin\s+(?:whole\s+)?(week|month|year)s?\b"
+    r"|\bin\s+(?:whole\s+)?(week|month|year)s?\b[^?]{0,30}?\bhow\s+long\b",
+    re.IGNORECASE)
+
+
+def _dates_stated_in_question(question: str) -> list:
+    """Every explicit calendar date the question recites, parsed and sorted."""
+    from services import db as _db
+    from services import wiki as _wiki
+    out = []
+    for m in _wiki._QUESTION_DATE_RE.finditer(question or ""):
+        d = _db.parse_effective_date(m.group(0))
+        if d and d not in out:
+            out.append(d)
+    return sorted(out)
+
+
+def date_gap(question: str) -> dict:
+    """Days between two dates the question itself states."""
+    ds = _dates_stated_in_question(question)
+    if len(ds) < 2:
+        return {"ok": False, "missing": "two dates to measure between",
+                "detail": "Fewer than two calendar dates could be read from the "
+                          "question."}
+    a, b = ds[0], ds[-1]
+    return {"ok": True, "kind": "date_gap", "start": a, "end": b,
+            "days": (b - a).days}
+
+
+def _target_unit(question: str) -> str:
+    m = _RX_CALC_TARGET_UNIT.search(question or "")
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").lower()
+
+
 def period_days(question: str) -> dict:
     """A period the question states, converted to whole days."""
     p = _period_stated_in_question(question)
@@ -673,12 +722,31 @@ def period_days(question: str) -> dict:
     if unit == "hour":
         days = count / 24
         whole = int(days) if float(days).is_integer() else round(days, 2)
-        return {"ok": True, "kind": "period_days", "count": count, "unit": unit,
-                "days": whole, "basis": f"{count} hours ÷ 24"}
-    per = _PERIOD_IN_DAYS[unit]
-    return {"ok": True, "kind": "period_days", "count": count, "unit": unit,
-            "days": count * per,
-            "basis": f"{count} {unit}{'s' if count != 1 else ''} × {per} days"}
+        result = {"ok": True, "kind": "period_days", "count": count, "unit": unit,
+                  "days": whole, "basis": f"{count} hours ÷ 24"}
+    else:
+        per = _PERIOD_IN_DAYS[unit]
+        result = {"ok": True, "kind": "period_days", "count": count, "unit": unit,
+                  "days": count * per,
+                  "basis": f"{count} {unit}{'s' if count != 1 else ''} × {per} days"}
+
+    # The question may ask for a unit other than days: "a 45-day payment term,
+    # expressed in weeks (rounded down)". Converting to days and stopping there
+    # answers a question nobody asked, and was measured being declined outright.
+    target = _target_unit(question)
+    if target and target != unit:
+        per_target = _PERIOD_IN_DAYS[target]
+        whole = result["days"] // per_target
+        rem = result["days"] - whole * per_target
+        result.update(
+            target_unit=target, target_value=int(whole),
+            target_basis=(f"{result['days']} days ÷ {per_target} days per "
+                          f"{target} = {result['days'] / per_target:.2f}, "
+                          f"so {int(whole)} whole {target}"
+                          f"{'s' if whole != 1 else ''}"
+                          + (f" with {int(rem)} day{'s' if rem != 1 else ''} "
+                             f"left over" if rem else "")))
+    return result
 
 
 _RX_ISO_DATE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
@@ -1012,7 +1080,12 @@ def is_calculation_query(question: str) -> str:
     # question's own words is not estimating. Confirmed live: three separate
     # evaluation questions of this shape were declined as "needs an expiry date"
     # while the period sat in the question itself.
-    if _RX_CALC_IN_DAYS.search(q) and _period_stated_in_question(q):
+    # Ahead of period_days: a question reciting two dates and asking how many
+    # days separate them is measuring between them, not converting a duration.
+    if _RX_CALC_DATE_GAP.search(q) and len(_dates_stated_in_question(q)) >= 2:
+        return "date_gap"
+    if (_RX_CALC_IN_DAYS.search(q) or _RX_CALC_TARGET_UNIT.search(q)) \
+            and _period_stated_in_question(q):
         return "period_days"
     if _RX_CALC_LD.search(q) and _RX_CALC_LD_WEEKS.search(q):
         return "ld"
@@ -1160,12 +1233,33 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
                      "ingest; the subtraction is exact.")
         lines.append("")
 
-    elif kind == "period_days":
+    elif kind == "date_gap":
         lines.append(f"**{result['days']} days**")
+        lines.append("")
+        lines.append(f"- Earlier date: {result['start'].isoformat()}")
+        lines.append(f"- Later date: {result['end'].isoformat()}")
+        lines.append(f"- {result['end'].isoformat()} − {result['start'].isoformat()} "
+                     f"= **{result['days']} days**")
+        lines.append("")
+        lines.append("Both dates are the ones the question states; the "
+                     "subtraction is exact.")
+        lines.append("")
+
+    elif kind == "period_days":
+        if result.get("target_unit"):
+            lines.append(f"**{result['target_value']} "
+                         f"{result['target_unit']}"
+                         f"{'s' if result['target_value'] != 1 else ''}**")
+        else:
+            lines.append(f"**{result['days']} days**")
         lines.append("")
         lines.append(f"- Period stated in the question: {result['count']} "
                      f"{result['unit']}{'s' if result['count'] != 1 else ''}")
-        lines.append(f"- {result['basis']} = **{result['days']} days**")
+        # A period already given in days needs no "x 1 days" step shown.
+        if result["unit"] != "day":
+            lines.append(f"- {result['basis']} = **{result['days']} days**")
+        if result.get("target_unit"):
+            lines.append(f"- {result['target_basis']}")
         lines.append("")
         if result["unit"] in ("year", "month"):
             lines.append("Converted at the usual convention of 365 days to a "
@@ -1343,8 +1437,8 @@ def answer(question: str, wiki_id: str, session_id: str,
     # records ... expressed in days") often resolves to nothing or to the wrong
     # sibling, and declining a stated 5-years-to-days conversion on that basis
     # was measured as a wrong answer three times in one evaluation run.
-    if kind == "period_days":
-        result = period_days(question)
+    if kind in ("period_days", "date_gap"):
+        result = period_days(question) if kind == "period_days" else date_gap(question)
         if not result.get("ok"):
             return None
         label = ", ".join(_label_for(d, wiki_id, session_id)

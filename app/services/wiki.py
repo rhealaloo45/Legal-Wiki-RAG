@@ -8518,6 +8518,14 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
 # An explicit calendar date typed in the question ("the SA dated 15 January
 # 2026", "signed on August 28, 2025"). Two orderings: day-month-year (the
 # convention this corpus's own documents use) and month-day-year.
+# Words that make a singular noun stand for its whole class. "Typically",
+# "generally", "usually" and the like turn "a legal opinion" into "legal
+# opinions as a rule", which is a corpus question, not a document one.
+_RX_GENERALISING = re.compile(
+    r"\b(?:typical(?:ly)?|generally|usually|commonly|normally|"
+    r"as\s+a\s+rule|in\s+general|on\s+average|most\s+often|"
+    r"tend\s+to|tends\s+to)\b",
+    re.IGNORECASE)
 _QUESTION_DATE_RE = re.compile(
     r'\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|'
     r'September|October|November|December)\s+\d{4}\b'
@@ -12256,6 +12264,16 @@ def classify_query(question: str, session_id: str) -> dict:
     # gate just never let it).
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         logger.info("Broad/plural-family phrasing → skip disambiguation")
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # A generalising question is about a CLASS even when its noun is singular:
+    # "what limitations does a legal opinion in this corpus TYPICALLY place on
+    # its own conclusions?" names no document and wants none. Neither gate above
+    # catches it — the noun is singular and there is no breadth word — so it was
+    # answered with "which agreement are you asking about?", a prompt the reader
+    # cannot usefully answer because the question was never about one agreement.
+    if _RX_GENERALISING.search(question):
+        logger.info("Generalising phrasing → skip disambiguation")
         return {"needs_disambiguation": False, "documents": docs}
 
     # A named party that resolves via full-text content search is an unambiguous

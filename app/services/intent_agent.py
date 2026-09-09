@@ -3683,8 +3683,40 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     # two filters, so "how many contracts are governed by the laws of England
     # and Wales" — one filter, and a perfectly ordinary question — had no
     # deterministic path and was answered by retrieval, which found 4 of the 5.
+    # Two or more jurisdictions named in a counting question is a comparison:
+    # report a count for each rather than picking one. "How many depart by
+    # choosing Singapore, and how does that compare with England and Wales?"
+    # named three (the framing clause says Indian law) and was answered 3 and 3
+    # by retrieval against a true 5 and 5.
+    _laws = _laws_named(question or "")
+    if len(_laws) > 1 and re.search(r"\bhow\s+many\b", question or "", re.I):
+        _counts = []
+        for _law in _laws[:4]:
+            try:
+                _lr = _db.list_documents_matching(
+                    wiki_id, session_id, parties or None, patterns or None,
+                    governing_law=_law, limit=1)
+            except Exception as e:
+                logger.error("[AGENT] multi-law count failed for %r: %s", _law, e)
+                continue
+            if _lr:
+                _counts.append((_law, _lr["total"]))
+        if len([c for c in _counts if c[1]]) > 1:
+            _noun = label or "contract"
+            _lines = [f"**Counted by governing law across the corpus:**", ""]
+            for _law, _n in _counts:
+                _lines.append(f"- {_law}: {_n} {_noun}(s)")
+            _lines += ["", "Counted from the recorded governing law of every "
+                           "document in the wiki, not from the pages a search "
+                           "returned. A document whose governing law was never "
+                           "extracted is in none of these figures."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = []
+            _p["meta_answer"] = False
+            return _p
+
     _gov = _compound_predicates(question or "").get("governing_law")
-    if _gov and _RX_COUNT.search(question or ""):
+    if _gov and re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
         try:
             _gres = _db.list_documents_matching(
                 wiki_id, session_id, parties or None, patterns or None,
@@ -3694,7 +3726,34 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
             _gres = None
         if _gres and _gres["total"]:
             _noun = label or "document"
+            # "...how does that compare with England and Wales?" — the second
+            # law is a second count over the same corpus, not a filter on the
+            # first. Measured live: this two-sided comparison ran on retrieval
+            # and reported 3 and 3 where the true figures are 5 and 5, while
+            # each law counted on its own was exact.
+            _second = None
+            _cmp = re.search(
+                r"\b(?:compare[sd]?\s+(?:with|to)|versus|vs\.?|against|"
+                r"and\s+how\s+many)\b(.+)$", question or "", re.IGNORECASE | re.DOTALL)
+            if _cmp:
+                _law2 = _compound_predicates(_cmp.group(1)).get("governing_law")
+                if _law2 and _law2.lower() != _gov.lower():
+                    try:
+                        _r2 = _db.list_documents_matching(
+                            wiki_id, session_id, parties or None, patterns or None,
+                            governing_law=_law2, limit=5)
+                        if _r2:
+                            _second = (_law2, _r2["total"])
+                    except Exception as e:
+                        logger.error("[AGENT] second governing-law count failed: %s", e)
             _lines = [f"**{_gres['total']} {_noun}(s) governed by {_gov}.**", ""]
+            if _second:
+                _l2, _n2 = _second
+                _rel = ("the same number" if _n2 == _gres["total"] else
+                        f"{'more' if _n2 > _gres['total'] else 'fewer'} "
+                        f"({abs(_n2 - _gres['total'])} {'more' if _n2 > _gres['total'] else 'fewer'})")
+                _lines = [f"**{_gres['total']} {_noun}(s) governed by {_gov}, "
+                          f"and {_n2} governed by {_l2} — {_rel}.**", ""]
             for d in _gres["documents"]:
                 _date = f" — {d['effective_date']}" if d.get("effective_date") else ""
                 _lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{_date}")
@@ -3918,6 +3977,33 @@ _LAW_ADJECTIVE = {"indian": "India", "english": "English",
                   "american": "America", "japanese": "Japan",
                   "german": "Germany", "french": "France",
                   "singaporean": "Singapore", "australian": "Australia"}
+# Every jurisdiction a question names, however it names it. A comparison
+# question puts them in three different constructions at once -- "governed by
+# Indian law ... choosing the laws of Singapore ... the number choosing England
+# and Wales" -- and a single-law extractor returns whichever it happens to hit
+# first, which for that question was the one in the framing clause. Counting
+# each named jurisdiction answers what was asked and cannot pick the wrong one.
+_RX_LAW_MENTIONS = re.compile(
+    r"\b(?:laws?\s+of|governed\s+by|choosing|choose|subject\s+to\s+the\s+laws?\s+of)\s+"
+    r"(?:the\s+)?([A-Z][\w'&.-]*(?:\s+(?:and\s+)?[A-Z][\w'&.-]*){0,2})"
+    r"|\b([A-Z][a-z]+)\s+law\b")
+
+
+def _laws_named(question: str) -> list:
+    """Distinct jurisdictions the question names, in the order they appear."""
+    out = []
+    for m in _RX_LAW_MENTIONS.finditer(question or ""):
+        raw = (m.group(1) or m.group(2) or "").strip().rstrip(",.;:")
+        raw = _LAW_ADJECTIVE.get(raw.lower(), raw)
+        # Trim a trailing word that belongs to the sentence, not the place.
+        raw = re.sub(r"\s+(?:law|laws|rather|instead|and)$", "", raw,
+                     flags=re.IGNORECASE).strip()
+        if len(raw) > 2 and raw.lower() not in {"this", "that", "these", "the"} \
+                and raw not in out:
+            out.append(raw)
+    return out
+
+
 _TERM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12}
 _RX_TERM_CMP = re.compile(
