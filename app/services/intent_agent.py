@@ -3028,7 +3028,9 @@ _RX_GAP = re.compile(
     re.IGNORECASE)
 _RX_GAP_FIELD = re.compile(
     r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?|"
-    r"dispute\s+resolution(?:\s+(?:clause|provision))?|arbitration\s+clause)\b",
+    r"dispute\s+resolution(?:\s+(?:clause|provision))?|arbitration\s+clause|"
+    r"(?:intellectual\s+property|ip)\s+ownership(?:\s+clause)?|insurance\s+clause|"
+    r"confidentiality\s+clause|indemnity\s+clause)\b",
     re.IGNORECASE)
 
 # A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
@@ -3369,6 +3371,13 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             field = ("dispute_resolution"
                      if re.search(r"dispute\s+resolution|arbitration\s+clause",
                                   question or "", re.I)
+                     else "ip_ownership"
+                     if re.search(r"(?:intellectual\s+property|\bip\b)\s+ownership",
+                                  question or "", re.I)
+                     else "insurance" if re.search(r"insurance", question or "", re.I)
+                     else "confidentiality"
+                     if re.search(r"confidentiality\s+clause", question or "", re.I)
+                     else "indemnity" if re.search(r"indemnity", question or "", re.I)
                      else "governing_law" if re.search(r"governing\s+law", question or "", re.I)
                      else "termination" if re.search(r"terminat", question or "", re.I)
                      else "liability_cap")
@@ -4282,6 +4291,13 @@ def _clause_commonality_answer(question: str, session_id: str,
 
     if not _RX_CLAUSE_COMMONALITY.search(question or ""):
         return None
+    # "How many contracts carry NO insurance clause at all?" is a gap question
+    # and its answer is the count that lack one. This branch answers the
+    # opposite — how many carry one — so firing on it reported 219 of 1372
+    # carry an insurance clause to a question whose answer is 724 carry none:
+    # a real number, exactly inverted. The gap branch owns these.
+    if _is_analytics_query(question) == "gap" or _RX_GAP.search(question or ""):
+        return None
     canon, _after = None, ""
     for m in _RX_COMMONALITY_CLAUSE.finditer(question or ""):
         phrase = m.group(1).strip()
@@ -4315,6 +4331,10 @@ def _clause_commonality_answer(question: str, session_id: str,
     n, total = data["with_clause"], data["in_scope"]
     pct = (n / total * 100) if total else 0
     scope_label = f"{label}(s)" if label else "documents in the corpus"
+    # The singular for the trailing sentence. rstrip("(s)") strips any trailing
+    # s or parenthesis, which turned "documents in the corpus" into "documents
+    # in the corpu"; the suffix is removed as a suffix instead.
+    scope_singular = label if label else "document in the corpus"
     verdict = ("a common feature" if pct >= 50 else
                "present in a substantial minority" if pct >= 20 else
                "uncommon")
@@ -4324,7 +4344,7 @@ def _clause_commonality_answer(question: str, session_id: str,
         f"**{canon.replace('_', ' ')} clauses are {verdict}: {n} of {total} "
         f"{scope_label} carry one ({pct:.0f}%).**",
         "",
-        f"Counted from the typed clause index over every {scope_label.rstrip('(s)')} "
+        f"Counted from the typed clause index over every {scope_singular} "
         f"in the wiki, not from the documents a search returned. A document is "
         f"counted once however many such clauses it contains.",
     ]
@@ -4810,8 +4830,12 @@ _RX_DOCTYPE_LEAD = re.compile(
     re.IGNORECASE)
 # The instrument nouns a set or compound question names. Wider than the
 # counting vocabulary, which deliberately excludes bare "ventures".
+# The modifier words use the same class as the count regexes, apostrophe
+# included: without it "Shareholders' Agreements" failed to parse as an
+# instrument type while the plain "Shareholder Agreements" worked, so a
+# question scoped to that family was silently answered over the whole corpus.
 _RX_DOCTYPE_NOUN = re.compile(
-    rf"\b((?:[a-z][a-z-]*\s+){{0,3}}?"
+    rf"\b((?:{_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS}|ventures?|jvs?|shas?))\b", re.IGNORECASE)
 
 
