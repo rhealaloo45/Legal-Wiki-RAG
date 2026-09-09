@@ -370,7 +370,7 @@ def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
 
 def find_gaps(wiki_id: str, session_id: str, field: str,
               parties: list[str] | None = None, doc_type: str | None = None,
-              limit: int = 50) -> dict:
+              limit: int = 50, doc_type_patterns: list | None = None) -> dict:
     """Documents that genuinely LACK `field`, separated from ones we can't read.
 
     The separation is the entire point. A naive `IS NULL` gap query on this
@@ -391,11 +391,24 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
     params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
     where = "c.wiki_id = :w AND c.session_id = :sid"
     where += _party_clause(parties, params)
-    if doc_type:
-        params["dt"] = f"%{doc_type}%"
-        where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
-                     AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc
-                     AND d2.doc_type ILIKE :dt)"""
+    # An instrument type is one string in the question and many spellings in
+    # the corpus: an NDA is filed under "Mutual Confidentiality and
+    # Non-Disclosure Agreement", "Non-Disclosure Agreement" and both again in
+    # upper case. A single ILIKE catches one of them, so the resolved pattern
+    # list is accepted and OR-ed. Measured live: "how many NDAs record no
+    # liability cap" ran with no type filter at all and answered 511 - the
+    # corpus-wide figure - against a true 142.
+    _pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if not _pats and doc_type:
+        _pats = [doc_type]
+    if _pats:
+        _ors = []
+        for _i, _p in enumerate(_pats):
+            params[f"dt{_i}"] = f"%{_p}%"
+            _ors.append(f"{db._PRIMARY_DOC_TYPE_SQL.replace('d.', 'd2.')} ILIKE :dt{_i}")
+        where += (" AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id"
+                  " AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc"
+                  " AND (" + " OR ".join(_ors) + "))")
 
     if spec.get("clause_type"):
         # Absence of a typed clause row. There is no "recorded elsewhere"
