@@ -2821,6 +2821,42 @@ _RX_COUNT_PARTY = re.compile(
     r"\b(?:with|for|involving|between|from|against)\s+"
     r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
 )
+# The other half of the same question. A lawyer asks "how many NDAs name
+# Infiniti Retail Limited as a party" at least as often as "how many NDAs with
+# Infiniti Retail Limited", and only the second form has a preposition for the
+# regex above to key on. Measured live: the first form counted every NDA in the
+# corpus, 147, against a true 13, with nothing in the output to show the party
+# had been dropped.
+_RX_COUNT_PARTY_NAMED = re.compile(
+    r"\b(?:nam(?:e|es|ed|ing)|list(?:s|ed)?|identif(?:y|ies|ied))\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)"
+    r"\s+as\s+(?:an?\s+|the\s+|its\s+|their\s+)?(?:part(?:y|ies)|"
+    r"counterpart(?:y|ies)|signator(?:y|ies)|contracting\s+part(?:y|ies))",
+)
+# "the agreements to which Tata Sons is a party" — the relative-clause form.
+_RX_COUNT_PARTY_TO_WHICH = re.compile(
+    r"\bto\s+which\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)"
+    r"\s+(?:is|was|are|were)\s+(?:an?\s+|the\s+)?part(?:y|ies)",
+)
+
+
+def _count_party_names(question: str) -> list:
+    """Every way a counting question can name the party it wants counted.
+
+    Returns [] rather than guessing when no form matches, so the caller falls
+    through to retrieval instead of counting a set nobody asked for.
+    """
+    for rx in (_RX_COUNT_PARTY, _RX_COUNT_PARTY_NAMED, _RX_COUNT_PARTY_TO_WHICH):
+        m = rx.search(question or "")
+        if not m:
+            continue
+        raw = m.group(1).strip().rstrip(".,;:?")
+        parts = re.split(r"\s+(?:and|&)\s+", raw)
+        names = [p.strip() for p in parts if len(p.strip()) > 2]
+        if names:
+            return names
+    return []
 _RX_COUNT_DOCTYPE = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
     rf"((?:(?!(?:{_COUNT_BLOCKERS})\b){_COUNT_MODIFIER}\s+){{0,3}}?"
@@ -2851,6 +2887,55 @@ _RX_COUNT_TOTAL = re.compile(
 # and "lack" but not a bare "no", so that phrasing reached the total branch and
 # was answered 1372 -- the size of the wiki, to a question about part of it.
 # Guarded against decimals ("no. 5") the same way _RX_GAP is.
+# Words that carry no constraint of their own, so a counting question made
+# only of these plus its count noun really is asking for the size of the wiki.
+_TOTALITY_FILLER = {
+    "a", "an", "the", "this", "that", "these", "those", "all", "any",
+    "we", "our", "us", "i", "my", "you", "your", "it", "its",
+    "is", "are", "was", "were", "be", "been", "do", "does", "did", "have",
+    "has", "had", "got", "hold", "holds", "held", "there", "here",
+    "in", "on", "at", "of", "for", "to", "and", "or", "s",
+    "total", "altogether", "overall", "currently", "right", "now", "today",
+    "please", "just", "about", "roughly", "approximately", "exactly",
+    "wiki", "corpus", "workspace", "collection", "database", "system",
+    "many", "much", "how", "number", "count", "overall",
+}
+# The count noun and the totality phrase, stripped so what remains is whatever
+# the question ACTUALLY narrows by.
+_RX_TOTALITY_LEAD = re.compile(
+    r"(?:how\s+many|number\s+of|count\s+(?:of|the))", re.IGNORECASE)
+_RX_TOTALITY_PHRASE = re.compile(
+    r"(?:in\s+total|in\s+all|altogether|overall|"
+    r"in\s+(?:this|the)\s+(?:wiki|corpus|workspace|collection)|"
+    r"do\s+we\s+(?:have|hold)|are\s+there|have\s+we\s+got)",
+    re.IGNORECASE)
+
+
+def _is_bare_totality(question: str) -> bool:
+    """True only when nothing in the question narrows the count.
+
+    The whole-corpus branch used to be gated by a list of narrowing words to
+    veto. A blocklist cannot be finished: "name X as a party", "carry a typed
+    confidentiality clause", "are arbitration petitions, by case number" and
+    "restrict a party from issuing a press release" all walked past it and were
+    answered with the size of the wiki -- 1372 to questions whose answers were
+    35, 559, 16 and 179. Four confident wrong numbers with nothing in the
+    output to show a filter had been dropped.
+
+    So the test is inverted. Strip the count phrase, the count noun and the
+    totality phrase; if any content word is left standing, the question is
+    about a subset and this branch must not answer it. Being too strict here
+    costs a fall-through to retrieval; being too loose states the wrong number
+    as fact.
+    """
+    t = (question or "").lower().strip().rstrip("?.! ")
+    t = _RX_TOTALITY_LEAD.sub(" ", t)
+    t = _RX_TOTALITY_PHRASE.sub(" ", t)
+    t = re.sub(rf"(?:{_COUNT_NOUNS})", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"[^a-z]+", " ", t)
+    return not [w for w in t.split() if w not in _TOTALITY_FILLER]
+
+
 _RX_COUNT_TOTAL_VETO = re.compile(
     r"\b(?:mention\w*|contain\w*|includ\w*|reference\w*|involving|"
     r"that|which|whose|where|with|without|missing|lack\w*|"
@@ -3640,16 +3725,10 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     "you have none" is far worse than a slow answer.
     """
     from services import db as _db, wiki
-    parties: list[str] = []
-    m = _RX_COUNT_PARTY.search(question or "")
-    if m:
-        raw = m.group(1).strip().rstrip(".,;:?")
-        # "X and Y" is two parties; "Tata Sons and Company Limited" is one.
-        # Split only when both sides survive as plausible names, and let the
-        # AND-semantics of the query do the rest — a bad split narrows the
-        # count rather than inflating it, which fails safe.
-        parts = re.split(r"\s+(?:and|&)\s+", raw)
-        parties = [p.strip() for p in parts if len(p.strip()) > 2]
+    # "X and Y" is two parties; "Tata Sons and Company Limited" is one. The
+    # split lets the AND-semantics of the query do the rest — a bad split
+    # narrows the count rather than inflating it, which fails safe.
+    parties: list[str] = _count_party_names(question)
 
     # Only a qualified type ("SLAs", "supply agreements") narrows the query;
     # the bare noun ("contracts", "documents") is the generic ask and must not
@@ -3664,9 +3743,44 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     # answer safely — but a bare totality question ("how many documents are
     # there in total") is the exception, and the one case where the index is
     # strictly better than anything retrieval can say.
+    # A clause TYPE is the strongest predicate a counting question can carry,
+    # and it must be tried before the literal-text one. "How many NDAs carry an
+    # intellectual property ownership clause" was matching the words
+    # "intellectual property ownership" against raw page text and reporting 5,
+    # where the typed clause index — which is what "carry a clause" means —
+    # holds 13. And "how many documents carry a typed confidentiality clause"
+    # had no path at all: no party, no instrument type, so it fell to the
+    # whole-corpus branch and was answered 1372 against a true 559.
+    _clause_canon = _compound_clause_type(question or "")
+    if _clause_canon and re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
+        try:
+            _cd = _db.count_documents_with_clause_type(
+                wiki_id, session_id, _clause_canon,
+                doc_type_patterns=patterns or None)
+        except Exception as e:
+            logger.error("[AGENT] clause-type count failed: %s", e)
+            _cd = None
+        if _cd and _cd.get("with_clause"):
+            _cnoun = label or "document"
+            from services import clause_vocab as _cv
+            _clabel = _cv.display(_clause_canon)
+            _lines = [f"**{_cd['with_clause']} of {_cd['in_scope']} {_cnoun}(s) "
+                      f"carry {'an' if _clabel[0] in 'aeiou' else 'a'} "
+                      f"{_clabel} clause.**", ""]
+            for _ex in _cd.get("examples") or []:
+                _lines.append(f"- {_dp_display(_ex, wiki_id, session_id)}")
+            _lines += ["", "Counted from the typed clause index over every "
+                           "document in the wiki, not from the pages a search "
+                           "returned. A clause of this kind that was never "
+                           "typed as one is not in the figure."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = list(_cd.get("examples") or [])
+            _p["meta_answer"] = False
+            return _p
+
     # A text predicate is a third way to pin a count, alongside a party and an
     # instrument type, and it is the one that was missing.
-    _predicate = _count_predicate_phrase(question)
+    _predicate = "" if _clause_canon else _count_predicate_phrase(question)
     if _predicate:
         try:
             res = _db.list_documents_matching(
@@ -3801,7 +3915,8 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     _whole_corpus = False
     if not parties and not patterns:
         if (_RX_COUNT_TOTAL.search(question or "")
-                and not _RX_COUNT_TOTAL_VETO.search(question or "")):
+                and not _RX_COUNT_TOTAL_VETO.search(question or "")
+                and _is_bare_totality(question)):
             _whole_corpus = True
         else:
             return None
@@ -3836,9 +3951,11 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
                 logger.error("[AGENT] compound clause sub-count failed: %s", e)
                 _cdata = None
             if _cdata and _cdata.get("with_clause"):
+                from services import clause_vocab as _cv
+                _sublabel = _cv.display(_sub_clause)
                 _sub_lines = ["", f"**Of those, {_cdata['with_clause']} carry "
-                                  f"{'an' if _sub_clause[0] in 'aeiou' else 'a'} "
-                                  f"{_sub_clause.replace('_', ' ')} clause.**"]
+                                  f"{'an' if _sublabel[0] in 'aeiou' else 'a'} "
+                                  f"{_sublabel} clause.**"]
             else:
                 _sub_lines = ["", "*The second part of this question — “"
                               + _tail.rstrip("?.") + "” — could not be counted "
