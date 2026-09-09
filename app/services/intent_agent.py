@@ -3016,7 +3016,15 @@ _RX_AGG_CARVEOUT_VETO = re.compile(
 _RX_GAP = re.compile(
     r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,80}?"
     r"\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
-    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b",
+    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b"
+    # The same two halves in the other order. "Among contracts that record NO
+    # governing law, WHICH instrument types make up the largest share?" states
+    # the gap first and asks about it second, which is ordinary English and was
+    # not matched — so the question reached retrieval, which answered it from
+    # an unrelated court exhibit it happened to fetch.
+    r"|\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
+    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b[^?]{0,80}?"
+    r"\b(?:which|what|list|show|find|how\s+many)\b",
     re.IGNORECASE)
 _RX_GAP_FIELD = re.compile(
     r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?|"
@@ -3368,6 +3376,21 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             if data.get("error"):
                 return None
             lines = [f"**{data['missing']} document(s) state no {data['label']}.**", ""]
+            # "which instrument types make up the largest share" asks about the
+            # shape of the gap, not its members. Led with the breakdown when
+            # that is what was asked, because a list of twenty filenames is not
+            # an answer to it — measured live, that question was answered from
+            # an unrelated court exhibit retrieval had fetched.
+            _wants_types = re.search(
+                r"\b(?:which|what)\b[^?]{0,60}?\b(?:instrument\s+types?|document\s+types?|"
+                r"types?\s+of\s+(?:document|contract|instrument|agreement))\b"
+                r"|\blargest\s+share\b|\bmost\s+common(?:ly)?\b|\bbreak\s*down\b",
+                question or "", re.I)
+            if _wants_types and data.get("by_type"):
+                lines.append("By instrument type:")
+                for t in data["by_type"]:
+                    lines.append(f"- {t['doc_type']}: {t['count']}")
+                lines.append("")
             for d in data["documents"][:20]:
                 date = f" — {d['effective_date']}" if d.get("effective_date") else ""
                 lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])}{date}")
