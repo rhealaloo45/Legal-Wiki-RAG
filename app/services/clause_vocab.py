@@ -268,6 +268,53 @@ def normalise(label: str) -> str:
     return s
 
 
+# Canonical names are database identifiers, not English. Rendering one
+# straight into a sentence produced "carry an ip ownership clause"; a lawyer
+# reading that cannot tell whether the system understood the question.
+DISPLAY = {
+    "ip_ownership": "intellectual property ownership",
+    "liability_cap": "liability cap",
+    "liability_cap_exclusion": "liability cap exclusion",
+    "indemnity_exclusion": "indemnity exclusion",
+    "force_majeure": "force majeure",
+    "termination_cause": "termination for cause",
+    "termination_convenience": "termination for convenience",
+    "termination_change_of_control": "termination on change of control",
+    "notice_period": "notice period",
+    "payment_terms": "payment terms",
+    "fee_escalation": "fee escalation",
+    "contract_value": "contract value",
+    "audit_rights": "audit rights",
+    "service_levels": "service levels",
+    "change_control": "change control",
+    "data_protection": "data protection",
+    "security_incident": "security incident",
+    "records_retention": "records retention",
+    "governing_law": "governing law",
+    "dispute_resolution": "dispute resolution",
+    "anti_bribery": "anti-bribery",
+    "entire_agreement": "entire agreement",
+    "third_party_rights": "third party rights",
+    "relationship_of_parties": "relationship of the parties",
+    "further_assurance": "further assurance",
+    "amendment_clause": "amendment",
+    "board_composition": "board composition",
+    "reserved_matters": "reserved matters",
+    "information_rights": "information rights",
+    "conditions_precedent": "conditions precedent",
+    "restrictive_covenant": "restrictive covenant",
+    "transfer_restriction": "transfer restriction",
+    "permitted_use": "permitted use",
+    "minimum_commitment": "minimum commitment",
+    "interim_relief": "interim relief",
+}
+
+
+def display(canon: str) -> str:
+    """The English name for a canonical clause type, for use in a sentence."""
+    return DISPLAY.get(canon or "", (canon or "").replace("_", " "))
+
+
 def canonical(label: str) -> str | None:
     """The canonical type for one raw clause label, or None if unmatched.
 
