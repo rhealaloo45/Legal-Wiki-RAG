@@ -9847,7 +9847,7 @@ _PARTY_GENERIC_WORDS = frozenset({
 })
 
 
-def _distinctive_party_token(name: str) -> str:
+def _distinctive_party_token(name: str, skip: frozenset = frozenset()) -> str:
     """The one word of a party name that identifies the party.
 
     "Aether Technologies Inc." → "Aether"; "Helios Energy Corporation" →
@@ -9856,9 +9856,16 @@ def _distinctive_party_token(name: str) -> str:
     page titles. Returns "" when nothing distinctive survives (a name made
     entirely of generic words), so the caller can skip it rather than search
     for a word that would match half the corpus.
+
+    `skip` lets a caller ask for the NEXT distinctive word instead of the
+    first — used when two different companies in the same question share a
+    leading word ("Apex Falcora Commodities Corp." and "Falcora Materials
+    Pte. Ltd." both lead with "Falcora"), so the second party is not silently
+    dropped as if it were a repeated mention of the first.
     """
     for word in re.split(r'[^A-Za-z0-9]+', name or ''):
-        if len(word) >= 3 and word.lower() not in _PARTY_GENERIC_WORDS:
+        if (len(word) >= 3 and word.lower() not in _PARTY_GENERIC_WORDS
+                and word.lower() not in skip):
             return word
     return ""
 
@@ -10117,7 +10124,19 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
     return set()
 
 
-_BETWEEN_RE = re.compile(r'\bbetween\b', re.I)
+# A lawyer enumerating several matters does not necessarily say "between"
+# every time — "the one WITH Tata Communications and Palladion, the one
+# between Falcora Commodities and Falcora Materials, and the one between..."
+# uses both in a single sentence. _BETWEEN_RE originally saw only two "between"
+# spans in that question, so the pair before the first one (Tata/Palladion)
+# was swept into the FIRST segment's head instead of getting a segment of its
+# own — the resolver then read that combined text as one pair, matched the
+# Tata/Palladion document, and silently dropped Falcora. "with" is scoped to
+# right after an enumeration word (one/first/second/third/matter/agreement) so
+# it does not fire on ordinary prose use of "with" elsewhere in the question.
+_BETWEEN_RE = re.compile(
+    r'\bbetween\b|\b(?:the\s+)?(?:one|first|second|third|other|matter|'
+    r'agreement)\s+with\b', re.I)
 
 # What joins one named instrument to the NEXT one in a question that names
 # several ("... dated 25 December 2019 AND THE Key Employee Retention Agreement
@@ -10268,6 +10287,19 @@ def _resolve_one_party_pair(question: str, session_id: str,
     token_full: dict[str, str] = {}
     for n in names:
         tok = _distinctive_party_token(n)
+        if tok and tok.lower() in {t.lower() for t in tokens}:
+            # The word collides with one already taken. If it came from the
+            # SAME full name, this is a repeated mention of one party and the
+            # collision is correct — drop it. If it came from a DIFFERENT
+            # full name, two distinct parties share a leading word (affiliated
+            # entities in the same corporate family are common on this
+            # corpus — "Apex Falcora Commodities Corp." and "Falcora
+            # Materials Pte. Ltd." both lead with "Falcora"), and dropping the
+            # second silently loses one whole side of the pair. Retry with
+            # that party's next distinctive word instead.
+            _prior_full = token_full.get(next(t for t in tokens if t.lower() == tok.lower()))
+            if _prior_full and _prior_full.strip().lower() != n.strip().lower():
+                tok = _distinctive_party_token(n, skip=frozenset({tok.lower()}))
         if tok and tok.lower() not in {t.lower() for t in tokens}:
             tokens.append(tok)
             token_full[tok] = n
