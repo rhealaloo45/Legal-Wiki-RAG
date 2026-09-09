@@ -3676,10 +3676,13 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             _col, _flabel = _consistency_field(question)
             _cs_label, _cs_pats = _doctype_from_question(question)
             _bd = _db.breakdown_by_typed_field(
-                wiki_id, session_id, _col, doc_type_patterns=_cs_pats or None)
+                wiki_id, session_id, _col, doc_type_patterns=_cs_pats or None,
+                parties=parties or None)
             if not _bd.get("recorded"):
                 return None
-            _noun = f"{_cs_label}(s)" if _cs_label else "document(s)"
+            _kind_word = f"{_cs_label}(s)" if _cs_label else "agreement(s)"
+            _noun = (f"{_kind_word} between {' and '.join(parties)}" if parties
+                     else _kind_word)
             _top = _bd["values"][0]
             if _bd["distinct"] == 1:
                 _head = (f"**Yes — every one of the {_bd['recorded']} {_noun} that "

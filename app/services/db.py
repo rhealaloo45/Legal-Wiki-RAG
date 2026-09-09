@@ -4621,25 +4621,37 @@ def count_documents_with_clause_text(wiki_id: str, session_id: str,
     ("shall maintain true and complete records relating to this Agreement")
     sits in 175 documents whatever period each states; requiring the period too
     is what makes the figure mean "documents with a FIVE-year retention".
+
+    Matched against page text as well as the clauses table, for the same
+    reason list_documents_matching's phrase search is: neither table is
+    complete alone. "Has the publicity restriction... been used elsewhere,
+    and in how many documents" reported 161 from clauses only, where the true
+    figure — confirmed against clauses UNION pages — is 179; the other 18
+    carry the wording somewhere the clause extractor never cut a clause from.
     """
     from sqlalchemy import text
     ps = [p.strip() for p in (phrases or []) if p and len(p.strip()) >= 4]
     if not ps or not any(len(p) >= 25 for p in ps):
         return 0
-    clauses, params = [], {"w": wiki_id, "s": session_id}
+    conds, params = [], {"w": wiki_id, "s": session_id}
     for i, p in enumerate(ps):
-        clauses.append(f"verbatim_text ILIKE '%' || :p{i} || '%'")
+        conds.append(f"""(EXISTS (
+            SELECT 1 FROM clauses cl WHERE cl.wiki_id = :w AND cl.session_id = :s
+             AND cl.source_doc = d.source_doc AND cl.verbatim_text ILIKE '%' || :p{i} || '%')
+          OR EXISTS (
+            SELECT 1 FROM pages pg WHERE pg.wiki_id = :w AND pg.session_id = :s
+             AND pg.source_doc = d.source_doc AND pg.content ILIKE '%' || :p{i} || '%'))""")
         params[f"p{i}"] = p
     with get_engine().connect() as conn:
         return conn.execute(text(
-            "SELECT count(DISTINCT source_doc) FROM clauses "
-            "WHERE wiki_id = :w AND session_id = :s AND "
-            + " AND ".join(clauses)), params).scalar() or 0
+            "SELECT count(*) FROM documents d WHERE d.wiki_id = :w "
+            "AND d.session_id = :s AND " + " AND ".join(conds)), params).scalar() or 0
 
 
 def breakdown_by_typed_field(wiki_id: str, session_id: str,
                              column: str,
                              doc_type_patterns: list | None = None,
+                             parties: list | None = None,
                              limit: int = 12) -> dict:
     """How the documents in scope split across the values of a typed column.
 
@@ -4649,6 +4661,13 @@ def breakdown_by_typed_field(wiki_id: str, session_id: str,
     Measured live, that question was answered from five agreements out of 17,
     which happened to agree, so the answer was right for the wrong reason and
     would have been wrong had the sixteenth differed.
+
+    `parties`, when given, requires EVERY named party to appear on the
+    document — a consistency question can name the two sides of a specific
+    relationship ("the agreements between Infiniti Retail and TerraNova") and
+    without this filter that question was answered as a breakdown of the
+    whole corpus (148 documents, 11 governing-law values) instead of the six
+    the question actually named.
     """
     from sqlalchemy import text
     if not re.fullmatch(r"[a-z_]{3,40}", column or ""):
@@ -4662,6 +4681,12 @@ def breakdown_by_typed_field(wiki_id: str, session_id: str,
             ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
             params[f"dt{i}"] = f"%{p}%"
         where += " AND (" + " OR ".join(ors) + ")"
+    for i, party in enumerate(p.strip() for p in (parties or []) if p and p.strip()):
+        where += f"""AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                COALESCE(d.parties, '[]'::jsonb)) AS pp(name)
+            WHERE pp.name ILIKE :pty{i}) """
+        params[f"pty{i}"] = f"%{party}%"
     with get_engine().connect() as conn:
         in_scope = conn.execute(text(
             f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
