@@ -3111,7 +3111,30 @@ _RX_CITE_YEAR = re.compile(r"(18|19|20)\d{2}")
 # different statutes and the one case this must never get wrong. So: a
 # year-less citation matches a year-bearing authority on the name alone, and
 # two year-bearing ones must agree on the year.
+# Statutes a lawyer cites by initials as often as by name. Without these, a
+# judgment citing "Order XXXIX CPC" and one citing "Code of Civil Procedure,
+# 1908" key to strings with nothing in common ("orderxxxixcpc" against
+# "codeofcivilprocedure1908") and were counted as different statutes -- two of
+# the twenty documents citing the Code were missed for exactly this reason.
+# Kept to unambiguous, well-known abbreviations only.
+_CITE_ABBREV = {
+    "cpc": "codeofcivilprocedure",
+    "crpc": "codeofcriminalprocedure",
+    "ipc": "indianpenalcode",
+    "cra": "companiesact",
+}
+
+
+def _cite_expand(key: str) -> str:
+    """The key with a known statute abbreviation expanded to its full name."""
+    for abbrev, full in _CITE_ABBREV.items():
+        if abbrev in key and full not in key:
+            return key.replace(abbrev, full)
+    return key
+
+
 def _cite_same_act(key_a: str, key_b: str) -> bool:
+    key_a, key_b = _cite_expand(key_a), _cite_expand(key_b)
     ya, yb = _RX_CITE_YEAR.search(key_a), _RX_CITE_YEAR.search(key_b)
     if ya and yb and ya.group(0) != yb.group(0):
         return False
