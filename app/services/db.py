@@ -4783,6 +4783,42 @@ def find_documents_by_date_span(wiki_id: str, session_id: str,
     return sorted(set(out))
 
 
+# The instrument words a lawyer uses for a case-number PREFIX, alongside the
+# regex that prefix appears as on this corpus. "How many documents are
+# arbitration petitions" names a litigation instrument, not a document TYPE
+# in the sense every other count path resolves - the number sits in
+# litigation_facts.case_number, not in doc_type, and nothing counted it.
+LITIGATION_CASE_PREFIXES = {
+    "arbitration petition": r"arb\.?\s*pet",
+    "arb pet": r"arb\.?\s*pet",
+    "civil suit": r"CS\s*\(",
+    "commercial suit": r"CS\s*\(\s*COMM",
+    "writ petition": r"W\.?P\.?\s*\(",
+    "company petition": r"C\.?P\.?\s*No",
+    "original petition": r"O\.?P\.?\s*No",
+    "appeal": r"Appeal\s*No",
+}
+
+
+def count_documents_by_case_prefix(wiki_id: str, session_id: str,
+                                   prefix_regex: str) -> dict:
+    """How many documents' litigation record carries a case number of this kind.
+
+    Counted per document, not per litigation_facts row: some documents carry
+    more than one row (a petition and its reply, say), and the question asks
+    about documents, not filings.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc, case_number FROM litigation_facts
+             WHERE wiki_id = :w AND session_id = :s AND case_number ~* :p
+        """), {"w": wiki_id, "s": session_id, "p": prefix_regex}).fetchall()
+    return {"total": len(rows),
+            "documents": sorted({r[0] for r in rows}),
+            "case_numbers": sorted({r[1] for r in rows if r[1]})}
+
+
 def find_documents_by_case_number(wiki_id: str, session_id: str,
                                   case_number: str) -> list[str]:
     """Documents whose litigation record carries this case number.
@@ -4898,18 +4934,25 @@ def list_documents_matching(wiki_id: str, session_id: str,
     # as an extracted clause, and clause text misses wording that sits in a
     # part of the document no clause was cut from. Searching one table and
     # calling the result a corpus figure understates it either way.
+    # Matched with a leading word boundary (\m), not a bare substring. Plain
+    # ILIKE '%press release%' matched inside "eXPRESS RELEASE" — the phrase
+    # sits fully inside a longer unrelated word once whitespace is ignored —
+    # and inflated a true 179 documents to 250. \m requires "press" to START
+    # a word; no trailing \M is used, so a plural or suffix on the LAST word
+    # of the phrase ("press releases", "assignable") still matches, which is
+    # the behaviour every other caller of this function already depends on.
     for i, ph in enumerate(_phrases):
         clauses.append(f"""(EXISTS (
             SELECT 1 FROM pages pg
              WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
                AND pg.source_doc = d.source_doc
-               AND pg.content ILIKE :phrase{i})
+               AND pg.content ~* :phrase{i})
           OR EXISTS (
             SELECT 1 FROM clauses cx
              WHERE cx.wiki_id = d.wiki_id AND cx.session_id = d.session_id
                AND cx.source_doc = d.source_doc
-               AND cx.verbatim_text ILIKE :phrase{i}))""")
-        params[f"phrase{i}"] = f"%{ph}%"
+               AND cx.verbatim_text ~* :phrase{i}))""")
+        params[f"phrase{i}"] = r"\m" + re.escape(ph)
 
     # Governing law and term live on the typed contracts row, not on the
     # document, and both are populated on only part of the corpus — so the

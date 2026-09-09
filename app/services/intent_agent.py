@@ -3855,6 +3855,37 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     if dm:
         label, patterns = _resolve_doctype(dm.group(1).strip())
 
+    # A litigation instrument named by its case-number PREFIX rather than by
+    # doc_type — "arbitration petitions", "writ petitions", "appeals" — is a
+    # count over litigation_facts.case_number, which no other branch reaches.
+    # "How many documents are arbitration petitions, by case number" fell
+    # through every path below and was answered from a handful of retrieved
+    # pleadings: "one document", against a true 16.
+    for _lit_phrase, _lit_rx in _db.LITIGATION_CASE_PREFIXES.items():
+        if re.search(rf"\b{re.escape(_lit_phrase)}s?\b", question or "", re.I) and \
+                re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
+            try:
+                _ld = _db.count_documents_by_case_prefix(wiki_id, session_id, _lit_rx)
+            except Exception as e:
+                logger.error("[AGENT] litigation case-prefix count failed: %s", e)
+                _ld = None
+            if _ld and _ld.get("total"):
+                _lines = [f"**{_ld['total']} document(s) carry a case number matching "
+                          f"{_lit_phrase}.**", ""]
+                for _cn in _ld["case_numbers"][:20]:
+                    _lines.append(f"- {_cn}")
+                if len(_ld["case_numbers"]) > 20:
+                    _lines.append(f"- …and {len(_ld['case_numbers']) - 20} more")
+                _lines += ["", "Counted from the recorded case number of every "
+                               "litigation record in the wiki, not from the pages "
+                               "a search returned. A matter whose case number was "
+                               "never extracted is not in this figure."]
+                _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+                _p["files_used"] = list(_ld["documents"])
+                _p["meta_answer"] = False
+                return _p
+            break
+
     # No party and no instrument type is normally a question this branch cannot
     # answer safely — but a bare totality question ("how many documents are
     # there in total") is the exception, and the one case where the index is
@@ -5470,6 +5501,18 @@ _COUNT_PREDICATE_GENERIC = {
 # verb is the tell; when it appears, this is not a content predicate.
 _RX_COUNT_PREDICATE_COMPARISON = re.compile(
     r"^\s*(?:the\s+)?(?:\w+\s+){0,2}same\b.{0,30}?\bas\b", re.IGNORECASE)
+# "Restrict a party FROM issuing a press release" is how a lawyer paraphrases
+# a prohibition; the clause itself reads "shall not ISSUE any press release".
+# The verb never matches between question and document, but the OBJECT after
+# it usually does — "press release or public statement" appears in both. So
+# this branch skips the verb entirely and anchors on what follows it, which
+# then feeds the same cut/edge trimming every other predicate uses. Measured
+# live: without it, "restrict...from issuing..." extracted no predicate at
+# all and fell through to the whole-corpus branch.
+_RX_COUNT_PREDICATE_RESTRICT = re.compile(
+    r"\b(?:restrict|restricts|restricted|prevent|prevents|prohibit|prohibits|"
+    r"bar|bars|forbid|forbids)\b[^?]{0,40}?\bfrom\s+\w+ing\s+(.{2,70})",
+    re.IGNORECASE)
 # A named thing a counting question is asking about: a project code name, a
 # programme, a defined term. Anchored on the words that introduce one so an
 # ordinary capitalised party name at the start of a sentence is not mistaken
@@ -5486,6 +5529,71 @@ _COUNT_PROPER_NOUN_STOP = {
     "the", "this", "that", "agreement", "agreements", "contract", "contracts",
     "document", "documents", "party", "parties", "company", "corpus", "wiki",
 }
+
+
+def _trim_predicate_words(raw: str) -> list:
+    """Word-split, cut at a joining word, then strip leading/trailing filler.
+
+    Pulled out of _count_predicate_phrase so the trigger-verb match has a
+    named helper to call. Kept strict — breaks at the first "or"/"and" — for
+    a reason: "mention arbitration or litigation" is two alternatives, and
+    stopping at "arbitration" alone is what makes that search find documents
+    naming EITHER. Extending across an "or" here would instead search for the
+    literal joined phrase, which almost never appears in a document verbatim.
+    """
+    words = [w for w in re.split(r"[^A-Za-z'-]+", raw or "") if w]
+    out = []
+    for w in words[:6]:
+        if w.lower() in _PRED_CUT:
+            break
+        out.append(w)
+    out = out[:4]
+    while out and out[0].lower() in _PRED_EDGE:
+        out.pop(0)
+    while out and out[-1].lower() in _PRED_EDGE:
+        out.pop()
+    return out
+
+
+def _trim_predicate_words_compound(raw: str) -> list:
+    """Like _trim_predicate_words, but extends once across a conjunction.
+
+    Used only for the object of a "restrict/prevent/prohibit X from V-ing"
+    construction, where the noun on either side of "or" is not two
+    alternatives to search for separately but one fixed templated phrase —
+    "press release or public statement" names a single restriction, and a
+    document stating it says exactly that, conjunction included. Cutting at
+    "or" there leaves "press release" alone, which is common enough English
+    that it also matches "eXPRESS RELEASE" and "publicity which limits press
+    releases" — real text, but not the same restriction the question named,
+    and it inflated a true 179 documents to 250. This is deliberately NOT
+    the general behaviour: it fires once, capped at five words, so it cannot
+    wander past the templated phrase into the question's own trailing
+    wording ("...about the other party") which the actual clause never uses.
+    """
+    words = [w for w in re.split(r"[^A-Za-z'-]+", raw or "") if w]
+    # A leading article ("a press release...") must not count toward "we
+    # already have 3 real words, stop at this conjunction" — it isn't one.
+    while words and words[0].lower() in _PRED_EDGE:
+        words.pop(0)
+    out: list = []
+    extended = False
+    for w in words[:8]:
+        lw = w.lower()
+        if lw in _PRED_CUT:
+            if len(out) >= 3 or extended:
+                break
+            out.append(w)
+            extended = True
+            continue
+        out.append(w)
+        if len(out) >= (5 if extended else 4):
+            break
+    while out and out[0].lower() in _PRED_EDGE:
+        out.pop(0)
+    while out and out[-1].lower() in (_PRED_EDGE | _PRED_CUT):
+        out.pop()
+    return out
 
 
 def _count_predicate_phrase(question: str) -> str:
@@ -5507,22 +5615,25 @@ def _count_predicate_phrase(question: str) -> str:
         if _name.lower() not in _COUNT_PROPER_NOUN_STOP and len(_name) >= 6:
             return _name
 
+    # Tried before the ordinary trigger-verb match: a "restrict...from V-ing"
+    # construction also contains a word from that list often enough (none of
+    # "restrict/prevent/prohibit/bar/forbid" collide with it here, but the
+    # object it captures — skipping the mismatched verb — is the one worth
+    # keeping).
+    _rm = _RX_COUNT_PREDICATE_RESTRICT.search(question or "")
+    if _rm:
+        _out = _trim_predicate_words_compound(_rm.group(1))
+        if _out and not any(w.lower() in _COUNT_PREDICATE_GENERIC for w in _out):
+            _phrase = " ".join(_out)
+            if len(_out) > 1 or len(_phrase) >= 5:
+                return _phrase
+
     m = _RX_COUNT_PREDICATE.search(question or "")
     if not m:
         return ""
     if _RX_COUNT_PREDICATE_COMPARISON.match(m.group(1)):
         return ""
-    words = [w for w in re.split(r"[^A-Za-z'-]+", m.group(1)) if w]
-    out = []
-    for w in words[:6]:
-        if w.lower() in _PRED_CUT:
-            break
-        out.append(w)
-    out = out[:4]
-    while out and out[0].lower() in _PRED_EDGE:
-        out.pop(0)
-    while out and out[-1].lower() in _PRED_EDGE:
-        out.pop()
+    out = _trim_predicate_words(m.group(1))
     if not out:
         return ""
     if any(w.lower() in _COUNT_PREDICATE_GENERIC for w in out):
