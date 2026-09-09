@@ -626,10 +626,20 @@ _RX_CALC_TERM_LOOKUP = re.compile(
 _RX_CALC_DAY_WORD = re.compile(r"\bdays?\b", re.IGNORECASE)
 # "When does the notice period actually end, accounting for business days?"
 # Needs a period the question or the document supplies, and a start date.
+# "On what calendar date would that notice period expire" says the same thing
+# as "when does the notice period end" but with neither of the words the
+# pattern was anchored on ("when...end") — it asks for a DATE and uses
+# "expire" instead of "end". Measured live: that phrasing fell through this
+# pattern entirely and reached an LLM that declined, saying it lacked "a
+# specific service date... to anchor the calculation" for a question that
+# needs no document at all — the period was "30 days" and the anchor is
+# today, both already in the question.
 _RX_CALC_NOTICE_END = re.compile(
-    r"\b(?:when\s+does|when\s+will)\b[^?]{0,60}?\bnotice\s+period\b[^?]{0,30}\bend\b"
-    r"|\bnotice\s+period\s+end(?:s|ing)?\s+(?:date|on)\b"
-    r"|\bend\s+of\s+the\s+notice\s+period\b",
+    r"\b(?:when\s+does|when\s+will)\b[^?]{0,60}?\bnotice\s+period\b[^?]{0,30}\b(?:end|expire)\b"
+    r"|\bnotice\s+period\s+(?:end|expir\w*)(?:s|ing)?\s+(?:date|on)\b"
+    r"|\bend\s+of\s+the\s+notice\s+period\b"
+    r"|\b(?:calendar\s+)?date\b[^?]{0,50}?\bnotice\s+period\b[^?]{0,30}\bexpire\b"
+    r"|\bnotice\s+period\b[^?]{0,40}?\bexpire\b",
     re.IGNORECASE)
 _RX_CALC_BUSINESS_DAYS = re.compile(
     r"\b(?:business|working|clear)\s+days?\b", re.IGNORECASE)
@@ -1607,6 +1617,41 @@ def answer(question: str, wiki_id: str, session_id: str,
         body = render(kind, result, label or "stated in the question")
         p = _payload(body, "Calculation")
         p["files_used"] = docs[:_MAX_CALC_DOCS]
+        return p
+
+    # "On what date does a 30-day notice served today expire" needs no
+    # document either: the period is in the question and the anchor is
+    # today. A document is used ONLY to resolve a business-day holiday
+    # calendar when the question asks for BUSINESS days — and even then its
+    # absence just means the answer counts weekdays without excluding
+    # holidays, which the render explains, rather than declining outright.
+    # Requiring scope to resolve here was the actual bug: "a confidentiality
+    # agreement" names no single document, scope resolved to nothing, and a
+    # pure date calculation was silently dropped along with it.
+    if kind == "notice_end":
+        m = _RX_CALC_DAYS_N.search(question)
+        notice_days = 0
+        if m:
+            tok = m.group(1).strip().lower()
+            notice_days = (int(tok) if tok.isdigit()
+                          else _NUM_WORDS.get(tok, _EXTRA_NUM_WORDS.get(tok, 0)))
+        if not notice_days:
+            return None
+        notice_business = bool(_RX_CALC_BUSINESS_DAYS.search(question))
+        _anchor_doc = docs[0] if docs else None
+        try:
+            result = notice_end(wiki_id, session_id, _anchor_doc,
+                                notice_days, notice_business)
+        except Exception as e:
+            logger.error("[CALC] notice_end failed: %s", e)
+            return None
+        if not result.get("ok"):
+            return None
+        label = (_label_for(_anchor_doc, wiki_id, session_id) if _anchor_doc
+                 else "stated in the question")
+        body = render("notice_end", result, label)
+        p = _payload(body, "Calculation")
+        p["files_used"] = [_anchor_doc] if _anchor_doc else []
         return p
 
     if kind == "out_of_scope":
