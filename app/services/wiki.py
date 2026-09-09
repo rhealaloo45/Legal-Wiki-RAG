@@ -11506,8 +11506,14 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     """
     scoped = _resolve_scope_uncorrected(question, session_id, pages, chat_session_id)
     method = (scoped or {}).get("method", "")
+    # A case number names one matter exactly, so doc-type correction has
+    # nothing to add and everything to lose. Measured live: CS(COMM) 37/2023
+    # resolved correctly to the judgment recording it, then doc-type
+    # enforcement replaced that with a DIFFERENT judgment of the same type, and
+    # the answer reported the disposition of the wrong case. The same applies
+    # to a scope pinned by the case-number resolver's sibling paths.
     if (not scoped or method == "file" or "carryover" in method
-            or "family-comparison" in method):
+            or "family-comparison" in method or method.startswith("case-number")):
         return scoped
     scoped = _enforce_question_doc_type(scoped, question, session_id)
     # Last, so it adds the amendment back whatever narrowing ran above: the two

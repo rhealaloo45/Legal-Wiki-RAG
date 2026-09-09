@@ -2783,10 +2783,18 @@ _COUNT_BLOCKERS = (
 # as a count and then extracts no type from itself, and answers for the whole
 # corpus instead. The acronyms carry as much weight as the words: a lawyer
 # asks "how many SLAs do we have", never "how many service level agreements".
+# The "X of Y" instrument names are listed explicitly because their plural
+# inflects on the FIRST word: "Powers of Attorney", "Letters of Intent",
+# "Statements of Work". Every other entry here ends on the noun that takes the
+# s, so a pattern anchored on the last word missed these entirely — "how many
+# Powers of Attorney are there" matched nothing and was answered 13 by
+# retrieval against a true 17.
 _COUNT_NOUNS = (
+    "powers? of attorney|letters? of intent|statements? of work|"
+    "memoranda of understanding|memorandums? of understanding|"
     "contracts?|agreements?|documents?|deeds?|leases?|licen[cs]es?|"
     "amendments?|policies|opinions?|judgm?ents?|petitions?|plaints?|"
-    "affidavits?|term sheets?|statements? of work|"
+    "affidavits?|term sheets?|"
     "slas?|dpas?|ndas?|msas?|spas?|ssas?|shas?|sows?|poas?|lois?|"
     "jvas?|jvs?|keras?|mous?|tsas?"
 )
@@ -2908,7 +2916,15 @@ _DOCTYPE_SYNONYMS = {
     "term sheet": ("Term Sheet", ["term sheet"]),
     "legal opinion": ("Legal Opinion", ["legal opinion"]),
     "escrow agreement": ("Escrow Agreement", ["escrow agreement"]),
-    "consultancy agreement": ("Consultancy Agreement", ["consultancy agreement"]),
+    # A lawyer says "consulting agreement"; this corpus files all 17 of them as
+    # "Consultancy Agreement". Without the synonym the count matched nothing,
+    # fell through to retrieval, and answered 2.
+    "consultancy agreement": ("Consultancy Agreement",
+                              ["consultancy agreement", "consulting agreement"]),
+    "consulting agreement": ("Consultancy Agreement",
+                             ["consultancy agreement", "consulting agreement"]),
+    "consulting": ("Consultancy Agreement",
+                   ["consultancy agreement", "consulting agreement"]),
     "employment agreement": ("Executive Employment Agreement",
                              ["employment agreement"]),
     "lease deed": ("Commercial Lease Deed", ["lease deed"]),
