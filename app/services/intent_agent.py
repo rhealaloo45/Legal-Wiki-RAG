@@ -3312,6 +3312,14 @@ def _is_structural_query(question: str) -> str:
     # only counting them.
     if _RX_COUNT.search(q):
         return "count"
+    # "How many DEPART from that by choosing the laws of Singapore, and how does
+    # that compare with England and Wales?" is a counting question whose verb
+    # stands where the count noun normally does, so _RX_COUNT does not see it.
+    # Naming two or more jurisdictions alongside "how many" is narrow enough to
+    # claim on its own, and the count branch answers each exactly; left to the
+    # comparison path it was answered 3 and 3 against a true 5 and 5.
+    if re.search(r"\bhow\s+many\b", q, re.IGNORECASE) and len(_laws_named(q)) > 1:
+        return "count"
     # Before enumerate: "list every X that does A and B" is both, and the
     # compound reading is the stricter one. Needs an explicit conjunction, so
     # a single-condition question stays with enumerate, and the branch itself
