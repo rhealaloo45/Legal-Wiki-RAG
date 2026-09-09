@@ -578,9 +578,17 @@ _RX_CALC_YEARS = re.compile(
 # such date recorded the calculation is declined by name, the same as a missing
 # fee schedule — on this corpus only a minority of documents carry an expiry
 # date at all, so declining honestly matters more here than anywhere else.
+# "How long" on its own is not a request for a day count. "In the
+# confidentiality agreement dated 25 May 2025, how long does the agreement
+# remain effective?" asks for the term as drafted, and reached this pattern
+# only because "how long" sits near the word "agreement". It came back as a
+# days-elapsed calculation over three documents, two of which were not the one
+# asked about. The bare "how long" form now has to say days somewhere.
 _RX_CALC_TERM_DAYS = re.compile(
-    r"\b(?:how\s+many\s+days|how\s+long|number\s+of\s+days|day[-\s]?count|"
+    r"\b(?:how\s+many\s+days|number\s+of\s+days|day[-\s]?count|"
     r"length\s+in\s+days)\b[^?]{0,60}?\b(?:term|agreement|contract|period)\b"
+    r"|\bhow\s+long\b[^?]{0,60}?\b(?:term|agreement|contract|period)\b"
+    r"[^?]{0,60}?\bdays?\b"
     r"|\b(?:term|contract)\s+length\b[^?]{0,30}\bdays?\b",
     re.IGNORECASE)
 _RX_CALC_ELAPSED = re.compile(
@@ -588,13 +596,34 @@ _RX_CALC_ELAPSED = re.compile(
     r"|\bdays?\s+(?:since|elapsed\s+since)\b"
     r"|\bhow\s+many\s+days\b[^?]{0,40}\b(?:since|ago|outstanding|pending|open)\b"
     r"|\bhow\s+long\b[^?]{0,40}\b(?:outstanding|pending|open)\b"
-    r"|\bbeen\s+outstanding\b",
+    r"|\bbeen\s+outstanding\b"
+    # "How many days has it been in force as of today?" is the same question
+    # as "how many days ago was that", and had no pattern of its own. Measured
+    # live: the pipeline quoted the effective date correctly and then reported
+    # that the number of days "is not stated in the Agreement" — true, and
+    # useless, when subtracting two dates is the whole of the work.
+    r"|\bhow\s+(?:many\s+days|long)\b[^?]{0,60}?\b(?:in\s+force|in\s+effect|"
+    r"been\s+running|been\s+live|effective\s+for)\b"
+    r"|\b(?:in\s+force|in\s+effect)\b[^?]{0,30}\bas\s+of\s+(?:today|now)\b",
     re.IGNORECASE)
 _RX_CALC_REMAINING = re.compile(
     r"\b(?:how\s+many\s+days|how\s+long)\b[^?]{0,40}?"
     r"\b(?:until|till|to\s+go|remain(?:ing)?|left)\b"
     r"|\bdays?\s+remaining\b|\bdays?\s+left\b",
     re.IGNORECASE)
+# "How long does the agreement remain effective?" uses the same words as "how
+# long remains on the term?" and means the opposite: it asks what the document
+# says, not how much of it is left to run. Measured live, that question was
+# answered as a days-elapsed calculation across three documents, two of which
+# were not the one asked about — the term clause it wanted says simply "three
+# years". A question of this shape that never mentions days is a lookup.
+_RX_CALC_TERM_LOOKUP = re.compile(
+    r"\bhow\s+long\b[^?]{0,60}?\b(?:remains?|stays?|continues?|lasts?|"
+    r"subsists?|survives?)\b[^?]{0,30}?"
+    r"(?:effective|in\s+force|in\s+effect|binding|valid|confidential|"
+    r"in\s+place|for)\b",
+    re.IGNORECASE)
+_RX_CALC_DAY_WORD = re.compile(r"\bdays?\b", re.IGNORECASE)
 # "When does the notice period actually end, accounting for business days?"
 # Needs a period the question or the document supplies, and a start date.
 _RX_CALC_NOTICE_END = re.compile(
@@ -619,10 +648,15 @@ _RX_CALC_IN_DAYS = re.compile(
     re.IGNORECASE)
 # The period the question itself states, as (count, unit). Hours are included
 # because a 72-hour notice window is the same question in a smaller unit.
+# The adjective between the number and the unit is optional but common:
+# "15 business days", "30 calendar days", "two clear weeks". Without it the
+# pattern saw no period at all in "at least 15 business days in advance" and
+# the conversion was declined rather than computed.
 _RX_STATED_PERIOD = re.compile(
     r"\b(\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
     r"fifteen|twenty|thirty|forty[-\s]?five|sixty|ninety)\s*"
-    r"(?:\(\d+\)\s*)?(year|month|week|day|hour)s?\b",
+    r"(?:\(\d+\)\s*)?(?:business\s+|working\s+|calendar\s+|clear\s+|whole\s+|full\s+)?"
+    r"(year|month|week|day|hour)s?\b",
     re.IGNORECASE)
 _PERIOD_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -673,10 +707,15 @@ _RX_CALC_DATE_GAP = re.compile(
     r"|\bdays?\s+(?:between|separating)\b",
     re.IGNORECASE)
 # The unit a conversion question asks for, when it is not days.
+# "Expressed in CALENDAR weeks" is the same request as "expressed in weeks".
+# The adjective sitting between the preposition and the unit made the whole
+# pattern miss, and a pure unit conversion — 15 business days at five to the
+# week — came back as "Needs document selection".
+_CALC_UNIT_ADJ = r"(?:whole\s+|calendar\s+|full\s+|complete\s+|clear\s+)?"
 _RX_CALC_TARGET_UNIT = re.compile(
     r"\b(?:expressed|stated|measured|converted?|rounded)\b[^?]{0,30}?"
-    r"\bin\s+(?:whole\s+)?(week|month|year)s?\b"
-    r"|\bin\s+(?:whole\s+)?(week|month|year)s?\b[^?]{0,30}?\bhow\s+long\b",
+    rf"\bin\s+{_CALC_UNIT_ADJ}(week|month|year)s?\b"
+    rf"|\bin\s+{_CALC_UNIT_ADJ}(week|month|year)s?\b[^?]{{0,30}}?\bhow\s+long\b",
     re.IGNORECASE)
 
 
@@ -690,6 +729,61 @@ def _dates_stated_in_question(question: str) -> list:
         if d and d not in out:
             out.append(d)
     return sorted(out)
+
+
+# "0.15% of the milestone value per week ... over a 4-week delay, what
+# percentage would that charge reach?" — a rate and a number of periods, both
+# in the question, multiplied. Measured live: the pipeline found the right
+# rate in the right document and then answered "four times the weekly rate of
+# 0.15%", which restates the inputs instead of doing the arithmetic.
+_RX_CALC_RATE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*%\s*(?:of\s+[^,.;]{0,60}?)?\s*"
+    r"per\s+(week|month|day|year|annum)\b",
+    re.IGNORECASE)
+_RX_CALC_OVER_PERIODS = re.compile(
+    r"\b(?:over|for|across|after)\s+(?:an?\s+)?(\d{1,3}|one|two|three|four|five|"
+    r"six|seven|eight|nine|ten|eleven|twelve)[-\s]"
+    r"(week|month|day|year)s?\b",
+    re.IGNORECASE)
+_RX_CALC_RATE_ASK = re.compile(
+    r"\bwhat\s+percentage\b|\bwhat\s+(?:total\s+)?(?:charge|amount|figure)\b"
+    r"|\bhow\s+much\b[^?]{0,40}\bpercent",
+    re.IGNORECASE)
+_PER_UNIT_SYNONYM = {"annum": "year"}
+
+
+def rate_over_periods(question: str) -> dict:
+    """A per-period rate multiplied by the number of periods, both stated."""
+    rm = _RX_CALC_RATE.search(question or "")
+    pm = _RX_CALC_OVER_PERIODS.search(question or "")
+    if not rm or not pm:
+        return {"ok": False, "missing": "a rate and a number of periods",
+                "detail": "The question does not state both a per-period rate "
+                          "and how many periods it runs for."}
+    rate = Decimal(rm.group(1))
+    rate_unit = _PER_UNIT_SYNONYM.get(rm.group(2).lower(), rm.group(2).lower())
+    raw = pm.group(1).lower()
+    n = _PERIOD_WORDS.get(raw)
+    if n is None:
+        try:
+            n = int(raw)
+        except ValueError:
+            return {"ok": False, "missing": "a number of periods",
+                    "detail": f"Could not read {raw!r} as a count."}
+    period_unit = pm.group(2).lower()
+    # Only multiply when the rate's period and the delay's period are the same
+    # unit. Converting weeks to months to apply a weekly rate would be an
+    # assumption about how the clause accrues, and this module does not guess.
+    if period_unit != rate_unit:
+        return {"ok": False, "missing": "matching periods",
+                "detail": f"The rate is stated per {rate_unit} and the question "
+                          f"asks over {n} {period_unit}s; converting between "
+                          f"them would assume how the charge accrues."}
+    total = rate * n
+    return {"ok": True, "kind": "rate_over_periods", "rate": rate,
+            "rate_unit": rate_unit, "periods": n, "total_percent": total,
+            "basis": f"{rate}% per {rate_unit} × {n} {period_unit}"
+                     f"{'s' if n != 1 else ''} = {total}%"}
 
 
 def date_gap(question: str) -> dict:
@@ -709,6 +803,32 @@ def _target_unit(question: str) -> str:
     if not m:
         return ""
     return (m.group(1) or m.group(2) or "").lower()
+
+
+_RX_BD_PER_WEEK = re.compile(
+    r"\b(\d{1,2}|one|two|three|four|five|six|seven)\s+"
+    r"(?:business|working)\s+days?\s+(?:to|per|in|a)\s+(?:the\s+)?week\b",
+    re.IGNORECASE)
+
+
+def _business_days_per_week(question: str) -> int | None:
+    """The business-day week the question states, or the usual five.
+
+    Returns None when the question is not about business days at all, so an
+    ordinary calendar conversion is left alone.
+    """
+    m = _RX_BD_PER_WEEK.search(question or "")
+    if m:
+        raw = m.group(1).lower()
+        n = _PERIOD_WORDS.get(raw)
+        if n is None:
+            try:
+                n = int(raw)
+            except ValueError:
+                n = None
+        if n and 1 <= n <= 7:
+            return n
+    return 5 if _RX_CALC_BUSINESS_DAYS.search(question or "") else None
 
 
 def period_days(question: str) -> dict:
@@ -736,6 +856,15 @@ def period_days(question: str) -> dict:
     target = _target_unit(question)
     if target and target != unit:
         per_target = _PERIOD_IN_DAYS[target]
+        # Business days do not convert at seven to the week. "At least 15
+        # business days in advance — expressed in calendar weeks, counting five
+        # business days to the week" states its own divisor, and using the
+        # calendar one turns the right answer, 3 weeks, into 2 weeks and a day.
+        _bd = _business_days_per_week(question)
+        if _bd and target == "week" and _RX_CALC_BUSINESS_DAYS.search(question or ""):
+            per_target = _bd
+            result["business_day_basis"] = (
+                f"counted at {_bd} business days to the week, as the question states")
         whole = result["days"] // per_target
         rem = result["days"] - whole * per_target
         result.update(
@@ -1073,6 +1202,12 @@ def is_calculation_query(question: str) -> str:
     q = question or ""
     if _RX_CALC_OUT_OF_SCOPE.search(q):
         return "out_of_scope"
+    # A term LOOKUP that happens to start with "how long". Vetoed before every
+    # date kind, because the answer is a clause to quote and not a number to
+    # compute, and only when the question never mentions days — "how long does
+    # it remain effective, in days" is genuinely a conversion.
+    if _RX_CALC_TERM_LOOKUP.search(q) and not _RX_CALC_DAY_WORD.search(q):
+        return ""
     # Ahead of term_days, which reads the two recorded date columns and declines
     # when a document has no expiry: a question that STATES its own period
     # ("retain records for not less than 7 years -- expressed in days, how long
@@ -1087,6 +1222,12 @@ def is_calculation_query(question: str) -> str:
     if (_RX_CALC_IN_DAYS.search(q) or _RX_CALC_TARGET_UNIT.search(q)) \
             and _period_stated_in_question(q):
         return "period_days"
+    # A per-period rate over a stated number of periods, both in the question.
+    # Ahead of "ld", which reads a document's own liquidated-damages row: when
+    # the question supplies the rate there is nothing to look up.
+    if _RX_CALC_RATE_ASK.search(q) and _RX_CALC_RATE.search(q) \
+            and _RX_CALC_OVER_PERIODS.search(q):
+        return "rate_over_periods"
     if _RX_CALC_LD.search(q) and _RX_CALC_LD_WEEKS.search(q):
         return "ld"
     if _RX_CALC_ESC.search(q) and _RX_CALC_YEARS.search(q):
@@ -1243,6 +1384,24 @@ def render(kind: str, result: dict, doc_label: str, weeks: int = 0,
         lines.append("")
         lines.append("Both dates are the ones the question states; the "
                      "subtraction is exact.")
+        lines.append("")
+
+    elif kind == "rate_over_periods":
+        _t = result["total_percent"]
+        _t = _t.normalize() if hasattr(_t, "normalize") else _t
+        lines.append(f"**{_t}% of the milestone value**")
+        lines.append("")
+        lines.append(f"- Rate stated in the question: {result['rate']}% per "
+                     f"{result['rate_unit']}")
+        lines.append(f"- Periods: {result['periods']} "
+                     f"{result['rate_unit']}"
+                     f"{'s' if result['periods'] != 1 else ''}")
+        lines.append(f"- {result['basis']}")
+        lines.append("")
+        lines.append("Both the rate and the number of periods are the ones the "
+                     "question states, so this is arithmetic on given figures "
+                     "and not a reading of any cap or aggregate limit the "
+                     "clause may also impose.")
         lines.append("")
 
     elif kind == "period_days":
@@ -1437,8 +1596,10 @@ def answer(question: str, wiki_id: str, session_id: str,
     # records ... expressed in days") often resolves to nothing or to the wrong
     # sibling, and declining a stated 5-years-to-days conversion on that basis
     # was measured as a wrong answer three times in one evaluation run.
-    if kind in ("period_days", "date_gap"):
-        result = period_days(question) if kind == "period_days" else date_gap(question)
+    if kind in ("period_days", "date_gap", "rate_over_periods"):
+        result = (period_days(question) if kind == "period_days"
+                  else date_gap(question) if kind == "date_gap"
+                  else rate_over_periods(question))
         if not result.get("ok"):
             return None
         label = ", ".join(_label_for(d, wiki_id, session_id)
