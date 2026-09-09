@@ -6982,6 +6982,25 @@ _COUNT_TRUSTED_MARKERS = (
 )
 
 
+# A reference line names its document before the first comma or pipe:
+# "[1] pdfs_by_category_generated_NDA_Foo.pdf, Clause 4 | Quote: ..."
+_RX_REF_LINE = re.compile(r"^\s*\[\d{1,2}\]\s*([^,|\n]{6,160})", re.MULTILINE)
+
+
+def _sole_cited_document(answer: str) -> str | None:
+    """The one document an answer cites, or None when it cites none or several."""
+    names = set()
+    for m in _RX_REF_LINE.finditer(answer or ""):
+        raw = m.group(1).strip().rstrip(".")
+        raw = re.sub(r"\.(pdf|docx?|txt)$", "", raw, flags=re.IGNORECASE)
+        if raw:
+            names.add(_norm_doc_name(raw))
+    if len(names) != 1:
+        return None
+    only = next(iter(names))
+    return only if 3 <= len(only) <= 120 else None
+
+
 def _is_counting_question(question: str) -> bool:
     return bool(_RX_IS_COUNTING.search(question or ""))
 
@@ -7005,8 +7024,24 @@ def _answer_states_a_total(answer: str) -> bool:
         answer += f"\n\n[SCOPE WARNING: {scope_warning}]"
 
     # Scope was inferred rather than stated by the question — say so, always.
+    # Except when the finished answer converges on one document and cites it:
+    # the note's premise is that nothing was pinned, and a reader who has just
+    # been given a verbatim clause from a named judgment reads "no document was
+    # confirmed as the one you meant" as the system doubting its own answer.
+    # Measured live on four questions that resolved correctly from a case
+    # number or a party pair. The disclosure duty is real, so it is reworded
+    # rather than dropped — the document was reached by search, not by name,
+    # and that is worth saying in one line instead of five.
     if scope_note:
-        answer += f"\n\n[SCOPE NOTE: {scope_note}]"
+        _one = _sole_cited_document(answer)
+        if _one and "named no document" in scope_note and "already under discussion" not in scope_note:
+            answer += (
+                f"\n\n[SCOPE NOTE: the question named no document; this answer came "
+                f"from {_one}, which retrieval matched to it. Name a document "
+                f"explicitly if you meant a different one.]"
+            )
+        else:
+            answer += f"\n\n[SCOPE NOTE: {scope_note}]"
 
     # A counting question answered from retrieved pages can only report what
     # was retrieved. Every deterministic count path returns long before this
