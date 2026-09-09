@@ -226,6 +226,22 @@ GAP_FIELDS = {
         "label": "dispute resolution clause",
         "table": "contracts", "clause_type": "dispute_resolution",
     },
+    "ip_ownership": {
+        "label": "intellectual property ownership clause",
+        "table": "contracts", "clause_type": "ip_ownership",
+    },
+    "insurance": {
+        "label": "insurance clause",
+        "table": "contracts", "clause_type": "insurance",
+    },
+    "confidentiality": {
+        "label": "confidentiality clause",
+        "table": "contracts", "clause_type": "confidentiality",
+    },
+    "indemnity": {
+        "label": "indemnity clause",
+        "table": "contracts", "clause_type": "indemnity",
+    },
 }
 
 
