@@ -8871,6 +8871,47 @@ def _canonical_party_name(bb, wiki_id: str, name: str) -> str | None:
     return canon
 
 
+def _resolve_docs_by_party_list(question: str, session_id: str,
+                                cap: int = 8) -> set[str]:
+    """The union of several separately-named parties' documents.
+
+    _resolve_docs_by_party answers "the agreement with X" by returning the most
+    distinctive named party's documents — right for one instrument, wrong for a
+    question that lists several: "one on Apex Arka (3 years), one on Apex Veyra
+    (5 years), one on Apex Bhumika (7 years) — which is longest?" needs all
+    three, and returning one of them had the comparison declined for lack of
+    the other two.
+
+    Deliberately narrow. It fires only on three or more distinct
+    suffix-bearing party names, and only when the question does NOT link them
+    with "between" — "the JV between X and Y" is one document naming both, and
+    turning that into a union would be a real regression. Each name must also
+    resolve to a small set of its own, so an umbrella party cannot drag the
+    corpus in.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    q = question or ""
+    if re.search(r"\bbetween\b", q, re.IGNORECASE):
+        return set()
+    names = {m.group(1).strip() for m in _PARTY_NAME_RE.finditer(q)}
+    names = {n for n in names if len(n) >= 4}
+    if len(names) < 3:
+        return set()
+    out: set[str] = set()
+    for name in names:
+        try:
+            hits = _resolve_docs_by_party(f"the agreement with {name}", session_id)
+        except Exception as e:
+            logger.error("party-list resolution failed for %r: %s", name, e)
+            continue
+        if hits and len(hits) <= 3:
+            out |= set(hits)
+        if len(out) > cap:
+            return set()
+    return out
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -11685,6 +11726,19 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # document under a bare type+number and masks the party in metadata. Only
     # fires on an unambiguous single-document hit, so it's safe to prefer over the
     # weaker entity heuristic below (which resolves no concrete target_docs).
+    # A question listing several parties, each with its own instrument, needs
+    # all of them. Checked before the single-party resolver below, which by
+    # design returns only the most distinctive one.
+    try:
+        _plist = _resolve_docs_by_party_list(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party-list resolution failed: %s", e)
+        _plist = set()
+    if len(_plist) > 1:
+        logger.info("Scope pinned to %d documents, one per party named", len(_plist))
+        return {"scope": "single_doc", "target_docs": sorted(_plist),
+                "target_family": None, "is_broad": True,
+                "confidence": 0.7, "method": "party-list"}
     try:
         party_docs = _resolve_docs_by_party(question, session_id)
     except Exception as e:
