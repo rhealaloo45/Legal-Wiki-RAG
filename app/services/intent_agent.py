@@ -2763,12 +2763,45 @@ _RX_AUTHORITY_PROC = re.compile(r"\b(Order\s+[IVXLCDM]{1,7})\b", re.IGNORECASE)
 # _is_structural_query fell through past the citations branch entirely, and
 # the question was answered as an ordinary compound document lookup instead,
 # from one arbitrarily-resolved document rather than the citation index.
-# The "EU " prefix is matched but not returned: the index records this
-# citation under several normalized forms ("GDPR", "EU GDPR", "EU General
-# Data Protection Regulation"), and only the bare acronym is a substring of
-# all of them — searching "EU GDPR" itself, confirmed live, missed the one
-# document indexed under bare "GDPR" alone (10 hits against a true 11).
-_RX_AUTHORITY_ACRONYM = re.compile(r"\b(?:EU\s+)?(GDPR)\b", re.IGNORECASE)
+#
+# Matched against the citation index's OWN recorded acronyms (see
+# _citation_authority_acronyms below) rather than one hardcoded name: this
+# corpus alone cites at least three bare-acronym authorities (GDPR, FCPA,
+# LCIA), and a fixed "GDPR"-only pattern would have carried the identical bug
+# for the other two, plus every acronym-only authority a document set ingested
+# later happens to cite — this generalizes to whatever the index actually
+# holds, checked fresh (via a per-wiki cache) rather than predicted in advance.
+_RX_BARE_ACRONYM = re.compile(r"\b([A-Z]{2,8})\b")
+
+_CITATION_AUTHORITY_CACHE: dict = {}
+
+
+def _citation_authority_acronyms(wiki_id: str) -> set:
+    """Every bare-acronym authority (2-8 upper-case letters, no spaces)
+    actually recorded in this wiki's citation index. Cached per wiki, the
+    same pattern _doc_type_vocabulary below uses for doc_type strings.
+
+    An authority cited only by its acronym never carries the Act/Code/Rules/
+    Regulation terminator _RX_AUTHORITY anchors on, so it needs a different
+    detector — one anchored on what the index itself holds, not a guess at
+    which acronyms might show up.
+    """
+    if wiki_id in _CITATION_AUTHORITY_CACHE:
+        return _CITATION_AUTHORITY_CACHE[wiki_id]
+    from sqlalchemy import text
+    from services import db as _db
+    try:
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT normalized_form FROM citations WHERE wiki_id = :w"),
+                {"w": wiki_id}).fetchall()
+    except Exception as e:
+        logger.error("citation-authority acronym lookup failed: %s", e)
+        return set()
+    vocab = {r[0].strip() for r in rows
+             if r[0] and re.fullmatch(r"[A-Z]{2,8}", r[0].strip())}
+    _CITATION_AUTHORITY_CACHE[wiki_id] = vocab
+    return vocab
 
 
 def _named_authority(question: str) -> str:
@@ -2785,8 +2818,16 @@ def _named_authority(question: str) -> str:
     m = _RX_AUTHORITY_PROC.search(question or "")
     if m:
         return m.group(1).strip(" ,")
-    m = _RX_AUTHORITY_ACRONYM.search(question or "")
-    return m.group(1).strip(" ,") if m else ""
+    try:
+        from services import wikis as _wikis_na
+        vocab = _citation_authority_acronyms(_wikis_na.active_wiki_id())
+    except Exception:
+        vocab = set()
+    if vocab:
+        for word in _RX_BARE_ACRONYM.findall(question or ""):
+            if word in vocab:
+                return word
+    return ""
 
 
 # Counting over document metadata (§ Phase 3.5b). Deliberately narrow: the
