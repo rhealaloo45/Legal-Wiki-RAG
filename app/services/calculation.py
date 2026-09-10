@@ -606,6 +606,23 @@ _RX_CALC_ELAPSED = re.compile(
     r"been\s+running|been\s+live|effective\s+for)\b"
     r"|\b(?:in\s+force|in\s+effect)\b[^?]{0,30}\bas\s+of\s+(?:today|now)\b",
     re.IGNORECASE)
+# A second question riding on an "elapsed" one: "...and how long had the
+# Service Level Agreement with Tata Communications been in force by then?"
+# asks for a SECOND, unrelated document's own elapsed time, measured not
+# against today but against the date the FIRST half just resolved (a
+# judgment's decision date, say). date_delta always measures against today,
+# so this half was silently dropped every time: the first half's "535 days
+# ago" rendered as the whole answer to a question that named two things to
+# compute. Captures the instrument type and the party together, exactly the
+# pair a structured party+doc-type lookup needs (see the compound-answer
+# block in answer() below) — a full-text party search on a common
+# counterparty like "Tata Communications" (100+ documents on this corpus)
+# can miss the one relevant document entirely (see
+# wiki._resolve_docs_by_party_list's docstring for the same failure mode).
+_RX_CALC_INFORCE_BY_THEN = re.compile(
+    r"how\s+long\s+had\s+(?:the\s+)?(?P<type>.+?)\s+with\s+(?P<party>.+?)\s+"
+    r"been\s+in\s+force\s+by\s+(?:then|that\s+(?:date|time|point))",
+    re.IGNORECASE)
 _RX_CALC_REMAINING = re.compile(
     r"\b(?:how\s+many\s+days|how\s+long)\b[^?]{0,40}?"
     r"\b(?:until|till|to\s+go|remain(?:ing)?|left)\b"
@@ -1728,6 +1745,7 @@ def answer(question: str, wiki_id: str, session_id: str,
             return None
 
     sections, used, any_ok = [], [], False
+    primary_anchor = None
     for source_doc in docs[:_MAX_CALC_DOCS]:
         label = _label_for(source_doc, wiki_id, session_id)
         try:
@@ -1748,15 +1766,67 @@ def answer(question: str, wiki_id: str, session_id: str,
             logger.error("[CALC] %s failed on %r: %s", kind, source_doc[:60], e)
             continue
         any_ok = any_ok or bool(result.get("ok"))
+        if kind == "elapsed" and result.get("ok") and primary_anchor is None:
+            primary_anchor = result.get("anchor")
         sections.append(render(kind, result, label, weeks=weeks, years=years))
         used.append(source_doc)
 
     if not sections:
         return None
+
+    # "...and how long had the Service Level Agreement with Tata
+    # Communications been in force by then?" — a second document's own
+    # elapsed time, measured against the date the primary section just
+    # resolved rather than against today. See _RX_CALC_INFORCE_BY_THEN.
+    compound_second = False
+    if kind == "elapsed" and primary_anchor is not None:
+        m = _RX_CALC_INFORCE_BY_THEN.search(question)
+        if m:
+            try:
+                from services import db as _db_ib
+                _hits = _db_ib.list_documents_matching(
+                    wiki_id, session_id, parties=[m.group("party").strip()],
+                    doc_type_patterns=[m.group("type").strip()], limit=5)
+                _cands = [d["source_doc"] for d in (_hits.get("documents") or [])
+                         if d.get("source_doc")]
+            except Exception as e:
+                logger.error("[CALC] in-force-by-then lookup failed: %s", e)
+                _cands = []
+            # More than one document can genuinely share this counterparty and
+            # instrument type (this corpus has two Tata Communications SLAs) —
+            # computed for each rather than guessing which one the question
+            # means, the same choice _resolve_docs_by_party_list makes for
+            # the identical ambiguity.
+            for _cand in _cands[:3]:
+                try:
+                    _second_dates = _doc_dates(wiki_id, session_id, _cand)
+                except Exception as e:
+                    logger.error("[CALC] in-force-by-then dates failed: %s", e)
+                    continue
+                _second_anchor = _second_dates.get("effective")
+                if not _second_anchor:
+                    continue
+                _delta = (primary_anchor - _second_anchor).days
+                _label2 = _label_for(_cand, wiki_id, session_id)
+                sections.append(
+                    f"**{_label2}** had been in force for **{_delta:,} day(s)** "
+                    f"as of {primary_anchor.isoformat()} — effective "
+                    f"{_second_anchor.isoformat()}, measured against the date "
+                    f"above rather than today.")
+                used.append(_cand)
+                compound_second = True
+            if len(_cands) > 1:
+                sections.append(
+                    f"{len(_cands)} documents match \"{m.group('type').strip()} with "
+                    f"{m.group('party').strip()}\" — every one is shown above rather "
+                    f"than guessing which the question means.")
+
     # Where several documents were in scope but only some can be computed, the
     # ones that cannot are still shown - "this copy states no fee schedule" is
     # information about the corpus, not noise.
-    if len(sections) > 1:
+    if compound_second:
+        body = "\n\n---\n\n".join(sections)
+    elif len(sections) > 1:
         body = (f"Scope resolved to {len(sections)} documents, computed "
                 "separately:\n\n" + "\n\n---\n\n".join(sections))
     else:
