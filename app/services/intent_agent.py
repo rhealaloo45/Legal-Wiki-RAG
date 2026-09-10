@@ -3206,6 +3206,32 @@ _RX_GAP_FIELD = re.compile(
     r"confidentiality\s+clause|indemnity\s+clause|audit[\s-]+rights?(?:\s+clause)?)\b",
     re.IGNORECASE)
 
+
+def _dynamic_gap_field(question: str) -> str:
+    """A clause_type_canon this wiki actually extracts, named in the question
+    by its natural-language phrase, or "" — the open-vocabulary sibling of
+    _RX_GAP_FIELD's fixed 9-field list. See analytics.clause_type_vocabulary.
+
+    Matched as the canon name with underscores turned to spaces ("force
+    majeure", "records retention") against the lower-cased question. Never
+    called on its own to decide whether a question is gap-shaped — only
+    alongside _RX_GAP, which supplies that judgement — so a stray clause-type
+    word in an unrelated sentence cannot turn it into a gap analytic by
+    itself.
+    """
+    try:
+        from services import analytics as _an, wikis as _wikis_dgf
+        vocab = _an.clause_type_vocabulary(_wikis_dgf.active_wiki_id())
+    except Exception:
+        return ""
+    q = (question or "").lower()
+    for canon in vocab:
+        phrase = canon.replace("_", " ")
+        if phrase and phrase in q:
+            return canon
+    return ""
+
+
 # A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
 # — is an instruction about the reply, not a property being asked of documents.
 # _RX_GAP only requires a question word and a negation within 80 characters of
@@ -3439,9 +3465,19 @@ def _is_analytics_query(question: str) -> str:
     # without this veto the gap branch reaches those questions first and answers
     # something else entirely. Vetoed here rather than reordered: the ordering
     # above it was chosen for reasons of its own, and a veto changes one branch.
-    if (_RX_GAP.search(q) and _RX_GAP_FIELD.search(q)
-            and not _RX_GAP_INSTRUCTION_VETO.search(q)
-            and not _is_clause_precedent_query(q)):
+    #
+    # _RX_GAP_FIELD alone only recognises the 9 fields someone wrote a fixed
+    # phrase for. _dynamic_gap_field extends the SAME "which field" question
+    # to any of the ~60 clause types this wiki actually extracts — "how many
+    # DPAs record no typed force-majeure clause" runs the identical
+    # NOT-EXISTS-in-clauses computation as the audit-rights case, and there is
+    # no reason that computation should be reachable for one and not the
+    # other. _RX_GAP itself still has to match first, so this only ever
+    # narrows an ALREADY gap-shaped question to a field, never turns an
+    # unrelated question into one.
+    if (_RX_GAP.search(q) and not _RX_GAP_INSTRUCTION_VETO.search(q)
+            and not _is_clause_precedent_query(q)
+            and (_RX_GAP_FIELD.search(q) or _dynamic_gap_field(q))):
         return "gap"
     if (_RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q)
             and not _RX_AGG_VETO.search(q)
@@ -3598,7 +3634,15 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                      else "indemnity" if re.search(r"indemnity", question or "", re.I)
                      else "governing_law" if re.search(r"governing\s+law", question or "", re.I)
                      else "termination" if re.search(r"terminat", question or "", re.I)
-                     else "liability_cap")
+                     # None of the 9 fixed fields matched — but _is_analytics_query
+                     # only classified this as "gap" at all because either
+                     # _RX_GAP_FIELD or _dynamic_gap_field matched, so if it
+                     # wasn't the former it has to have been the latter. Reused
+                     # rather than re-derived, so the field this branch computes
+                     # from is exactly the one that made the question a gap
+                     # question in the first place, not a coincidentally similar
+                     # second match.
+                     else (_dynamic_gap_field(question) or "liability_cap"))
             # The instrument type the question named, honoured rather than
             # dropped. "How many NDAs record no liability cap at all" and "how
             # many NDAs carry no dispute resolution clause" both ran

@@ -248,6 +248,45 @@ GAP_FIELDS = {
     },
 }
 
+# Extraction-pipeline buckets, not clause TYPES a lawyer would ask "how many
+# documents lack X" about — "definition" and "structural" are catch-all
+# categories for page content that doesn't fit a substantive clause type at
+# all (they are, by a wide margin, the two largest buckets in this corpus),
+# and "obligations" is itself a generic catch-all rather than one nameable
+# provision. Excluded from the dynamic gap-field vocabulary below so a
+# question mentioning "obligations" in passing cannot trigger a meaningless
+# "N documents have no obligations clause" analytic.
+_GAP_FIELD_VOCAB_EXCLUDE = frozenset({"definition", "structural", "obligations"})
+
+_CLAUSE_TYPE_VOCAB_CACHE: dict = {}
+
+
+def clause_type_vocabulary(wiki_id: str) -> list:
+    """Every distinct clause_type_canon actually extracted in this wiki,
+    minus the extraction-pipeline buckets above. Cached per wiki.
+
+    This is what lets find_gaps answer a clause type nobody wrote a
+    GAP_FIELDS entry for: the NOT-EXISTS-in-clauses computation those entries
+    already run is equally valid for any of the ~60 canon values this corpus
+    actually holds, not only the 9 someone happened to name in advance.
+    """
+    if wiki_id in _CLAUSE_TYPE_VOCAB_CACHE:
+        return _CLAUSE_TYPE_VOCAB_CACHE[wiki_id]
+    from sqlalchemy import text
+    from services import db as _db
+    try:
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT clause_type_canon FROM clauses "
+                "WHERE wiki_id = :w AND clause_type_canon IS NOT NULL"),
+                {"w": wiki_id}).fetchall()
+    except Exception:
+        return []
+    vocab = sorted({r[0] for r in rows
+                    if r[0] and r[0] not in _GAP_FIELD_VOCAB_EXCLUDE})
+    _CLAUSE_TYPE_VOCAB_CACHE[wiki_id] = vocab
+    return vocab
+
 
 def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
                 doc_type: str | None = None, parties: list[str] | None = None,
@@ -387,8 +426,22 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
         return {"error": "database not configured"}
     spec = GAP_FIELDS.get(field)
     if not spec:
-        return {"error": f"unknown gap field {field!r}",
-                "available": sorted(GAP_FIELDS)}
+        # Not one of the hand-curated fields above, but this corpus extracts
+        # ~60 distinct clause_type_canon values and GAP_FIELDS names only 9 of
+        # them — "how many DPAs record no typed force-majeure clause" is
+        # exactly the same NOT-EXISTS-in-clauses computation as the audit-rights
+        # entry above, just for a type nobody had written a dedicated entry
+        # for yet. Built on the fly instead, but only for a canon value
+        # actually extracted somewhere in this wiki — an unrecognised or
+        # misspelled field must fail loudly here, not silently run a
+        # NOT-EXISTS against zero real rows and report every document as
+        # missing something that was never a real clause type at all.
+        if field and field in clause_type_vocabulary(wiki_id):
+            spec = {"label": f"{field.replace('_', ' ')} clause",
+                    "table": "contracts", "clause_type": field}
+        else:
+            return {"error": f"unknown gap field {field!r}",
+                    "available": sorted(GAP_FIELDS) + clause_type_vocabulary(wiki_id)}
     from sqlalchemy import text
     from services import db
 
