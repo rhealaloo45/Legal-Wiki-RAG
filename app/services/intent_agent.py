@@ -3215,6 +3215,15 @@ _TREND_UNTYPED_SUBJECTS = (
     (re.compile(r"\brenewal\s+(?:terms?|periods?)\b", re.I),
      "renewal terms", "renewal_terms", "record renewal terms as free text"),
     (re.compile(r"\bcure\s+periods?\b", re.I), "cure period", None, None),
+    # "Are the confidentiality obligations in our agreements getting longer
+    # year on year?" declined correctly without this entry — the trend
+    # branch above requires _RX_AGG_METRIC (liability caps / contract
+    # values only), so the question fell all the way through to an LLM,
+    # which gave the right direction but no reason, costing a real call for
+    # a question this module can answer for free. Same fix as notice
+    # period: confidentiality duration is never extracted as its own field.
+    (re.compile(r"\bconfidentialit(?:y|ies)\s+(?:obligations?|duration|"
+               r"period|term)s?\b", re.I), "confidentiality duration", None, None),
 )
 
 # A date-range question over the corpus. Same shape of failure the aggregate and
