@@ -4648,6 +4648,52 @@ def count_documents_with_clause_text(wiki_id: str, session_id: str,
             "AND d.session_id = :s AND " + " AND ".join(conds)), params).scalar() or 0
 
 
+def count_documents_with_any_clause_text(wiki_id: str, session_id: str,
+                                         phrase_groups: list) -> int:
+    """How many documents match at least one wording VARIANT of a clause.
+
+    ``count_documents_with_clause_text`` anchors on a single phrase and ANDs
+    every element of it — right for "this exact wording, and this period",
+    wrong when the phrase itself is the thing in question and the corpus uses
+    more than one template for it. A precedent search's top hit is the
+    closest by embedding similarity, not necessarily the most common wording:
+    asked how many documents carry the Infiniti Retail/TerraNova open-ended
+    survival clause, anchoring on the nearest hit's own (rarer) phrasing
+    undercounted 50 documents down to 1, because the dominant template a
+    couple of ranks down uses different wording for the same commitment.
+
+    Each element of ``phrase_groups`` is itself a list of phrases that must
+    ALL appear together (one wording variant, same semantics as
+    ``count_documents_with_clause_text``'s ``phrases``) — the groups
+    themselves are OR'd, so a document counts once if it matches ANY variant.
+    """
+    from sqlalchemy import text
+    groups = []
+    for g in (phrase_groups or []):
+        ps = [p.strip() for p in (g or []) if p and len(p.strip()) >= 4]
+        if ps and any(len(p) >= 25 for p in ps):
+            groups.append(ps)
+    if not groups:
+        return 0
+    conds, params = [], {"w": wiki_id, "s": session_id}
+    for gi, ps in enumerate(groups):
+        phrase_conds = []
+        for pi, p in enumerate(ps):
+            key = f"p{gi}_{pi}"
+            phrase_conds.append(f"""(EXISTS (
+                SELECT 1 FROM clauses cl WHERE cl.wiki_id = :w AND cl.session_id = :s
+                 AND cl.source_doc = d.source_doc AND cl.verbatim_text ILIKE '%' || :{key} || '%')
+              OR EXISTS (
+                SELECT 1 FROM pages pg WHERE pg.wiki_id = :w AND pg.session_id = :s
+                 AND pg.source_doc = d.source_doc AND pg.content ILIKE '%' || :{key} || '%'))""")
+            params[key] = p
+        conds.append("(" + " AND ".join(phrase_conds) + ")")
+    with get_engine().connect() as conn:
+        return conn.execute(text(
+            "SELECT count(*) FROM documents d WHERE d.wiki_id = :w "
+            "AND d.session_id = :s AND (" + " OR ".join(conds) + ")"), params).scalar() or 0
+
+
 def breakdown_by_typed_field(wiki_id: str, session_id: str,
                              column: str,
                              doc_type_patterns: list | None = None,

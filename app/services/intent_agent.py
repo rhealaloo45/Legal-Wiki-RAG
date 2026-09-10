@@ -3147,7 +3147,7 @@ _RX_GAP_FIELD = re.compile(
     r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?|"
     r"dispute\s+resolution(?:\s+(?:clause|provision))?|arbitration\s+clause|"
     r"(?:intellectual\s+property|ip)\s+ownership(?:\s+clause)?|insurance\s+clause|"
-    r"confidentiality\s+clause|indemnity\s+clause)\b",
+    r"confidentiality\s+clause|indemnity\s+clause|audit[\s-]+rights?(?:\s+clause)?)\b",
     re.IGNORECASE)
 
 # A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
@@ -3519,7 +3519,9 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             # because that default is what a question naming neither falls to —
             # a dispute-resolution question reaching it was answered with the
             # liability cap gap, a real number about the wrong field.
-            field = ("dispute_resolution"
+            field = ("audit_rights"
+                     if re.search(r"audit[\s-]+rights?", question or "", re.I)
+                     else "dispute_resolution"
                      if re.search(r"dispute\s+resolution|arbitration\s+clause",
                                   question or "", re.I)
                      else "ip_ownership"
@@ -5831,6 +5833,21 @@ _RX_PRECEDENT = re.compile(
     r"|most\s+similar|comparable\s+(?:documents?|agreements?))\b",
     re.IGNORECASE,
 )
+# "Which other documents ... carry that same restriction?" matches
+# _RX_PRECEDENT's "which other documents" on the surface, but it is not asking
+# for document-to-document similarity — it names a specific CLAUSE (the
+# restriction/provision it just described) and wants every document that
+# carries it, the same task _RX_CLAUSE_PRECEDENT below already serves.
+# Confirmed live: "the Tata Sons DPA bars training AI models on Customer
+# Data. Which other documents in the corpus carry that same restriction?"
+# routed here, embedded the whole question, and returned unrelated
+# closest-precedent documents to an anchor it guessed wrong - never
+# attempting the clause count the question actually asked for.
+_RX_PRECEDENT_CLAUSE_VETO = re.compile(
+    r"\bcarr(?:y|ies)\s+(?:that|this|the)\s+(?:same\s+)?"
+    r"(?:restriction|clause|provision|wording|term|prohibition|obligation|requirement)\b",
+    re.IGNORECASE,
+)
 
 
 # Clause-level precedent, asked conversationally (§ Phase 3.5b). The Precedent
@@ -5841,7 +5858,7 @@ _RX_PRECEDENT = re.compile(
 # no drafting step.
 _RX_CLAUSE_PRECEDENT = re.compile(
     r"\b(?:"
-    r"have\s+we\s+(?:ever\s+)?(?:agreed|accepted|signed\s+up|conceded|given)"
+    r"have\s+we\s+(?:ever\s+)?(?:agreed|accepted|signed\s+up|conceded|given|used)"
     r"|has\s+(?:the\s+)?(?:company|firm|business)\s+(?:ever\s+)?agreed"
     r"|(?:what|which)\s+(?:did|have)\s+we\s+(?:do|done|agree[d]?)\s+(?:before|previously|in\s+the\s+past)"
     r"|do\s+we\s+have\s+precedent"
@@ -5862,6 +5879,13 @@ _RX_CLAUSE_PRECEDENT = re.compile(
     # retrieval happened to return — 15 and 23 documents against true figures
     # of 172 and 179.
     r"|(?:has|have)\s+[\w\s,'–—-]{0,160}?\bbeen\s+(?:used|agreed|accepted|adopted|included)"
+    # "Which other documents ... carry that same restriction?" — third person,
+    # no "we" at all, because the subject is a clause the question just
+    # described rather than something "we" did. Same veto text as
+    # _RX_PRECEDENT_CLAUSE_VETO above, which stops the document-similarity
+    # branch from claiming this phrasing first.
+    r"|carr(?:y|ies)\s+(?:that|this|the)\s+(?:same\s+)?"
+    r"(?:restriction|clause|provision|wording|term|prohibition|obligation|requirement)"
     r")\b",
     re.IGNORECASE,
 )
@@ -6219,30 +6243,56 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     # wording, and nothing said the list was partial. Counted by matching a
     # distinctive slice of the closest clause's own text, so the figure is the
     # documents carrying that wording rather than a similarity score.
+    # "Which other documents ... carry that same restriction?" carries the
+    # same intent as "...and in how many documents?" even though it never
+    # says "how many" — it is asking for the full population, not the ranked
+    # sample below. Confirmed live: without this, the ranked list of 8 stood
+    # as the whole answer to a question whose real figure was 85.
     _how_many = re.search(r"\bin\s+how\s+many\b|\bhow\s+many\s+(?:agreements?|"
-                          r"documents?|contracts?)\b", question or "", re.IGNORECASE)
+                          r"documents?|contracts?)\b"
+                          r"|\bwhich\s+other\s+(?:documents?|agreements?)\b[^?]{0,60}?\bcarr(?:y|ies)\b",
+                          question or "", re.IGNORECASE)
     if _how_many and hits:
-        _top = " ".join((hits[0].get("verbatim_text")
-                         or hits[0].get("text") or "").split())
-        # A clause opens with the obligated party's name, which is unique to
-        # that one document — slicing from the start counted 1. The shared
-        # wording begins at the operative verb, so the slice starts there when
-        # there is one ("Trent Limited SHALL MAINTAIN true and complete
-        # records ...").
-        _anchor = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b",
-                            _top, re.IGNORECASE)
-        _slice = (_top[_anchor.start():] if _anchor else _top)[:70]
-        if len(_slice) >= 25:
-            # The period is required alongside the boilerplate: the shared part
-            # of a templated clause is not what distinguishes it, and counting
-            # on it alone would report every retention clause whatever its term.
-            _phrases = [_slice]
+        def _anchor_slice(hit) -> str:
+            _t = " ".join((hit.get("verbatim_text") or hit.get("text") or "").split())
+            # A clause opens with the obligated party's name, which is unique to
+            # that one document — slicing from the start counted 1. The shared
+            # wording begins at the operative verb, so the slice starts there
+            # when there is one ("Trent Limited SHALL MAINTAIN true and
+            # complete records ...").
+            _a = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b",
+                           _t, re.IGNORECASE)
+            return (_t[_a.start():] if _a else _t)[:70]
+
+        # Anchoring the count on hits[0] alone measures ONE wording variant —
+        # the closest by embedding similarity, not necessarily the template
+        # most documents actually use. The Infiniti Retail/TerraNova
+        # open-ended survival wording sits a couple of ranks down from the
+        # nearest hit's own (rarer) phrasing, and anchoring on rank 0 alone
+        # undercounted 50 documents down to 1. Building one phrase-group per
+        # DISTINCT top hit (already de-duplicated above) and counting
+        # documents matching ANY of them catches the dominant template
+        # whichever rank it landed at, instead of betting the whole count on
+        # rank 0.
+        _phrase_groups = []
+        for _h in hits[:4]:
+            _slice = _anchor_slice(_h)
+            if len(_slice) < 25:
+                continue
+            _group = [_slice]
             if period:
-                _phrases.append(f"{period[0]} {period[1]}s")
+                # The period is required alongside the boilerplate for EACH
+                # variant: the shared part of a templated clause is not what
+                # distinguishes it, and counting on it alone would report
+                # every retention clause whatever its term.
+                _group.append(f"{period[0]} {period[1]}s")
+            _phrase_groups.append(_group)
+        _n_docs = 0
+        if _phrase_groups:
             try:
                 from services import db as _db_pc
-                _n_docs = _db_pc.count_documents_with_clause_text(
-                    wiki_id, session_id, _phrases)
+                _n_docs = _db_pc.count_documents_with_any_clause_text(
+                    wiki_id, session_id, _phrase_groups)
             except Exception as e:
                 logger.error("[AGENT] precedent corpus count failed: %s", e)
                 _n_docs = 0
@@ -6277,7 +6327,8 @@ def _is_precedent_query(question: str) -> bool:
     answer needs a document-to-document search instead — see
     db.find_similar_documents.
     """
-    return bool(_RX_PRECEDENT.search(question or ""))
+    q = question or ""
+    return bool(_RX_PRECEDENT.search(q) and not _RX_PRECEDENT_CLAUSE_VETO.search(q))
 
 
 def _precedent_answer(question: str, session_id: str) -> dict | None:

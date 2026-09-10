@@ -242,6 +242,10 @@ GAP_FIELDS = {
         "label": "indemnity clause",
         "table": "contracts", "clause_type": "indemnity",
     },
+    "audit_rights": {
+        "label": "audit-rights clause",
+        "table": "contracts", "clause_type": "audit_rights",
+    },
 }
 
 

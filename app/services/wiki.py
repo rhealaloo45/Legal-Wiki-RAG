@@ -8980,6 +8980,17 @@ def _canonical_party_name(bb, wiki_id: str, name: str) -> str | None:
     return canon
 
 
+
+# "one with X and one with Y" — an explicit per-item enumeration marker. A
+# same-document mention of two counterparties ("the NDA with X and Y") never
+# repeats "one", so this is a safe, narrow signal that the question names two
+# SEPARATE documents rather than one document with two parties — unlike a
+# bare two-name count, which is genuinely ambiguous between those readings.
+_RX_ONE_WITH_LIST = re.compile(
+    r"\bone\b[^.?]{0,60}?\bwith\b.{0,80}?\band\s+one\b[^.?]{0,60}?\bwith\b",
+    re.IGNORECASE)
+
+
 def _resolve_docs_by_party_list(question: str, session_id: str,
                                 cap: int = 8) -> set[str]:
     """The union of several separately-named parties' documents.
@@ -8991,12 +9002,26 @@ def _resolve_docs_by_party_list(question: str, session_id: str,
     three, and returning one of them had the comparison declined for lack of
     the other two.
 
-    Deliberately narrow. It fires only on three or more distinct
-    suffix-bearing party names, and only when the question does NOT link them
-    with "between" — "the JV between X and Y" is one document naming both, and
-    turning that into a union would be a real regression. Each name must also
-    resolve to a small set of its own, so an umbrella party cannot drag the
-    corpus in.
+    Deliberately narrow. It fires only when the question does NOT link the
+    names with "between" — "the JV between X and Y" is one document naming
+    both, and turning that into a union would be a real regression. Each name
+    must also resolve to a small set of its own, so an umbrella party cannot
+    drag the corpus in.
+
+    Requires three or more distinct names by default — but a question can
+    list its counterparties with NO corporate suffix at all ("Service Level
+    Agreements with Tata Communications, Apex Falcora Commodities and Apex
+    Everest Beverages" — the corpus's own registered names carry "Limited" /
+    "Corp." / "Private Limited", the question doesn't). _PARTY_NAME_RE alone
+    then finds nothing and this returned empty for exactly the shape it was
+    built for. Falls back to the same bare Title-Case phrase detector
+    _resolve_docs_by_party itself falls back to for a suffix-less name.
+
+    Two names is allowed only behind the explicit "one with X and one with Y"
+    marker (_RX_ONE_WITH_LIST) — confirmed live on "one with Castellane
+    Alloys and one with Castellane Hotels & Resorts" — because a bare
+    two-name count on its own is genuinely ambiguous with "the NDA with X and
+    Y" (one document, two counterparties), which this function must not catch.
     """
     if not config.USE_DATABASE:
         return set()
@@ -9005,17 +9030,48 @@ def _resolve_docs_by_party_list(question: str, session_id: str,
         return set()
     names = {m.group(1).strip() for m in _PARTY_NAME_RE.finditer(q)}
     names = {n for n in names if len(n) >= 4}
-    if len(names) < 3:
+    min_names = 2 if _RX_ONE_WITH_LIST.search(q) else 3
+    if len(names) < min_names:
+        # No corporate suffix on any name as typed — try the bare Title-Case
+        # phrase fallback _resolve_docs_by_party itself uses. Filtered to
+        # multi-word phrases only: a lone bare word here is far too likely to
+        # be ordinary capitalised prose ("Service Level Agreements") rather
+        # than a party name.
+        bare = {p.strip() for p in _bare_proper_noun_phrase_candidates(q)
+                if len(p.split()) >= 2}
+        names |= bare
+    if len(names) < min_names:
         return set()
+    # The instrument type the question names ("Service Level Agreements",
+    # "confidentiality agreements") — resolved once and applied to every
+    # name below via a structured party+type filter rather than
+    # _resolve_docs_by_party's full-text content scan. That scan is capped
+    # at 20 hits for performance, ranked in whatever order the database
+    # returns them; a party as common as "Tata Communications" (100+
+    # documents on this corpus, across many instrument types) can have every
+    # one of its Service Level Agreements sit OUTSIDE that first 20, so the
+    # scan finds nothing to narrow at all. Confirmed live: capped scan found
+    # 20 documents for "Tata Communications" and the one true SLA was not
+    # among them, while list_documents_matching's party-column filter (an
+    # indexed structured match, not a ranked scan) finds it directly. Local
+    # import: intent_agent imports this module, so the reverse import has to
+    # stay deferred to call time rather than sit at module scope.
+    from services import intent_agent as _ia
+    _, _type_patterns = _ia._doctype_from_question(question)
+
     out: set[str] = set()
-    for name in names:
+    for name in sorted(names):
         try:
-            hits = _resolve_docs_by_party(f"the agreement with {name}", session_id)
+            result = _db.list_documents_matching(
+                _active_wiki_id(), session_id, parties=[name],
+                doc_type_patterns=_type_patterns or None, limit=cap + 2)
+            hits = {d.get("source_doc") for d in (result.get("documents") or [])
+                    if d.get("source_doc")}
         except Exception as e:
             logger.error("party-list resolution failed for %r: %s", name, e)
             continue
         if hits and len(hits) <= 3:
-            out |= set(hits)
+            out |= hits
         if len(out) > cap:
             return set()
     return out
