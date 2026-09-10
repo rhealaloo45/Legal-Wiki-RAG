@@ -2758,6 +2758,18 @@ _RX_AUTHORITY = re.compile(
 # "Purchase Order PO-2025-185" out.
 _RX_AUTHORITY_PROC = re.compile(r"\b(Order\s+[IVXLCDM]{1,7})\b", re.IGNORECASE)
 
+# A regulation cited only by its acronym has no Act/Code/Rules terminator for
+# _RX_AUTHORITY to anchor on at all — "cite the EU GDPR" named no authority,
+# _is_structural_query fell through past the citations branch entirely, and
+# the question was answered as an ordinary compound document lookup instead,
+# from one arbitrarily-resolved document rather than the citation index.
+# The "EU " prefix is matched but not returned: the index records this
+# citation under several normalized forms ("GDPR", "EU GDPR", "EU General
+# Data Protection Regulation"), and only the bare acronym is a substring of
+# all of them — searching "EU GDPR" itself, confirmed live, missed the one
+# document indexed under bare "GDPR" alone (10 hits against a true 11).
+_RX_AUTHORITY_ACRONYM = re.compile(r"\b(?:EU\s+)?(GDPR)\b", re.IGNORECASE)
+
 
 def _named_authority(question: str) -> str:
     """The authority a citation question asks about, statutory or procedural.
@@ -2771,6 +2783,9 @@ def _named_authority(question: str) -> str:
     if m:
         return m.group(1).strip(" ,")
     m = _RX_AUTHORITY_PROC.search(question or "")
+    if m:
+        return m.group(1).strip(" ,")
+    m = _RX_AUTHORITY_ACRONYM.search(question or "")
     return m.group(1).strip(" ,") if m else ""
 
 
@@ -5173,6 +5188,22 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
             lines.append("")
             lines.append("Read directly from the citation index, so this is every "
                          "recorded occurrence rather than the closest matches.")
+            # This fast path answers ONLY the citation-count half of the
+            # question and returns immediately — a compound question also
+            # asking to compare or overlap that list against something else
+            # ("...and does that overlap with the agreements that restrict
+            # data to the EEA?") never reaches retrieval to answer the other
+            # half. Silently dropping it reads as a complete answer when it
+            # is not; naming the gap honestly is the safer failure. Confirmed
+            # live as the shape of this exact question on this corpus.
+            if re.search(r"\b(?:overlap|compare[sd]?|same\s+(?:as|set|documents?)|"
+                        r"also\s+(?:asks?|wants?))\b", question or "", re.IGNORECASE):
+                lines.append("")
+                lines.append("This list answers only which documents cite the "
+                             "authority named above — it does not by itself establish "
+                             "any overlap with a separately-asked population, which "
+                             "needs its own check rather than an assumption that the "
+                             "two sets are the same.")
             payload = _canned_payload("\n".join(lines), "Citations", "citation-index")
             payload["files_used"] = [h["source_doc"] for h in hits[:25]]
             payload["meta_answer"] = False
