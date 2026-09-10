@@ -8275,6 +8275,13 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
     # conjunctions are the same failure one turn later ("And what happens
     # if..."). None of these is ever a party name on its own.
     "tell", "give", "show", "draft", "find", "identify", "outline", "walk",
+    # Same failure, different part of speech: a sentence-initial quantifier
+    # pronoun capitalised only by position. "Anything anomalous across our
+    # data processing agreements?" offered "Anything" as the sole bare
+    # candidate, whose content search matched one coincidental Statement of
+    # Work instead of leaving the question scoped to the DPA population it
+    # names.
+    "anything", "something", "everything", "nothing",
     "and", "in", "of", "for", "as", "on", "at", "but", "so", "if",
     "client", "vendor", "party", "parties", "agreement", "agreements",
     "contract", "contracts", "document", "documents", "clause", "clauses",
@@ -8282,6 +8289,17 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
     "service", "services", "statement", "work", "data", "processing",
     "master", "regarding", "concerning", "according", "prepare", "provide",
     "explain", "describe", "summarize", "summarise", "compare", "list",
+    # "Customer" is a defined term in nearly every DPA on this corpus
+    # ("Customer Data"), not a party name — and a jurisdiction named in a
+    # governing-law clause ("India", "Singapore", "Maharashtra" are this
+    # corpus's actual values) is a place, never a contracting party. Left
+    # unfiltered, "Our data residency standard requires Customer Data to
+    # stay in India. Do our data processing agreements comply?" offered
+    # "Customer" and "India" as bare party candidates, whose content
+    # intersection pinned the whole question to one coincidentally-matching
+    # Non-Solicitation Agreement instead of surveying the DPA population the
+    # question actually names.
+    "customer", "india", "singapore", "maharashtra",
 })
 _BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
 
