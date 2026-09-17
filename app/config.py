@@ -245,6 +245,7 @@ QUESTION_MAX_PAGES_SHARING   = 1     # Drop question texts shared by more than N
 RRF_K                        = 60    # Reciprocal Rank Fusion constant — standard default; larger = flatter weighting of rank position
 HYBRID_FUSION_TOP_K          = 23    # Final page budget after RRF fusion for a NON-broad hybrid query (≈ old VECTOR_SEARCH_TOP_K + HYBRID_BM25_SUPPLEMENT_N, preserves prior context size)
 RERANK_CANDIDATE_N           = 25    # Candidates sent to the optional LLM reranker (titles+summaries only)
+MAX_TOKENS_CELL_EXTRACT      = 2048  # Review/Compare per-cell extraction. Was a hard-coded 300, under the same empty-output threshold as the rerank note below: in a 3-document compare 16 of 34 calls came back empty, and each empty reply rendered as if the term were absent. Doubled once on an empty reply (see extract_cell).
 MAX_TOKENS_RERANK            = 2048  # Fast-model rerank: the gpt-oss reasoning model spends most of the budget on hidden reasoning, so a small cap (e.g. 400) returns EMPTY output — 2048 is the smallest that reliably emits the JSON ranking for ~25 candidates
 
 # Compaction thresholds (S3, Phase 4)
