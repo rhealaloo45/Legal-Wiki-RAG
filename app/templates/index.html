@@ -10445,7 +10445,10 @@
         html += `<tr><td>${doc}</td>`;
         for (const col of data.columns) {
           const cell = data.rows[doc][col] || {};
-          const val = cell.value || '-';
+          // A failed extraction is not the same as a term the document lacks:
+          // say which one it is instead of showing both as '-'.
+          const val = cell.failed ? 'Extraction failed — not checked'
+                                  : (cell.value || 'Not stated');
           let cls = 'cr';
           if (cell.confidence >= 0.8) cls = 'cg';
           else if (cell.confidence >= 0.5) cls = 'cy';
@@ -10560,7 +10563,10 @@
         html += `<tr><td>${aspect}</td>`;
         for (const s of sourceNames) {
           const cell = data.table[aspect][s] || {};
-          const val = cell.value || '-';
+          // A failed extraction is not the same as a term the document lacks:
+          // say which one it is instead of showing both as '-'.
+          const val = cell.failed ? 'Extraction failed — not checked'
+                                  : (cell.value || 'Not stated');
           let cls = 'cr';
           if (cell.confidence >= 0.8) cls = 'cg';
           else if (cell.confidence >= 0.5) cls = 'cy';

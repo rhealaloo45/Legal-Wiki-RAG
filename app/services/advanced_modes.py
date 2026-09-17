@@ -223,12 +223,22 @@ Text:
 
 Extract: {column_name}"""
 
+    # The fast model is a reasoning model: it spends part of the budget on
+    # hidden reasoning, and when that eats the whole budget the reply is an
+    # empty string. One retry at double the budget covers the run-to-run
+    # variance in reasoning spend.
+    budget = config.MAX_TOKENS_CELL_EXTRACT
+    raw = ""
     try:
-        raw, _ = llm.fast_ask(prompt, max_tokens=300)
-        # remove potential reasoning block or markdown
-        raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-        raw = re.sub(r'```json', '', raw)
-        raw = re.sub(r'```', '', raw)
+        for attempt in range(2):
+            raw, _ = llm.fast_ask(prompt, max_tokens=budget)
+            # remove potential reasoning block or markdown
+            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw or "", flags=re.DOTALL)
+            raw = re.sub(r'```json', '', raw)
+            raw = re.sub(r'```', '', raw)
+            if raw.strip():
+                break
+            budget *= 2
         parsed = json.loads(raw.strip())
         return {
             "value": parsed.get("value"),
@@ -237,7 +247,31 @@ Extract: {column_name}"""
         }
     except Exception as e:
         logger.error(f"Cell extraction failed for '{column_name}': {e}")
-        return {"value": None, "confidence": 0.0, "quote": None}
+        return failed_cell()
+
+
+def failed_cell() -> dict:
+    """A cell whose extraction did not complete.
+
+    Kept distinct from a cell whose value is genuinely null: a null value
+    means the model read the text and found no such term, while this means
+    nobody knows. Rendering the two the same way tells a reviewer that an
+    agreement lacks a clause it may well contain.
+    """
+    return {"value": None, "confidence": 0.0, "quote": None, "failed": True}
+
+
+def _cell_for_summary(cell: dict):
+    """What a follow-on LLM prompt should see for one cell."""
+    if (cell or {}).get("failed"):
+        return "EXTRACTION FAILED (unknown; not evidence that the term is absent)"
+    return (cell or {}).get("value")
+
+
+def _cell_for_export(cell: dict):
+    if (cell or {}).get("failed"):
+        return "Extraction failed - not checked"
+    return (cell or {}).get("value")
 
 
 def _extract_with_retrieval(session_id: str, doc_name: str, query_text: str, broad_hint: bool = False) -> dict:
@@ -252,6 +286,10 @@ def _extract_with_retrieval(session_id: str, doc_name: str, query_text: str, bro
         if broad_text and broad_text != doc_text:
             res_broad = extract_cell(broad_text, query_text)
             if res_broad.get("value") is not None and res_broad.get("confidence", 0.0) >= res.get("confidence", 0.0):
+                res = res_broad
+            elif res.get("failed") and not res_broad.get("failed"):
+                # The broad pass completed and found nothing: that is a real
+                # answer, which beats an extraction that never finished.
                 res = res_broad
     return res
 
@@ -288,7 +326,7 @@ def _build_review_sheet(ws, store_data: dict):
         row_values = [doc_name]
         for col_name in columns:
             cell_data = col_data.get(col_name, {})
-            row_values.append(cell_data.get("value"))
+            row_values.append(_cell_for_export(cell_data))
             
         ws.append(row_values)
         
@@ -320,7 +358,7 @@ def _build_compare_sheet(ws, store_data: dict):
         for s in sources:
             doc_key = s.get("label", s.get("name"))
             cell_data = aspect_data.get(doc_key, {})
-            row_values.append(cell_data.get("value"))
+            row_values.append(_cell_for_export(cell_data))
             
         ws.append(row_values)
         
@@ -431,7 +469,7 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str
             res = _extract_with_retrieval(session_id, doc_name, col_name, broad_hint=_is_open_ended_column(col_name))
         except Exception as e:
             logger.error(f"Worker failed for {doc_name}/{col_name}: {e}")
-            res = {"value": None, "confidence": 0.0, "quote": None}
+            res = failed_cell()
         with lock:
             store_ref[job_id]["rows"][doc_name][col_name] = res
             store_ref[job_id]["completed"] += 1
@@ -716,7 +754,7 @@ Return JSON only, no preamble or explanation:
                     res = extract_cell(source_dict["text"], aspect)
                 except Exception as e:
                     logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
-                    res = {"value": None, "confidence": 0.0, "quote": None}
+                    res = failed_cell()
             else:
                 # C7: try metadata cache before firing an LLM call
                 res = _lookup_cached_metadata(session_id, source_dict["name"], aspect)
@@ -728,7 +766,7 @@ Return JSON only, no preamble or explanation:
                         )
                     except Exception as e:
                         logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
-                        res = {"value": None, "confidence": 0.0, "quote": None}
+                        res = failed_cell()
             with lock:
                 store_ref[job_id]["table"][aspect][doc_key] = res
 
@@ -773,7 +811,7 @@ Return JSON only, no preamble or explanation:
             for s in all_sources:
                 doc_key = s.get("label", s["name"])
                 cell_data = store_ref[job_id]["table"].get(aspect, {}).get(doc_key, {})
-                val = cell_data.get("value")
+                val = _cell_for_summary(cell_data)
                 if val:
                     aspect_vals[doc_key] = val
             if aspect_vals:
@@ -810,9 +848,19 @@ Extracted values:
         # already-extracted table, not doing fresh legal reasoning over raw
         # text, so the fast/cheap model is sufficient — same tier used for
         # every other Review/Compare call.
+        # The failed-cell rule is only added when a cell failed: naming the
+        # marker in a prompt with no failures gets it echoed into the text.
+        _any_failed = any((_c or {}).get("failed")
+                          for _row in store_ref[job_id]["table"].values()
+                          for _c in _row.values())
+        _failed_rule = (
+            '- A value reading "EXTRACTION FAILED" means that cell was never read. '
+            'Say it could not be checked; never describe it as absent or not specified. '
+            'Do NOT flag a failed cell as a contradiction.\n'
+        ) if _any_failed else ""
         narrative_prompt = f"""\
 Question: {question}
-Comparison table: {json.dumps(store_ref[job_id]["table"])}
+Comparison table: {json.dumps({_a: {_d: dict(_c, value=_cell_for_summary(_c)) for _d, _c in _row.items()} for _a, _row in store_ref[job_id]["table"].items()})}
 Outliers: {json.dumps(outliers)}
 
 Write a well-structured legal synthesis based ONLY on the comparison table data above.
@@ -822,7 +870,7 @@ STRICT RULES:
 - Write fluid, cohesive summary paragraphs describing trends across the documents. DO NOT output repetitive nested lists detailing every single document's individual value. 
 - Group similar findings together into single sentences (e.g. "Most documents do not specify a notice period, except [1] which requires 30 days").
 - Do NOT redundantly enumerate "not specified" for every document. Synthesize it.
-- Cite your sources using standard IEEE format inline (e.g., [1], [2], [3]). Do NOT mention the exact document names anywhere in the paragraph text.
+{_failed_rule}- Cite your sources using standard IEEE format inline (e.g., [1], [2], [3]). Do NOT mention the exact document names anywhere in the paragraph text.
 - ONLY state facts that appear in the comparison table. DO NOT add information not present in the data.
 - Flag contradictions explicitly, citing both documents and their conflicting values verbatim.
 - DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
