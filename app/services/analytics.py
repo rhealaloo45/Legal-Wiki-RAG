@@ -61,13 +61,36 @@ def _party_clause(parties: list[str] | None, params: dict) -> str:
     return " AND " + " AND ".join(frags)
 
 
+def _source_doc_clause(source_docs: list[str] | None, params: dict) -> str:
+    """SQL fragment restricting an aggregate to an explicitly resolved document set.
+
+    A question that NAMES its instruments ("of the Service Level Agreements
+    with X, Y and Z, which carries the highest cap") is asking about those
+    documents, not about every document in the corpus that happens to mention
+    one of those parties. The party filter above cannot express that: measured
+    live, it computed the answer over all 72 documents mentioning "Acme
+    Communications" - judgments, NDAs, shareholder agreements - when the
+    question named three Service Level Agreements. Scope resolution already
+    identifies the right documents; this lets the aggregate be told which.
+    """
+    if not source_docs:
+        return ""
+    keys = []
+    for i, sd in enumerate(source_docs):
+        key = f"agg_doc{i}"
+        params[key] = sd
+        keys.append(f":{key}")
+    return " AND c.source_doc IN (" + ", ".join(keys) + ")"
+
+
 # ---------------------------------------------------------------------------
 # aggregation
 # ---------------------------------------------------------------------------
 
 def aggregate_liability_caps(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
-                             doc_type: str | None = None) -> dict:
+                             doc_type: str | None = None,
+                             source_docs: list[str] | None = None) -> dict:
     """SUM/AVG/median over parsed liability caps, with full coverage reporting.
 
     Currency is reported but NOT converted — mixing INR and USD into one sum
@@ -82,6 +105,7 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
     params: dict = {"w": wiki_id, "sid": session_id}
     where = "c.wiki_id = :w AND c.session_id = :sid"
     where += _party_clause(parties, params)
+    where += _source_doc_clause(source_docs, params)
     if doc_type:
         params["dt"] = f"%{doc_type}%"
         where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
@@ -102,6 +126,26 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
             GROUP BY 1 ORDER BY 2 DESC
         """), params).fetchall()
 
+    # Per-document rows, but only for an explicitly named set. "Which of these
+    # carries the highest cap" is answered by naming a document, and a summary
+    # of min/max never names one - measured live, the answer gave a range and
+    # left the question itself unanswered. Deliberately not returned for a
+    # corpus-wide aggregate, where 112 rows would be a wall, not an answer.
+    per_doc = []
+    if source_docs:
+        with db.get_engine().connect() as conn:
+            per_doc = [{
+                "source_doc": r[0],
+                "amount": float(r[1]) if r[1] is not None else None,
+                "currency": r[2] or "unspecified",
+            } for r in conn.execute(text(f"""
+                SELECT c.source_doc, c.liability_cap_amount,
+                       COALESCE(c.liability_cap_currency, 'unspecified')
+                FROM contracts c
+                WHERE {where} AND c.liability_cap_amount IS NOT NULL
+                ORDER BY c.liability_cap_amount DESC
+            """), params).fetchall()]
+
     total = sum(coverage.values())
     by_currency = [{
         "currency": r[0], "contracts": int(r[1]),
@@ -114,6 +158,7 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
     computed = sum(c["contracts"] for c in by_currency)
     return {
         "metric": "liability_cap",
+        "per_doc": per_doc,
         "by_currency": by_currency,
         "mixed_currency": len(by_currency) > 1,
         "computed_over": computed,
@@ -121,12 +166,14 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
         "coverage": _coverage_note(coverage, computed, total, "liability cap"),
         "excluded": {k: v for k, v in coverage.items() if k != OK},
         "parties": parties or [], "doc_type": doc_type,
+        "source_docs": list(source_docs or []),
     }
 
 
 def aggregate_contract_values(wiki_id: str, session_id: str,
                               parties: list[str] | None = None,
-                              doc_type: str | None = None) -> dict:
+                              doc_type: str | None = None,
+                              source_docs: list[str] | None = None) -> dict:
     """Same shape, over clause-level contract-value figures."""
     if not _enabled():
         return {"error": "database not configured"}
@@ -137,6 +184,7 @@ def aggregate_contract_values(wiki_id: str, session_id: str,
     where = ("c.wiki_id = :w AND c.session_id = :sid "
              "AND c.clause_type_canon = 'contract_value'")
     where += _party_clause(parties, params)
+    where += _source_doc_clause(source_docs, params)
     if doc_type:
         params["dt"] = f"%{doc_type}%"
         where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
