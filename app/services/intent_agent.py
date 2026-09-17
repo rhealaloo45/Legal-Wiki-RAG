@@ -3590,14 +3590,51 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             metric = ("contract_value"
                       if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
                       else "liability_cap")
-            data = (analytics.aggregate_contract_values(wiki_id, session_id, parties)
+            # A question that LISTS its instruments by counterparty ("of the
+            # Service Level Agreements with X, Y and Z, which carries the
+            # highest cap") is asking about those documents. The party filter
+            # alone cannot say that, and this branch owns the question before
+            # scope resolution ever runs, so it has to ask for the resolved
+            # set itself. Measured live: without this the answer was computed
+            # over all 72 documents mentioning "Tata Communications" - the
+            # judgments and NDAs among them included - for a question naming
+            # three Service Level Agreements.
+            #
+            # Narrowed ONLY on the explicit multi-name list shape that
+            # _resolve_docs_by_party_list recognises, never on a general scope
+            # guess: a plain corpus aggregate ("what is the average liability
+            # cap across our contracts") must keep answering over the corpus,
+            # and a false narrowing there would be a worse answer than the
+            # over-broad one this fixes.
+            _scoped_docs = []
+            try:
+                _plist = _wiki._resolve_docs_by_party_list(question, session_id)
+                if len(_plist) > 1:
+                    _scoped_docs = sorted(_plist)
+            except Exception as _sc_err:
+                logger.error("[AGENT] aggregate scope narrowing failed: %s", _sc_err)
+            # The party filter is dropped once the documents are resolved, and
+            # dropping it is the whole point: _party_clause requires EVERY named
+            # party on EVERY document, but a list question names one party PER
+            # document. ANDing all three against each of the four resolved
+            # agreements left only the two that name the same counterparty, and
+            # the answer was computed over those - right documents, wrong two of
+            # them. Scope has already applied the party constraint, distributed
+            # across the set rather than conjoined within each document.
+            _agg_parties = None if _scoped_docs else parties
+            data = (analytics.aggregate_contract_values(
+                        wiki_id, session_id, _agg_parties, source_docs=_scoped_docs or None)
                     if metric == "contract_value"
-                    else analytics.aggregate_liability_caps(wiki_id, session_id, parties))
+                    else analytics.aggregate_liability_caps(
+                        wiki_id, session_id, _agg_parties, source_docs=_scoped_docs or None))
             if data.get("error") or not data.get("by_currency"):
                 return None
             label = "contract value" if metric == "contract_value" else "liability cap"
             scope_txt = f" for {' and '.join(parties)}" if parties else ""
-            lines = [f"**{label.title()} across the corpus{scope_txt}**", ""]
+            _head = (f"**{label.title()} across the {len(_scoped_docs)} agreement(s) named**"
+                     if _scoped_docs else
+                     f"**{label.title()} across the corpus{scope_txt}**")
+            lines = [_head, ""]
             for c in data["by_currency"]:
                 n = c.get("contracts") or c.get("documents")
                 lines.append(f"- **{c['currency']}** — {n} document(s)")
@@ -3607,12 +3644,31 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append(f"  - Mean: {_fmt_money(c['mean'], c['currency'])}")
                 lines.append(f"  - Range: {_fmt_money(c['min'], c['currency'])} to "
                              f"{_fmt_money(c['max'], c['currency'])}")
+                # "...and by how much does it exceed the lowest?" is a second
+                # question, and min/max alone leave the reader to subtract.
+                if (c.get("min") is not None and c.get("max") is not None
+                        and re.search(r"\bexceed|\bby how much\b|\bdifference\b|\bgap\b|"
+                                      r"\bhigher than\b|\bmore than the (?:lowest|smallest)\b",
+                                      question or "", re.I)):
+                    lines.append(f"  - Highest exceeds lowest by: "
+                                 f"{_fmt_money(c['max'] - c['min'], c['currency'])}")
+            if data.get("per_doc"):
+                lines += ["", "Per agreement, highest first:"]
+                for d in data["per_doc"]:
+                    lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])} — "
+                                 f"{_fmt_money(d['amount'], d['currency'])}")
+                lines.append("")
+                lines.append("Every agreement the question's names resolve to is listed, "
+                             "rather than one being picked where the names fit more than "
+                             "one document.")
             if data.get("mixed_currency"):
                 lines += ["", "Reported per currency and deliberately not converted or "
                               "combined — a single total across currencies would be wrong "
                               "in each of them."]
             lines += ["", f"*{data['coverage']}*"]
             payload = _canned_payload("\n".join(lines), "Aggregate", "structured-analytics")
+            if _scoped_docs:
+                payload["files_used"] = _scoped_docs
 
         elif kind == "gap":
             # Checked before termination because "dispute resolution" questions
