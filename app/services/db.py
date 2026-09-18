@@ -4824,12 +4824,12 @@ def find_documents_by_date_span(wiki_id: str, session_id: str,
 LITIGATION_CASE_PREFIXES = {
     "arbitration petition": r"arb\.?\s*pet",
     "arb pet": r"arb\.?\s*pet",
-    "civil suit": r"CS\s*\(",
-    "commercial suit": r"CS\s*\(\s*COMM",
-    "writ petition": r"W\.?P\.?\s*\(",
-    "company petition": r"C\.?P\.?\s*No",
-    "original petition": r"O\.?P\.?\s*No",
-    "appeal": r"Appeal\s*No",
+    "civil suit": r"\mCS\s*\(",
+    "commercial suit": r"\mCS\s*\(\s*COMM",
+    "writ petition": r"\mW\.?P\.?\s*\(",
+    "company petition": r"\mC\.?P\.?\s*No",
+    "original petition": r"\mO\.?P\.?\s*No",
+    "appeal": r"\mAppeal\s*No",
 }
 
 
