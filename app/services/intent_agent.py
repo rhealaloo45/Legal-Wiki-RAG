@@ -3456,6 +3456,16 @@ def _is_analytics_query(question: str) -> str:
         _sk = ""
     if _sk:
         return "survey_" + _sk
+    # A named company's litigation matters and their outcomes ("X appears in
+    # more than one matter; what are they, and did X win?") are recorded in
+    # litigation_facts; retrieval read the same question from pleadings and
+    # hedged on an outcome the index held two final orders for.
+    try:
+        from services import matters as _matters
+        if _matters.is_matters_query(q):
+            return "party_matters"
+    except Exception as _pm_err:
+        logger.error("[AGENT] party-matters detection failed: %s", _pm_err)
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
     # Checked straight after, and only when the question is unambiguously about
@@ -3904,6 +3914,14 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append(f"| {b['year']} | {b['documents']} | {b['with_value']} | {med} |")
             lines += ["", f"*{data['note']}*"]
             payload = _canned_payload("\n".join(lines), "Trend", "structured-analytics")
+        elif kind == "party_matters":
+            from services import matters
+            _pm = matters.answer(question, wiki_id, session_id,
+                                 display=lambda d: _dp_display(d, wiki_id, session_id))
+            if not _pm:
+                return None
+            payload = _canned_payload(_pm["text"], "Matters", "structured-analytics")
+            payload["files_used"] = _pm["documents"]
         elif kind.startswith("survey_"):
             from services import survey
             _sv = survey.answer(kind[len("survey_"):], question, wiki_id, session_id)
