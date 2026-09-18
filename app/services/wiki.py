@@ -8272,6 +8272,19 @@ _RX_DEMONSTRATIVE_DOC = re.compile(
     r"(?:agreement|contract|document|deed|lease|instrument|sla|nda|msa|dpa|spa|"
     r"sow|licence|license|arrangement)\b",
     re.IGNORECASE)
+# The same back-reference with a name between the demonstrative and the type
+# word: "under that <Company> agreement". Used only by _carryover_scope, where
+# a thread has already pinned a document; the subject-pivot check there still
+# refuses to inherit when the name is not on the carried document. Without it,
+# the type word counted as a pivot and the follow-up searched the whole corpus
+# (measured: it answered from court judgments that the agreement "is not
+# included in these documents"). Name words must be capitalised, so "that new
+# agreement" stays with the plain pattern's rules.
+_RX_DEMONSTRATIVE_NAMED_DOC = re.compile(
+    r"\b(?i:in|under|of|for|about|within)\s+(?i:this|that|the\s+said|the\s+same)\s+"
+    r"(?:[A-Z][\w&.'()-]*\s+){1,5}"
+    r"(?i:agreement|contract|document|deed|lease|instrument|sla|nda|msa|dpa|spa|"
+    r"sow|licence|license|arrangement)\b")
 
 
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
@@ -11030,7 +11043,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
             # pinned, searched all 1,372 documents and answered from a different
             # company's Joint Venture Agreement that merely shared the word
             # "Gringotts" - and turns 3 and 4 then inherited that wrong document.
-            and not _RX_DEMONSTRATIVE_DOC.search(question)):
+            and not _RX_DEMONSTRATIVE_DOC.search(question)
+            and not _RX_DEMONSTRATIVE_NAMED_DOC.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
