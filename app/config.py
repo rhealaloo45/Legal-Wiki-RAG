@@ -73,6 +73,13 @@ LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "10"))
 PRODUCTION_WIKI_SESSION_ID = os.getenv("PRODUCTION_WIKI_SESSION_ID", "")
 DISABLE_INGEST = os.getenv("DISABLE_INGEST", "false").lower() == "true"
 
+# The house's own entities, comma-separated, matched as substrings of a
+# document's recorded parties. "Our data processing agreements" means the ones
+# a house entity signed; with this empty, "our" is read as every document of
+# that type and population answers say so. Deployment data, so it lives in the
+# environment and never in code.
+HOUSE_PARTIES = [p.strip() for p in os.getenv("HOUSE_PARTIES", "").split(",") if p.strip()]
+
 # Global Providers (azure / openrouter / nvidia)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
