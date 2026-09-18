@@ -3239,6 +3239,13 @@ _DATED_RE = re.compile(
 # answered outright under stated assumptions. The first is right; a lawyer
 # reading the other two could reasonably come away believing the document had
 # been checked against the statute.
+# A drafting request that also asks how widely a term is used, so the draft
+# needs a corpus figure rather than an impression from the precedent sample.
+_RX_BREADTH = re.compile(
+    r"\bhow\s+(?:widely|widespread|common(?:ly)?|often|many\s+(?:of\s+)?(?:our\s+)?"
+    r"(?:agreements?|documents?|contracts?))\b|\bin\s+how\s+many\b|\bprevalen(?:ce|t)\b"
+    r"|\bhow\s+much\s+of\s+(?:our|the)\s+(?:portfolio|corpus|book)\b",
+    re.IGNORECASE)
 _RX_STATUTE_NAMED = re.compile(
     r"\b((?:[A-Z][\w'&.-]*\s+(?:(?:and|of|the|for|on)\s+)?){0,6}"
     r"(?:Act|Rules|Regulations|Code|Directive|Convention|Ordinance)"
@@ -6270,6 +6277,33 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                     f"documents in this corpus; cite them as precedent, never "
                     f"as terms of the document under discussion) ---\n{_block}")
                 logger.info("Drafting intent: added %d precedent clause(s)", len(_pc))
+                # A draft that has to say how widely a term is used ("a note
+                # to the board on our position and how widely we have it")
+                # was left to characterise breadth from the dozen precedent
+                # clauses above, and wrote "at least five" where the index
+                # held 85. The same count the precedent answer uses is run
+                # here and handed over as a figure, not left to inference.
+                if _RX_BREADTH.search(question or ""):
+                    from services import intent_agent as _ia_cnt
+                    _bd = _ia_cnt.precedent_wording_breakdown(
+                        _pc, _active_wiki_id(), session_id)
+                    if _bd.get("any"):
+                        _rows = "\n".join(f'- {n} documents: "{w}..."'
+                                          for w, n in _bd["wordings"] if n)
+                        wiki_content += (
+                            f"\n\n--- CORPUS COUNT (computed from the index, not "
+                            f"estimated) ---\nDocuments in this corpus carrying "
+                            f"each wording among the precedent clauses above:\n"
+                            # No combined total: offered one, the draft led
+                            # with it as the reach of "this restriction", when
+                            # it summed several different commitments.
+                            f"{_rows}"
+                            f"\nWhen the draft states how widely a term is used, "
+                            f"use the figure for the wording that term matches, "
+                            f"say it was counted across the corpus, and do not "
+                            f"substitute a number of your own.")
+                        logger.info("Drafting intent: corpus breakdown injected (%d any)",
+                                    _bd["any"])
         except Exception as _p_err:
             logger.warning("Precedent clauses unavailable for drafting intent: %s",
                            _p_err)

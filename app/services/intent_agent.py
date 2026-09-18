@@ -6354,6 +6354,84 @@ def _clause_states_period(text_: str, count: int, unit: str) -> bool:
         text_ or "", re.IGNORECASE))
 
 
+def _anchor_slice(hit: dict) -> str:
+    """The shared, countable part of one precedent clause's wording.
+
+    A clause opens with the obligated party's name, which is unique to that one
+    document, so slicing from the start counted 1. The shared wording begins at
+    the operative verb, so the slice starts there when there is one.
+    """
+    _t = " ".join((hit.get("verbatim_text") or hit.get("text") or "").split())
+    _a = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b", _t, re.IGNORECASE)
+    return (_t[_a.start():] if _a else _t)[:70]
+
+
+def _precedent_wording_groups(hits: list, period=None) -> list:
+    """One phrase group per distinct wording among the hits, at most four.
+
+    Distinct wordings, not the first four hits: a search result is often
+    several copies of one template, and four copies of it measure one variant
+    four times while the corpus's dominant wording sits at rank 5. The closest
+    hit by embedding similarity is not necessarily the template most documents
+    use either; anchoring on rank 0 alone once undercounted 50 documents as 1.
+    When the question fixes a period it is required alongside each wording,
+    since the shared boilerplate alone would count every such clause whatever
+    its term.
+    """
+    groups, seen = [], set()
+    for h in (hits or []):
+        if len(groups) == 4:
+            break
+        sl = _anchor_slice(h)
+        if len(sl) < 25 or sl.lower() in seen:
+            continue
+        seen.add(sl.lower())
+        groups.append([sl] + ([f"{period[0]} {period[1]}s"] if period else []))
+    return groups
+
+
+def precedent_wording_count(hits: list, wiki_id: str, session_id: str,
+                            period=None) -> int:
+    """How many documents carry any of the closest precedent clauses' wordings.
+
+    Returns 0 when nothing countable could be built or the count failed;
+    callers treat 0 as "no figure", never as "no documents".
+    """
+    groups = _precedent_wording_groups(hits, period)
+    if not groups:
+        return 0
+    try:
+        from services import db as _db_pc
+        return _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, groups)
+    except Exception as e:
+        logger.error("[AGENT] precedent corpus count failed: %s", e)
+        return 0
+
+
+def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
+                                period=None) -> dict:
+    """{"wordings": [(wording, documents)], "any": documents} for the closest
+    precedent clauses, or {} if nothing countable could be built.
+
+    The union alone can mislead: the nearest clauses to a question are often
+    related but different commitments (a ban on training general-purpose
+    models, and a narrower one on shared models), and one combined figure
+    reads as the reach of a single clause.
+    """
+    groups = _precedent_wording_groups(hits, period)
+    if not groups:
+        return {}
+    try:
+        from services import db as _db_pc
+        per = [(g[0], _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, [g]))
+               for g in groups]
+        return {"wordings": sorted(per, key=lambda x: -x[1]),
+                "any": _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, groups)}
+    except Exception as e:
+        logger.error("[AGENT] precedent corpus breakdown failed: %s", e)
+        return {}
+
+
 def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     """Rank precedent clauses matching the term the question describes.
 
@@ -6454,54 +6532,12 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
                           r"|\bwhich\s+other\s+(?:documents?|agreements?)\b[^?]{0,60}?\bcarr(?:y|ies)\b",
                           question or "", re.IGNORECASE)
     if _how_many and hits:
-        def _anchor_slice(hit) -> str:
-            _t = " ".join((hit.get("verbatim_text") or hit.get("text") or "").split())
-            # A clause opens with the obligated party's name, which is unique to
-            # that one document — slicing from the start counted 1. The shared
-            # wording begins at the operative verb, so the slice starts there
-            # when there is one ("Trent Limited SHALL MAINTAIN true and
-            # complete records ...").
-            _a = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b",
-                           _t, re.IGNORECASE)
-            return (_t[_a.start():] if _a else _t)[:70]
-
-        # Anchoring the count on hits[0] alone measures ONE wording variant —
-        # the closest by embedding similarity, not necessarily the template
-        # most documents actually use. The Infiniti Retail/TerraNova
-        # open-ended survival wording sits a couple of ranks down from the
-        # nearest hit's own (rarer) phrasing, and anchoring on rank 0 alone
-        # undercounted 50 documents down to 1. Building one phrase-group per
-        # DISTINCT top hit (already de-duplicated above) and counting
-        # documents matching ANY of them catches the dominant template
-        # whichever rank it landed at, instead of betting the whole count on
-        # rank 0.
-        _phrase_groups = []
-        for _h in hits[:4]:
-            _slice = _anchor_slice(_h)
-            if len(_slice) < 25:
-                continue
-            _group = [_slice]
-            if period:
-                # The period is required alongside the boilerplate for EACH
-                # variant: the shared part of a templated clause is not what
-                # distinguishes it, and counting on it alone would report
-                # every retention clause whatever its term.
-                _group.append(f"{period[0]} {period[1]}s")
-            _phrase_groups.append(_group)
-        _n_docs = 0
-        if _phrase_groups:
-            try:
-                from services import db as _db_pc
-                _n_docs = _db_pc.count_documents_with_any_clause_text(
-                    wiki_id, session_id, _phrase_groups)
-            except Exception as e:
-                logger.error("[AGENT] precedent corpus count failed: %s", e)
-                _n_docs = 0
-            if _n_docs:
-                lines.insert(0, f"**{_n_docs} document(s) in the corpus carry this "
-                                f"wording.** The clauses below are the closest "
-                                f"matches, not the whole list.")
-                lines.insert(1, "")
+        _n_docs = precedent_wording_count(hits, wiki_id, session_id, period)
+        if _n_docs:
+            lines.insert(0, f"**{_n_docs} document(s) in the corpus carry this "
+                            f"wording.** The clauses below are the closest "
+                            f"matches, not the whole list.")
+            lines.insert(1, "")
 
     lines.append("Ranked from the precedent clause index by similarity to your "
                  "question, and quoted verbatim — these are clauses already agreed "
