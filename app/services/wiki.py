@@ -294,7 +294,7 @@ def _make_doc_identifier(doc_name: str) -> str:
     # Try to extract type + number: "Service Agreement 1" → "SA1"
     m = re.search(r'(Service\s+Agreement|Shareholder\s+Agreement|Joint\s+Venture(?:\s+Agreement)?|'
                   r'NDA|Legal\s+Opinion|Court\s+Case(?:\s+Document)?|Judgment|'
-                  r'Acme\s+Brand\s+Judgment)\s*(\d+)',
+                  r'Brand\s+Judgment)\s*(\d+)',
                   clean, re.IGNORECASE)
     if m:
         type_str = m.group(1).strip()
@@ -304,7 +304,7 @@ def _make_doc_identifier(doc_name: str) -> str:
             'joint venture agreement': 'JVA', 'joint venture': 'JVA',
             'nda': 'NDA', 'legal opinion': 'LO',
             'court case document': 'CCD', 'court case': 'CCD',
-            'judgment': 'J', 'acme brand judgment': 'TBJ',
+            'judgment': 'J', 'brand judgment': 'BJ',
         }
         abbr = abbrevs.get(type_str.lower(), type_str[:3].upper())
         return f"{abbr}{num}"
@@ -3998,9 +3998,9 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 # Extract just the doc name: last meaningful segment
                 # "Legal AI Tool - Acme Group Service Agreement Service Agreement 4"
                 #   → "Service Agreement 4"
-                for prefix in ["Legal AI Tool - Acme Group ", "Legal AI Tool - "]:
-                    if clean_file.startswith(prefix):
-                        clean_file = clean_file[len(prefix):]
+                clean_file = re.sub(r"^Legal AI Tool - (?:\S+ ){0,3}?Group ", "", clean_file)
+                if clean_file.startswith("Legal AI Tool - "):
+                    clean_file = clean_file[len("Legal AI Tool - "):]
                 # Remove repeated type prefix: "Service Agreement Service Agreement 4" → "Service Agreement 4"
                 parts = clean_file.split()
                 mid = len(parts) // 2
@@ -4121,7 +4121,7 @@ JSON:"""
 
 
 _ASSESSMENT_PATTERNS = re.compile(
-    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?:we|i|acme)\s+sign|'
+    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?!be\b|not\b|have\b)(?:\w+\s+){1,3}?sign\b|'
     r'risk\s+assessment|risk\s+review|advise|advisory|red\s+flag|deal[- ]?breaker|'
     r'approve|approval|sign\s+off|signoff|would\s+you\s+(?:recommend|advise|sign)|'
     r'safe\s+to\s+sign|ready\s+to\s+(?:sign|execute)|negotiation\s+strategy|'
@@ -7622,7 +7622,7 @@ _NON_ENTITY_WORDS = {
     "your", "its", "his", "her", "some", "no", "which", "what", "does", "do",
     "is", "are", "was", "were", "review", "summarize", "summarise", "analyze",
     "analyse", "explain", "describe", "identify", "assess", "evaluate", "draft",
-    "compare", "in", "of", "for", "on", "about", "regarding", "acme", "given",
+    "compare", "in", "of", "for", "on", "about", "regarding", "given",
     "from", "with", "and", "or", "to", "by", "under", "between", "during", "at",
     "into", "onto", "over", "after", "before", "against", "across", "within",
     # Quantifiers over the whole corpus ("across all Service Agreements") name
@@ -7630,7 +7630,7 @@ _NON_ENTITY_WORDS = {
     # (and the resulting 45%-confidence cap) on a genuinely broad, correctly
     # cross-document-synthesized answer.
     "all", "both", "such", "these", "those", "various", "multiple", "several", "many",
-}
+} | set(config.COMMON_PARTY_TOKENS)
 
 # Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
 # (a determiner + a doc type/noun) NOT followed by a number. Used to disambiguate
@@ -7748,7 +7748,7 @@ def _names_numbered_document(question: str) -> bool:
 
 # Tokens that are doc types / generic vocabulary, NOT distinctive entity names.
 _ENTITY_EXCLUDE = {
-    "nda", "sha", "jva", "jv", "sa", "acme", "agreement", "agreements", "service",
+    "nda", "sha", "jva", "jv", "sa", "agreement", "agreements", "service",
     "shareholder", "shareholders", "joint", "venture", "court", "judgment",
     "judgments", "legal", "opinion", "opinions", "case", "document", "documents",
     "redacted", "test", "amendment", "summary", "final", "draft", "the", "and",
@@ -7838,7 +7838,7 @@ _ENTITY_EXCLUDE = {
     # excluding it loses only the ability to match on "data" alone, not the
     # full "Pinnacle Data Analytics" name.
     "intellectual", "property", "governing", "forum", "proper", "data",
-}
+} | set(config.COMMON_PARTY_TOKENS)
 
 
 @lru_cache(maxsize=2048)
@@ -9964,8 +9964,7 @@ _PARTY_GENERIC_WORDS = frozenset({
     # entirely; a real Transition Services Agreement never found at all).
     # Ingest's own short-titling already drops these ("Sagar-Trey", "TPL"),
     # this just catches the token extractor up to match.
-    'apex', 'acme',
-})
+}) | frozenset(config.COMMON_PARTY_TOKENS)
 
 
 def _distinctive_party_token(name: str, skip: frozenset = frozenset()) -> str:

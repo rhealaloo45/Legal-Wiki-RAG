@@ -80,6 +80,12 @@ DISABLE_INGEST = os.getenv("DISABLE_INGEST", "false").lower() == "true"
 # environment and never in code.
 HOUSE_PARTIES = [p.strip() for p in os.getenv("HOUSE_PARTIES", "").split(",") if p.strip()]
 
+# Party-name words so common across this corpus that they identify no
+# document (a group name most entities share), lower-case, comma-separated.
+# Excluded wherever a question's words are matched against party names, the
+# same as the stop-words beside them. Deployment data: environment only.
+COMMON_PARTY_TOKENS = [t.strip().lower() for t in os.getenv("COMMON_PARTY_TOKENS", "").split(",") if t.strip()]
+
 # Global Providers (azure / openrouter / nvidia)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")

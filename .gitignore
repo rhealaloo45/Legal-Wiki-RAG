@@ -404,3 +404,7 @@ test_nvidia/
 tools/*_results*.json
 tools/*_memory.json
 tools/*.log
+
+# Corpus-specific test data: names real documents and parties.
+app/services/regression_cases_local.py
+tools/conversation_scenarios_local.py

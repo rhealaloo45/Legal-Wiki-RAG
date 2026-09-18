@@ -223,7 +223,7 @@ _RX_OBLIGATION = re.compile(
 )
 # Risk assessment reuses the legal-recommendation patterns (moved here from wiki.py).
 _RX_RISK = re.compile(
-    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?:we|i|acme)\s+sign|'
+    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?!be\b|not\b|have\b)(?:\w+\s+){1,3}?sign\b|'
     r'risk\s+assessment|risk\s+review|advise|advisory|red\s+flag|deal[- ]?breaker|'
     r'approve|approval|sign\s+off|signoff|would\s+you\s+(?:recommend|advise|sign)|'
     r'safe\s+to\s+sign|ready\s+to\s+(?:sign|execute)|negotiation\s+strategy|'
