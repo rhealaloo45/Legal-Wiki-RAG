@@ -466,6 +466,117 @@ def _resolve_selected_docs(candidates: list[str], available_docs: list[str]) -> 
                 resolved.append(flat_lookup[flat])
     return list(dict.fromkeys(resolved))
 
+# ---------------------------------------------------------------------------
+# Columns / aspects the question already names
+# ---------------------------------------------------------------------------
+# "For each agreement, extract the parties, the effective date and the
+# governing law" and "Compare these on breach notification window and data
+# residency restriction" spell out their own columns. Asking the model to
+# re-derive them produced a different set on every run: an extra
+# document-name column, renamed columns, and a two-part compare split into six
+# overlapping aspects (18 extractions instead of 6, and a clause landing under
+# the wrong heading). When the question enumerates, the enumeration is used as
+# written; the model is only asked when it doesn't.
+_RX_ITEM_LIST = re.compile(
+    r"\b(?:extract(?:ing)?|list|pull(?:\s+out)?|capture|tabulate|show(?:\s+me)?|"
+    r"compare\b[^.?;:]{0,120}?\b(?:on|for|by|in\s+terms\s+of|regarding|across)|"
+    r"(?:check|review|look\s+at)\s+(?:(?:each|every|all|these|the)\s+\w+\s+)?for)"
+    r"\s+(?P<items>[^.?:]+)",
+    re.I,
+)
+# Where the item list ends and the rest of the sentence begins.
+_RX_ITEM_LIST_TAIL = re.compile(
+    r"\s+(?:for|in|across|from|of)\s+(?:each|every|all|these|those|the\s+(?:selected|chosen))\b.*$"
+    r"|\s+(?:where|if|when|as)\s+.*$",
+    re.I,
+)
+# "Compare the payment terms across all the selected agreements": the item
+# comes before the preposition, and what follows it is the document set.
+_RX_COMPARE_X_ACROSS = re.compile(
+    r"\bcompare\s+(?P<items>[^.?:]+?)\s+(?:across|between|among|in|of)\s+"
+    r"(?:all|each|every|these|those|both|the)\b",
+    re.I,
+)
+_RX_DOCUMENT_SET = re.compile(
+    r"^(?:(?:all|each|every|these|those|both|the|of|selected|chosen|above)\s+)*"
+    r"(?:agreements?|documents?|contracts?|files?|instruments?|ndas?|dpas?|slas?)$",
+    re.I,
+)
+# Two-word legal pairs that name one thing, so "and" inside them is not a
+# list separator.
+_BINOMIALS = (
+    "terms and conditions", "representations and warranties",
+    "rights and obligations", "roles and responsibilities",
+    "fees and expenses", "costs and expenses", "losses and damages",
+    "assignment and transfer", "limitations and exclusions",
+)
+_SMALL_WORDS = {"of", "and", "or", "to", "per", "in", "for", "on", "the", "a", "an", "by", "vs"}
+_RX_IDENTITY_COLUMN = re.compile(
+    r"^(?:the\s+)?(?:agreement|document|contract|file|instrument)(?:\s+(?:name|title|id|identifier|reference))?$"
+    r"|^(?:name|title)$",
+    re.I,
+)
+
+
+def _title_item(item: str) -> str:
+    words = item.split()
+    return " ".join(
+        w if (w.isupper() and len(w) > 1) else
+        (w.lower() if i and w.lower() in _SMALL_WORDS else w[:1].upper() + w[1:])
+        for i, w in enumerate(words)
+    )
+
+
+def _explicit_items(question: str) -> list:
+    """The columns/aspects a question lists itself, or [] if it lists none.
+
+    Returns [] rather than a guess whenever the list doesn't look like a list
+    of short noun phrases, so a narrative question still goes to the model.
+    """
+    items = None
+    m = _RX_ITEM_LIST.search(question or "")
+    if m:
+        items = _RX_ITEM_LIST_TAIL.sub("", m.group("items")).strip()
+        if _RX_DOCUMENT_SET.match(items):
+            items = None
+    if items is None:
+        m = _RX_COMPARE_X_ACROSS.search(question or "")
+        if not m:
+            return []
+        items = re.sub(r"^(?:these|those|the)\s+(?:\w+\s+)?(?:agreements?|documents?|contracts?)\s+(?:on|for)\s+",
+                       "", m.group("items").strip(), flags=re.I)
+    protected = items
+    for i, b in enumerate(_BINOMIALS):
+        protected = re.sub(re.escape(b), f"\x00{i}\x00", protected, flags=re.I)
+    parts = re.split(r"\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or|&)\s+|\s*;\s*", protected)
+    out = []
+    for part in parts:
+        part = re.sub(r"\x00(\d+)\x00", lambda k: _BINOMIALS[int(k.group(1))], part)
+        part = re.sub(r"^(?:the|a|an|any|its|their|each\s+\w+'s)\s+", "", part.strip(), flags=re.I)
+        part = part.strip(" .")
+        if not part or _RX_DOCUMENT_SET.match(part):
+            continue
+        # A long or clause-like fragment means this wasn't a plain list.
+        if len(part.split()) > 6 or re.search(
+                r"\b(?:which|whether|who|how|what|why|is|are|does|do|they|it)\b", part, re.I):
+            return []
+        out.append(_title_item(part))
+    return list(dict.fromkeys(out)) if 1 <= len(out) <= 12 else []
+
+
+def _drop_identity_columns(columns: list, question: str) -> list:
+    """Remove a model-invented "Agreement"/"Document Name" column.
+
+    Every row is already labelled with its document, so the column repeats it
+    at best and, when the model fills it from the text, holds some other
+    clause at worst. Kept only when the question asks for a name or title.
+    """
+    if re.search(r"\b(?:name|title)s?\b", question or "", re.I):
+        return columns
+    kept = [c for c in columns if not _RX_IDENTITY_COLUMN.match((c or "").strip())]
+    return kept or columns
+
+
 def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
     """Background job for review mode with NLP prompt.
     
@@ -531,18 +642,21 @@ Based on the User Query, perform the following:
    If the query asks for specific items (e.g., "deliverables, fees, payment terms"), list those exact items as columns.
    If the query is open-ended (e.g., "Summarize this agreement"), list 4-6 key legal or commercial columns to extract.
    Keep column names short (1-5 words).
+   One requested item is one column: do not split it into sub-columns.
+   Do not add a column naming or identifying the document; every row is already labelled with its document.
 {task_2}
 Return JSON only, no preamble or explanation:
 {result_shape}"""
 
-        columns = []
+        columns = _explicit_items(question)
         inferred = []
-        try:
-            parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
-            columns = parsed.get("columns", [])
-            inferred = parsed.get("inferred_documents", [])
-        except Exception as e:
-            logger.error(f"Failed to generate columns/inferred documents: {e}")
+        if not columns or needs_doc_inference:
+            try:
+                parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
+                columns = columns or _drop_identity_columns(parsed.get("columns", []), question)
+                inferred = parsed.get("inferred_documents", [])
+            except Exception as e:
+                logger.error(f"Failed to generate columns/inferred documents: {e}")
             
         if not columns:
             columns = ["Extracted Information"]
@@ -706,18 +820,21 @@ Based on the User Query, perform the following:
    If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
    Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts or full sentences.
    Keep aspect names short (1-5 words).
+   One requested point is one aspect: do not split it into sub-aspects (trigger, recipients, exceptions...) the user did not ask for.
+   Do not add an aspect naming or identifying the document; every column is already labelled with its document.
 {task_2}
 Return JSON only, no preamble or explanation:
 {result_shape}"""
 
-        aspects = []
+        aspects = _explicit_items(question)
         inferred = []
-        try:
-            parsed = json.loads(_fast_ask_nonempty(aspect_prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
-            aspects = parsed.get("aspects", [])
-            inferred = parsed.get("inferred_documents", [])
-        except Exception as e:
-            logger.error(f"Failed to generate aspects and inferred documents: {e}")
+        if not aspects or needs_doc_inference:
+            try:
+                parsed = json.loads(_fast_ask_nonempty(aspect_prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
+                aspects = aspects or _drop_identity_columns(parsed.get("aspects", []), question)
+                inferred = parsed.get("inferred_documents", [])
+            except Exception as e:
+                logger.error(f"Failed to generate aspects and inferred documents: {e}")
             
         if not aspects:
             aspects = ["Comparison Details"]
