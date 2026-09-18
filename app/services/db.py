@@ -4606,66 +4606,28 @@ _PRIMARY_DOC_TYPE_SQL = (
 )
 
 
-def count_documents_with_clause_text(wiki_id: str, session_id: str,
-                                     phrases: list) -> int:
-    """How many documents carry a clause containing ALL of these phrases.
-
-    A precedent search returns the closest few clauses, which answers "have we
-    agreed this before" but not "in how many agreements". Matching a slice of
-    the closest clause's own text gives the corpus figure, and matching CLAUSE
-    text rather than the obligations table matters: the same wording sat in 65
-    documents' clauses and only 35 obligation rows.
-
-    Every phrase must appear, because the shared part of a templated clause is
-    not what distinguishes it. The retention boilerplate alone
-    ("shall maintain true and complete records relating to this Agreement")
-    sits in 175 documents whatever period each states; requiring the period too
-    is what makes the figure mean "documents with a FIVE-year retention".
-
-    Matched against page text as well as the clauses table, for the same
-    reason list_documents_matching's phrase search is: neither table is
-    complete alone. "Has the publicity restriction... been used elsewhere,
-    and in how many documents" reported 161 from clauses only, where the true
-    figure — confirmed against clauses UNION pages — is 179; the other 18
-    carry the wording somewhere the clause extractor never cut a clause from.
-    """
-    from sqlalchemy import text
-    ps = [p.strip() for p in (phrases or []) if p and len(p.strip()) >= 4]
-    if not ps or not any(len(p) >= 25 for p in ps):
-        return 0
-    conds, params = [], {"w": wiki_id, "s": session_id}
-    for i, p in enumerate(ps):
-        conds.append(f"""(EXISTS (
-            SELECT 1 FROM clauses cl WHERE cl.wiki_id = :w AND cl.session_id = :s
-             AND cl.source_doc = d.source_doc AND cl.verbatim_text ILIKE '%' || :p{i} || '%')
-          OR EXISTS (
-            SELECT 1 FROM pages pg WHERE pg.wiki_id = :w AND pg.session_id = :s
-             AND pg.source_doc = d.source_doc AND pg.content ILIKE '%' || :p{i} || '%'))""")
-        params[f"p{i}"] = p
-    with get_engine().connect() as conn:
-        return conn.execute(text(
-            "SELECT count(*) FROM documents d WHERE d.wiki_id = :w "
-            "AND d.session_id = :s AND " + " AND ".join(conds)), params).scalar() or 0
-
-
 def count_documents_with_any_clause_text(wiki_id: str, session_id: str,
                                          phrase_groups: list) -> int:
-    """How many documents match at least one wording VARIANT of a clause.
+    """How many documents carry a clause in any one of several wordings.
 
-    ``count_documents_with_clause_text`` anchors on a single phrase and ANDs
-    every element of it — right for "this exact wording, and this period",
-    wrong when the phrase itself is the thing in question and the corpus uses
-    more than one template for it. A precedent search's top hit is the
-    closest by embedding similarity, not necessarily the most common wording:
-    asked how many documents carry the Stark Retail/Oceanic open-ended
-    survival clause, anchoring on the nearest hit's own (rarer) phrasing
-    undercounted 50 documents down to 1, because the dominant template a
-    couple of ranks down uses different wording for the same commitment.
+    A precedent search returns the closest few clauses, which answers "have we
+    agreed this before" but not "in how many agreements". Matching slices of
+    those clauses' own text gives the corpus figure.
 
-    Each element of ``phrase_groups`` is itself a list of phrases that must
-    ALL appear together (one wording variant, same semantics as
-    ``count_documents_with_clause_text``'s ``phrases``) — the groups
-    themselves are OR'd, so a document counts once if it matches ANY variant.
+    Each element of ``phrase_groups`` is one wording variant: a list of
+    phrases that must ALL appear together, because the shared part of a
+    templated clause is not what distinguishes it (records-retention
+    boilerplate appears in most agreements whatever period each states;
+    requiring the period too is what makes the count mean "documents with a
+    five-year retention"). The groups are OR'd, because the closest hit by
+    embedding similarity is not necessarily the corpus's most common template
+    for the same commitment, and anchoring on its rarer wording alone once
+    undercounted 50 documents as 1. A document counts once whichever variant
+    it matches.
+
+    Matched against page text as well as the clauses table: neither is
+    complete alone, and clauses-only missed about a tenth of the documents
+    carrying a wording somewhere the clause extractor never cut a clause from.
     """
     from sqlalchemy import text
     groups = []
