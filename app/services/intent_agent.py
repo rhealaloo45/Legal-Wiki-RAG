@@ -5860,7 +5860,11 @@ def _enumerate_answer(question: str, session_id: str,
     """
     from services import db as _db, wiki as _wiki
 
-    parties = _question_parties(question)
+    # _count_party_names knows the forms _question_parties does not, among them
+    # the relative clause "every document to which X is a party". Without it
+    # that question declined here and retrieval listed 18 of the 131 documents
+    # with no total and nothing to say the list was partial.
+    parties = _question_parties(question) or _count_party_names(question)
 
     label, patterns = _doctype_from_question(question)
 
