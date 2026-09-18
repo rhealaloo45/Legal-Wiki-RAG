@@ -86,7 +86,12 @@ def _lookup_cached_metadata(session_id: str, doc_name: str, col_name: str) -> Op
             from services import db as _db, wikis as _wikis
             cached = _db.get_metadata(_wikis.active_wiki_id(), session_id, doc_name)
             if cached.get(field_key) is not None:
-                return {"value": cached[field_key], "confidence": 0.95, "quote": None}
+                from services import register as _register
+                _wid = _wikis.active_wiki_id()
+                _sd = _register.resolve_source_doc(_wid, session_id, doc_name)
+                _quote = (_register.verbatim_quote(_wid, session_id, _sd, [str(cached[field_key])], topic=field_key)
+                          if _sd else None)
+                return {"value": cached[field_key], "confidence": 0.95, "quote": _quote}
         except Exception as _e:
             logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
 
