@@ -290,6 +290,7 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
         model_name = config.AZURE_FAST_DEPLOYMENT
 
     def _call(reasoning_effort=None):
+        _t0 = time.time()
         kwargs = _completion_kwargs(model_name, prompt, max_tokens, reasoning_effort)
         response = client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or ""
@@ -297,7 +298,17 @@ def fast_ask(prompt: str, max_tokens: int = 150) -> tuple[str, dict]:
             "prompt_tokens": response.usage.prompt_tokens if hasattr(response, 'usage') and response.usage else 0,
             "completion_tokens": response.usage.completion_tokens if hasattr(response, 'usage') and response.usage else 0,
             "cached_prompt_tokens": _cached_prompt_tokens(response),
+            "finish_reason": getattr(response.choices[0], "finish_reason", None),
         }
+        # Logged per attempt, not per fast_ask: an empty first attempt still
+        # spent its tokens, and the retry below returns only its own usage.
+        # Until this, fast-model calls never reached the trace at all, so
+        # everything built on them (Review, Compare, page selection) looked
+        # free in query_traces.
+        _trace = tracing.get_trace()
+        if _trace:
+            _trace.log_llm_call("fast", model_name, prompt, content, usage,
+                                (time.time() - _t0) * 1000, fast=True)
         return content, usage
 
     try:

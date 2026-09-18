@@ -5,11 +5,12 @@ import json
 import uuid
 import logging
 import concurrent.futures
+import contextvars
 from threading import Lock
 from typing import Optional
 
 import config
-from services import reader, llm, wiki
+from services import reader, llm, wiki, tracing
 
 logger = logging.getLogger(__name__)
 
@@ -467,6 +468,46 @@ def _resolve_selected_docs(candidates: list[str], available_docs: list[str]) -> 
     return list(dict.fromkeys(resolved))
 
 # ---------------------------------------------------------------------------
+# Tracing for background jobs
+# ---------------------------------------------------------------------------
+# Review and Compare run on a background thread and fan out to a thread pool,
+# and llm.ask only records a call on the trace in the *current* context. With
+# no trace started for the job, and pool workers not inheriting one anyway,
+# every model call these modes made was invisible: a 30-call compare showed up
+# as zero tokens anywhere outside an ad-hoc test harness.
+
+def _submit_traced(executor, fn, *args):
+    """executor.submit that carries the caller's trace into the worker.
+
+    Each submission gets its own copy of the context, since one Context can't
+    be entered by two threads at once.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args)
+
+
+def _run_traced_job(kind: str, session_id: str, question: str, job_id: str,
+                    store_ref: dict, body, *body_args):
+    """Run a job body under its own trace, then record its token usage on the
+    job's store entry and persist the trace like a chat query's."""
+    trace, token = tracing.start_trace(f"[{kind}] {question}", session_id, session_id)
+    try:
+        body(*body_args)
+    finally:
+        calls = trace.llm_calls
+        usage = {
+            "llm_calls": len(calls),
+            "prompt_tokens": sum(c["prompt_tokens"] for c in calls),
+            "completion_tokens": sum(c["completion_tokens"] for c in calls),
+            "empty_replies": sum(1 for c in calls if not c["response_chars"]),
+        }
+        try:
+            store_ref[job_id]["usage"] = usage
+        except Exception:
+            pass
+        tracing.finish_and_persist(trace, token)
+
+
+# ---------------------------------------------------------------------------
 # Columns / aspects the question already names
 # ---------------------------------------------------------------------------
 # "For each agreement, extract the parties, the effective date and the
@@ -578,6 +619,12 @@ def _drop_identity_columns(columns: list, question: str) -> list:
 
 
 def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
+    """Background job for review mode; see _review_job_body."""
+    _run_traced_job("review", session_id, question, job_id, store_ref, _review_job_body,
+                    job_id, session_id, doc_names, question, store_ref, locks_ref)
+
+
+def _review_job_body(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
     """Background job for review mode with NLP prompt.
     
     Dynamically generates columns based on the prompt, then uses wiki-synthesized content
@@ -687,7 +734,7 @@ Return JSON only, no preamble or explanation:
         for chunk in doc_chunks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
-                    executor.submit(_extract_worker, doc_name, col_name)
+                    _submit_traced(executor, _extract_worker, doc_name, col_name)
                     for doc_name in chunk
                     for col_name in columns
                 ]
@@ -770,7 +817,16 @@ def _get_scoped_wiki_pages(session_id: str, doc_name: str) -> dict:
     logger.info(f"Scoped wiki lookup for '{doc_name}': found {len(scoped)} pages (out of {len(pages)} total)")
     return scoped
 
-def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str, 
+def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str,
+                     uploaded_text: Optional[str], uploaded_name: Optional[str], temp_path: Optional[str],
+                     store_ref: dict, locks_ref: dict):
+    """Background job for compare mode; see _compare_job_body."""
+    _run_traced_job("compare", session_id, question, job_id, store_ref, _compare_job_body,
+                    job_id, session_id, doc_names, question, uploaded_text, uploaded_name,
+                    temp_path, store_ref, locks_ref)
+
+
+def _compare_job_body(job_id: str, session_id: str, doc_names: list, question: str,
                      uploaded_text: Optional[str], uploaded_name: Optional[str], temp_path: Optional[str],
                      store_ref: dict, locks_ref: dict):
     """Background job for compare mode.
@@ -911,7 +967,7 @@ Return JSON only, no preamble or explanation:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
-                    executor.submit(_extract_compare_worker, s, a)
+                    _submit_traced(executor, _extract_compare_worker, s, a)
                     for s in chunk_sources
                     for a in aspects
                 ]
