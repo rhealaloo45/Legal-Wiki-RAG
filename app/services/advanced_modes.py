@@ -210,6 +210,28 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
         return f"[Source Document: {doc_name}]\n\n{raw[:limit]}"
     return ""
 
+def _fast_ask_nonempty(prompt: str, budget: int, strip_fences: bool = False) -> str:
+    """fast_ask, retried once at double the budget if the reply is empty.
+
+    The fast model is a reasoning model: it spends part of the budget on
+    hidden reasoning, and when that eats the whole budget the reply is an
+    empty string rather than an error. One retry at double the budget covers
+    the run-to-run variance in reasoning spend. Every Review/Compare call goes
+    through here so none of them can quietly return nothing.
+    """
+    raw = ""
+    for _ in range(2):
+        raw, _usage = llm.fast_ask(prompt, max_tokens=budget)
+        raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw or "", flags=re.DOTALL)
+        if strip_fences:
+            raw = re.sub(r'```json', '', raw)
+            raw = re.sub(r'```', '', raw)
+        if raw.strip():
+            break
+        budget *= 2
+    return raw.strip()
+
+
 def extract_cell(doc_text: str, column_name: str) -> dict:
     """Extract a specific piece of information from text using fast LLM path."""
     prompt = f"""\
@@ -234,23 +256,8 @@ Text:
 
 Extract: {column_name}"""
 
-    # The fast model is a reasoning model: it spends part of the budget on
-    # hidden reasoning, and when that eats the whole budget the reply is an
-    # empty string. One retry at double the budget covers the run-to-run
-    # variance in reasoning spend.
-    budget = config.MAX_TOKENS_CELL_EXTRACT
-    raw = ""
     try:
-        for attempt in range(2):
-            raw, _ = llm.fast_ask(prompt, max_tokens=budget)
-            # remove potential reasoning block or markdown
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw or "", flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
-            if raw.strip():
-                break
-            budget *= 2
-        parsed = json.loads(raw.strip())
+        parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_CELL_EXTRACT, strip_fences=True))
         return {
             "value": parsed.get("value"),
             "confidence": float(parsed.get("confidence", 0.0)),
@@ -531,12 +538,7 @@ Return JSON only, no preamble or explanation:
         columns = []
         inferred = []
         try:
-            raw, _ = llm.fast_ask(prompt, max_tokens=450)
-            import re
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
-            parsed = json.loads(raw.strip())
+            parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
             columns = parsed.get("columns", [])
             inferred = parsed.get("inferred_documents", [])
         except Exception as e:
@@ -711,11 +713,7 @@ Return JSON only, no preamble or explanation:
         aspects = []
         inferred = []
         try:
-            raw, _ = llm.fast_ask(aspect_prompt, max_tokens=450)
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
-            parsed = json.loads(raw.strip())
+            parsed = json.loads(_fast_ask_nonempty(aspect_prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
             aspects = parsed.get("aspects", [])
             inferred = parsed.get("inferred_documents", [])
         except Exception as e:
@@ -842,11 +840,7 @@ Extracted values:
 {json.dumps(all_values, indent=1)}"""
 
             try:
-                raw, _ = llm.fast_ask(outlier_prompt, max_tokens=1000)
-                raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-                raw = re.sub(r'```json', '', raw)
-                raw = re.sub(r'```', '', raw)
-                parsed_outliers = json.loads(raw.strip())
+                parsed_outliers = json.loads(_fast_ask_nonempty(outlier_prompt, config.MAX_TOKENS_COMPARE_OUTLIERS, strip_fences=True))
                 if isinstance(parsed_outliers, list):
                     outliers = parsed_outliers
             except Exception as e:
@@ -887,7 +881,7 @@ STRICT RULES:
 - DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
 - PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1 | Quote: The Supplier shall deliver..."). If the exact clause/page or quote is not in the table, just map it as: "[1] Service Agreement 1_redacted.pdf | Quote: <verbatim quote>" or "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
 
-        narrative, _ = llm.fast_ask(narrative_prompt, max_tokens=1500)
+        narrative = _fast_ask_nonempty(narrative_prompt, config.MAX_TOKENS_COMPARE_NARRATIVE)
         
         # STEP 6 - STORE + COMPLETE
         with lock:
