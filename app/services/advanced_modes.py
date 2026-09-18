@@ -140,7 +140,10 @@ def get_raw_doc_text(session_id: str, doc_name: str) -> str:
 # config.BROAD_QUESTION_TOTAL_CAP in wiki.py), used only for open-ended/summary
 # columns or when a narrow-budget first pass comes back low-confidence/empty.
 _CELL_CONTEXT_NARROW_LIMIT = 3000
-_CELL_CONTEXT_BROAD_LIMIT = 8000
+# Sized to the median document's whole wiki text (~14k chars, measured),
+# so the escalation pass can read all of a typical
+# document rather than a second, slightly larger ranked slice of it.
+_CELL_CONTEXT_BROAD_LIMIT = 16000
 
 
 def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broad: bool = False) -> str:
@@ -172,7 +175,15 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
                 )
                 ranked = [t for t in selected_titles if t in scoped]
                 if ranked:
-                    ordered_titles = ranked
+                    # Narrow: only what ranked. Broad: what ranked first, then
+                    # the document's remaining pages. Ranking is keyword-led,
+                    # so a clause filed under different wording (a "Data
+                    # Location" page for a "data residency" column) never
+                    # ranks; re-ranking the same few pages on escalation left
+                    # it out again and the cell came back as not stated.
+                    ordered_titles = ranked + (
+                        [t for t in scoped if t not in ranked] if broad else []
+                    )
             except Exception as e:
                 logger.warning(
                     f"Scoped page selection failed for {doc_name}/{query[:40]!r}: {e} — using all scoped pages"
@@ -186,7 +197,7 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
             summary = page_data.get("summary", "") if isinstance(page_data, dict) else ""
             chunk = f"## {title}\n{summary}\n{content}"
             if total_len and total_len + len(chunk) > limit:
-                break
+                continue  # a smaller page further down may still fit
             parts.append(chunk)
             total_len += len(chunk)
         wiki_text = "\n\n".join(parts)
