@@ -3444,6 +3444,18 @@ def _is_analytics_query(question: str) -> str:
     # exact answer and nothing else here is a better match.
     if _RX_CONSISTENCY.search(q) and _consistency_field(q):
         return "consistency"
+    # A question about a whole population of one document type - its oldest
+    # and newest member, or whether every member meets a stated standard - is
+    # computed over that population, not answered from whatever a search
+    # returns. Both shapes came back as "Needs clarification" before this.
+    try:
+        from services import survey as _survey
+        _sk = _survey.survey_kind(q)
+    except Exception as _sv_err:
+        logger.error("[AGENT] survey detection failed: %s", _sv_err)
+        _sk = ""
+    if _sk:
+        return "survey_" + _sk
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
     # Checked straight after, and only when the question is unambiguously about
@@ -3892,6 +3904,12 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append(f"| {b['year']} | {b['documents']} | {b['with_value']} | {med} |")
             lines += ["", f"*{data['note']}*"]
             payload = _canned_payload("\n".join(lines), "Trend", "structured-analytics")
+        elif kind.startswith("survey_"):
+            from services import survey
+            _sv = survey.answer(kind[len("survey_"):], question, wiki_id, session_id)
+            if not _sv:
+                return None
+            payload = _canned_payload(_sv, "Population survey", "structured-analytics")
         else:
             return None
     except Exception as e:
@@ -3899,7 +3917,9 @@ def _analytics_answer(kind: str, question: str, session_id: str,
         return None
 
     payload["meta_answer"] = False
-    payload["files_used"] = []
+    # setdefault: a branch that resolved its own documents (the named-agreement
+    # aggregate) sets files_used itself, and resetting it here threw that away.
+    payload.setdefault("files_used", [])
     return payload
 
 
