@@ -2975,11 +2975,11 @@ _TOTALITY_FILLER = {
 # The count noun and the totality phrase, stripped so what remains is whatever
 # the question ACTUALLY narrows by.
 _RX_TOTALITY_LEAD = re.compile(
-    r"(?:how\s+many|number\s+of|count\s+(?:of|the))", re.IGNORECASE)
+    r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\b", re.IGNORECASE)
 _RX_TOTALITY_PHRASE = re.compile(
-    r"(?:in\s+total|in\s+all|altogether|overall|"
+    r"\b(?:in\s+total|in\s+all|altogether|overall|"
     r"in\s+(?:this|the)\s+(?:wiki|corpus|workspace|collection)|"
-    r"do\s+we\s+(?:have|hold)|are\s+there|have\s+we\s+got)",
+    r"do\s+we\s+(?:have|hold)|are\s+there|have\s+we\s+got)\b",
     re.IGNORECASE)
 
 
