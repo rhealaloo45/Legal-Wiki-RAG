@@ -50,6 +50,10 @@ _RX_COMPLY = re.compile(
     r"\b(?:do|does|are|is)\s+(?:our|all|the|these|any)\b[^.?]*?\b(?:meet|meets|comply|complies|"
     r"compliant|conform|conforms|satisfy|satisfies|align|aligned|in\s+line)\b", re.I)
 
+_RX_ANOMALY = re.compile(
+    r"\b(?:anomal\w*|unusual|outliers?|odd|inconsisten\w*|irregular\w*|deviat\w*|"
+    r"stand\s+out|out\s+of\s+line)\b", re.I)
+
 _RX_QTY = re.compile(
     r"(\d+(?:\.\d+)?)\s*(?:\(\w+\)\s*)?(business\s+days?|calendar\s+days?|working\s+days?|"
     r"hours?|days?|weeks?|months?|years?)\b", re.I)
@@ -84,6 +88,8 @@ def survey_kind(question: str) -> str:
         return "extremes"
     if _RX_STANDARD.search(q) and _RX_COMPLY.search(q) and _standard_value(q):
         return "standard"
+    if _RX_ANOMALY.search(q) and (_RX_OUR.search(q) or _RX_POPULATION.search(q)):
+        return "anomalies"
     return ""
 
 
@@ -323,7 +329,102 @@ def answer_standard(question: str, wiki_id: str, session_id: str) -> str | None:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Anomalies: one clause template, different values
+# ---------------------------------------------------------------------------
+# Documents of one type are usually drafted from a few templates. The
+# anomalies a reviewer can check mechanically are the places where documents
+# share a clause's wording but state a different value in it: a 24-hour
+# breach window where the template usually says 48, a data-location
+# restriction to one country where the others name a region. Detected by
+# masking names, numbers and places out of each clause's operative wording,
+# grouping documents on what is left, and reporting any group whose values
+# differ.
+_RX_OPERATIVE = re.compile(r"\b(?:shall|must|may|agrees?\s+to|undertakes?\s+to)\b", re.I)
+_RX_NAME_RUN = re.compile(r"(?:\b[A-Z][\w&.'()-]*)(?:\s+(?:[A-Z][\w&.'()-]*|of|and|&))*")
+_ANOMALY_MIN_GROUP = 3
+
+
+def _template_key(clause: str) -> str | None:
+    t = " ".join((clause or "").split())
+    m = _RX_OPERATIVE.search(t)
+    if not m:
+        return None
+    t = t[m.start():m.start() + 160]
+    t = _RX_CLAUSE_PLACE.sub(lambda x: x.group(0).split()[0] + " <place>", t)
+    t = _RX_QTY.sub("<n> <unit>", t)
+    t = _RX_NAME_RUN.sub("<name>", t)
+    t = re.sub(r"\d+", "<n>", t)
+    return t.lower()[:110]
+
+
+def _clause_value(clause: str) -> str | None:
+    m = _RX_QTY.search(clause)
+    if m:
+        return f"{m.group(1)} {m.group(2).lower()}"
+    m = _RX_CLAUSE_PLACE.search(clause)
+    if m:
+        return re.sub(r"^the\s+", "", m.group(1), flags=re.I)
+    return None
+
+
+def answer_anomalies(question: str, wiki_id: str, session_id: str) -> str | None:
+    from sqlalchemy import text
+    from services import intent_agent as _ia
+    label, pats = _ia._doctype_from_question(question)
+    docs, rule = population(wiki_id, session_id, pats, question)
+    if len(docs) < _ANOMALY_MIN_GROUP:
+        return None
+    noun = f"{label}s" if label else "documents"
+    by_name = {d["source_doc"]: d for d in docs}
+    with db.get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc, verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+              AND COALESCE(review_status, '') <> 'rejected'
+        """), {"w": wiki_id, "s": session_id, "d": list(by_name)}).fetchall()
+    groups: dict[str, dict] = {}
+    for src, clause in rows:
+        key, val = _template_key(clause), _clause_value(clause or "")
+        if not key or not val:
+            continue
+        g = groups.setdefault(key, {"example": clause, "values": {}})
+        g["values"].setdefault(val, set()).add(src)
+    findings = []
+    for key, g in groups.items():
+        # One value per document: a document restating its own figure in two
+        # clauses of the same shape is not a split.
+        docs_in = set().union(*g["values"].values())
+        if len(docs_in) < _ANOMALY_MIN_GROUP or len(g["values"]) < 2:
+            continue
+        findings.append((len(docs_in), g))
+    if not findings:
+        return None
+    findings.sort(key=lambda x: -x[0])
+    lines = [f"**{len(findings)} clause(s) share one wording across the {noun} but "
+             f"state different values in it.**", ""]
+    for n, g in findings[:8]:
+        ex = " ".join(g["example"].split())
+        m = _RX_OPERATIVE.search(ex)
+        ex = ex[m.start():m.start() + 140] if m else ex[:140]
+        lines.append(f"**“…{ex}…”** ({n} documents)")
+        vals = sorted(g["values"].items(), key=lambda kv: -len(kv[1]))
+        for i, (v, srcs) in enumerate(vals):
+            who = ""
+            if i and len(srcs) <= 5:
+                who = ": " + "; ".join(_doc_label(by_name[s_]) for s_ in sorted(srcs))
+            lines.append(f"- {v}: {len(srcs)} document(s){who}")
+        lines.append("")
+    lines.append(rule.format(noun=noun))
+    lines.append("Only value differences inside a shared clause wording are detected "
+                 "here. A clause that is unusual in substance rather than in a figure "
+                 "(an obligation running the other way, say) needs a reading, not a count.")
+    return "\n".join(lines)
+
+
 def answer(kind: str, question: str, wiki_id: str, session_id: str) -> str | None:
+    if kind == "anomalies":
+        return answer_anomalies(question, wiki_id, session_id)
     if kind == "extremes":
         return answer_extremes(question, wiki_id, session_id)
     if kind == "standard":
