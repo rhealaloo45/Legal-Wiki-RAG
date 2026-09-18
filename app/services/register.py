@@ -591,6 +591,125 @@ def _clause_cell(wiki_id: str, session_id: str, source_doc: str,
             "source": f"clause: {best[0]}"}
 
 
+# A registry field is a value, not a passage, so a cell served from one had
+# nothing to cite: right answer, no evidence a reviewer could check. The
+# field's `raw` is the value as the document wrote it ("29 January 2024",
+# "Rs. 1,000,000"), so the sentence around it in the document's own clause
+# text is the quote.
+_QUOTE_MAX = 200
+_RX_SENTENCE_BREAK = _re.compile(r"(?<=[.;])\s+|\s*\|\s*|\n+")
+
+
+def _field_needles(field: dict) -> list[list[str]]:
+    """What to look for, as groups that must all appear in one passage.
+
+    A list value (several parties) is one group: quoting a sentence that
+    happens to name one of them would cite an audit clause as evidence for
+    who the parties are.
+    """
+    groups = []
+    for v in (field.get("raw"), field.get("value")):
+        if isinstance(v, dict):
+            v = v.get("raw")
+        if isinstance(v, list):
+            items = [x.strip() for x in v if isinstance(x, str) and len(x.strip()) >= 3]
+            if items:
+                groups.append(items)
+        elif isinstance(v, str) and 3 <= len(v.strip()) <= 120:
+            groups.append([v.strip()])
+    out = []
+    for g in groups:
+        if g not in out:
+            out.append(g)
+    return out
+
+
+def _sentence_around(text: str, i: int, j: int) -> str:
+    """The sentence(s) spanning text[i:j], cut to _QUOTE_MAX on word edges."""
+    start, end = 0, len(text)
+    for m in _RX_SENTENCE_BREAK.finditer(text):
+        if m.end() <= i:
+            start = m.end()
+        elif m.start() >= j:
+            end = m.start()
+            break
+    if end - start > _QUOTE_MAX:
+        pad = max(0, (_QUOTE_MAX - (j - i)) // 2)
+        lo, hi = max(start, i - pad), min(end, max(j, i - pad + _QUOTE_MAX))
+        if lo > start:
+            sp = text.find(" ", lo, i)
+            lo = sp + 1 if sp >= 0 else lo
+        if hi < end:
+            sp = text.rfind(" ", j, hi)
+            hi = sp if sp >= 0 else hi
+        return ("…" if lo > start else "") + text[lo:hi].strip() + ("…" if hi < end else "")
+    return text[start:end].strip()
+
+
+def verbatim_quote(wiki_id: str, session_id: str, source_doc: str,
+                   needles: list, topic: str = "") -> str | None:
+    """The passage in a document's own text that contains every item of one
+    needle group (groups tried in order; a bare string is a group of one), or
+    None if no group appears verbatim.
+
+    Searched in order of how well the passage is *about* `topic`: clauses and
+    wiki pages whose type or title shares a word with it first, then the rest
+    of the clauses. Without that, a value that also appears in passing
+    elsewhere (both parties named in an audit clause) was quoted from wherever
+    it happened to come first.
+    """
+    groups = [[n] if isinstance(n, str) else list(n) for n in (needles or []) if n]
+    if not groups:
+        return None
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        clauses = conn.execute(text("""
+            SELECT clause_type, verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND review_status <> 'rejected'
+        """), {"w": wiki_id, "s": session_id, "d": source_doc}).fetchall()
+        pages = conn.execute(text("""
+            SELECT title, content FROM pages
+            WHERE wiki_id = :w AND source_doc = :d
+        """), {"w": wiki_id, "d": source_doc}).fetchall() if topic else []
+    want = _tokens(topic)
+    on_topic = lambda label: bool(want and want & _tokens(label))
+    # A wiki page's prose is the wiki's own wording; only its "> " supporting
+    # quote lines are the document's, so those are all that is searched.
+    page_quotes = [line[1:].strip() for r in pages if on_topic(r[0])
+                   for line in (r[1] or "").splitlines() if line.startswith(">")]
+    topical = [r[1] or "" for r in clauses if on_topic(r[0])] + page_quotes
+    elsewhere = [r[1] or "" for r in clauses if not on_topic(r[0])]
+    for group in groups:
+        for t in topical:
+            low = t.lower()
+            hits = [(low.find(n.lower()), len(n)) for n in group]
+            if all(i >= 0 for i, _ in hits):
+                return _sentence_around(t, min(i for i, _ in hits),
+                                        max(i + n for i, n in hits))
+        # On-topic passages often quote each party on its own line; one
+        # on-topic quote per item beats one off-topic passage naming them all.
+        if len(group) > 1:
+            parts = []
+            for n in group:
+                t = next((t for t in topical if n.lower() in t.lower()), None)
+                if t is None:
+                    break
+                i = t.lower().find(n.lower())
+                parts.append(_sentence_around(t, i, i + len(n)))
+            else:
+                return " … ".join(dict.fromkeys(parts))
+    for group in groups:
+        # Nothing on-topic held the whole group: accept any passage that does.
+        for t in elsewhere:
+            low = t.lower()
+            hits = [(low.find(n.lower()), len(n)) for n in group]
+            if all(i >= 0 for i, _ in hits):
+                return _sentence_around(t, min(i for i, _ in hits),
+                                        max(i + n for i, n in hits))
+    return None
+
+
 def standard_cell(wiki_id: str, session_id: str, doc_name: str,
                   column: str) -> dict | None:
     """Answer one Review Table cell from the backbone, or return None.
@@ -612,7 +731,8 @@ def standard_cell(wiki_id: str, session_id: str, doc_name: str,
         if value:
             return {"value": value,
                     "confidence": field.get("confidence"),
-                    "quote": None,
+                    "quote": verbatim_quote(wiki_id, session_id, source_doc,
+                                            _field_needles(field), topic=name),
                     "source": f"registry field: {name}"}
 
     return _clause_cell(wiki_id, session_id, source_doc, column)
