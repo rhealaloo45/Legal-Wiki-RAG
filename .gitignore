@@ -408,3 +408,102 @@ tools/*.log
 # Corpus-specific test data: names real documents and parties.
 app/services/regression_cases_local.py
 tools/conversation_scenarios_local.py
+
+# ---------------------------------------------------------------------------
+# Added 2026-09-20 with the data scrub. Everything below exists for one reason:
+# this repository is published, and nothing that carries corpus content, local
+# state or a credential may leave with it.
+# ---------------------------------------------------------------------------
+
+# Local-only modules, generalised. The corpus-specific test data above follows
+# a "<name>_local.py" convention; this covers every future one, while the
+# committed "*_local.example.py" format samples stay tracked.
+*_local.py
+!*_local.example.py
+*.local.*
+!*.local.example.*
+
+# Document and data formats that ingest material or an export arrives in.
+# The PDF/DOCX/CSV rules above missed the rest of the family.
+*.xlsx
+*.xls
+*.xlsm
+*.doc
+*.rtf
+*.odt
+*.ods
+*.pptx
+*.ppt
+*.msg
+*.eml
+*.tsv
+*.parquet
+*.jsonl
+*.ndjson
+*.dbf
+
+# Archives and repository bundles: a scrub backup, a deploy bundle or a corpus
+# zip is exactly the kind of thing that gets dropped in a working tree.
+*.tar
+*.tar.*
+*.tgz
+*.gz
+*.bz2
+*.7z
+*.rar
+*.bundle
+
+# Database dumps and local stores beyond the sqlite/dump rules above.
+*.sql
+*.dmp
+*.mdb
+*.accdb
+pgdata/
+postgres-data/
+
+# Credentials, keys and tokens in the shapes not already covered.
+*.crt
+*.cer
+*.der
+*.jks
+*.keystore
+*.kdbx
+*.ppk
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+*secret*.json
+*token*.json
+service-account*.json
+*serviceaccount*.json
+.htpasswd
+
+# Environment files anywhere in the tree, not just at the two paths named
+# above. The example file stays tracked.
+**/.env
+.env.*
+!app/.env.example
+
+# Uploads and local run state wherever they land.
+uploads/
+**/uploads/
+logs/
+**/logs/
+tmp/
+.tmp/
+scratch/
+scratchpad/
+
+# Notebooks: outputs are saved inside the file, so a notebook run against the
+# corpus carries document text in its cells.
+*.ipynb
+
+# Editor, AI tooling and OS strays not already listed.
+.cursor/
+.aider*
+CLAUDE.local.md
+*.sublime-*
+desktop.ini
+*.tmp
+~$*
