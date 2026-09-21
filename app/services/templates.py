@@ -199,6 +199,69 @@ def count_any(wiki_id: str, session_id: str, template_hashes: list[str]) -> int:
             {"w": wiki_id, "s": session_id, "fams": fams}).scalar() or 0)
 
 
+def docs_by_hash(wiki_id: str, session_id: str, source_docs: list[str],
+                 ) -> tuple[dict[str, set[str]], dict[str, int]]:
+    """Within these documents: which documents state each wording, and how many
+    fingerprinted passages each document has at all.
+
+    The second number is what separates a document that omits a term from a
+    document the extractor barely read: a scanned copy that produced four
+    passages is missing most wordings in the population, and none of those
+    absences mean anything.
+    """
+    from sqlalchemy import text
+    if not source_docs:
+        return {}, {}
+    by_hash: dict[str, set[str]] = {}
+    units: dict[str, int] = {d: 0 for d in source_docs}
+    with db.get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT COALESCE(f.family, t.template_hash) AS h, t.source_doc, count(*) AS n
+            FROM clause_templates t
+            LEFT JOIN template_families f
+                   ON f.wiki_id = t.wiki_id AND f.template_hash = t.template_hash
+            WHERE t.wiki_id = :w AND t.session_id = :s AND t.source_doc = ANY(:d)
+            GROUP BY 1, 2"""),
+            {"w": wiki_id, "s": session_id, "d": list(source_docs)}).fetchall()
+    for h, src, n in rows:
+        by_hash.setdefault(h, set()).add(src)
+        units[src] = units.get(src, 0) + int(n)
+    return by_hash, units
+
+
+def example_text(wiki_id: str, session_id: str, template_hash: str) -> str | None:
+    """One passage carrying this wording, read back through the unit it came
+    from — the table stores hashes, so the words have to come from the source."""
+    from sqlalchemy import text
+    crypto = db._crypto()
+    with db.get_engine().connect() as conn:
+        refs = conn.execute(text("""
+            SELECT kind, unit_ref FROM clause_templates
+            WHERE wiki_id = :w AND session_id = :s AND template_hash = :h
+            ORDER BY kind LIMIT 8"""),
+            {"w": wiki_id, "s": session_id, "h": template_hash}).fetchall()
+        for kind, ref in refs:
+            try:
+                if kind == "clause":
+                    cid = int(ref.split(":", 1)[1])
+                    raw = conn.execute(text(
+                        "SELECT verbatim_text FROM clauses WHERE id = :i"),
+                        {"i": cid}).scalar()
+                    if raw:
+                        return crypto.decrypt_safe(raw, default=raw)
+                else:
+                    _, pid, idx = ref.split(":", 2)
+                    content = conn.execute(text(
+                        "SELECT content FROM pages WHERE id = :i"),
+                        {"i": int(pid)}).scalar()
+                    lines = quote_lines(content or "")
+                    if lines and int(idx) < len(lines):
+                        return lines[int(idx)]
+            except Exception:
+                continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Merging fingerprints that state one commitment in different words
 # ---------------------------------------------------------------------------

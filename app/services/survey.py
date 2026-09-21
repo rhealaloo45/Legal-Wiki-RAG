@@ -368,6 +368,122 @@ def _clause_value(clause: str) -> str | None:
     return None
 
 
+_ABSENCE_MIN_POPULATION = 6
+_ABSENCE_MIN_SHARE = 0.8
+_ABSENCE_MAX_MISSING = 4
+_THIN_DOC_SHARE = 0.25
+# A word this much of the population uses is the population's own vocabulary
+# rather than one document's; anything rarer is a party name or a one-off.
+_COMMON_TERM_SHARE = 0.4
+# A document using nearly all of a wording's vocabulary somewhere else in its
+# text is writing the same term its own way, not leaving it out.
+_REWORDED_SHARE = 0.7
+_ABSENCE_MIN_TERMS = 4
+
+_RX_WORD = re.compile(r"[a-z][a-z-]{4,}")
+
+
+def _wording_terms(example: str) -> set[str]:
+    """The content words of a wording, which a document stating the same term
+    in its own words would still be likely to use."""
+    return {w for w in _RX_WORD.findall((example or "").lower()) if w not in _STOP} - {
+        "party", "parties", "other", "shall"}
+
+
+def _doc_text(conn, wiki_id: str, session_id: str, source_doc: str) -> str:
+    from sqlalchemy import text
+    crypto = db._crypto()
+    rows = conn.execute(text("""
+        SELECT verbatim_text FROM clauses
+        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d"""),
+        {"w": wiki_id, "s": session_id, "d": source_doc}).fetchall()
+    clauses = " ".join((crypto.decrypt_safe(r[0], default=r[0]) or "") for r in rows)
+    pages = conn.execute(text("""
+        SELECT string_agg(content, ' ') FROM pages
+        WHERE wiki_id = :w AND session_id = :s AND source_doc = :d"""),
+        {"w": wiki_id, "s": session_id, "d": source_doc}).scalar() or ""
+    return (clauses + " " + pages).lower()
+
+
+def _absence_findings(wiki_id: str, session_id: str,
+                      by_name: dict) -> tuple[list, int, int]:
+    """Wordings that nearly every document of the population carries and one or
+    two do not. Returns (findings, thin documents, documents set aside as
+    rewordings); each finding is (documents carrying it, example, missing labels).
+
+    The value check above only sees a document that states a term with a
+    different figure in it. A document that does not state the term in these
+    words at all is invisible to it, and is usually the more interesting of the
+    two.
+
+    What this cannot tell you is WHY a wording is missing. A fingerprint is
+    exact wording, so a document that deals with the term in its own words is
+    missing the fingerprint exactly as a document that never deals with it is.
+    Checked against the index both ways: one document reported as missing an
+    AI-training restriction genuinely had none anywhere in its text, and
+    another reported as missing a confidentiality wording carried the
+    obligation throughout in different words - and no deterministic signal
+    tried here separates the two. Bag-of-words overlap ran 0.42 for the real
+    absence against 0.39 for the rewording, and the clause_type labels are free
+    text, so the same obligation sits under several of them. Only the clear
+    rewordings are dropped, by the high overlap threshold below; the rest are
+    reported as what was actually measured - the wording is not there - and the
+    answer says plainly that reading is what settles which it is.
+    """
+    from services import templates
+    if len(by_name) < _ABSENCE_MIN_POPULATION or not templates.is_populated(wiki_id, session_id):
+        return [], 0, 0
+    by_hash, units = templates.docs_by_hash(wiki_id, session_id, list(by_name))
+    if not by_hash:
+        return [], 0, 0
+    # A document the extractor barely read is missing most wordings for a
+    # reason that has nothing to do with what it says, so it is neither an
+    # anomaly nor evidence about one.
+    counts = sorted(units.values())
+    median = counts[len(counts) // 2] if counts else 0
+    scored = {d for d, n in units.items() if n >= max(1, median * _THIN_DOC_SHARE)}
+    if len(scored) < _ABSENCE_MIN_POPULATION:
+        return [], 0, 0
+
+    candidates = []
+    for h, srcs in by_hash.items():
+        present = srcs & scored
+        missing = scored - srcs
+        if not missing or len(missing) > _ABSENCE_MAX_MISSING:
+            continue
+        if len(present) / float(len(scored)) < _ABSENCE_MIN_SHARE:
+            continue
+        candidates.append((len(present), h, sorted(missing)))
+    if not candidates:
+        return [], len(by_name) - len(scored), 0
+    candidates.sort(key=lambda x: (-x[0], len(x[2])))
+    candidates = candidates[:6]
+
+    findings, reworded = [], 0
+    with db.get_engine().connect() as conn:
+        texts = {s: _doc_text(conn, wiki_id, session_id, s) for s in scored}
+        for present, h, missing in candidates:
+            example = " ".join((templates.example_text(wiki_id, session_id, h) or "").split())
+            terms = _wording_terms(example)
+            # A party name or a one-off word cannot be evidence about another
+            # document, because no other document would use it either.
+            terms = {t for t in terms
+                     if sum(1 for x in texts.values() if t in x)
+                     >= _COMMON_TERM_SHARE * len(texts)}
+            if not example or len(terms) < _ABSENCE_MIN_TERMS:
+                continue
+            truly = []
+            for s_ in missing:
+                share = sum(1 for t in terms if t in texts[s_]) / float(len(terms))
+                if share >= _REWORDED_SHARE:
+                    reworded += 1
+                else:
+                    truly.append(_doc_label(by_name[s_]))
+            if truly:
+                findings.append((present, example, truly))
+    return findings, len(by_name) - len(scored), reworded
+
+
 def answer_anomalies(question: str, wiki_id: str, session_id: str) -> str | None:
     from sqlalchemy import text
     from services import intent_agent as _ia
@@ -398,27 +514,59 @@ def answer_anomalies(question: str, wiki_id: str, session_id: str) -> str | None
         if len(docs_in) < _ANOMALY_MIN_GROUP or len(g["values"]) < 2:
             continue
         findings.append((len(docs_in), g))
-    if not findings:
-        return None
     findings.sort(key=lambda x: -x[0])
-    lines = [f"**{len(findings)} clause(s) share one wording across the {noun} but "
-             f"state different values in it.**", ""]
-    for n, g in findings[:8]:
-        ex = " ".join(g["example"].split())
-        m = _RX_OPERATIVE.search(ex)
-        ex = ex[m.start():m.start() + 140] if m else ex[:140]
-        lines.append(f"**“…{ex}…”** ({n} documents)")
-        vals = sorted(g["values"].items(), key=lambda kv: -len(kv[1]))
-        for i, (v, srcs) in enumerate(vals):
-            who = ""
-            if i and len(srcs) <= 5:
-                who = ": " + "; ".join(_doc_label(by_name[s_]) for s_ in sorted(srcs))
-            lines.append(f"- {v}: {len(srcs)} document(s){who}")
-        lines.append("")
+
+    absences, thin, reworded = _absence_findings(wiki_id, session_id, by_name)
+    if not findings and not absences:
+        return None
+
+    lines = []
+    if findings:
+        lines += [f"**{len(findings)} clause(s) share one wording across the {noun} but "
+                  f"state different values in it.**", ""]
+        for n, g in findings[:8]:
+            ex = " ".join(g["example"].split())
+            m = _RX_OPERATIVE.search(ex)
+            ex = ex[m.start():m.start() + 140] if m else ex[:140]
+            lines.append(f"**“…{ex}…”** ({n} documents)")
+            vals = sorted(g["values"].items(), key=lambda kv: -len(kv[1]))
+            for i, (v, srcs) in enumerate(vals):
+                who = ""
+                if i and len(srcs) <= 5:
+                    who = ": " + "; ".join(_doc_label(by_name[s_]) for s_ in sorted(srcs))
+                lines.append(f"- {v}: {len(srcs)} document(s){who}")
+            lines.append("")
+
+    if absences:
+        lines += [f"**{len(absences)} wording(s) that nearly all the {noun} share are "
+                  f"not stated in these words by one or two of them.**", ""]
+        for present, example, missing in absences:
+            m = _RX_OPERATIVE.search(example)
+            snippet = (example[m.start():m.start() + 140] if m else example[:140])
+            lines.append(f"**“…{snippet}…”** (stated this way in {present})")
+            for label_ in missing:
+                lines.append(f"- not stated this way: {label_}")
+            lines.append("")
+        if reworded:
+            lines.append(f"{reworded} further document(s) do not match a shared wording "
+                         f"but use nearly all of its terms elsewhere, so they state it "
+                         f"their own way and are not listed.")
+        if thin:
+            lines.append(f"{thin} document(s) were left out of this check: too little "
+                         f"of their text was extracted for a missing wording to mean "
+                         f"anything.")
+
+    if not any(ln.startswith("**") for ln in lines):
+        return None
     lines.append(rule.format(noun=noun))
-    lines.append("Only value differences inside a shared clause wording are detected "
-                 "here. A clause that is unusual in substance rather than in a figure "
-                 "(an obligation running the other way, say) needs a reading, not a count.")
+    lines.append("Two things are measured here: a shared clause wording whose figures "
+                 "differ between documents, and a wording most of the population "
+                 "states that one or two do not. The second is a count of wording, not "
+                 "of meaning — a document can be listed because it omits the term or "
+                 "because it writes the term differently, and only reading it settles "
+                 "which. A clause that is unusual in substance rather than in a figure "
+                 "or its wording (an obligation running the other way, say) is not "
+                 "found by either count.")
     return "\n".join(lines)
 
 
