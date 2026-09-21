@@ -957,13 +957,45 @@ _RX_SCAN_SCOPE = re.compile(
 _RX_CORPUS_WIDE = re.compile(
     r"\b(?:in|across|throughout|within)\s+(?:the|this|our)\s+"
     r"(?:corpus|wiki|portfolio|collection|workspace|document\s+set)\b"
-    r"|\bcorpus-wide\b|\bin\s+total\b|\bdo\s+we\s+(?:have|hold)\b",
+    r"|\bcorpus-wide\b|\bin\s+total\b|\bdo\s+we\s+(?:have|hold)\b"
+    # "in this set" and "across our data processing agreements": a whole
+    # population named by its plural type is as much a statement of scope as
+    # "in the corpus".
+    r"|\b(?:in|within)\s+(?:this|the|our)\s+set\b"
+    r"|\bacross\s+(?:all\s+)?(?:of\s+)?(?:our|the|these|those)\s+(?:[\w&'-]+\s+){0,4}"
+    r"(?:agreements|documents|contracts|matters|cases|judgments|judgements|opinions|"
+    r"petitions|filings|pleadings)\b",
     re.IGNORECASE)
 
 
 def _explicitly_corpus_wide(question: str) -> bool:
     """Whether the question states its own scope as the whole corpus."""
     return bool(_RX_CORPUS_WIDE.search(question or ""))
+
+
+# A request that opens with what to produce - "Draft a breach-notification
+# clause...", "Put our SLAs in date order" - has said what to do, and the
+# ambiguity check is told never to interrupt those. It does anyway: the small
+# model that runs it answered "Needs clarification" to two drafting requests
+# that the previous model (and the drafting path) handled, at 1,070 tokens of
+# nothing. "Summarize" and "review" are left out on purpose: the check's own
+# prompt names a bare "summarize this agreement" as the case worth asking about.
+_RX_TASK_OPENER = re.compile(
+    r"^\s*(?:please\s+)?(?:draft|redraft|write|prepare|compose|put|list|tabulate|"
+    r"rank|sort|order|count|show\s+me|give\s+me)\b",
+    re.IGNORECASE)
+# "this agreement" with no name attached: which one is exactly what would be asked.
+_RX_BARE_DOCUMENT_REFERENCE = re.compile(
+    r"\b(?:this|that|the\s+said)\s+(?:agreement|contract|document|nda|sla|msa|dpa|deed|"
+    r"clause|instrument)\b",
+    re.IGNORECASE)
+
+
+def _states_its_task(question: str) -> bool:
+    """Whether a question opens with a deliverable and points at no unnamed
+    single document, so there is nothing for the ambiguity check to ask."""
+    q = question or ""
+    return bool(_RX_TASK_OPENER.search(q) and not _RX_BARE_DOCUMENT_REFERENCE.search(q))
 
 
 # Words by which a question leans on the turn before it. "Which of THOSE expire
@@ -1100,6 +1132,8 @@ def check_clarification_node(state: QueryState) -> dict:
     chat_sid = state.get("chat_session_id") or state["session_id"]
     if (state.get("is_followup") or wiki._question_names_a_document(state["question"], [])
             or not config.ENABLE_CLARIFICATION
+            or _states_its_task(state["question"])
+            or _explicitly_corpus_wide(state["question"])
             or _risk_question_on_a_settled_document(state)
             or _question_precisely_names_a_document(state["question"], state["session_id"])):
         conv = wiki.build_conversation_context(chat_sid)
