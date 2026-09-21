@@ -9201,8 +9201,8 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
     _PARTY_SCAN_CAP = 20
-    # Wider re-scan used only to intersect several party names against each
-    # other, where a cap-truncated set makes the intersection meaningless.
+    # Full-set re-scan for any name whose first pass came back at the cap, where
+    # a truncated set is a number that cannot be compared or intersected.
     _PARTY_INTERSECT_CAP = 200
 
     # Canonicalise each candidate through the entity registry before searching.
@@ -9237,6 +9237,35 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     if not resolved:
         return set()
 
+    # A set that came back sitting exactly on the cap was truncated, not
+    # counted. Everything below treats the size of these sets as meaning
+    # something: the smallest set wins as the most distinctive name, the
+    # intersection narrows to the documents every name shares, and the token
+    # narrowing picks one document out of the siblings. A name that appears in
+    # 200 documents and a name that appears in 20 are indistinguishable once
+    # both have been cut to 20, so the selection can hand the rest of the
+    # function an arbitrary fifth of the real sibling set and the question's own
+    # identifier then fails to find the document it names. Re-scanned per name
+    # rather than by raising the first-pass cap for everyone: the wide query is
+    # only paid for by the names that turn out to be broad, which is usually
+    # none of them.
+    for _i, (_name, _docs) in enumerate(resolved):
+        if len(_docs) < _PARTY_SCAN_CAP:
+            continue
+        try:
+            _full: set[str] = set()
+            for variant in _variants_by_name[_name]:
+                _full |= {d for d in _db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, variant,
+                    cap=_PARTY_INTERSECT_CAP) if d}
+        except Exception as e:
+            logger.error("resolve_scope: full party lookup failed for %r: %s", _name, e)
+            continue
+        if len(_full) > len(_docs):
+            logger.info("Party-name scan for %r was truncated at %d — %d document(s) "
+                        "actually mention it", _name, _PARTY_SCAN_CAP, len(_full))
+            resolved[_i] = (_name, _full)
+
     # A question naming TWO parties is naming the document that mentions BOTH.
     # Picking the single most distinctive name instead answered "the liability
     # cap in the Proseware-Wideworld agreement" from a Acme Capital DPA whose
@@ -9260,30 +9289,12 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
                       (all(n in suffix_candidates for n, _ in resolved)
                        or len(resolved) == 2))
     if _intersectable:
+        # Every set here is already a full one — a name whose first pass hit the
+        # cap was re-scanned above — so the intersection is over what each name
+        # really matches. It used to be computed over truncated sets and then
+        # re-run wide only when it came back empty, which left the narrowing
+        # below working from the truncated sets whenever it came back non-empty.
         inter = set.intersection(*[d for _, d in resolved])
-        if not inter and any(len(d) >= _PARTY_SCAN_CAP for _, d in resolved):
-            # A truncated scan cannot be intersected: "Proseware" alone hits 26
-            # documents, the scan stopped at 20, and the one document that also
-            # mentions "Wideworld" was in the 6 it never returned.
-            wide = []
-            for name, docs in resolved:
-                if len(docs) < _PARTY_SCAN_CAP:
-                    wide.append(docs)
-                    continue
-                try:
-                    rescanned: set[str] = set()
-                    for variant in _variants_by_name[name]:
-                        rescanned |= {d for d in _db.find_source_docs_mentioning_phrase(
-                            _active_wiki_id(), session_id, variant,
-                            cap=_PARTY_INTERSECT_CAP) if d}
-                    wide.append(rescanned)
-                except Exception as e:
-                    logger.error("resolve_scope: wide party lookup failed for %r: %s",
-                                 name, e)
-                    wide = []
-                    break
-            if wide:
-                inter = set.intersection(*wide)
         _smallest = min(len(d) for _, d in resolved)
         if inter and len(inter) < _smallest:
             logger.info("Party-name match: %d document(s) mention every party named "
