@@ -6467,8 +6467,20 @@ def precedent_wording_count(hits: list, wiki_id: str, session_id: str,
         return 0
 
 
+_RX_CONTENT_WORD = re.compile(r"[a-z][a-z-]{4,}")
+
+
+def _question_overlap(question: str, sentence: str) -> int:
+    """How many of the question's content words the sentence uses."""
+    asked = set(_RX_CONTENT_WORD.findall((question or "").lower()))
+    if not asked:
+        return 0
+    said = set(_RX_CONTENT_WORD.findall((sentence or "").lower()))
+    return len(asked & said)
+
+
 def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str,
-                        _tpl) -> dict:
+                        _tpl, question: str = "") -> dict:
     """The breakdown, counted from wording fingerprints. Same shape as the
     literal version; {} when no clause has a fingerprint."""
     seen, entries = set(), []
@@ -6477,7 +6489,19 @@ def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str
         # separately — a clause stating a restriction and its exception is two
         # commitments, and the index fingerprints them that way, so a lookup
         # made from the whole clause would match neither.
-        for fp, sentence in _tpl.wordings(hit.get("verbatim_text") or hit.get("text") or ""):
+        #
+        # The sentence the QUESTION is about leads, rather than whichever one
+        # the extractor happened to put first. Measured on the golden set: a
+        # clause that fixed a three-year term and then made confidentiality
+        # survive open-endedly was quoted back as the term sentence to a
+        # question asking about survival. Both wordings sat in the same 50
+        # documents, so the count was right and the quotation was not — and on
+        # a clause whose sentences do not travel together it would have been
+        # the wrong count too.
+        _found = _tpl.wordings(hit.get("verbatim_text") or hit.get("text") or "")
+        if question and len(_found) > 1:
+            _found = sorted(_found, key=lambda fs: -_question_overlap(question, fs[1]))
+        for fp, sentence in _found:
             fam = _tpl.family_of(wiki_id, fp)
             if fam in seen:
                 continue
@@ -6499,7 +6523,8 @@ def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str
 
 
 def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
-                                period=None, anchors: list | None = None) -> dict:
+                                period=None, anchors: list | None = None,
+                                question: str = "") -> dict:
     """{"wordings": [(wording, documents)], "any": documents, "anchored": [wording]}
     for the closest precedent clauses, or {} if nothing countable could be built.
 
@@ -6524,7 +6549,7 @@ def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
             from services import templates as _tpl
             if _tpl.is_populated(wiki_id, session_id):
                 _t = _template_breakdown(list(anchors or []), list(hits or []),
-                                         wiki_id, session_id, _tpl)
+                                         wiki_id, session_id, _tpl, question)
                 if _t:
                     return _t
         except Exception as e:
@@ -6686,7 +6711,7 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
                           question or "", re.IGNORECASE)
     if _how_many and hits:
         _bd = precedent_wording_breakdown(_pool, wiki_id, session_id, period,
-                                          anchors=_anchor_hits)
+                                          anchors=_anchor_hits, question=question)
         _shown = [(w, n) for w, n in (_bd.get("wordings") or []) if n]
         if _shown:
             _w0, _n0 = _shown[0]
