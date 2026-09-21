@@ -3680,6 +3680,48 @@ def find_pages_mentioning_title(wiki_id: str, session_id: str, title: str) -> li
         return [row.title for row in rows]
 
 
+def source_docs_for_titles(wiki_id: str, session_id: str,
+                           titles: list[str]) -> list[str]:
+    """The documents the given wiki pages were built from."""
+    from sqlalchemy import text
+    if not titles:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc FROM pages
+            WHERE wiki_id = :w AND session_id = :s
+              AND title = ANY(:t) AND source_doc <> ''
+        """), {"w": wiki_id, "s": session_id, "t": list(titles)})
+        return [r.source_doc for r in rows]
+
+
+def stored_text_for_docs(wiki_id: str, session_id: str,
+                         source_docs: list[str]) -> str:
+    """Everything the index holds for these documents: the full text of every
+    page built from them, and every verbatim clause cut from them.
+
+    Wider than the passages any one question retrieves, which is the point —
+    a quote can be genuinely in a document and still be outside the slice the
+    answer was written from.
+    """
+    from sqlalchemy import text
+    if not source_docs:
+        return ""
+    crypto = _crypto()
+    parts = []
+    with get_engine().connect() as conn:
+        parts.append(conn.execute(text("""
+            SELECT string_agg(content, ' ') FROM pages
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+        """), {"w": wiki_id, "s": session_id, "d": list(source_docs)}).scalar() or "")
+        for (raw,) in conn.execute(text("""
+            SELECT verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+        """), {"w": wiki_id, "s": session_id, "d": list(source_docs)}):
+            parts.append(crypto.decrypt_safe(raw, default=raw) or "")
+    return " ".join(parts)
+
+
 def find_source_docs_mentioning_phrase(
     wiki_id: str, session_id: str, phrase: str, cap: int = 25
 ) -> list[str]:

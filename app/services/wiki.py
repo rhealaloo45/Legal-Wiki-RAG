@@ -5323,6 +5323,71 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     return unverified
 
 
+_SOURCE_CHECK_MAX_DOCS = 4
+_SOURCE_CHECK_MAX_QUOTES = 6
+
+
+def _quotes_present_in_sources(quotes: list, session_id: str,
+                               titles: list) -> tuple[set, set]:
+    """Look for flagged quotes in the DOCUMENTS, not in the retrieved passage.
+
+    _verify_answer_citations can only compare a quote against the context the
+    answer was written from, so it flags two different things as one: a
+    paraphrase dressed up as a quote, and a real sentence of the document that
+    the retrieval slice did not happen to include. Only the first is a
+    fabrication. Measured on the golden set, a drafting answer had three
+    genuine clause quotes flagged this way, and each flag also bought a full
+    regeneration before the warning was printed.
+
+    Two widening steps, cheapest first. The index holds far more of each
+    document than any one answer retrieves — every page built from it and
+    every verbatim clause cut from it — so that is searched first. What is
+    still missing is looked for in the ORIGINAL FILE on disk, which is the
+    only text that can settle a quote the index never stored, and is the
+    check the retrieved-context comparison cannot make. Bounded to a few
+    documents and a few quotes, and reached only when something was flagged.
+
+    Returns (found in the index, found only in the original file). The second
+    set is worth logging separately: those quotes are real, and their absence
+    from the index is a gap in the index.
+    """
+    if not quotes or not titles:
+        return set(), set()
+    quotes = list(quotes)[:_SOURCE_CHECK_MAX_QUOTES]
+    in_index, in_file = set(), set()
+    try:
+        wiki_id = _active_wiki_id()
+        docs = _db.source_docs_for_titles(wiki_id, session_id, list(titles))[
+            :_SOURCE_CHECK_MAX_DOCS]
+        if not docs:
+            return set(), set()
+        stored = _norm_for_match(_db.stored_text_for_docs(wiki_id, session_id, docs))
+        for q in quotes:
+            if _norm_for_match(q) in stored:
+                in_index.add(q)
+        remaining = [q for q in quotes if q not in in_index]
+        if not remaining:
+            return in_index, in_file
+        for doc in docs:
+            if not remaining:
+                break
+            path = os.path.join(config.UPLOAD_PATH, doc)
+            if not os.path.exists(path):
+                continue
+            try:
+                text_norm = _norm_for_match(_read_file(path))
+            except Exception as e:
+                logger.warning("Source-text citation check could not read a document: %s", e)
+                continue
+            for q in list(remaining):
+                if _norm_for_match(q) in text_norm:
+                    in_file.add(q)
+                    remaining.remove(q)
+    except Exception as e:
+        logger.warning("Source-text citation check failed, keeping the context result: %s", e)
+    return in_index, in_file
+
+
 # Markdown emphasis the model writes INSIDE a quoted span, plus unicode
 # space/apostrophe variants that differ from the source only visually. Folded
 # ONLY for the severity classification below — never for verification itself.
@@ -6820,6 +6885,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         if _n_repaired:
             logger.info("Citation check: completed %d truncated quote(s) from context "
                         "without a retry call", _n_repaired)
+
+    # Anything still flagged is checked against the documents themselves before
+    # it is called unverified — see _quotes_present_in_sources.
+    if _unverified_quotes:
+        _in_index, _in_file = _quotes_present_in_sources(
+            _unverified_quotes, session_id, selected_titles)
+        if _in_index or _in_file:
+            _unverified_quotes = [q for q in _unverified_quotes
+                                  if q not in _in_index and q not in _in_file]
+            logger.info("Citation check: %d quote(s) absent from the retrieved passage "
+                        "were found in the documents themselves (%d elsewhere in the "
+                        "index, %d only in the original file) — not flagged, no retry",
+                        len(_in_index) + len(_in_file), len(_in_index), len(_in_file))
+        if _in_file:
+            logger.warning("Citation check: %d quote(s) are in the original file but "
+                           "nowhere in the index — the index is missing that passage",
+                           len(_in_file))
 
     if _unverified_quotes or _misattributed or _unverified_ids:
         # Why the retry fired, not just that it did. This is the single largest
