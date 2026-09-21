@@ -41,7 +41,30 @@ page = ("Summary of the clause.\n\n**Supporting Quotes:**\n"
         "not a quote line shall notify Globex Corp within 48 hours of any incident affecting it\n")
 check("quote lines", T.quote_lines(page) == ["Acme Widgets Ltd shall notify Globex Corp within 48 hours of any incident."])
 
+# One commitment, fingerprinted the same whether or not the extractor cut an
+# unrelated sentence in front of it.
+alone = ("Confidentiality obligations shall survive for so long as the information "
+         "remains confidential.")
+bundled = "This Agreement shall remain effective for three years. " + alone
+check("bundled passage still carries the wording",
+      set(T.fingerprints(alone)) <= set(T.fingerprints(bundled)))
+check("the extra sentence is its own wording", len(T.fingerprints(bundled)) == 2)
+check("whole-passage fingerprint still differs", T.fingerprint(alone) != T.fingerprint(bundled))
+check("one sentence is one fingerprint", T.fingerprints(alone) == [T.fingerprint(alone)])
+check("nothing operative, nothing to fingerprint",
+      T.fingerprints("Customer Data means all data supplied by the Customer.") == [])
+
+# A full stop inside an abbreviation or a clause number is not a sentence end.
+check("abbreviations survive",
+      len(T.wordings("Acme Pte. Ltd. shall pay the fee under Section 3.2 hereof.")) == 1)
+check("two sentences are two",
+      len(T.wordings("Acme Co. shall indemnify the Buyer. Art. 5 shall apply.")) == 2)
+
+# The same sentence twice in one passage is one fingerprint, not two.
+check("repeat within a passage counted once",
+      len(T.fingerprints(alone + " " + alone)) == 1)
+
 if failures:
     print("FAILED:", failures)
     raise SystemExit(1)
-print("ok - 8 wording-fingerprint checks correct (2 negative)")
+print("ok - 16 wording-fingerprint checks correct (3 negative)")

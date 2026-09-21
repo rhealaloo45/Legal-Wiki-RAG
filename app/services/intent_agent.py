@@ -6473,14 +6473,18 @@ def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str
     literal version; {} when no clause has a fingerprint."""
     seen, entries = set(), []
     for is_anchor, hit in [(True, a) for a in anchors] + [(False, h) for h in hits]:
-        fp = _tpl.fingerprint(hit.get("verbatim_text") or hit.get("text") or "")
-        if not fp:
-            continue
-        fam = _tpl.family_of(wiki_id, fp)
-        if fam in seen:
-            continue
-        seen.add(fam)
-        entries.append((is_anchor, _anchor_slice(hit), fp))
+        # Each operative sentence of the clause is its own wording, counted
+        # separately — a clause stating a restriction and its exception is two
+        # commitments, and the index fingerprints them that way, so a lookup
+        # made from the whole clause would match neither.
+        for fp, sentence in _tpl.wordings(hit.get("verbatim_text") or hit.get("text") or ""):
+            fam = _tpl.family_of(wiki_id, fp)
+            if fam in seen:
+                continue
+            seen.add(fam)
+            entries.append((is_anchor, _anchor_slice({"text": sentence}), fp))
+            if len(entries) == 4:
+                break
         if len(entries) == 4:
             break
     if not entries:

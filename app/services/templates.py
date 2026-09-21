@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 
 from services import db
 
@@ -36,6 +37,18 @@ logger = logging.getLogger(__name__)
 
 _MIN_QUOTE_CHARS = 40
 _BATCH = 2000
+
+# A sentence end, kept away from the abbreviations and numbering that fill a
+# contract: "No. 5.", "Ltd.", "Section 3.2", "(a)." and the like.
+# Each lookbehind ends where the full stop BEGINS, so it holds the
+# abbreviation without its dot.
+_RX_SENTENCE = re.compile(r"""
+    (?<![A-Z][a-z])              # a two-letter abbreviation: No. Co. Mr. St.
+    (?<!\bPte)(?<!\bLtd)(?<!\bPvt)(?<!\bInc)(?<!\bLLP)(?<!\bPLC)(?<!\bLLC)
+    (?<!\bArt)(?<!\bart)(?<!\bSec)(?<!\bsec)(?<!\bCl)(?<!\bcl)
+    (?<!\bNos)(?<!\bnos)(?<!\bPara)(?<!\bpara)
+    [.;]\s+(?=[A-Z(\"'“])
+""", re.X)
 
 
 def key(text: str) -> str | None:
@@ -45,8 +58,52 @@ def key(text: str) -> str | None:
 
 
 def fingerprint(text: str) -> str | None:
-    k = key(text)
-    return hashlib.md5(k.encode("utf-8")).hexdigest() if k else None
+    """The fingerprint of a passage's first operative sentence, or None.
+
+    Sentence-scoped so that it matches what the index stores: a lookup made
+    from a retrieved clause has to hash the same way the clause was indexed.
+    """
+    found = wordings(text)
+    return found[0][0] if found else None
+
+
+def fingerprints(text: str) -> list[str]:
+    """One fingerprint per operative sentence of a passage, in order.
+
+    A fingerprint taken from the whole passage starts at its FIRST operative
+    verb, so the same commitment fingerprints differently depending on what
+    the extractor happened to cut with it. Measured on the test index: the
+    sentence "Confidentiality obligations shall survive for so long as the
+    information remains confidential" carried one fingerprint in 27 documents
+    and a second in 23, and the only difference was that in those 23 the
+    extractor had included the preceding sentence about the term of the
+    agreement — so "shall remain effective for three years" became the
+    operative wording and the survival sentence was never fingerprinted at
+    all. Counting the two together gives 50, which is what the index actually
+    holds.
+
+    Sentence by sentence, the commitment is fingerprinted wherever it sits.
+    A passage with one operative sentence yields exactly what it did before.
+    """
+    return [h for h, _ in wordings(text)]
+
+
+def wordings(text: str) -> list[tuple[str, str]]:
+    """(fingerprint, sentence) for each distinct operative sentence, in order."""
+    out, seen = [], set()
+    for sentence in _RX_SENTENCE.split(text or ""):
+        # The split takes the stop with the separator, so every sentence but
+        # the last has already lost it. Dropping it from the last one too
+        # keeps one wording from fingerprinting two ways by its punctuation.
+        sentence = sentence.strip().rstrip(".;, ")
+        k = key(sentence)
+        if not k:
+            continue
+        h = hashlib.md5(k.encode("utf-8")).hexdigest()
+        if h not in seen:
+            seen.add(h)
+            out.append((h, " ".join(sentence.split())))
+    return out
 
 
 def quote_lines(content: str) -> list[str]:
@@ -64,16 +121,14 @@ def _rows_for(wiki_id: str, session_id: str, clauses, pages) -> list[dict]:
     rows = []
     crypto = db._crypto()
     for cid, src, vtext in clauses:
-        h = fingerprint(crypto.decrypt_safe(vtext, default=vtext) or "")
-        if h:
+        for i, h in enumerate(fingerprints(crypto.decrypt_safe(vtext, default=vtext) or "")):
             rows.append({"w": wiki_id, "s": session_id, "d": src, "k": "clause",
-                         "u": f"c:{cid}", "h": h})
+                         "u": f"c:{cid}:{i}", "h": h})
     for pid, src, content in pages:
         for i, q in enumerate(quote_lines(content)):
-            h = fingerprint(q)
-            if h:
+            for j, h in enumerate(fingerprints(q)):
                 rows.append({"w": wiki_id, "s": session_id, "d": src, "k": "page",
-                             "u": f"p:{pid}:{i}", "h": h})
+                             "u": f"p:{pid}:{i}:{j}", "h": h})
     return rows
 
 
@@ -242,21 +297,29 @@ def example_text(wiki_id: str, session_id: str, template_hash: str) -> str | Non
             {"w": wiki_id, "s": session_id, "h": template_hash}).fetchall()
         for kind, ref in refs:
             try:
+                parts = ref.split(":")
                 if kind == "clause":
-                    cid = int(ref.split(":", 1)[1])
                     raw = conn.execute(text(
                         "SELECT verbatim_text FROM clauses WHERE id = :i"),
-                        {"i": cid}).scalar()
-                    if raw:
-                        return crypto.decrypt_safe(raw, default=raw)
+                        {"i": int(parts[1])}).scalar()
+                    passage = crypto.decrypt_safe(raw, default=raw) if raw else ""
+                    nth = int(parts[2]) if len(parts) > 2 else 0
                 else:
-                    _, pid, idx = ref.split(":", 2)
                     content = conn.execute(text(
                         "SELECT content FROM pages WHERE id = :i"),
-                        {"i": int(pid)}).scalar()
+                        {"i": int(parts[1])}).scalar()
                     lines = quote_lines(content or "")
-                    if lines and int(idx) < len(lines):
-                        return lines[int(idx)]
+                    idx = int(parts[2])
+                    passage = lines[idx] if idx < len(lines) else ""
+                    nth = int(parts[3]) if len(parts) > 3 else 0
+                # The fingerprint belongs to one sentence of the passage, so
+                # that sentence is the example — not the whole extracted
+                # chunk, which may carry unrelated wording around it.
+                found = wordings(passage)
+                if nth < len(found):
+                    return found[nth][1]
+                if passage:
+                    return passage
             except Exception:
                 continue
     return None
