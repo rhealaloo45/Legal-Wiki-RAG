@@ -1701,6 +1701,14 @@ def ingest(file_path: str, session_id: str) -> dict:
     _update_doc_step(session_id, doc_name, "persisting")
     _persist_structured(session_id, doc_name, structured, classification, anchors)
 
+    # Wording fingerprints, now that this document's clauses and pages exist.
+    # Failure never blocks ingest: the table is rebuilt by the backfill.
+    try:
+        from services import templates as _templates
+        _templates.index_document(_active_wiki_id(), session_id, doc_name)
+    except Exception as _tpl_err:
+        logger.warning("Could not fingerprint wording for %s: %s", doc_name, _tpl_err)
+
     # --- Stage 06: hypothetical-question embeddings ------------------------
     _embed_hypothetical_questions(
         session_id, doc_name, structured.get("hypothetical_questions") or {},

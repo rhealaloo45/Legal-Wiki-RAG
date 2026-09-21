@@ -6433,6 +6433,33 @@ def precedent_wording_count(hits: list, wiki_id: str, session_id: str,
         return 0
 
 
+def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str,
+                        _tpl) -> dict:
+    """The breakdown, counted from wording fingerprints. Same shape as the
+    literal version; {} when no clause has a fingerprint."""
+    seen, entries = set(), []
+    for is_anchor, hit in [(True, a) for a in anchors] + [(False, h) for h in hits]:
+        fp = _tpl.fingerprint(hit.get("verbatim_text") or hit.get("text") or "")
+        if not fp:
+            continue
+        fam = _tpl.family_of(wiki_id, fp)
+        if fam in seen:
+            continue
+        seen.add(fam)
+        entries.append((is_anchor, _anchor_slice(hit), fp))
+        if len(entries) == 4:
+            break
+    if not entries:
+        return {}
+    per = [(is_a, label, _tpl.count_documents(wiki_id, session_id, fp))
+           for is_a, label, fp in entries]
+    anchored = [(w, n) for is_a, w, n in per if is_a]
+    others = sorted(((w, n) for is_a, w, n in per if not is_a), key=lambda x: -x[1])
+    return {"wordings": anchored + others, "anchored": [w for w, _ in anchored],
+            "any": _tpl.count_any(wiki_id, session_id, [fp for _, _, fp in entries]),
+            "source": "templates"}
+
+
 def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
                                 period=None, anchors: list | None = None) -> dict:
     """{"wordings": [(wording, documents)], "any": documents, "anchored": [wording]}
@@ -6448,6 +6475,22 @@ def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
     whatever else the similarity search happened to rank higher; the rest follow
     by document count.
     """
+    # Preferred: count documents per wording fingerprint (services/templates.py),
+    # which does not depend on which clauses a search happened to return and
+    # covers wording that exists only in page text. Not used when the question
+    # fixes a period - the fingerprint masks numbers, and the literal path below
+    # is what requires "5 years" alongside the wording - or when the table has
+    # not been built.
+    if not period:
+        try:
+            from services import templates as _tpl
+            if _tpl.is_populated(wiki_id, session_id):
+                _t = _template_breakdown(list(anchors or []), list(hits or []),
+                                         wiki_id, session_id, _tpl)
+                if _t:
+                    return _t
+        except Exception as e:
+            logger.error("[AGENT] template breakdown failed, using literal counts: %s", e)
     groups = _precedent_wording_groups(list(anchors or []) + list(hits or []), period)
     if not groups:
         return {}

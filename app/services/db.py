@@ -607,6 +607,39 @@ def _run_schema_statements(conn, text) -> None:
             CREATE INDEX IF NOT EXISTS clauses_session_status_idx
             ON clauses (session_id, review_status)
         """))
+        # Wording fingerprints (services/templates.py): one row per clause or
+        # page quote line, holding only a hash and a document reference, so
+        # "how many documents state this clause this way" is an indexed count.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clause_templates (
+                id             BIGSERIAL PRIMARY KEY,
+                wiki_id        TEXT NOT NULL,
+                session_id     TEXT NOT NULL,
+                source_doc     TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                unit_ref       TEXT NOT NULL,
+                template_hash  TEXT NOT NULL,
+                UNIQUE (wiki_id, kind, unit_ref)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clause_templates_hash_idx
+            ON clause_templates (wiki_id, template_hash)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clause_templates_doc_idx
+            ON clause_templates (wiki_id, source_doc)
+        """))
+        # Fingerprints an operator (or the merge pass) has joined because they
+        # state one commitment in different words.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS template_families (
+                wiki_id        TEXT NOT NULL,
+                template_hash  TEXT NOT NULL,
+                family         TEXT NOT NULL,
+                PRIMARY KEY (wiki_id, template_hash)
+            )
+        """))
         # Canonical clause type (§ Phase 3.5c) — added BESIDE clause_type,
         # which keeps the raw model-chosen label. NULL means "not mapped",
         # which is a real answer here, not a missing value: see
@@ -2697,7 +2730,7 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
         "clause_map_deleted": 0, "source_positions_deleted": 0,
         "relations_deleted": 0, "contradictions_deleted": 0,
         "page_metadata_deleted": 0,
-        "clauses_deleted": 0, "clause_embeddings_deleted": 0,
+        "clauses_deleted": 0, "clause_embeddings_deleted": 0, "clause_templates_deleted": 0,
         "question_embeddings_deleted": 0,
         "contracts_deleted": 0, "obligations_deleted": 0,
         "litigation_facts_deleted": 0, "authorizations_deleted": 0,
@@ -2727,6 +2760,7 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
         ("review_queue", "review_queue_deleted"),
         ("collection_documents", "collection_documents_deleted"),
         ("clauses", "clauses_deleted"),
+        ("clause_templates", "clause_templates_deleted"),
         # defined_terms is DERIVED from the clause rows above by
         # services/defined_terms.build(), but it is still per-document data
         # keyed the same way, and leaving it behind outlived the document:

@@ -1,0 +1,199 @@
+"""Wording templates: which documents state a clause in the same words.
+
+"Which other documents carry that same restriction, and how many?" is a count
+of documents per wording. Counting it from whichever clauses a similarity
+search returned made the answer depend on the search: eight copies of one
+template measured that template alone, and a template the search ranked ninth
+was never counted.
+
+Every clause, and every verbatim quote line on a wiki page, is instead given a
+fingerprint at ingest: its operative wording with names, figures and places
+masked out, hashed. Documents that state a clause the same way share a
+fingerprint whatever their parties or numbers, so a count is the number of
+distinct documents under one fingerprint. Exact, and the same tomorrow as
+today.
+
+Quote lines on pages are fingerprinted as well as clauses because the clause
+extractor does not cut a clause from every passage that states a term. On the
+test index, counting clauses alone found 71 documents for a wording that 85
+carry, the missing 14 having it only in page text.
+
+Two fingerprints can still state one commitment in different words. Those are
+joined into a family by an optional merge pass (see merge_families); a count
+then covers the family. Nothing here calls a model except that pass.
+
+Only hashes and document references are stored, never wording, so the table
+adds no readable contract text beyond what the clauses table already holds.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+
+from services import db
+
+logger = logging.getLogger(__name__)
+
+_MIN_QUOTE_CHARS = 40
+_BATCH = 2000
+
+
+def key(text: str) -> str | None:
+    """The masked operative wording of a clause, or None if it has none."""
+    from services import survey
+    return survey._template_key(text)
+
+
+def fingerprint(text: str) -> str | None:
+    k = key(text)
+    return hashlib.md5(k.encode("utf-8")).hexdigest() if k else None
+
+
+def quote_lines(content: str) -> list[str]:
+    """The verbatim lines of a wiki page (its "> " supporting quotes)."""
+    out = []
+    for line in (content or "").splitlines():
+        if line.startswith(">"):
+            q = line[1:].strip()
+            if len(q) >= _MIN_QUOTE_CHARS:
+                out.append(q)
+    return out
+
+
+def _rows_for(wiki_id: str, session_id: str, clauses, pages) -> list[dict]:
+    rows = []
+    crypto = db._crypto()
+    for cid, src, vtext in clauses:
+        h = fingerprint(crypto.decrypt_safe(vtext, default=vtext) or "")
+        if h:
+            rows.append({"w": wiki_id, "s": session_id, "d": src, "k": "clause",
+                         "u": f"c:{cid}", "h": h})
+    for pid, src, content in pages:
+        for i, q in enumerate(quote_lines(content)):
+            h = fingerprint(q)
+            if h:
+                rows.append({"w": wiki_id, "s": session_id, "d": src, "k": "page",
+                             "u": f"p:{pid}:{i}", "h": h})
+    return rows
+
+
+def _insert(conn, rows: list[dict]) -> None:
+    from sqlalchemy import text
+    for i in range(0, len(rows), _BATCH):
+        conn.execute(text("""
+            INSERT INTO clause_templates
+                (wiki_id, session_id, source_doc, kind, unit_ref, template_hash)
+            VALUES (:w, :s, :d, :k, :u, :h)
+            ON CONFLICT (wiki_id, kind, unit_ref) DO UPDATE SET
+                source_doc = EXCLUDED.source_doc, template_hash = EXCLUDED.template_hash
+        """), rows[i:i + _BATCH])
+
+
+def index_document(wiki_id: str, session_id: str, source_doc: str) -> int:
+    """(Re)fingerprint one document. Called when a document finishes ingest,
+    after its clauses and pages exist, so a new document is counted at once."""
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        conn.execute(text("DELETE FROM clause_templates WHERE wiki_id = :w "
+                          "AND session_id = :s AND source_doc = :d"),
+                     {"w": wiki_id, "s": session_id, "d": source_doc})
+        clauses = conn.execute(text("""
+            SELECT id, source_doc, verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d
+              AND review_status <> 'rejected'"""),
+            {"w": wiki_id, "s": session_id, "d": source_doc}).fetchall()
+        pages = conn.execute(text("""
+            SELECT id, source_doc, content FROM pages
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = :d"""),
+            {"w": wiki_id, "s": session_id, "d": source_doc}).fetchall()
+        rows = _rows_for(wiki_id, session_id, clauses, pages)
+        _insert(conn, rows)
+        conn.commit()
+    return len(rows)
+
+
+def backfill(wiki_id: str, session_id: str) -> dict:
+    """Fingerprint every clause and page quote line in a wiki session.
+
+    Replaces the session's rows in one transaction, so it can be re-run at any
+    time. Zero model calls: it reads text already stored.
+    """
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        clauses = conn.execute(text("""
+            SELECT id, source_doc, verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND review_status <> 'rejected'"""),
+            {"w": wiki_id, "s": session_id}).fetchall()
+        pages = conn.execute(text("""
+            SELECT id, source_doc, content FROM pages
+            WHERE wiki_id = :w AND session_id = :s AND source_doc IS NOT NULL"""),
+            {"w": wiki_id, "s": session_id}).fetchall()
+        rows = _rows_for(wiki_id, session_id, clauses, pages)
+        conn.execute(text("DELETE FROM clause_templates WHERE wiki_id = :w AND session_id = :s"),
+                     {"w": wiki_id, "s": session_id})
+        _insert(conn, rows)
+        conn.commit()
+    return {"clauses_read": len(clauses), "pages_read": len(pages),
+            "rows_written": len(rows),
+            "distinct_templates": len({r["h"] for r in rows}),
+            "documents": len({r["d"] for r in rows})}
+
+
+def is_populated(wiki_id: str, session_id: str) -> bool:
+    from sqlalchemy import text
+    try:
+        with db.get_engine().connect() as conn:
+            return bool(conn.execute(text(
+                "SELECT 1 FROM clause_templates WHERE wiki_id = :w AND session_id = :s LIMIT 1"),
+                {"w": wiki_id, "s": session_id}).fetchone())
+    except Exception as e:
+        logger.warning("template table unavailable: %s", e)
+        return False
+
+
+def count_documents(wiki_id: str, session_id: str, template_hash: str) -> int:
+    """Distinct documents whose text states this wording (or any wording in
+    its family, once families have been merged)."""
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        fam = conn.execute(text("""
+            SELECT family FROM template_families
+            WHERE wiki_id = :w AND template_hash = :h"""),
+            {"w": wiki_id, "h": template_hash}).scalar() or template_hash
+        return int(conn.execute(text("""
+            SELECT count(DISTINCT t.source_doc)
+            FROM clause_templates t
+            JOIN documents d ON d.wiki_id = t.wiki_id AND d.source_doc = t.source_doc
+            LEFT JOIN template_families f
+                   ON f.wiki_id = t.wiki_id AND f.template_hash = t.template_hash
+            WHERE t.wiki_id = :w AND t.session_id = :s
+              AND COALESCE(f.family, t.template_hash) = :fam"""),
+            {"w": wiki_id, "s": session_id, "fam": fam}).scalar() or 0)
+
+
+def family_of(wiki_id: str, template_hash: str) -> str:
+    """The family a fingerprint belongs to, or the fingerprint itself."""
+    from sqlalchemy import text
+    with db.get_engine().connect() as conn:
+        return conn.execute(text("""
+            SELECT family FROM template_families
+            WHERE wiki_id = :w AND template_hash = :h"""),
+            {"w": wiki_id, "h": template_hash}).scalar() or template_hash
+
+
+def count_any(wiki_id: str, session_id: str, template_hashes: list[str]) -> int:
+    """Distinct documents stating ANY of these wordings (or their families)."""
+    from sqlalchemy import text
+    if not template_hashes:
+        return 0
+    fams = list({family_of(wiki_id, h) for h in template_hashes})
+    with db.get_engine().connect() as conn:
+        return int(conn.execute(text("""
+            SELECT count(DISTINCT t.source_doc)
+            FROM clause_templates t
+            JOIN documents d ON d.wiki_id = t.wiki_id AND d.source_doc = t.source_doc
+            LEFT JOIN template_families f
+                   ON f.wiki_id = t.wiki_id AND f.template_hash = t.template_hash
+            WHERE t.wiki_id = :w AND t.session_id = :s
+              AND COALESCE(f.family, t.template_hash) = ANY(:fams)"""),
+            {"w": wiki_id, "s": session_id, "fams": fams}).scalar() or 0)
