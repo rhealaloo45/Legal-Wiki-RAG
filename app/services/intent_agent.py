@@ -6434,23 +6434,33 @@ def precedent_wording_count(hits: list, wiki_id: str, session_id: str,
 
 
 def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
-                                period=None) -> dict:
-    """{"wordings": [(wording, documents)], "any": documents} for the closest
-    precedent clauses, or {} if nothing countable could be built.
+                                period=None, anchors: list | None = None) -> dict:
+    """{"wordings": [(wording, documents)], "any": documents, "anchored": [wording]}
+    for the closest precedent clauses, or {} if nothing countable could be built.
 
     The union alone can mislead: the nearest clauses to a question are often
     related but different commitments (a ban on training general-purpose
     models, and a narrower one on shared models), and one combined figure
     reads as the reach of a single clause.
+
+    `anchors` are clauses from the document the question itself names. Their
+    wordings are the restriction being asked about, so they come first, ahead of
+    whatever else the similarity search happened to rank higher; the rest follow
+    by document count.
     """
-    groups = _precedent_wording_groups(hits, period)
+    groups = _precedent_wording_groups(list(anchors or []) + list(hits or []), period)
     if not groups:
         return {}
+    anchor_keys = {_anchor_slice(a).lower() for a in (anchors or [])}
     try:
         from services import db as _db_pc
         per = [(g[0], _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, [g]))
                for g in groups]
-        return {"wordings": sorted(per, key=lambda x: -x[1]),
+        anchored = [p for p in per if p[0].lower() in anchor_keys]
+        others = sorted((p for p in per if p[0].lower() not in anchor_keys),
+                        key=lambda x: -x[1])
+        return {"wordings": anchored + others,
+                "anchored": [w for w, _ in anchored],
                 "any": _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, groups)}
     except Exception as e:
         logger.error("[AGENT] precedent corpus breakdown failed: %s", e)
@@ -6476,13 +6486,44 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
         # closest clauses are often eight copies of one template, and counting
         # from them alone measured that one wording (69 documents) while the
         # restriction the question described sat in the pool at rank 9 (85).
+        from services import embedder as _emb
+        _vec = _emb.embed(question, is_query=True)
         hits = _prec.search_clauses(wiki_id, session_id, question,
-                                    limit=_PRECEDENT_POOL)
+                                    limit=_PRECEDENT_POOL, vec=_vec)
     except Exception as e:
         logger.error("[AGENT] clause-precedent fast-path failed: %s", e)
         return None
     if not hits:
         return None
+
+    # "The <named> agreement bars X. Which other documents carry the same
+    # restriction?" - the restriction is the one in the document the question
+    # names, and the closest clauses to the question's wording are often a
+    # different template's phrasing of it (the named agreement's own clause was
+    # not in the 48 nearest, so it was never counted). The named document, when
+    # scope resolution finds one unambiguously, supplies its own closest clauses
+    # as the anchor wording, from the same embedding. Only its single closest
+    # clause: the next-closest in that document are its neighbouring clauses
+    # (data ownership, data location), and anchoring on them counted a
+    # different commitment under the restriction's name.
+    _anchor_hits, _anchor_docs = [], []
+    try:
+        _sc = wiki.resolve_scope(question, session_id)
+        _named = list((_sc or {}).get("target_docs") or [])
+        if 1 <= len(_named) <= 2:
+            _anchor_docs = _named
+            _anchor_hits = _prec.search_clauses(
+                wiki_id, session_id, question, limit=1,
+                only_docs=tuple(_named), vec=_vec)
+    except Exception as e:
+        logger.error("[AGENT] precedent anchor lookup failed: %s", e)
+    _anchor_names = {re.sub(r"^[0-9a-f-]{36}_", "", d) for d in _anchor_docs}
+    if _anchor_names:
+        # The named document is what the others are compared against, not one of them.
+        hits = [h for h in hits
+                if re.sub(r"^[0-9a-f-]{36}_", "", h.get("source_doc") or "") not in _anchor_names]
+        if not hits:
+            hits = _anchor_hits
 
     # The same clause can be indexed more than once for a document — the
     # 30-day list showed "tailspin autocomponents amdt agreement 2022-02-02"
@@ -6563,12 +6604,16 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
                           r"|\bwhich\s+other\s+(?:documents?|agreements?)\b[^?]{0,60}?\bcarr(?:y|ies)\b",
                           question or "", re.IGNORECASE)
     if _how_many and hits:
-        _bd = precedent_wording_breakdown(_pool, wiki_id, session_id, period)
+        _bd = precedent_wording_breakdown(_pool, wiki_id, session_id, period,
+                                          anchors=_anchor_hits)
         _shown = [(w, n) for w, n in (_bd.get("wordings") or []) if n]
         if _shown:
             _w0, _n0 = _shown[0]
-            _head = [f"**{_n0} document(s) in the corpus carry the wording "
-                     f"“{_w0}…”.**", ""]
+            _src = (" as the named agreement"
+                    if _bd.get("anchored") and _w0 in _bd["anchored"] else "")
+            _head = [f"**{_n0} document(s) in the corpus carry the same wording"
+                     f"{_src}: “{_w0}…”.**" if _src else
+                     f"**{_n0} document(s) in the corpus carry the wording “{_w0}…”.**", ""]
             if len(_shown) > 1:
                 _head += ["Related wordings, counted separately: " + "; ".join(
                     f"{n} carry “{w}…”" for w, n in _shown[1:]) + ".", ""]

@@ -22,6 +22,7 @@ is a stronger precedent than the other 200, and only a human knows that.
 from __future__ import annotations
 
 import logging
+import re
 
 from services import db
 
@@ -218,23 +219,31 @@ def coverage(wiki_id: str, session_id: str) -> dict:
 def search_clauses(wiki_id: str, session_id: str, query: str, limit: int = 12,
                    clause_type: str | None = None,
                    roles: tuple[str, ...] = ("precedent",),
-                   exclude_docs: tuple[str, ...] = ()) -> list[dict]:
+                   exclude_docs: tuple[str, ...] = (),
+                   only_docs: tuple[str, ...] = (),
+                   vec: list[float] | None = None) -> list[dict]:
     """Rank precedent clauses against a drafting request.
 
     This is what replaces Draft Mode's page dump: it returns the specific
     clauses most similar to what is being drafted, already scoped to
     role-tagged precedent documents, so nothing has to be truncated to fit.
+
+    `only_docs` confines the ranking to those documents (matched on the name
+    without its session prefix). `vec` is an already-computed query embedding,
+    so a caller running several searches for one question pays for one
+    embedding, not one per search.
     """
     if not _enabled() or not (query or "").strip():
         return []
     from services import embedder
     text = _text()
     tbl = db._clause_table_name()
-    try:
-        vec = embedder.embed(query, is_query=True)
-    except Exception as e:
-        logger.error("Clause search embedding failed: %s", e)
-        return []
+    if vec is None:
+        try:
+            vec = embedder.embed(query, is_query=True)
+        except Exception as e:
+            logger.error("Clause search embedding failed: %s", e)
+            return []
     emb = "[" + ",".join(f"{x:.8f}" for x in vec) + "]"
     params = {"w": wiki_id, "s": session_id, "e": emb, "l": limit,
               "roles": list(roles)}
@@ -246,6 +255,10 @@ def search_clauses(wiki_id: str, session_id: str, query: str, limit: int = 12,
     if exclude_docs:
         excl = "AND e.source_doc <> ALL(:ex)"
         params["ex"] = list(exclude_docs)
+    only = ""
+    if only_docs:
+        only = ("AND regexp_replace(e.source_doc, '^[0-9a-f-]{36}_', '') = ANY(:od)")
+        params["od"] = [re.sub(r"^[0-9a-f-]{36}_", "", d) for d in only_docs]
     with db.get_engine().connect() as c:
         rows = c.execute(text(f"""
             SELECT e.clause_id, e.source_doc, e.clause_type, e.doc_family,
@@ -254,7 +267,7 @@ def search_clauses(wiki_id: str, session_id: str, query: str, limit: int = 12,
             FROM {tbl} e
             JOIN clauses cl ON cl.id = e.clause_id
             WHERE e.wiki_id = :w AND e.session_id = :s
-              AND e.role = ANY(:roles) {type_clause} {excl}
+              AND e.role = ANY(:roles) {type_clause} {excl} {only}
             ORDER BY e.embedding <=> CAST(:e AS vector)
             LIMIT :l
         """), params).fetchall()
