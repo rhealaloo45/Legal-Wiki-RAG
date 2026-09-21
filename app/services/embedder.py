@@ -15,6 +15,8 @@ import requests as _requests
 
 import config
 
+config.enforce_model_policy()
+
 logger = logging.getLogger(__name__)
 
 # Transient HTTP status codes worth retrying (gateway errors, rate limits, etc.)

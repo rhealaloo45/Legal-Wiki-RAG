@@ -86,7 +86,24 @@ HOUSE_PARTIES = [p.strip() for p in os.getenv("HOUSE_PARTIES", "").split(",") if
 # same as the stop-words beside them. Deployment data: environment only.
 COMMON_PARTY_TOKENS = [t.strip().lower() for t in os.getenv("COMMON_PARTY_TOKENS", "").split(",") if t.strip()]
 
-# Global Providers (azure / openrouter / nvidia)
+# ---------------------------------------------------------------------------
+# Model policy. This system runs on ONE chat model and ONE embedding model:
+# every completion (answers, page selection, review/compare extraction, OCR
+# transcription) goes to the chat model, every vector to the embedding model.
+# The OpenRouter and NVIDIA provider code below is kept only so old configs
+# still import; enforce_model_policy() refuses to start with them selected, so
+# no other model can be reached by a stray environment variable or an unset
+# default. Changing the standard means changing these two constants.
+# ---------------------------------------------------------------------------
+REQUIRED_CHAT_MODEL = "gpt-4o-mini"
+# gpt-4o-mini refuses a request whose output cap exceeds its 16,384-token limit
+# (HTTP 400), and two ingest budgets below were sized for a reasoning model
+# that spends most of its budget thinking. llm.py clamps every call to this.
+CHAT_MODEL_MAX_OUTPUT_TOKENS = 16384
+REQUIRED_EMBEDDING_MODEL = "text-embedding-3-large"
+REQUIRED_EMBEDDING_DIMENSIONS = 3072  # text-embedding-3-large native; matches the *_azure vector columns
+
+# Global Providers (azure only — see the model policy above)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 
@@ -94,15 +111,15 @@ EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", REQUIRED_CHAT_MODEL)
 # GPT-5.x/o-series burn an uncapped share of max_completion_tokens on hidden
 # reasoning before writing any visible content — confirmed live: a 37-page
 # single-doc summary spent its entire 8192-token retry budget on reasoning,
 # leaving <20 visible chars (default effort is "medium"). Capping effort to
 # "low" leaves far more of the budget for the actual answer.
 AZURE_REASONING_EFFORT = os.getenv("AZURE_REASONING_EFFORT", "low")
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
-EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", REQUIRED_EMBEDDING_MODEL)
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", str(REQUIRED_EMBEDDING_DIMENSIONS)))
 
 # Azure embeddings can live on a separate AI Foundry resource from chat —
 # falls back to the chat resource's key/endpoint if not set separately, so a
@@ -131,7 +148,7 @@ OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "nvidia/lla
 # Fast/cheap model for non-synthesis tasks:
 #   contradiction pre-flight, page selection, JSON repair, cell extraction.
 #   Set these to a smaller/cheaper deployment — full synthesis calls ignore these.
-AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", "gpt-5.4-mini")
+AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", REQUIRED_CHAT_MODEL)
 OPENROUTER_FAST_MODEL = os.getenv("OPENROUTER_FAST_MODEL", "google/gemma-4-27b-it")
 
 # NVIDIA NIM Config
@@ -141,6 +158,35 @@ NVIDIA_MODEL                = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_FAST_MODEL           = os.getenv("NVIDIA_FAST_MODEL", "openai/gpt-oss-20b")
 NVIDIA_EMBEDDING_MODEL      = os.getenv("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
 NVIDIA_EMBEDDING_DIMENSIONS = int(os.getenv("NVIDIA_EMBEDDING_DIMENSIONS", "4096"))
+
+
+def enforce_model_policy() -> None:
+    """Refuse to run on anything but the one chat and one embedding model.
+
+    Called when the LLM and embedding modules load, so a wrong provider, a
+    stale deployment name or an unset variable stops the app at start-up with
+    the reason, instead of quietly sending calls to a different model. The
+    check is on the deployment NAME, which is all Azure exposes; the trace
+    also records the model on every call, so a mismatch that got past here
+    would still show up.
+    """
+    problems = []
+    if LLM_PROVIDER.lower() != "azure":
+        problems.append(f"LLM_PROVIDER={LLM_PROVIDER!r} (must be 'azure')")
+    if EMBEDDING_PROVIDER.lower() != "azure":
+        problems.append(f"EMBEDDING_PROVIDER={EMBEDDING_PROVIDER!r} (must be 'azure')")
+    for var, val in (("AZURE_OPENAI_DEPLOYMENT", AZURE_OPENAI_DEPLOYMENT),
+                     ("AZURE_FAST_DEPLOYMENT", AZURE_FAST_DEPLOYMENT)):
+        if (val or "").strip().lower() != REQUIRED_CHAT_MODEL:
+            problems.append(f"{var}={val!r} (must be {REQUIRED_CHAT_MODEL!r})")
+    if (AZURE_OPENAI_EMBEDDING_DEPLOYMENT or "").strip().lower() != REQUIRED_EMBEDDING_MODEL:
+        problems.append(f"AZURE_OPENAI_EMBEDDING_DEPLOYMENT={AZURE_OPENAI_EMBEDDING_DEPLOYMENT!r} "
+                        f"(must be {REQUIRED_EMBEDDING_MODEL!r})")
+    if EMBEDDING_DIMENSIONS != REQUIRED_EMBEDDING_DIMENSIONS:
+        problems.append(f"EMBEDDING_DIMENSIONS={EMBEDDING_DIMENSIONS} "
+                        f"(must be {REQUIRED_EMBEDDING_DIMENSIONS}, the stored vector size)")
+    if problems:
+        raise RuntimeError("Model policy violated: " + "; ".join(problems))
 
 # ---------------------------------------------------------------------------
 # Token budget constants — one source of truth for every llm.ask() call.

@@ -10,6 +10,8 @@ from openai import OpenAI, RateLimitError
 import config
 from services import tracing
 
+config.enforce_model_policy()
+
 logger = logging.getLogger(__name__)
 
 # Lazy load clients — default and fast (shorter timeout for bulk extraction)
@@ -131,7 +133,7 @@ def _completion_kwargs(model_name: str, prompt: str, max_tokens: int | None,
     kwargs = {"model": model_name, "messages": [{"role": "user", "content": prompt}]}
     if _is_azure():
         if max_tokens is not None:
-            kwargs["max_completion_tokens"] = max_tokens
+            kwargs["max_completion_tokens"] = min(max_tokens, config.CHAT_MODEL_MAX_OUTPUT_TOKENS)
         if _is_reasoning_model(model_name):
             kwargs["reasoning_effort"] = reasoning_effort or config.AZURE_REASONING_EFFORT
         else:
