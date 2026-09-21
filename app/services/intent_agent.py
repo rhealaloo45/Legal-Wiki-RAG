@@ -6388,6 +6388,9 @@ def _anchor_slice(hit: dict) -> str:
     return (_t[_a.start():] if _a else _t)[:70]
 
 
+_PRECEDENT_POOL = 48  # clauses searched for counting; the first 8 are listed
+
+
 def _precedent_wording_groups(hits: list, period=None) -> list:
     """One phrase group per distinct wording among the hits, at most four.
 
@@ -6469,7 +6472,12 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     from services import precedent as _prec, wikis as _wikis, wiki
     try:
         wiki_id = _wikis.active_wiki_id()
-        hits = _prec.search_clauses(wiki_id, session_id, question, limit=8)
+        # A wider pool than is shown, from the same single search: the eight
+        # closest clauses are often eight copies of one template, and counting
+        # from them alone measured that one wording (69 documents) while the
+        # restriction the question described sat in the pool at rank 9 (85).
+        hits = _prec.search_clauses(wiki_id, session_id, question,
+                                    limit=_PRECEDENT_POOL)
     except Exception as e:
         logger.error("[AGENT] clause-precedent fast-path failed: %s", e)
         return None
@@ -6489,7 +6497,8 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
             continue
         _seen.add(key)
         _uniq.append(h)
-    hits = _uniq
+    _pool = _uniq          # what the count is built from
+    hits = _uniq[:8]      # what is listed
 
     # A question naming a figure is asking about THAT figure. Similarity
     # cannot see the difference between thirty days and forty-five — asked
@@ -6554,12 +6563,17 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
                           r"|\bwhich\s+other\s+(?:documents?|agreements?)\b[^?]{0,60}?\bcarr(?:y|ies)\b",
                           question or "", re.IGNORECASE)
     if _how_many and hits:
-        _n_docs = precedent_wording_count(hits, wiki_id, session_id, period)
-        if _n_docs:
-            lines.insert(0, f"**{_n_docs} document(s) in the corpus carry this "
-                            f"wording.** The clauses below are the closest "
-                            f"matches, not the whole list.")
-            lines.insert(1, "")
+        _bd = precedent_wording_breakdown(_pool, wiki_id, session_id, period)
+        _shown = [(w, n) for w, n in (_bd.get("wordings") or []) if n]
+        if _shown:
+            _w0, _n0 = _shown[0]
+            _head = [f"**{_n0} document(s) in the corpus carry the wording "
+                     f"“{_w0}…”.**", ""]
+            if len(_shown) > 1:
+                _head += ["Related wordings, counted separately: " + "; ".join(
+                    f"{n} carry “{w}…”" for w, n in _shown[1:]) + ".", ""]
+            _head += ["The clauses below are the closest matches, not the whole list.", ""]
+            lines[0:0] = _head
 
     lines.append("Ranked from the precedent clause index by similarity to your "
                  "question, and quoted verbatim — these are clauses already agreed "
