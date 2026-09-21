@@ -197,3 +197,124 @@ def count_any(wiki_id: str, session_id: str, template_hashes: list[str]) -> int:
             WHERE t.wiki_id = :w AND t.session_id = :s
               AND COALESCE(f.family, t.template_hash) = ANY(:fams)"""),
             {"w": wiki_id, "s": session_id, "fams": fams}).scalar() or 0)
+
+
+# ---------------------------------------------------------------------------
+# Merging fingerprints that state one commitment in different words
+# ---------------------------------------------------------------------------
+
+_MIN_DOCS_TO_MERGE = 5
+_MERGE_BATCH = 25
+_SAMPLE_CHARS = 350
+
+_MERGE_PROMPT = """\
+You compare contract clause wordings. Below are {n} wordings taken from documents of one clause type, each with an id. Party names and figures differ between documents and do not matter.
+
+Group ids that state the SAME obligation with the SAME scope and exceptions: a lawyer would say they impose one commitment in different words. Do NOT group wordings that differ in who is bound, what is restricted, whether the duration is fixed or open-ended, what exceptions apply, or whether consent is needed. When unsure, leave them apart: a wrong group overstates how widely a term is used.
+
+Return JSON only, no other text: {{"groups": [[id, id], ...]}}, listing only groups of two or more, using the ids given.
+
+{items}"""
+
+
+def _candidates(wiki_id: str, session_id: str, min_docs: int) -> dict[str, list[dict]]:
+    """Templates worth comparing, bucketed by clause type: the clause type the
+    template's clauses most often carry, the documents it covers, and one
+    sample clause text."""
+    from sqlalchemy import text
+    crypto = db._crypto()
+    out: dict[str, list[dict]] = {}
+    with db.get_engine().connect() as conn:
+        docs = {r[0]: int(r[1]) for r in conn.execute(text("""
+            SELECT template_hash, count(DISTINCT source_doc) FROM clause_templates
+            WHERE wiki_id = :w AND session_id = :s GROUP BY 1 HAVING count(DISTINCT source_doc) >= :m"""),
+            {"w": wiki_id, "s": session_id, "m": min_docs}).fetchall()}
+        rows = conn.execute(text("""
+            SELECT t.template_hash, COALESCE(cl.clause_type_canon, '(untyped)') AS canon,
+                   count(*) AS n, min(cl.verbatim_text) AS sample
+            FROM clause_templates t
+            JOIN clauses cl ON t.kind = 'clause' AND t.unit_ref = 'c:' || cl.id
+            WHERE t.wiki_id = :w AND t.session_id = :s AND t.template_hash = ANY(:hs)
+            GROUP BY 1, 2"""), {"w": wiki_id, "s": session_id, "hs": list(docs)}).fetchall()
+    best: dict[str, tuple] = {}
+    for h, canon, n, sample in rows:
+        if h not in best or n > best[h][0]:
+            best[h] = (n, canon, sample)
+    for h, (_, canon, sample) in best.items():
+        txt = " ".join((crypto.decrypt_safe(sample, default=sample) or "").split())[:_SAMPLE_CHARS]
+        if txt:
+            out.setdefault(canon, []).append({"hash": h, "docs": docs[h], "text": txt})
+    for v in out.values():
+        v.sort(key=lambda x: -x["docs"])
+    return out
+
+
+def propose_families(wiki_id: str, session_id: str,
+                     min_docs: int = _MIN_DOCS_TO_MERGE) -> dict:
+    """Ask the chat model which wordings of one clause type state one
+    commitment. Writes nothing: returns the proposed groups with their
+    document counts and sample wording, and the tokens spent, for review.
+
+    Only templates covering at least `min_docs` documents are compared, and only
+    within one clause type, so the model never sees an unrelated pair and the
+    call count stays small."""
+    import json
+    import re
+    from services import llm
+    cands = _candidates(wiki_id, session_id, min_docs)
+    groups, tokens, calls, bad = [], {"prompt": 0, "completion": 0}, 0, 0
+    for canon, items in sorted(cands.items()):
+        if len(items) < 2:
+            continue
+        for i in range(0, len(items), _MERGE_BATCH):
+            chunk = items[i:i + _MERGE_BATCH]
+            if len(chunk) < 2:
+                continue
+            prompt = _MERGE_PROMPT.format(
+                n=len(chunk),
+                items="\n".join(f"[{j}] {c['text']}" for j, c in enumerate(chunk)))
+            raw, usage = llm.fast_ask(prompt, max_tokens=2048)
+            if not (raw or "").strip():
+                raw, usage2 = llm.fast_ask(prompt, max_tokens=4096)
+                usage = {k: (usage or {}).get(k, 0) + (usage2 or {}).get(k, 0)
+                         for k in ("prompt_tokens", "completion_tokens")}
+            calls += 1
+            tokens["prompt"] += (usage or {}).get("prompt_tokens", 0)
+            tokens["completion"] += (usage or {}).get("completion_tokens", 0)
+            try:
+                parsed = json.loads(re.sub(r"```(?:json)?", "", raw or "").strip())
+                found = parsed.get("groups", [])
+            except Exception:
+                bad += 1
+                continue
+            used = set()
+            for g in found:
+                idx = [x for x in g if isinstance(x, int) and 0 <= x < len(chunk) and x not in used]
+                if len(idx) < 2:
+                    continue
+                used.update(idx)
+                members = [chunk[x] for x in idx]
+                groups.append({"clause_type": canon,
+                               "members": [{"hash": m["hash"], "docs": m["docs"],
+                                            "sample": m["text"]} for m in members]})
+    return {"groups": groups, "llm_calls": calls, "unparsed_replies": bad,
+            "tokens": tokens, "clause_types_compared": sum(1 for v in cands.values() if len(v) >= 2),
+            "templates_considered": sum(len(v) for v in cands.values())}
+
+
+def save_families(wiki_id: str, groups: list[dict]) -> int:
+    """Store reviewed groups: every member of a group points at its first
+    member's fingerprint as the family id."""
+    from sqlalchemy import text
+    rows = []
+    for g in groups:
+        fam = g["members"][0]["hash"]
+        rows += [{"w": wiki_id, "h": m["hash"], "f": fam} for m in g["members"]]
+    with db.get_engine().connect() as conn:
+        for r in rows:
+            conn.execute(text("""
+                INSERT INTO template_families (wiki_id, template_hash, family)
+                VALUES (:w, :h, :f)
+                ON CONFLICT (wiki_id, template_hash) DO UPDATE SET family = EXCLUDED.family"""), r)
+        conn.commit()
+    return len(rows)
