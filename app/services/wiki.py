@@ -9173,8 +9173,8 @@ def _resolve_docs_by_party_list(question: str, session_id: str,
     _resolve_docs_by_party itself falls back to for a suffix-less name.
 
     Two names is allowed only behind the explicit "one with X and one with Y"
-    marker (_RX_ONE_WITH_LIST) — confirmed live on "one with Northwind
-    Alloys and one with Northwind Hotels & Resorts" — because a bare
+    marker (_RX_ONE_WITH_LIST) — confirmed live on a question naming one
+    counterparty group's two separate entities — because a bare
     two-name count on its own is genuinely ambiguous with "the NDA with X and
     Y" (one document, two counterparties), which this function must not catch.
     """
