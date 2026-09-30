@@ -73,7 +73,37 @@ LOGIN_MAX_FAILURES_PER_IP = int(os.getenv("LOGIN_MAX_FAILURES_PER_IP", "10"))
 PRODUCTION_WIKI_SESSION_ID = os.getenv("PRODUCTION_WIKI_SESSION_ID", "")
 DISABLE_INGEST = os.getenv("DISABLE_INGEST", "false").lower() == "true"
 
-# Global Providers (azure / openrouter / nvidia)
+# The house's own entities, comma-separated, matched as substrings of a
+# document's recorded parties. "Our data processing agreements" means the ones
+# a house entity signed; with this empty, "our" is read as every document of
+# that type and population answers say so. Deployment data, so it lives in the
+# environment and never in code.
+HOUSE_PARTIES = [p.strip() for p in os.getenv("HOUSE_PARTIES", "").split(",") if p.strip()]
+
+# Party-name words so common across this corpus that they identify no
+# document (a group name most entities share), lower-case, comma-separated.
+# Excluded wherever a question's words are matched against party names, the
+# same as the stop-words beside them. Deployment data: environment only.
+COMMON_PARTY_TOKENS = [t.strip().lower() for t in os.getenv("COMMON_PARTY_TOKENS", "").split(",") if t.strip()]
+
+# ---------------------------------------------------------------------------
+# Model policy. This system runs on ONE chat model and ONE embedding model:
+# every completion (answers, page selection, review/compare extraction, OCR
+# transcription) goes to the chat model, every vector to the embedding model.
+# The OpenRouter and NVIDIA provider code below is kept only so old configs
+# still import; enforce_model_policy() refuses to start with them selected, so
+# no other model can be reached by a stray environment variable or an unset
+# default. Changing the standard means changing these two constants.
+# ---------------------------------------------------------------------------
+REQUIRED_CHAT_MODEL = "gpt-4o-mini"
+# gpt-4o-mini refuses a request whose output cap exceeds its 16,384-token limit
+# (HTTP 400), and two ingest budgets below were sized for a reasoning model
+# that spends most of its budget thinking. llm.py clamps every call to this.
+CHAT_MODEL_MAX_OUTPUT_TOKENS = 16384
+REQUIRED_EMBEDDING_MODEL = "text-embedding-3-large"
+REQUIRED_EMBEDDING_DIMENSIONS = 3072  # text-embedding-3-large native; matches the *_azure vector columns
+
+# Global Providers (azure only — see the model policy above)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "azure")
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 
@@ -81,15 +111,15 @@ EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "azure")
 AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-01-01-preview")
-AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5.4")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", REQUIRED_CHAT_MODEL)
 # GPT-5.x/o-series burn an uncapped share of max_completion_tokens on hidden
 # reasoning before writing any visible content — confirmed live: a 37-page
 # single-doc summary spent its entire 8192-token retry budget on reasoning,
 # leaving <20 visible chars (default effort is "medium"). Capping effort to
 # "low" leaves far more of the budget for the actual answer.
 AZURE_REASONING_EFFORT = os.getenv("AZURE_REASONING_EFFORT", "low")
-AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
-EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", "1536"))
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", REQUIRED_EMBEDDING_MODEL)
+EMBEDDING_DIMENSIONS = int(os.getenv("EMBEDDING_DIMENSIONS", str(REQUIRED_EMBEDDING_DIMENSIONS)))
 
 # Azure embeddings can live on a separate AI Foundry resource from chat —
 # falls back to the chat resource's key/endpoint if not set separately, so a
@@ -118,7 +148,7 @@ OPENROUTER_EMBEDDING_MODEL = os.getenv("OPENROUTER_EMBEDDING_MODEL", "nvidia/lla
 # Fast/cheap model for non-synthesis tasks:
 #   contradiction pre-flight, page selection, JSON repair, cell extraction.
 #   Set these to a smaller/cheaper deployment — full synthesis calls ignore these.
-AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", "gpt-5.4-mini")
+AZURE_FAST_DEPLOYMENT = os.getenv("AZURE_FAST_DEPLOYMENT", REQUIRED_CHAT_MODEL)
 OPENROUTER_FAST_MODEL = os.getenv("OPENROUTER_FAST_MODEL", "google/gemma-4-27b-it")
 
 # NVIDIA NIM Config
@@ -128,6 +158,35 @@ NVIDIA_MODEL                = os.getenv("NVIDIA_MODEL", "openai/gpt-oss-120b")
 NVIDIA_FAST_MODEL           = os.getenv("NVIDIA_FAST_MODEL", "openai/gpt-oss-20b")
 NVIDIA_EMBEDDING_MODEL      = os.getenv("NVIDIA_EMBEDDING_MODEL", "nvidia/nv-embed-v1")
 NVIDIA_EMBEDDING_DIMENSIONS = int(os.getenv("NVIDIA_EMBEDDING_DIMENSIONS", "4096"))
+
+
+def enforce_model_policy() -> None:
+    """Refuse to run on anything but the one chat and one embedding model.
+
+    Called when the LLM and embedding modules load, so a wrong provider, a
+    stale deployment name or an unset variable stops the app at start-up with
+    the reason, instead of quietly sending calls to a different model. The
+    check is on the deployment NAME, which is all Azure exposes; the trace
+    also records the model on every call, so a mismatch that got past here
+    would still show up.
+    """
+    problems = []
+    if LLM_PROVIDER.lower() != "azure":
+        problems.append(f"LLM_PROVIDER={LLM_PROVIDER!r} (must be 'azure')")
+    if EMBEDDING_PROVIDER.lower() != "azure":
+        problems.append(f"EMBEDDING_PROVIDER={EMBEDDING_PROVIDER!r} (must be 'azure')")
+    for var, val in (("AZURE_OPENAI_DEPLOYMENT", AZURE_OPENAI_DEPLOYMENT),
+                     ("AZURE_FAST_DEPLOYMENT", AZURE_FAST_DEPLOYMENT)):
+        if (val or "").strip().lower() != REQUIRED_CHAT_MODEL:
+            problems.append(f"{var}={val!r} (must be {REQUIRED_CHAT_MODEL!r})")
+    if (AZURE_OPENAI_EMBEDDING_DEPLOYMENT or "").strip().lower() != REQUIRED_EMBEDDING_MODEL:
+        problems.append(f"AZURE_OPENAI_EMBEDDING_DEPLOYMENT={AZURE_OPENAI_EMBEDDING_DEPLOYMENT!r} "
+                        f"(must be {REQUIRED_EMBEDDING_MODEL!r})")
+    if EMBEDDING_DIMENSIONS != REQUIRED_EMBEDDING_DIMENSIONS:
+        problems.append(f"EMBEDDING_DIMENSIONS={EMBEDDING_DIMENSIONS} "
+                        f"(must be {REQUIRED_EMBEDDING_DIMENSIONS}, the stored vector size)")
+    if problems:
+        raise RuntimeError("Model policy violated: " + "; ".join(problems))
 
 # ---------------------------------------------------------------------------
 # Token budget constants — one source of truth for every llm.ask() call.
@@ -245,6 +304,10 @@ QUESTION_MAX_PAGES_SHARING   = 1     # Drop question texts shared by more than N
 RRF_K                        = 60    # Reciprocal Rank Fusion constant — standard default; larger = flatter weighting of rank position
 HYBRID_FUSION_TOP_K          = 23    # Final page budget after RRF fusion for a NON-broad hybrid query (≈ old VECTOR_SEARCH_TOP_K + HYBRID_BM25_SUPPLEMENT_N, preserves prior context size)
 RERANK_CANDIDATE_N           = 25    # Candidates sent to the optional LLM reranker (titles+summaries only)
+MAX_TOKENS_CELL_EXTRACT      = 2048  # Review/Compare per-cell extraction. Was a hard-coded 300, under the same empty-output threshold as the rerank note below: in a 3-document compare 16 of 34 calls came back empty, and each empty reply rendered as if the term were absent. Doubled once on an empty reply (see extract_cell).
+MAX_TOKENS_ASPECT_INFERENCE  = 2048  # Review column / Compare aspect list when the question doesn't enumerate them itself. Was 450: same reasoning-model empty-reply risk as the cell cap above.
+MAX_TOKENS_COMPARE_OUTLIERS  = 2048  # Compare outlier JSON over the whole extracted table. Was 1000.
+MAX_TOKENS_COMPARE_NARRATIVE = 4096  # Compare synthesis prose + references. Was 1500; matches MAX_TOKENS_ANSWER's proven-safe floor for this model.
 MAX_TOKENS_RERANK            = 2048  # Fast-model rerank: the gpt-oss reasoning model spends most of the budget on hidden reasoning, so a small cap (e.g. 400) returns EMPTY output — 2048 is the smallest that reliably emits the JSON ranking for ~25 candidates
 
 # Compaction thresholds (S3, Phase 4)

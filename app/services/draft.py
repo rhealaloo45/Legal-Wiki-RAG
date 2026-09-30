@@ -27,33 +27,33 @@ def _get_draft_lock(session_id: str) -> threading.Lock:
     return _draft_locks[session_id]
 
 STANCE_INSTRUCTIONS = {
-    "acme_favorable": """
-Draft from Acme's perspective as the customer/principal.
+    "house_favorable": """
+Draft from {house}'s perspective as the customer/principal.
 
 Prioritize:
-- broad indemnities in Acme's favour
+- broad indemnities in {house}'s favour
 - strong audit and inspection rights
 - expansive confidentiality protections
 - strict data protection and security obligations
 - broad representations and warranties from the counterparty
 - strong IP ownership and licensing protections
 - short cure periods for counterparty breaches
-- strong termination rights for Acme
+- strong termination rights for {house}
 - survival of key protections after termination
-- liability carve-outs benefiting Acme
+- liability carve-outs benefiting {house}
 - compliance obligations aligned with enterprise procurement standards
 - precise drafting with minimal ambiguity
 
 Where commercially reasonable:
 - avoid unnecessary mutuality
 - narrow vendor exclusions
-- ensure ambiguity resolves in Acme's favour
+- ensure ambiguity resolves in {house}'s favour
 
 Avoid:
 - vague standards
 - weak enforcement language
 - broad exclusions favouring the vendor
-- uncapped Acme obligations
+- uncapped {house} obligations
 - open-ended customer liabilities
 """,
 
@@ -217,23 +217,36 @@ PROMPT:
 Begin the response with: "*AI-generated draft — requires legal review.*"
 """
 
+def _house_name() -> str:
+    """How the stance text names the side this firm acts for.
+
+    The house's own entities are deployment data (config.HOUSE_PARTIES), so
+    the instruction names them at runtime instead of carrying them in code.
+    """
+    return " / ".join(config.HOUSE_PARTIES) or "our client"
+
+
 def detect_stance(prompt: str) -> str:
     prompt_lower = prompt.lower()
-    acme_keywords = ["acme-friendly", "acme favourable", "acme favorable", "protect acme", "in favour of acme", "customer-friendly", "customer favorable"]
+    house_keywords = ["house-friendly", "client-friendly", "our side", "protect our client",
+                      "customer-friendly", "customer favorable", "customer favourable"]
+    for h in (p.lower() for p in config.HOUSE_PARTIES):
+        house_keywords += [f"{h}-friendly", f"{h} favourable", f"{h} favorable",
+                           f"protect {h}", f"in favour of {h}"]
     counterparty_keywords = ["service provider friendly", "vendor-friendly", "vendor favorable", "counterparty friendly", "protect vendor", "supplier favorable"]
     neutral_keywords = ["neutral", "balanced", "mutual", "objective"]
-    
-    for kw in acme_keywords:
+
+    for kw in house_keywords:
         if kw in prompt_lower:
-            return "acme_favorable"
+            return "house_favorable"
     for kw in counterparty_keywords:
         if kw in prompt_lower:
             return "counterparty_favorable"
     for kw in neutral_keywords:
         if kw in prompt_lower:
             return "neutral"
-            
-    return "acme_favorable"
+
+    return "house_favorable"
 
 def classify_draft(prompt: str) -> str:
     sys_prompt = "Classify this legal drafting request into exactly one of these five types:\nclause | full_document | communication | letter | tracker\n\nReturn ONLY the single category word."
@@ -418,7 +431,8 @@ def _run_draft_job(job_id: str, session_id: str, prompt: str, use_wiki: bool = T
         }
         
         template = template_map.get(draft_type, CLAUSE_TEMPLATE)
-        stance_inst = STANCE_INSTRUCTIONS.get(stance, STANCE_INSTRUCTIONS["neutral"])
+        stance_inst = STANCE_INSTRUCTIONS.get(stance, STANCE_INSTRUCTIONS["neutral"]).replace(
+            "{house}", _house_name())
         
         wiki_instructions = ""
         if has_wiki:

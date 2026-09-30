@@ -82,93 +82,14 @@ from services import tracing                     # noqa: E402
 #
 # Every must_not below is a defect that actually shipped, not a hypothetical.
 
-SCENARIOS = [
-    {
-        "name": "corpus questions keep reaching the index mid-thread",
-        "why": "the expiry question was starved by the is_followup gate and "
-               "answered over twelve carried documents",
-        "turns": [
-            {"q": "What is the term of the NDA between Acme Steel Limited and "
-                  "Company054 Metallurgy GmbH?",
-             "free": False, "must": ["two years"]},
-            {"q": "Which agreements expire in the next 90 days?",
-             "path": "analytics", "free": True,
-             "must": ["expiry"],
-             # It opened with the previous turn's answer when this broke.
-             "must_not": ["mention arbitration", "two years"]},
-            {"q": "How many documents are there in total in this wiki?",
-             "path": "document-index", "free": True, "must": ["1372"]},
-            {"q": "Which documents cite Order XXXIX CPC?",
-             "path": "citation", "free": True, "must": ["Order XXXIX"]},
-        ],
-    },
-    {
-        "name": "a new subject drops the inherited document",
-        "why": "the Weyland question inherited a pinned NDA and answered about it",
-        "turns": [
-            {"q": "Is NDA 4 compliant with GDPR?",
-             "free": False, "must": ["cannot be determined"]},
-            {"q": "Does our Weyland litigation strategy satisfy the Indian Trade "
-                  "Marks Act requirements?",
-             "free": False,
-             "must": ["cannot be determined", "Trade Marks Act"],
-             # The whole bug: it described the confidentiality agreement.
-             "must_not": ["Non-Disclosure Agreement", "NDA 4",
-                          "Receiving Party"]},
-        ],
-    },
-    {
-        "name": "an ordinary follow-up still inherits its document",
-        "why": "the guard above must not cost carryover its real job",
-        "turns": [
-            {"q": "What does Clause 8 of Service Agreement 2 say about "
-                  "termination?",
-             "free": False, "holds": "Service Agreement 2"},
-            {"q": "What is the notice period?",
-             "free": False, "holds": "Service Agreement 2"},
-            {"q": "Does it contain a liability cap?",
-             "free": False, "holds": "Service Agreement 2"},
-        ],
-    },
-    {
-        "name": "a question pointing back does NOT get the index",
-        "why": "'which of those' needs the conversation, not the corpus",
-        "turns": [
-            {"q": "Which contracts are missing a liability cap?",
-             "path": "analytics", "free": True, "must": ["liability cap"]},
-            # Must NOT be answered by the corpus-wide branch: it refers to the
-            # set the previous turn produced.
-            {"q": "Which of those are governed by Indian law?",
-             "path_not": "analytics", "free": False},
-        ],
-    },
-    {
-        "name": "counts stay exact mid-thread",
-        "why": "'how many contracts mention arbitration' answered 15 of 701",
-        "turns": [
-            {"q": "How many Joint Venture Agreements are in the corpus?",
-             "path": "document-index", "free": True, "must": ["144"]},
-            {"q": "How many contracts do we have that mention arbitration?",
-             "path": "document-index", "free": True, "must": ["701"],
-             "must_not": ["144"]},
-        ],
-    },
-    {
-        "name": "a scan after a scoped turn stays a scan",
-        "why": "corpus-wide risk questions were inconsistently clarified",
-        "turns": [
-            {"q": "What does Clause 8 of Service Agreement 2 say about "
-                  "termination?", "free": False},
-            {"q": "What are the main risks across our joint venture agreements?",
-             "free": False,
-             "must": ["joint venture"],
-             # A clarification request instead of an answer is the old bug.
-             "must_not": ["Needs clarification"]},
-        ],
-    },
-]
-
-
+# The scenarios name real documents and parties, so they live in
+# tools/conversation_scenarios_local.py, which is not committed. See
+# conversation_scenarios_local.example.py for the format.
+try:
+    sys.path.insert(0, _HERE)
+    from conversation_scenarios_local import SCENARIOS
+except ImportError:
+    SCENARIOS = []
 # The first sentence of one answer turning up at the head of the next is the
 # contamination signature, and it is checked on every turn rather than declared
 # per scenario — it was not predicted anywhere, it was just noticed.

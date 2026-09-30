@@ -20,6 +20,9 @@ Five lawyer intents drive prompt selection in wiki.generate_answer():
 
 import re
 import logging
+import threading
+import time
+import contextvars
 from typing import TypedDict
 
 from langgraph.graph import StateGraph, START, END
@@ -59,6 +62,20 @@ INTENT_LABELS = {
 # Order encodes priority: a query matching several buckets resolves to the
 # most specific lawyer task (drafting > comparison > risk > obligation).
 # ---------------------------------------------------------------------------
+# "Draft a one-sentence board-pack summary of the conclusion in the Apex
+# Harborline Alloys opinion" hit "draft" and got the full DRAFTING_PROMPT — three
+# labelled Aggressive/Balanced/Conservative clause formulations, 1,074
+# completion tokens, for a request that asked for one sentence of prose and
+# named no clause type at all. DRAFTING_PROMPT exists to negotiate CONTRACT
+# LANGUAGE; "draft" is also the ordinary English verb for writing a summary,
+# memo, or briefing note, which is a factual/summarisation request wearing the
+# same word. Vetoed ahead of the drafting match rather than folded into it —
+# the two need different prompts entirely, not a shared one with a flag.
+_RX_DRAFTING_SUMMARY_VETO = re.compile(
+    r'\bdraft\w*\b[^.?!]{0,40}\b(?:summary|summaries|synopsis|overview|memo|'
+    r'briefing|abstract|board[-\s]?pack)\b',
+    re.IGNORECASE,
+)
 _RX_DRAFTING = re.compile(
     r'\b(draft|re-?draft|redline|re-?write|suggest(?:ed)?\s+(?:language|wording|clause)|'
     r'counter[- ]?proposal|alternative\s+(?:wording|language|clause)|'
@@ -206,7 +223,7 @@ _RX_OBLIGATION = re.compile(
 )
 # Risk assessment reuses the legal-recommendation patterns (moved here from wiki.py).
 _RX_RISK = re.compile(
-    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?:we|i|acme)\s+sign|'
+    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?!be\b|not\b|have\b)(?:\w+\s+){1,3}?sign\b|'
     r'risk\s+assessment|risk\s+review|advise|advisory|red\s+flag|deal[- ]?breaker|'
     r'approve|approval|sign\s+off|signoff|would\s+you\s+(?:recommend|advise|sign)|'
     r'safe\s+to\s+sign|ready\s+to\s+(?:sign|execute)|negotiation\s+strategy|'
@@ -316,6 +333,15 @@ _INTENT_LLM_PROMPT = (
     "NDA 5?\", \"What is NDA 5 about?\", \"When was Service Agreement 2 signed?\" — is "
     "factual, never comparison, even if the same conversation earlier discussed several "
     "other documents.\n\n"
+    "IMPORTANT: the word \"draft\" alone does NOT mean drafting intent. Drafting is "
+    "specifically about producing CONTRACT CLAUSE language — a redline, a new provision, "
+    "an alternative formulation of a clause a lawyer could paste into an agreement. "
+    "\"Draft a summary\", \"draft a one-sentence summary\", \"draft a memo\", \"draft a "
+    "briefing note\" ask for PROSE ABOUT a document, not clause language, and are "
+    "factual (a summarisation request), even though they use the verb \"draft\". Only "
+    "classify as drafting when the thing being produced is itself contract text — a "
+    "clause, a provision, redlined wording — not a description, summary, or explanation "
+    "of one.\n\n"
     "Question: {question}\n\n"
     "Respond with JSON only:\n"
     '{{"intent": "one of the five slugs", "confidence": 0.0-1.0}}'
@@ -330,7 +356,7 @@ def classify_intent(question: str, conversation_context: str = "") -> dict:
     """
     q = question or ""
 
-    if _RX_DRAFTING.search(q):
+    if _RX_DRAFTING.search(q) and not _RX_DRAFTING_SUMMARY_VETO.search(q):
         return {"intent": "drafting", "confidence": 0.95, "method": "regex"}
     if _RX_COMPARISON.search(q) and not _is_case_caption_vs_only(q):
         return {"intent": "comparison", "confidence": 0.9, "method": "regex"}
@@ -462,6 +488,121 @@ def _emit(event: dict) -> None:
         pass
 
 
+_HEARTBEAT_INTERVAL_S = 4
+# Rotates rather than repeating "Generating…" verbatim, so a reader watching
+# the tile for thirty seconds sees it change rather than wondering if it is
+# frozen. Deliberately says nothing about internal steps this call is not
+# actually taking (no claim of "checking citations" mid-generation, which
+# only happens afterwards, in validate) — the tile must stay honest about
+# what is happening, not just alive-looking.
+_HEARTBEAT_PHRASES = [
+    "Still generating the answer…",
+    "This one's taking a bit — still generating…",
+    "Still working on it…",
+    "Longer answer in progress…",
+]
+
+
+# Both grounded in the measured 48-question archetype suite, not a guess: a
+# corpus-wide scan (open discovery, risk-scan) is the single most expensive
+# shape at 39,127-76,714 tokens and up to 77s; drafting runs three clause
+# variants against precedent at 16,365-41,392 tokens. Every other archetype
+# either answers from an index at zero cost or sits in an unremarkable middle
+# that a hint would misdescribe as often as not — comparison-to-standard, for
+# instance, is usually a ~1,200-token playbook lookup and only occasionally the
+# expensive miss case, so hinting it "slow" would be wrong most of the time.
+_SLOW_PATH_HINTS = {
+    "scan": "This looks like a broad question across many documents — it can take "
+            "up to a minute, because it reads a sample of them rather than one.",
+    "drafting": "Drafting grounded in precedent — this usually runs three clause "
+                "variants against retrieved examples, which takes longer than a "
+                "single lookup.",
+}
+
+
+def _emit_slow_path_hint(question: str, intent: str) -> None:
+    """Say up front that this one will take longer, before the wait starts.
+
+    Exists because the alternative is a spinner doing all the talking for up
+    to 77 seconds with no indication whether that is normal for the question
+    just asked or something has gone wrong. Both signals here are computed
+    elsewhere in the pipeline anyway — wiki._broad_scan_directive shapes the
+    generation prompt for exactly this shape, and intent is always classified —
+    so the hint cannot drift from what actually happens next: it is reading the
+    same check that gates the real behaviour, not a separate estimate.
+    """
+    try:
+        if wiki._broad_scan_directive(question):
+            kind = "scan"
+        elif intent == "drafting":
+            kind = "drafting"
+        else:
+            return
+        _emit({"stage": "estimate", "status": "info",
+              "message": _SLOW_PATH_HINTS[kind]})
+    except Exception:
+        pass
+
+
+def _call_with_heartbeat(fn, *args, stage: str = "generating",
+                         base_message: str = "Generating…", **kwargs):
+    """Run a blocking call on a worker thread, emitting stage ticks while it runs.
+
+    Exists because the generating stage previously emitted exactly one "active"
+    event before the blocking model call and nothing again until it returned —
+    on the slowest archetypes (open discovery, risk-scan) that is a single
+    static tile sitting still for 65-77 seconds, which reads as hung even
+    though the pipeline is working.
+
+    The call itself still runs synchronously from the caller's point of view —
+    this function blocks until it finishes and returns its result or re-raises
+    its exception, so callers do not need to change. Only the WAITING becomes
+    visible: the model call runs on a worker thread purely to let this thread
+    keep control long enough to emit at a fixed interval, and _emit is called
+    only from this thread — the one already running inside the LangGraph node,
+    so its context-var-based stream writer resolves as it always has.
+
+    The worker thread runs inside a COPY of the calling context
+    (contextvars.copy_context()), not bare. A plain threading.Thread starts
+    with an empty context, and this codebase keeps two live contextvars that
+    depend on inheriting it: LangGraph's stream writer, and tracing._current —
+    the trace that tracing.get_trace() reads inside llm.ask() to record every
+    call's tokens. Without the copy, generate_answer's own LLM call (and any
+    retry it fires) would run against no trace at all, silently dropping its
+    tokens from tracing.get_trace().to_dict() with no error raised anywhere —
+    exactly the kind of gap the token-accounting fixes elsewhere in this
+    codebase exist to close, and one that would have shipped invisibly here.
+    """
+    result: dict = {}
+    ctx = contextvars.copy_context()
+
+    def _run():
+        try:
+            result["value"] = ctx.run(fn, *args, **kwargs)
+        except Exception as e:
+            result["error"] = e
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    tick = 0
+    while th.is_alive():
+        th.join(timeout=_HEARTBEAT_INTERVAL_S)
+        if th.is_alive():
+            tick += 1
+            # No elapsed time in the rendered message on purpose — a reader
+            # watching a number climb past 30, 40, 50 seconds counts every
+            # tick as evidence something is wrong, even though the phrase
+            # rotation alone already proves the tile is alive. elapsed_s
+            # stays on the payload for anything server-side that wants it;
+            # only the text shown to the user drops it.
+            phrase = _HEARTBEAT_PHRASES[(tick - 1) % len(_HEARTBEAT_PHRASES)]
+            _emit({"stage": stage, "status": "active", "message": phrase,
+                   "elapsed_s": tick * _HEARTBEAT_INTERVAL_S})
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 # ---------------------------------------------------------------------------
 # Nodes
 # ---------------------------------------------------------------------------
@@ -478,6 +619,7 @@ def classify_intent_node(state: QueryState) -> dict:
         "intent_confidence": res["confidence"], "intent_method": res["method"],
         "message": f"Intent: {label}",
     })
+    _emit_slow_path_hint(state["question"], res["intent"])
     return {
         "intent": res["intent"],
         "intent_confidence": res["confidence"],
@@ -815,13 +957,45 @@ _RX_SCAN_SCOPE = re.compile(
 _RX_CORPUS_WIDE = re.compile(
     r"\b(?:in|across|throughout|within)\s+(?:the|this|our)\s+"
     r"(?:corpus|wiki|portfolio|collection|workspace|document\s+set)\b"
-    r"|\bcorpus-wide\b|\bin\s+total\b|\bdo\s+we\s+(?:have|hold)\b",
+    r"|\bcorpus-wide\b|\bin\s+total\b|\bdo\s+we\s+(?:have|hold)\b"
+    # "in this set" and "across our data processing agreements": a whole
+    # population named by its plural type is as much a statement of scope as
+    # "in the corpus".
+    r"|\b(?:in|within)\s+(?:this|the|our)\s+set\b"
+    r"|\bacross\s+(?:all\s+)?(?:of\s+)?(?:our|the|these|those)\s+(?:[\w&'-]+\s+){0,4}"
+    r"(?:agreements|documents|contracts|matters|cases|judgments|judgements|opinions|"
+    r"petitions|filings|pleadings)\b",
     re.IGNORECASE)
 
 
 def _explicitly_corpus_wide(question: str) -> bool:
     """Whether the question states its own scope as the whole corpus."""
     return bool(_RX_CORPUS_WIDE.search(question or ""))
+
+
+# A request that opens with what to produce - "Draft a breach-notification
+# clause...", "Put our SLAs in date order" - has said what to do, and the
+# ambiguity check is told never to interrupt those. It does anyway: the small
+# model that runs it answered "Needs clarification" to two drafting requests
+# that the previous model (and the drafting path) handled, at 1,070 tokens of
+# nothing. "Summarize" and "review" are left out on purpose: the check's own
+# prompt names a bare "summarize this agreement" as the case worth asking about.
+_RX_TASK_OPENER = re.compile(
+    r"^\s*(?:please\s+)?(?:draft|redraft|write|prepare|compose|put|list|tabulate|"
+    r"rank|sort|order|count|show\s+me|give\s+me)\b",
+    re.IGNORECASE)
+# "this agreement" with no name attached: which one is exactly what would be asked.
+_RX_BARE_DOCUMENT_REFERENCE = re.compile(
+    r"\b(?:this|that|the\s+said)\s+(?:agreement|contract|document|nda|sla|msa|dpa|deed|"
+    r"clause|instrument)\b",
+    re.IGNORECASE)
+
+
+def _states_its_task(question: str) -> bool:
+    """Whether a question opens with a deliverable and points at no unnamed
+    single document, so there is nothing for the ambiguity check to ask."""
+    q = question or ""
+    return bool(_RX_TASK_OPENER.search(q) and not _RX_BARE_DOCUMENT_REFERENCE.search(q))
 
 
 # Words by which a question leans on the turn before it. "Which of THOSE expire
@@ -958,6 +1132,8 @@ def check_clarification_node(state: QueryState) -> dict:
     chat_sid = state.get("chat_session_id") or state["session_id"]
     if (state.get("is_followup") or wiki._question_names_a_document(state["question"], [])
             or not config.ENABLE_CLARIFICATION
+            or _states_its_task(state["question"])
+            or _explicitly_corpus_wide(state["question"])
             or _risk_question_on_a_settled_document(state)
             or _question_precisely_names_a_document(state["question"], state["session_id"])):
         conv = wiki.build_conversation_context(chat_sid)
@@ -1385,7 +1561,8 @@ def generate_answer_node(state: QueryState) -> dict:
         )
 
     try:
-        wr = wiki.generate_answer(
+        wr = _call_with_heartbeat(
+            wiki.generate_answer,
             state["question"], state.get("wiki_context", ""),
             state.get("selected_titles", []), state["session_id"],
             meta.get("bm25_count", 0), meta.get("page_selection_usage", {}),
@@ -1398,6 +1575,22 @@ def generate_answer_node(state: QueryState) -> dict:
     except Exception as e:
         logger.error("Answer generation failed (%s): %s", type(e).__name__, e)
         wr = {"answer": f"Wiki error: {type(e).__name__}: {e}",
+              "scope_method": "", "scope_docs": [],
+              "pages_used": [], "files_used": [], "confidence_score": 0}
+
+    # A generator that returns nothing raises no exception, so the except above
+    # never sees it and every line below assigns into None — which surfaced to
+    # the user as "TypeError: 'NoneType' object does not support item
+    # assignment" followed by "No answer was produced", with no clue which
+    # function had gone quiet. One malformed edit to generate_answer put its
+    # tail outside the function body and took down every question that reaches
+    # the graph. Cheap to check, and it turns a dead request into a named fault.
+    if not isinstance(wr, dict):
+        logger.error("Answer generation returned %s, not a payload dict",
+                     type(wr).__name__)
+        wr = {"answer": "The answer generator returned nothing. This is a fault in "
+                        "the pipeline rather than a gap in the documents — the "
+                        "question was not answered and should be retried.",
               "scope_method": "", "scope_docs": [],
               "pages_used": [], "files_used": [], "confidence_score": 0}
 
@@ -2558,8 +2751,14 @@ _RX_ACK = re.compile(
 )
 
 
+# "How many" belongs here alongside "which": the branch below already answers
+# from the citation index and renders a count headline, so the counting form of
+# the question is the same lookup. Without it, "how many documents cite the
+# Arbitration and Conciliation Act, 1996" fell through to ordinary retrieval
+# and answered 9 against a true 37 — the listing form of the identical question
+# was exact at the same moment.
 _RX_CITES = re.compile(
-    r"\b(?:which|what)\s+(?:documents?|agreements?|contracts?|judgments?)\b[^?]*"
+    r"\b(?:which|what|how\s+many)\s+(?:documents?|agreements?|contracts?|judgments?)\b[^?]*"
     r"\b(?:cite|cites|citing|rely\s+on|relies\s+on|reference|references|invoke)\b",
     re.IGNORECASE,
 )
@@ -2593,6 +2792,51 @@ _RX_AUTHORITY = re.compile(
 # "Purchase Order PO-2025-185" out.
 _RX_AUTHORITY_PROC = re.compile(r"\b(Order\s+[IVXLCDM]{1,7})\b", re.IGNORECASE)
 
+# A regulation cited only by its acronym has no Act/Code/Rules terminator for
+# _RX_AUTHORITY to anchor on at all — "cite the EU GDPR" named no authority,
+# _is_structural_query fell through past the citations branch entirely, and
+# the question was answered as an ordinary compound document lookup instead,
+# from one arbitrarily-resolved document rather than the citation index.
+#
+# Matched against the citation index's OWN recorded acronyms (see
+# _citation_authority_acronyms below) rather than one hardcoded name: this
+# corpus alone cites at least three bare-acronym authorities (GDPR, FCPA,
+# LCIA), and a fixed "GDPR"-only pattern would have carried the identical bug
+# for the other two, plus every acronym-only authority a document set ingested
+# later happens to cite — this generalizes to whatever the index actually
+# holds, checked fresh (via a per-wiki cache) rather than predicted in advance.
+_RX_BARE_ACRONYM = re.compile(r"\b([A-Z]{2,8})\b")
+
+_CITATION_AUTHORITY_CACHE: dict = {}
+
+
+def _citation_authority_acronyms(wiki_id: str) -> set:
+    """Every bare-acronym authority (2-8 upper-case letters, no spaces)
+    actually recorded in this wiki's citation index. Cached per wiki, the
+    same pattern _doc_type_vocabulary below uses for doc_type strings.
+
+    An authority cited only by its acronym never carries the Act/Code/Rules/
+    Regulation terminator _RX_AUTHORITY anchors on, so it needs a different
+    detector — one anchored on what the index itself holds, not a guess at
+    which acronyms might show up.
+    """
+    if wiki_id in _CITATION_AUTHORITY_CACHE:
+        return _CITATION_AUTHORITY_CACHE[wiki_id]
+    from sqlalchemy import text
+    from services import db as _db
+    try:
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT normalized_form FROM citations WHERE wiki_id = :w"),
+                {"w": wiki_id}).fetchall()
+    except Exception as e:
+        logger.error("citation-authority acronym lookup failed: %s", e)
+        return set()
+    vocab = {r[0].strip() for r in rows
+             if r[0] and re.fullmatch(r"[A-Z]{2,8}", r[0].strip())}
+    _CITATION_AUTHORITY_CACHE[wiki_id] = vocab
+    return vocab
+
 
 def _named_authority(question: str) -> str:
     """The authority a citation question asks about, statutory or procedural.
@@ -2606,7 +2850,18 @@ def _named_authority(question: str) -> str:
     if m:
         return m.group(1).strip(" ,")
     m = _RX_AUTHORITY_PROC.search(question or "")
-    return m.group(1).strip(" ,") if m else ""
+    if m:
+        return m.group(1).strip(" ,")
+    try:
+        from services import wikis as _wikis_na
+        vocab = _citation_authority_acronyms(_wikis_na.active_wiki_id())
+    except Exception:
+        vocab = set()
+    if vocab:
+        for word in _RX_BARE_ACRONYM.findall(question or ""):
+            if word in vocab:
+                return word
+    return ""
 
 
 # Counting over document metadata (§ Phase 3.5b). Deliberately narrow: the
@@ -2634,16 +2889,34 @@ _COUNT_BLOCKERS = (
 # as a count and then extracts no type from itself, and answers for the whole
 # corpus instead. The acronyms carry as much weight as the words: a lawyer
 # asks "how many SLAs do we have", never "how many service level agreements".
+# The "X of Y" instrument names are listed explicitly because their plural
+# inflects on the FIRST word: "Powers of Attorney", "Letters of Intent",
+# "Statements of Work". Every other entry here ends on the noun that takes the
+# s, so a pattern anchored on the last word missed these entirely — "how many
+# Powers of Attorney are there" matched nothing and was answered 13 by
+# retrieval against a true 17.
 _COUNT_NOUNS = (
+    "powers? of attorney|letters? of intent|statements? of work|"
+    "memoranda of understanding|memorandums? of understanding|"
     "contracts?|agreements?|documents?|deeds?|leases?|licen[cs]es?|"
     "amendments?|policies|opinions?|judgm?ents?|petitions?|plaints?|"
-    "affidavits?|term sheets?|statements? of work|"
+    "affidavits?|term sheets?|"
     "slas?|dpas?|ndas?|msas?|spas?|ssas?|shas?|sows?|poas?|lois?|"
     "jvas?|jvs?|keras?|mous?|tsas?"
 )
+# The modifier words in front of the noun are matched with [a-z][a-z'&-]* and
+# not [a-z]+: a bare [a-z]+ stops dead at the hyphen in "Non-Disclosure
+# Agreements", so the whole count branch declined the single most common
+# instrument type in this corpus and let retrieval answer instead. Confirmed
+# live: "how many Non-Disclosure Agreements are there in total in the corpus"
+# reported 30 against a true 147, while the identically-shaped Joint Venture,
+# Legal Opinion and IP Assignment questions all answered exactly from the
+# document index. Apostrophes are in the class for the same reason
+# ("Shareholders' Agreements") and & for "R&D".
+_COUNT_MODIFIER = r"[a-z][a-z'&-]*"
 _RX_COUNT = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
-    rf"(?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    rf"(?:(?!(?:{_COUNT_BLOCKERS})\b){_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS})\b",
     re.IGNORECASE,
 )
@@ -2654,9 +2927,45 @@ _RX_COUNT_PARTY = re.compile(
     r"\b(?:with|for|involving|between|from|against)\s+"
     r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
 )
+# The other half of the same question. A lawyer asks "how many NDAs name
+# Stark Retail Limited as a party" at least as often as "how many NDAs with
+# Stark Retail Limited", and only the second form has a preposition for the
+# regex above to key on. Measured live: the first form counted every NDA in the
+# corpus, 147, against a true 13, with nothing in the output to show the party
+# had been dropped.
+_RX_COUNT_PARTY_NAMED = re.compile(
+    r"\b(?:nam(?:e|es|ed|ing)|list(?:s|ed)?|identif(?:y|ies|ied))\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)"
+    r"\s+as\s+(?:an?\s+|the\s+|its\s+|their\s+)?(?:part(?:y|ies)|"
+    r"counterpart(?:y|ies)|signator(?:y|ies)|contracting\s+part(?:y|ies))",
+)
+# "the agreements to which Acme Sons is a party" — the relative-clause form.
+_RX_COUNT_PARTY_TO_WHICH = re.compile(
+    r"\bto\s+which\s+"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)"
+    r"\s+(?:is|was|are|were)\s+(?:an?\s+|the\s+)?part(?:y|ies)",
+)
+
+
+def _count_party_names(question: str) -> list:
+    """Every way a counting question can name the party it wants counted.
+
+    Returns [] rather than guessing when no form matches, so the caller falls
+    through to retrieval instead of counting a set nobody asked for.
+    """
+    for rx in (_RX_COUNT_PARTY, _RX_COUNT_PARTY_NAMED, _RX_COUNT_PARTY_TO_WHICH):
+        m = rx.search(question or "")
+        if not m:
+            continue
+        raw = m.group(1).strip().rstrip(".,;:?")
+        parts = re.split(r"\s+(?:and|&)\s+", raw)
+        names = [p.strip() for p in parts if len(p.strip()) > 2]
+        if names:
+            return names
+    return []
 _RX_COUNT_DOCTYPE = re.compile(
     r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\s+"
-    rf"((?:(?!(?:{_COUNT_BLOCKERS})\b)[a-z]+\s+){{0,3}}?"
+    rf"((?:(?!(?:{_COUNT_BLOCKERS})\b){_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS}))\b",
     re.IGNORECASE,
 )
@@ -2679,9 +2988,64 @@ _RX_COUNT_TOTAL = re.compile(
 # filtered question too ("how many contracts do we have that mention
 # arbitration"), and answering that one with the corpus total would be the same
 # confident-and-wrong failure pointing the other way.
+# "carry no dispute resolution clause" is a question about a SUBSET, and the
+# whole-corpus total is never its answer. The veto listed "without", "missing"
+# and "lack" but not a bare "no", so that phrasing reached the total branch and
+# was answered 1372 -- the size of the wiki, to a question about part of it.
+# Guarded against decimals ("no. 5") the same way _RX_GAP is.
+# Words that carry no constraint of their own, so a counting question made
+# only of these plus its count noun really is asking for the size of the wiki.
+_TOTALITY_FILLER = {
+    "a", "an", "the", "this", "that", "these", "those", "all", "any",
+    "we", "our", "us", "i", "my", "you", "your", "it", "its",
+    "is", "are", "was", "were", "be", "been", "do", "does", "did", "have",
+    "has", "had", "got", "hold", "holds", "held", "there", "here",
+    "in", "on", "at", "of", "for", "to", "and", "or", "s",
+    "total", "altogether", "overall", "currently", "right", "now", "today",
+    "please", "just", "about", "roughly", "approximately", "exactly",
+    "wiki", "corpus", "workspace", "collection", "database", "system",
+    "many", "much", "how", "number", "count", "overall",
+}
+# The count noun and the totality phrase, stripped so what remains is whatever
+# the question ACTUALLY narrows by.
+_RX_TOTALITY_LEAD = re.compile(
+    r"\b(?:how\s+many|number\s+of|count\s+(?:of|the))\b", re.IGNORECASE)
+_RX_TOTALITY_PHRASE = re.compile(
+    r"\b(?:in\s+total|in\s+all|altogether|overall|"
+    r"in\s+(?:this|the)\s+(?:wiki|corpus|workspace|collection)|"
+    r"do\s+we\s+(?:have|hold)|are\s+there|have\s+we\s+got)\b",
+    re.IGNORECASE)
+
+
+def _is_bare_totality(question: str) -> bool:
+    """True only when nothing in the question narrows the count.
+
+    The whole-corpus branch used to be gated by a list of narrowing words to
+    veto. A blocklist cannot be finished: "name X as a party", "carry a typed
+    confidentiality clause", "are arbitration petitions, by case number" and
+    "restrict a party from issuing a press release" all walked past it and were
+    answered with the size of the wiki -- 1372 to questions whose answers were
+    35, 559, 16 and 179. Four confident wrong numbers with nothing in the
+    output to show a filter had been dropped.
+
+    So the test is inverted. Strip the count phrase, the count noun and the
+    totality phrase; if any content word is left standing, the question is
+    about a subset and this branch must not answer it. Being too strict here
+    costs a fall-through to retrieval; being too loose states the wrong number
+    as fact.
+    """
+    t = (question or "").lower().strip().rstrip("?.! ")
+    t = _RX_TOTALITY_LEAD.sub(" ", t)
+    t = _RX_TOTALITY_PHRASE.sub(" ", t)
+    t = re.sub(rf"(?:{_COUNT_NOUNS})", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"[^a-z]+", " ", t)
+    return not [w for w in t.split() if w not in _TOTALITY_FILLER]
+
+
 _RX_COUNT_TOTAL_VETO = re.compile(
     r"\b(?:mention\w*|contain\w*|includ\w*|reference\w*|involving|"
     r"that|which|whose|where|with|without|missing|lack\w*|"
+    r"no(?!\s*\.?\s*\d)|absent|fail\s+to|"
     r"governed|under|signed|expir\w*|terminat\w*|before|after|since|"
     r"between|per|each|by\s+type|by\s+year)\b",
     re.IGNORECASE,
@@ -2743,7 +3107,15 @@ _DOCTYPE_SYNONYMS = {
     "term sheet": ("Term Sheet", ["term sheet"]),
     "legal opinion": ("Legal Opinion", ["legal opinion"]),
     "escrow agreement": ("Escrow Agreement", ["escrow agreement"]),
-    "consultancy agreement": ("Consultancy Agreement", ["consultancy agreement"]),
+    # A lawyer says "consulting agreement"; this corpus files all 17 of them as
+    # "Consultancy Agreement". Without the synonym the count matched nothing,
+    # fell through to retrieval, and answered 2.
+    "consultancy agreement": ("Consultancy Agreement",
+                              ["consultancy agreement", "consulting agreement"]),
+    "consulting agreement": ("Consultancy Agreement",
+                             ["consultancy agreement", "consulting agreement"]),
+    "consulting": ("Consultancy Agreement",
+                   ["consultancy agreement", "consulting agreement"]),
     "employment agreement": ("Executive Employment Agreement",
                              ["employment agreement"]),
     "lease deed": ("Commercial Lease Deed", ["lease deed"]),
@@ -2851,11 +3223,48 @@ _RX_AGG_CARVEOUT_VETO = re.compile(
 _RX_GAP = re.compile(
     r"\b(?:which|what|list|show|find|how\s+many)\b[^?]{0,80}?"
     r"\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
-    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b",
+    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b"
+    # The same two halves in the other order. "Among contracts that record NO
+    # governing law, WHICH instrument types make up the largest share?" states
+    # the gap first and asks about it second, which is ordinary English and was
+    # not matched — so the question reached retrieval, which answered it from
+    # an unrelated court exhibit it happened to fetch.
+    r"|\b(?:do\s+not|don't|doesn't|does\s+not|lack|lacks|lacking|missing|"
+    r"without|no(?!\s*\.?\s*\d)|absent|fail\s+to)\b[^?]{0,80}?"
+    r"\b(?:which|what|list|show|find|how\s+many)\b",
     re.IGNORECASE)
 _RX_GAP_FIELD = re.compile(
-    r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?)\b",
+    r"\b(?:liability\s+caps?|caps?\b|governing\s+law|termination(?:\s+(?:clause|provision))?|"
+    r"dispute\s+resolution(?:\s+(?:clause|provision))?|arbitration\s+clause|"
+    r"(?:intellectual\s+property|ip)\s+ownership(?:\s+clause)?|insurance\s+clause|"
+    r"confidentiality\s+clause|indemnity\s+clause|audit[\s-]+rights?(?:\s+clause)?)\b",
     re.IGNORECASE)
+
+
+def _dynamic_gap_field(question: str) -> str:
+    """A clause_type_canon this wiki actually extracts, named in the question
+    by its natural-language phrase, or "" — the open-vocabulary sibling of
+    _RX_GAP_FIELD's fixed 9-field list. See analytics.clause_type_vocabulary.
+
+    Matched as the canon name with underscores turned to spaces ("force
+    majeure", "records retention") against the lower-cased question. Never
+    called on its own to decide whether a question is gap-shaped — only
+    alongside _RX_GAP, which supplies that judgement — so a stray clause-type
+    word in an unrelated sentence cannot turn it into a gap analytic by
+    itself.
+    """
+    try:
+        from services import analytics as _an, wikis as _wikis_dgf
+        vocab = _an.clause_type_vocabulary(_wikis_dgf.active_wiki_id())
+    except Exception:
+        return ""
+    q = (question or "").lower()
+    for canon in vocab:
+        phrase = canon.replace("_", " ")
+        if phrase and phrase in q:
+            return canon
+    return ""
+
 
 # A negation aimed at the ASSISTANT — "show precedent, don't draft anything new"
 # — is an instruction about the reply, not a property being asked of documents.
@@ -2874,9 +3283,15 @@ _RX_GAP_INSTRUCTION_VETO = re.compile(
     r"summaris(?:e|ing)|summariz(?:e|ing)|paraphras(?:e|ing))\b",
     re.IGNORECASE)
 
+# "trended" and "year over year" were both misses: \btrend\b does not match the
+# past tense, and only the "year on year" spelling was listed. A question
+# reading "has the average liability cap trended up or down year over year"
+# therefore classified as a plain corpus aggregate and answered with one
+# overall mean instead of the by-year table it asked for.
 _RX_TREND = re.compile(
-    r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend|trending|"
-    r"year[- ]on[- ]year|by\s+year|changed?\s+since|historically|"
+    r"\b(?:over\s+time|over\s+the\s+(?:years|last|past)|trend(?:s|ed|ing)?|"
+    r"year[-\s](?:on|over)[-\s]year|by\s+year|year\s+by\s+year|"
+    r"changed?\s+since|historically|"
     r"getting\s+(?:longer|shorter|higher|lower|bigger|smaller))\b",
     re.IGNORECASE)
 
@@ -2901,6 +3316,15 @@ _TREND_UNTYPED_SUBJECTS = (
     (re.compile(r"\brenewal\s+(?:terms?|periods?)\b", re.I),
      "renewal terms", "renewal_terms", "record renewal terms as free text"),
     (re.compile(r"\bcure\s+periods?\b", re.I), "cure period", None, None),
+    # "Are the confidentiality obligations in our agreements getting longer
+    # year on year?" declined correctly without this entry — the trend
+    # branch above requires _RX_AGG_METRIC (liability caps / contract
+    # values only), so the question fell all the way through to an LLM,
+    # which gave the right direction but no reason, costing a real call for
+    # a question this module can answer for free. Same fix as notice
+    # period: confidentiality duration is never extracted as its own field.
+    (re.compile(r"\bconfidentialit(?:y|ies)\s+(?:obligations?|duration|"
+               r"period|term)s?\b", re.I), "confidentiality duration", None, None),
 )
 
 # A date-range question over the corpus. Same shape of failure the aggregate and
@@ -3014,6 +3438,28 @@ def _expiry_floor(question: str):
     return None
 
 
+_RX_CONSISTENCY = re.compile(
+    r"\b(?:consistent|consistency|uniform|the\s+same|vary|varies|varied|"
+    r"differ|different|standardi[sz]ed|aligned)\b",
+    re.IGNORECASE)
+# The typed columns a consistency question can be answered from exactly.
+_CONSISTENCY_FIELDS = (
+    (re.compile(r"governing\s+law|choice\s+of\s+law|applicable\s+law", re.I),
+     "governing_law", "governing law"),
+    (re.compile(r"liability\s+cap", re.I), "liability_cap", "liability cap"),
+    (re.compile(r"\bterm\s+length|length\s+of\s+(?:the\s+)?term", re.I),
+     "term_length", "term length"),
+)
+
+
+def _consistency_field(question: str):
+    """(column, label) a consistency question asks about, or None."""
+    for rx, col, label in _CONSISTENCY_FIELDS:
+        if rx.search(question or ""):
+            return (col, label)
+    return None
+
+
 def _is_analytics_query(question: str) -> str:
     """'aggregate' | 'gap' | 'trend' | '' — questions the normalised columns answer.
 
@@ -3024,6 +3470,36 @@ def _is_analytics_query(question: str) -> str:
     average over an arbitrary sample.
     """
     q = question or ""
+    # "Are the Service Level Agreements consistent in their choice of governing
+    # law?" is a question about the shape of a whole population, and it was
+    # answered by comparing the five agreements a search happened to return out
+    # of 17 — right by luck, and wrong the moment the sixteenth differs. It is
+    # checked first because a consistency question about a typed column has an
+    # exact answer and nothing else here is a better match.
+    if _RX_CONSISTENCY.search(q) and _consistency_field(q):
+        return "consistency"
+    # A question about a whole population of one document type - its oldest
+    # and newest member, or whether every member meets a stated standard - is
+    # computed over that population, not answered from whatever a search
+    # returns. Both shapes came back as "Needs clarification" before this.
+    try:
+        from services import survey as _survey
+        _sk = _survey.survey_kind(q)
+    except Exception as _sv_err:
+        logger.error("[AGENT] survey detection failed: %s", _sv_err)
+        _sk = ""
+    if _sk:
+        return "survey_" + _sk
+    # A named company's litigation matters and their outcomes ("X appears in
+    # more than one matter; what are they, and did X win?") are recorded in
+    # litigation_facts; retrieval read the same question from pleadings and
+    # hedged on an outcome the index held two final orders for.
+    try:
+        from services import matters as _matters
+        if _matters.is_matters_query(q):
+            return "party_matters"
+    except Exception as _pm_err:
+        logger.error("[AGENT] party-matters detection failed: %s", _pm_err)
     if _RX_TREND.search(q) and _RX_AGG_METRIC.search(q):
         return "trend"
     # Checked straight after, and only when the question is unambiguously about
@@ -3045,9 +3521,19 @@ def _is_analytics_query(question: str) -> str:
     # without this veto the gap branch reaches those questions first and answers
     # something else entirely. Vetoed here rather than reordered: the ordering
     # above it was chosen for reasons of its own, and a veto changes one branch.
-    if (_RX_GAP.search(q) and _RX_GAP_FIELD.search(q)
-            and not _RX_GAP_INSTRUCTION_VETO.search(q)
-            and not _is_clause_precedent_query(q)):
+    #
+    # _RX_GAP_FIELD alone only recognises the 9 fields someone wrote a fixed
+    # phrase for. _dynamic_gap_field extends the SAME "which field" question
+    # to any of the ~60 clause types this wiki actually extracts — "how many
+    # DPAs record no typed force-majeure clause" runs the identical
+    # NOT-EXISTS-in-clauses computation as the audit-rights case, and there is
+    # no reason that computation should be reachable for one and not the
+    # other. _RX_GAP itself still has to match first, so this only ever
+    # narrows an ALREADY gap-shaped question to a field, never turns an
+    # unrelated question into one.
+    if (_RX_GAP.search(q) and not _RX_GAP_INSTRUCTION_VETO.search(q)
+            and not _is_clause_precedent_query(q)
+            and (_RX_GAP_FIELD.search(q) or _dynamic_gap_field(q))):
         return "gap"
     if (_RX_AGG_OP.search(q) and _RX_AGG_METRIC.search(q)
             and not _RX_AGG_VETO.search(q)
@@ -3114,6 +3600,14 @@ def _is_structural_query(question: str) -> str:
     # only counting them.
     if _RX_COUNT.search(q):
         return "count"
+    # "How many DEPART from that by choosing the laws of Singapore, and how does
+    # that compare with England and Wales?" is a counting question whose verb
+    # stands where the count noun normally does, so _RX_COUNT does not see it.
+    # Naming two or more jurisdictions alongside "how many" is narrow enough to
+    # claim on its own, and the count branch answers each exactly; left to the
+    # comparison path it was answered 3 and 3 against a true 5 and 5.
+    if re.search(r"\bhow\s+many\b", q, re.IGNORECASE) and len(_laws_named(q)) > 1:
+        return "count"
     # Before enumerate: "list every X that does A and B" is both, and the
     # compound reading is the stricter one. Needs an explicit conjunction, so
     # a single-condition question stays with enumerate, and the branch itself
@@ -3144,26 +3638,59 @@ def _analytics_answer(kind: str, question: str, session_id: str,
     statement about those contracts, not about the corpus, and a reader shown
     a bare figure will reasonably assume the latter.
     """
-    from services import analytics, wiki as _wiki
-    parties = []
-    m = _RX_COUNT_PARTY.search(question or "")
-    if m:
-        raw = m.group(1).strip().rstrip(".,;:?")
-        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw) if len(p.strip()) > 2]
+    from services import analytics, db as _db, wiki as _wiki
+    parties = _count_party_names(question)
 
     try:
         if kind == "aggregate":
             metric = ("contract_value"
                       if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
                       else "liability_cap")
-            data = (analytics.aggregate_contract_values(wiki_id, session_id, parties)
+            # A question that LISTS its instruments by counterparty ("of the
+            # Service Level Agreements with X, Y and Z, which carries the
+            # highest cap") is asking about those documents. The party filter
+            # alone cannot say that, and this branch owns the question before
+            # scope resolution ever runs, so it has to ask for the resolved
+            # set itself. Measured live: without this the answer was computed
+            # over all 72 documents mentioning "Acme Communications" - the
+            # judgments and NDAs among them included - for a question naming
+            # three Service Level Agreements.
+            #
+            # Narrowed ONLY on the explicit multi-name list shape that
+            # _resolve_docs_by_party_list recognises, never on a general scope
+            # guess: a plain corpus aggregate ("what is the average liability
+            # cap across our contracts") must keep answering over the corpus,
+            # and a false narrowing there would be a worse answer than the
+            # over-broad one this fixes.
+            _scoped_docs = []
+            try:
+                _plist = _wiki._resolve_docs_by_party_list(question, session_id)
+                if len(_plist) > 1:
+                    _scoped_docs = sorted(_plist)
+            except Exception as _sc_err:
+                logger.error("[AGENT] aggregate scope narrowing failed: %s", _sc_err)
+            # The party filter is dropped once the documents are resolved, and
+            # dropping it is the whole point: _party_clause requires EVERY named
+            # party on EVERY document, but a list question names one party PER
+            # document. ANDing all three against each of the four resolved
+            # agreements left only the two that name the same counterparty, and
+            # the answer was computed over those - right documents, wrong two of
+            # them. Scope has already applied the party constraint, distributed
+            # across the set rather than conjoined within each document.
+            _agg_parties = None if _scoped_docs else parties
+            data = (analytics.aggregate_contract_values(
+                        wiki_id, session_id, _agg_parties, source_docs=_scoped_docs or None)
                     if metric == "contract_value"
-                    else analytics.aggregate_liability_caps(wiki_id, session_id, parties))
+                    else analytics.aggregate_liability_caps(
+                        wiki_id, session_id, _agg_parties, source_docs=_scoped_docs or None))
             if data.get("error") or not data.get("by_currency"):
                 return None
             label = "contract value" if metric == "contract_value" else "liability cap"
             scope_txt = f" for {' and '.join(parties)}" if parties else ""
-            lines = [f"**{label.title()} across the corpus{scope_txt}**", ""]
+            _head = (f"**{label.title()} across the {len(_scoped_docs)} agreement(s) named**"
+                     if _scoped_docs else
+                     f"**{label.title()} across the corpus{scope_txt}**")
+            lines = [_head, ""]
             for c in data["by_currency"]:
                 n = c.get("contracts") or c.get("documents")
                 lines.append(f"- **{c['currency']}** — {n} document(s)")
@@ -3173,21 +3700,89 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append(f"  - Mean: {_fmt_money(c['mean'], c['currency'])}")
                 lines.append(f"  - Range: {_fmt_money(c['min'], c['currency'])} to "
                              f"{_fmt_money(c['max'], c['currency'])}")
+                # "...and by how much does it exceed the lowest?" is a second
+                # question, and min/max alone leave the reader to subtract.
+                if (c.get("min") is not None and c.get("max") is not None
+                        and re.search(r"\bexceed|\bby how much\b|\bdifference\b|\bgap\b|"
+                                      r"\bhigher than\b|\bmore than the (?:lowest|smallest)\b",
+                                      question or "", re.I)):
+                    lines.append(f"  - Highest exceeds lowest by: "
+                                 f"{_fmt_money(c['max'] - c['min'], c['currency'])}")
+            if data.get("per_doc"):
+                lines += ["", "Per agreement, highest first:"]
+                for d in data["per_doc"]:
+                    lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])} — "
+                                 f"{_fmt_money(d['amount'], d['currency'])}")
+                lines.append("")
+                lines.append("Every agreement the question's names resolve to is listed, "
+                             "rather than one being picked where the names fit more than "
+                             "one document.")
             if data.get("mixed_currency"):
                 lines += ["", "Reported per currency and deliberately not converted or "
                               "combined — a single total across currencies would be wrong "
                               "in each of them."]
             lines += ["", f"*{data['coverage']}*"]
             payload = _canned_payload("\n".join(lines), "Aggregate", "structured-analytics")
+            if _scoped_docs:
+                payload["files_used"] = _scoped_docs
 
         elif kind == "gap":
-            field = ("governing_law" if re.search(r"governing\s+law", question or "", re.I)
+            # Checked before termination because "dispute resolution" questions
+            # often also say "terminate", and before the liability-cap default
+            # because that default is what a question naming neither falls to —
+            # a dispute-resolution question reaching it was answered with the
+            # liability cap gap, a real number about the wrong field.
+            field = ("audit_rights"
+                     if re.search(r"audit[\s-]+rights?", question or "", re.I)
+                     else "dispute_resolution"
+                     if re.search(r"dispute\s+resolution|arbitration\s+clause",
+                                  question or "", re.I)
+                     else "ip_ownership"
+                     if re.search(r"(?:intellectual\s+property|\bip\b)\s+ownership",
+                                  question or "", re.I)
+                     else "insurance" if re.search(r"insurance", question or "", re.I)
+                     else "confidentiality"
+                     if re.search(r"confidentiality\s+clause", question or "", re.I)
+                     else "indemnity" if re.search(r"indemnity", question or "", re.I)
+                     else "governing_law" if re.search(r"governing\s+law", question or "", re.I)
                      else "termination" if re.search(r"terminat", question or "", re.I)
-                     else "liability_cap")
-            data = analytics.find_gaps(wiki_id, session_id, field, parties)
+                     # None of the 9 fixed fields matched — but _is_analytics_query
+                     # only classified this as "gap" at all because either
+                     # _RX_GAP_FIELD or _dynamic_gap_field matched, so if it
+                     # wasn't the former it has to have been the latter. Reused
+                     # rather than re-derived, so the field this branch computes
+                     # from is exactly the one that made the question a gap
+                     # question in the first place, not a coincidentally similar
+                     # second match.
+                     else (_dynamic_gap_field(question) or "liability_cap"))
+            # The instrument type the question named, honoured rather than
+            # dropped. "How many NDAs record no liability cap at all" and "how
+            # many NDAs carry no dispute resolution clause" both ran
+            # corpus-wide and answered 511 and 659, against true figures of 142
+            # and 82 - right analytic, wrong population, and no sign in the
+            # output that the word "NDA" had been ignored.
+            _gap_label, _gap_pats = _doctype_from_question(question)
+            data = analytics.find_gaps(wiki_id, session_id, field, parties,
+                                       doc_type_patterns=_gap_pats or None)
             if data.get("error"):
                 return None
-            lines = [f"**{data['missing']} document(s) state no {data['label']}.**", ""]
+            _scope = f" {_gap_label}(s)" if _gap_label else " document(s)"
+            lines = [f"**{data['missing']}{_scope} state no {data['label']}.**", ""]
+            # "which instrument types make up the largest share" asks about the
+            # shape of the gap, not its members. Led with the breakdown when
+            # that is what was asked, because a list of twenty filenames is not
+            # an answer to it — measured live, that question was answered from
+            # an unrelated court exhibit retrieval had fetched.
+            _wants_types = re.search(
+                r"\b(?:which|what)\b[^?]{0,60}?\b(?:instrument\s+types?|document\s+types?|"
+                r"types?\s+of\s+(?:document|contract|instrument|agreement))\b"
+                r"|\blargest\s+share\b|\bmost\s+common(?:ly)?\b|\bbreak\s*down\b",
+                question or "", re.I)
+            if _wants_types and data.get("by_type"):
+                lines.append("By instrument type:")
+                for t in data["by_type"]:
+                    lines.append(f"- {t['doc_type']}: {t['count']}")
+                lines.append("")
             for d in data["documents"][:20]:
                 date = f" — {d['effective_date']}" if d.get("effective_date") else ""
                 lines.append(f"- {_wiki._norm_doc_name(d['source_doc'])}{date}")
@@ -3199,6 +3794,27 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append("The indeterminate documents are excluded from the list above "
                              "on purpose: reporting a contract as uncapped when its cap is "
                              "recorded in a schedule would be a worse error than omitting it.")
+            # "...and of those, how many are Joint Venture Agreements?" — the
+            # same trailing filter the count branch handles, over the gap set
+            # rather than the whole index. find_gaps already narrows by
+            # instrument type, so the sub-count is the same query once more.
+            _gtail = _RX_COUNT_COMPOUND_TAIL.search(question or "")
+            if _gtail:
+                _t = _gtail.group(1).strip()
+                _sp, _spat, _slabel = _compound_subcount(_t)
+                _sub = None
+                if _spat:
+                    try:
+                        _sub = analytics.find_gaps(wiki_id, session_id, field,
+                                                   parties, doc_type=_spat[0])
+                    except Exception as e:
+                        logger.error("[AGENT] gap sub-count failed: %s", e)
+                if _sub and not _sub.get("error") and _sub.get("missing"):
+                    lines += ["", f"**Of those, {_sub['missing']} are "
+                                  f"{_slabel or 'that type'}(s).**"]
+                else:
+                    lines += ["", "*The second part of this question — “"
+                                  + _t.rstrip("?") + "” — is not answered above.*"]
             payload = _canned_payload("\n".join(lines), "Gap analysis", "structured-analytics")
 
         elif kind == "expiry":
@@ -3279,16 +3895,52 @@ def _analytics_answer(kind: str, question: str, session_id: str,
             payload = _canned_payload("\n".join(lines), "Trend unavailable",
                                       "structured-analytics")
 
+        elif kind == "consistency":
+            _col, _flabel = _consistency_field(question)
+            _cs_label, _cs_pats = _doctype_from_question(question)
+            _bd = _db.breakdown_by_typed_field(
+                wiki_id, session_id, _col, doc_type_patterns=_cs_pats or None,
+                parties=parties or None)
+            if not _bd.get("recorded"):
+                return None
+            _kind_word = f"{_cs_label}(s)" if _cs_label else "agreement(s)"
+            _noun = (f"{_kind_word} between {' and '.join(parties)}" if parties
+                     else _kind_word)
+            _top = _bd["values"][0]
+            if _bd["distinct"] == 1:
+                _head = (f"**Yes — every one of the {_bd['recorded']} {_noun} that "
+                         f"records a {_flabel} states the same one: {_top['value']}.**")
+            else:
+                _head = (f"**No — the {_bd['recorded']} {_noun} that record a "
+                         f"{_flabel} split across {_bd['distinct']} different "
+                         f"values.**")
+            _lines = [_head, "", f"| {_flabel.title()} | Documents |",
+                      "| --- | --- |"]
+            for _v in _bd["values"]:
+                _lines.append(f"| {_v['value']} | {_v['count']} |")
+            _lines += ["", f"Counted over all {_bd['in_scope']} {_noun} in the "
+                           f"index, not over the documents a search returned."]
+            if _bd["unrecorded"]:
+                _lines.append(f"{_bd['unrecorded']} of them record no {_flabel} at "
+                              f"all and are outside the comparison — they are not "
+                              f"evidence either way.")
+            payload = _canned_payload("\n".join(_lines), "Consistency",
+                                      "structured-analytics")
+
         elif kind == "trend":
             metric = ("contract_value"
                       if re.search(r"\b(?:contract|deal|total)\s+(?:value|price)", question or "", re.I)
                       else "liability_cap")
-            data = analytics.trend_over_time(wiki_id, session_id, metric, parties)
+            _tr_label, _tr_pats = _doctype_from_question(question)
+            data = analytics.trend_over_time(wiki_id, session_id, metric, parties,
+                                             doc_type_patterns=_tr_pats or None)
             if data.get("error") or not data.get("buckets"):
                 return None
             label = "contract value" if metric == "contract_value" else "liability cap"
-            head = (f"**{label.title()} by year — {data['direction']}**"
-                    if data.get("direction") else f"**{label.title()} by year**")
+            _scope_txt = f" across {_tr_label}(s)" if _tr_label else ""
+            head = (f"**{label.title()} by year{_scope_txt} — {data['direction']}**"
+                    if data.get("direction")
+                    else f"**{label.title()} by year{_scope_txt}**")
             lines = [head, "", "| Year | Documents | With a readable value | Median |",
                      "| --- | --- | --- | --- |"]
             for b in data["buckets"]:
@@ -3296,6 +3948,20 @@ def _analytics_answer(kind: str, question: str, session_id: str,
                 lines.append(f"| {b['year']} | {b['documents']} | {b['with_value']} | {med} |")
             lines += ["", f"*{data['note']}*"]
             payload = _canned_payload("\n".join(lines), "Trend", "structured-analytics")
+        elif kind == "party_matters":
+            from services import matters
+            _pm = matters.answer(question, wiki_id, session_id,
+                                 display=lambda d: _dp_display(d, wiki_id, session_id))
+            if not _pm:
+                return None
+            payload = _canned_payload(_pm["text"], "Matters", "structured-analytics")
+            payload["files_used"] = _pm["documents"]
+        elif kind.startswith("survey_"):
+            from services import survey
+            _sv = survey.answer(kind[len("survey_"):], question, wiki_id, session_id)
+            if not _sv:
+                return None
+            payload = _canned_payload(_sv, "Population survey", "structured-analytics")
         else:
             return None
     except Exception as e:
@@ -3303,8 +3969,107 @@ def _analytics_answer(kind: str, question: str, session_id: str,
         return None
 
     payload["meta_answer"] = False
-    payload["files_used"] = []
+    # setdefault: a branch that resolved its own documents (the named-agreement
+    # aggregate) sets files_used itself, and resetting it here threw that away.
+    payload.setdefault("files_used", [])
     return payload
+
+
+# "How many JVAs are in the corpus in total, AND HOW MANY OF THOSE involve Acme
+# Power?" — the count branch answered the first clause from the index and
+# returned, dropping the second half without a word. Measured live on three
+# separate evaluation questions: each got a correct headline number followed by
+# a document listing that answered a question nobody had asked, and the reader
+# had no way to tell the second half had been silently discarded.
+#
+# The tail is a FILTER over the set the first clause just counted, so it is
+# answered by re-running the same count with the extra constraint ANDed in.
+_RX_COUNT_COMPOUND_TAIL = re.compile(
+    r",?\s*(?:and|&)\s+(?:of\s+(?:those|them|these)\s*,?\s*)?"
+    r"how\s+many\s+(?:of\s+(?:those|them|these)\s+)?(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+# The sub-clause names its constraint as a party ("involve Acme Power as a
+# party") or as an instrument type ("are Joint Venture Agreements").
+# The determiner is optional and skipped: "how many of them name AN APEX
+# entity as a party" put "an" between the verb and the name, so the pattern
+# matched nothing and the second half of the question was reported unanswered.
+_RX_COMPOUND_PARTY = re.compile(
+    r"\b(?:involve|involving|name|naming|with|for|between|from|against)\s+"
+    r"(?:an?\s+|the\s+)?"
+    r"((?:[A-Z][\w'&.\-]*)(?:\s+(?:[A-Z][\w'&.\-]*|and|&|of|the))*)",
+)
+# "...and how many of them carry an exit clause?" — the trailing filter names a
+# clause TYPE rather than a party or an instrument, and the typed clause index
+# answers it exactly.
+_RX_COMPOUND_CLAUSE = re.compile(
+    r"\b(?:carry|carries|contain|contains|include|includes|have|has|with)\s+"
+    r"(?:an?\s+|the\s+)?((?:[a-z][\w-]*\s+){0,3}?[a-z][\w-]*)[-\s]+"
+    r"(?:resolution\s+)?clauses?\b",
+    re.IGNORECASE,
+)
+_RX_COMPOUND_DOCTYPE = re.compile(
+    rf"\b(?:are|is|were|was)\s+((?:{_COUNT_MODIFIER}\s+){{0,3}}?(?:{_COUNT_NOUNS}))\b",
+    re.IGNORECASE,
+)
+
+
+def _compound_subcount(tail: str):
+    """(parties, doc_type_patterns, label) the trailing clause constrains by."""
+    parties: list[str] = []
+    pm = _RX_COMPOUND_PARTY.search(tail or "")
+    if pm:
+        raw = pm.group(1).strip().rstrip(".,;:?")
+        parties = [p.strip() for p in re.split(r"\s+(?:and|&)\s+", raw)
+                   if len(p.strip()) > 2]
+    label, patterns = (None, [])
+    dm = _RX_COMPOUND_DOCTYPE.search(tail or "")
+    if dm:
+        label, patterns = _resolve_doctype(dm.group(1).strip())
+    return parties, patterns, label
+
+
+# A trailing filter can name a typed FIELD rather than a clause type: "how
+# many of those record a readable rupee liability cap" is answered from
+# contracts.liability_cap_amount, which either parsed to a number or did not.
+# Measured live, that half of the question was reported unanswerable while the
+# column sat there holding the answer.
+_RX_COMPOUND_TYPED_FIELD = re.compile(
+    r"\b(?:record|records|recorded|state|states|stated|carry|carries|have|has|"
+    r"with)\b[^?]{0,40}?\b(?:readable|parsed|numeric|rupee|inr|monetary|"
+    r"stated)\b[^?]{0,30}?\b(liability\s+cap|contract\s+value|"
+    r"governing\s+law|effective\s+date|expiry\s+date)\b"
+    r"|\b(?:readable|numeric|rupee)\s+(liability\s+cap|contract\s+value)\b",
+    re.IGNORECASE)
+_TYPED_FIELD_SQL = {
+    "liability cap": ("contracts", "liability_cap_amount"),
+    "contract value": ("contracts", "liability_cap_amount"),
+    "governing law": ("contracts", "governing_law"),
+    "effective date": ("documents", "effective_date"),
+    "expiry date": ("documents", "expiry_date"),
+}
+
+
+def _compound_typed_field(tail: str):
+    """(table, column, label) a trailing filter names as a typed field, or None."""
+    m = _RX_COMPOUND_TYPED_FIELD.search(tail or "")
+    if not m:
+        return None
+    name = (m.group(1) or m.group(2) or "").strip().lower()
+    name = re.sub(r"\s+", " ", name)
+    spec = _TYPED_FIELD_SQL.get(name)
+    return (spec[0], spec[1], name) if spec else None
+
+
+def _compound_clause_type(tail: str) -> str:
+    """The canonical clause type a trailing filter names, or ""."""
+    from services import clause_vocab as _vocab
+    for m in _RX_COMPOUND_CLAUSE.finditer(tail or ""):
+        phrase = m.group(1).strip()
+        canon = _vocab.canonical(phrase) or _vocab.canonical(phrase.split()[-1])
+        if canon:
+            return canon
+    return ""
 
 
 def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
@@ -3318,16 +4083,10 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     "you have none" is far worse than a slow answer.
     """
     from services import db as _db, wiki
-    parties: list[str] = []
-    m = _RX_COUNT_PARTY.search(question or "")
-    if m:
-        raw = m.group(1).strip().rstrip(".,;:?")
-        # "X and Y" is two parties; "Acme Sons and Company Limited" is one.
-        # Split only when both sides survive as plausible names, and let the
-        # AND-semantics of the query do the rest — a bad split narrows the
-        # count rather than inflating it, which fails safe.
-        parts = re.split(r"\s+(?:and|&)\s+", raw)
-        parties = [p.strip() for p in parts if len(p.strip()) > 2]
+    # "X and Y" is two parties; "Acme Sons and Company Limited" is one. The
+    # split lets the AND-semantics of the query do the rest — a bad split
+    # narrows the count rather than inflating it, which fails safe.
+    parties: list[str] = _count_party_names(question)
 
     # Only a qualified type ("SLAs", "supply agreements") narrows the query;
     # the bare noun ("contracts", "documents") is the generic ask and must not
@@ -3338,13 +4097,79 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     if dm:
         label, patterns = _resolve_doctype(dm.group(1).strip())
 
+    # A litigation instrument named by its case-number PREFIX rather than by
+    # doc_type — "arbitration petitions", "writ petitions", "appeals" — is a
+    # count over litigation_facts.case_number, which no other branch reaches.
+    # "How many documents are arbitration petitions, by case number" fell
+    # through every path below and was answered from a handful of retrieved
+    # pleadings: "one document", against a true 16.
+    for _lit_phrase, _lit_rx in _db.LITIGATION_CASE_PREFIXES.items():
+        if re.search(rf"\b{re.escape(_lit_phrase)}s?\b", question or "", re.I) and \
+                re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
+            try:
+                _ld = _db.count_documents_by_case_prefix(wiki_id, session_id, _lit_rx)
+            except Exception as e:
+                logger.error("[AGENT] litigation case-prefix count failed: %s", e)
+                _ld = None
+            if _ld and _ld.get("total"):
+                _lines = [f"**{_ld['total']} document(s) carry a case number matching "
+                          f"{_lit_phrase}.**", ""]
+                for _cn in _ld["case_numbers"][:20]:
+                    _lines.append(f"- {_cn}")
+                if len(_ld["case_numbers"]) > 20:
+                    _lines.append(f"- …and {len(_ld['case_numbers']) - 20} more")
+                _lines += ["", "Counted from the recorded case number of every "
+                               "litigation record in the wiki, not from the pages "
+                               "a search returned. A matter whose case number was "
+                               "never extracted is not in this figure."]
+                _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+                _p["files_used"] = list(_ld["documents"])
+                _p["meta_answer"] = False
+                return _p
+            break
+
     # No party and no instrument type is normally a question this branch cannot
     # answer safely — but a bare totality question ("how many documents are
     # there in total") is the exception, and the one case where the index is
     # strictly better than anything retrieval can say.
+    # A clause TYPE is the strongest predicate a counting question can carry,
+    # and it must be tried before the literal-text one. "How many NDAs carry an
+    # intellectual property ownership clause" was matching the words
+    # "intellectual property ownership" against raw page text and reporting 5,
+    # where the typed clause index — which is what "carry a clause" means —
+    # holds 13. And "how many documents carry a typed confidentiality clause"
+    # had no path at all: no party, no instrument type, so it fell to the
+    # whole-corpus branch and was answered 1372 against a true 559.
+    _clause_canon = _compound_clause_type(question or "")
+    if _clause_canon and re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
+        try:
+            _cd = _db.count_documents_with_clause_type(
+                wiki_id, session_id, _clause_canon,
+                doc_type_patterns=patterns or None)
+        except Exception as e:
+            logger.error("[AGENT] clause-type count failed: %s", e)
+            _cd = None
+        if _cd and _cd.get("with_clause"):
+            _cnoun = label or "document"
+            from services import clause_vocab as _cv
+            _clabel = _cv.display(_clause_canon)
+            _lines = [f"**{_cd['with_clause']} of {_cd['in_scope']} {_cnoun}(s) "
+                      f"carry {'an' if _clabel[0] in 'aeiou' else 'a'} "
+                      f"{_clabel} clause.**", ""]
+            for _ex in _cd.get("examples") or []:
+                _lines.append(f"- {_dp_display(_ex, wiki_id, session_id)}")
+            _lines += ["", "Counted from the typed clause index over every "
+                           "document in the wiki, not from the pages a search "
+                           "returned. A clause of this kind that was never "
+                           "typed as one is not in the figure."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = list(_cd.get("examples") or [])
+            _p["meta_answer"] = False
+            return _p
+
     # A text predicate is a third way to pin a count, alongside a party and an
     # instrument type, and it is the one that was missing.
-    _predicate = _count_predicate_phrase(question)
+    _predicate = "" if _clause_canon else _count_predicate_phrase(question)
     if _predicate:
         try:
             res = _db.list_documents_matching(
@@ -3357,7 +4182,20 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
             return None
         noun = label or "document"
         qual = f" naming {' and '.join(parties)}" if parties else ""
-        lines = [f"**{res['total']} {noun}(s){qual} whose text contains "
+        # The denominator, when the question named an instrument type. "44 NDAs
+        # mention model training" answers half of "how many NDAs are there, and
+        # how many of them mention model training" — the reader needs the set
+        # being counted against, and it is one more indexed count to get it.
+        _base_total = None
+        if patterns:
+            try:
+                _base_total = _db.count_documents_by_party(
+                    wiki_id, session_id, parties or [], None,
+                    doc_type_patterns=patterns).get("total")
+            except Exception as e:
+                logger.error("[AGENT] predicate denominator failed: %s", e)
+        _of = f" of {_base_total}" if _base_total else ""
+        lines = [f"**{res['total']}{_of} {noun}(s){qual} whose text contains "
                  f"“{_predicate}”.**", ""]
         for d in res["documents"]:
             date = f" — {d['effective_date']}" if d.get("effective_date") else ""
@@ -3375,10 +4213,99 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         payload["meta_answer"] = False
         return payload
 
+    # A governing law is a third way to pin a count, alongside a party and an
+    # instrument type. The compound branch already filters by it but demands
+    # two filters, so "how many contracts are governed by the laws of England
+    # and Wales" — one filter, and a perfectly ordinary question — had no
+    # deterministic path and was answered by retrieval, which found 4 of the 5.
+    # Two or more jurisdictions named in a counting question is a comparison:
+    # report a count for each rather than picking one. "How many depart by
+    # choosing Singapore, and how does that compare with England and Wales?"
+    # named three (the framing clause says Indian law) and was answered 3 and 3
+    # by retrieval against a true 5 and 5.
+    _laws = _laws_named(question or "")
+    if len(_laws) > 1 and re.search(r"\bhow\s+many\b", question or "", re.I):
+        _counts = []
+        for _law in _laws[:4]:
+            try:
+                _lr = _db.list_documents_matching(
+                    wiki_id, session_id, parties or None, patterns or None,
+                    governing_law=_law, limit=1)
+            except Exception as e:
+                logger.error("[AGENT] multi-law count failed for %r: %s", _law, e)
+                continue
+            if _lr:
+                _counts.append((_law, _lr["total"]))
+        if len([c for c in _counts if c[1]]) > 1:
+            _noun = label or "contract"
+            _lines = [f"**Counted by governing law across the corpus:**", ""]
+            for _law, _n in _counts:
+                _lines.append(f"- {_law}: {_n} {_noun}(s)")
+            _lines += ["", "Counted from the recorded governing law of every "
+                           "document in the wiki, not from the pages a search "
+                           "returned. A document whose governing law was never "
+                           "extracted is in none of these figures."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = []
+            _p["meta_answer"] = False
+            return _p
+
+    _gov = _compound_predicates(question or "").get("governing_law")
+    if _gov and re.search(r"\bhow\s+many\b|\bcount\b", question or "", re.I):
+        try:
+            _gres = _db.list_documents_matching(
+                wiki_id, session_id, parties or None, patterns or None,
+                governing_law=_gov, limit=25)
+        except Exception as e:
+            logger.error("[AGENT] governing-law count failed: %s", e)
+            _gres = None
+        if _gres and _gres["total"]:
+            _noun = label or "document"
+            # "...how does that compare with England and Wales?" — the second
+            # law is a second count over the same corpus, not a filter on the
+            # first. Measured live: this two-sided comparison ran on retrieval
+            # and reported 3 and 3 where the true figures are 5 and 5, while
+            # each law counted on its own was exact.
+            _second = None
+            _cmp = re.search(
+                r"\b(?:compare[sd]?\s+(?:with|to)|versus|vs\.?|against|"
+                r"and\s+how\s+many)\b(.+)$", question or "", re.IGNORECASE | re.DOTALL)
+            if _cmp:
+                _law2 = _compound_predicates(_cmp.group(1)).get("governing_law")
+                if _law2 and _law2.lower() != _gov.lower():
+                    try:
+                        _r2 = _db.list_documents_matching(
+                            wiki_id, session_id, parties or None, patterns or None,
+                            governing_law=_law2, limit=5)
+                        if _r2:
+                            _second = (_law2, _r2["total"])
+                    except Exception as e:
+                        logger.error("[AGENT] second governing-law count failed: %s", e)
+            _lines = [f"**{_gres['total']} {_noun}(s) governed by {_gov}.**", ""]
+            if _second:
+                _l2, _n2 = _second
+                _rel = ("the same number" if _n2 == _gres["total"] else
+                        f"{'more' if _n2 > _gres['total'] else 'fewer'} "
+                        f"({abs(_n2 - _gres['total'])} {'more' if _n2 > _gres['total'] else 'fewer'})")
+                _lines = [f"**{_gres['total']} {_noun}(s) governed by {_gov}, "
+                          f"and {_n2} governed by {_l2} — {_rel}.**", ""]
+            for d in _gres["documents"]:
+                _date = f" — {d['effective_date']}" if d.get("effective_date") else ""
+                _lines.append(f"- {_dp_display(d['source_doc'], wiki_id, session_id)}{_date}")
+            if _gres["truncated"]:
+                _lines.append(f"- …and {_gres['total'] - len(_gres['documents'])} more")
+            _lines += ["", "Counted from the recorded governing law of every document "
+                           "in the wiki, not from the pages a search returned."]
+            _p = _canned_payload("\n".join(_lines), "Count", "document-index")
+            _p["files_used"] = [d["source_doc"] for d in _gres["documents"]]
+            _p["meta_answer"] = False
+            return _p
+
     _whole_corpus = False
     if not parties and not patterns:
         if (_RX_COUNT_TOTAL.search(question or "")
-                and not _RX_COUNT_TOTAL_VETO.search(question or "")):
+                and not _RX_COUNT_TOTAL_VETO.search(question or "")
+                and _is_bare_totality(question)):
             _whole_corpus = True
         else:
             return None
@@ -3391,6 +4318,92 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         return None
     if not result["total"]:
         return None
+
+    # The second half of a compound count, answered against the same set the
+    # first half just counted. Computed here so both render branches below can
+    # append it, and kept advisory: if the sub-count cannot be resolved the
+    # first answer still stands, with the gap stated rather than hidden.
+    _sub_lines: list[str] = []
+    _tail_m = _RX_COUNT_COMPOUND_TAIL.search(question or "")
+    if _tail_m:
+        _tail = _tail_m.group(1).strip()
+        _sub_parties, _sub_patterns, _sub_label = _compound_subcount(_tail)
+        _sub_clause = _compound_clause_type(_tail)
+        _sub_field = _compound_typed_field(_tail)
+        if _sub_field and not _sub_parties:
+            # A typed column, not a clause: "how many of those record a
+            # readable rupee liability cap" is a coverage question and the
+            # column answers it. This half used to come back as uncountable.
+            _tbl, _col, _fname = _sub_field
+            try:
+                _fd = _db.count_documents_with_typed_field(
+                    wiki_id, session_id, _tbl, _col,
+                    doc_type_patterns=patterns or None)
+            except Exception as e:
+                logger.error("[AGENT] typed-field sub-count failed: %s", e)
+                _fd = None
+            if _fd and _fd.get("with_value"):
+                _sub_lines = ["", f"**Of those, {_fd['with_value']} record a "
+                                  f"readable {_fname}.**"]
+            else:
+                _sub_lines = ["", "*The second part of this question — “"
+                              + _tail.rstrip("?.") + "” — could not be counted "
+                              "and is not answered above.*"]
+        elif _sub_clause and not _sub_parties:
+            # A clause-type filter over the set just counted, answered from the
+            # typed clause index rather than left unanswered.
+            try:
+                _cdata = _db.count_documents_with_clause_type(
+                    wiki_id, session_id, _sub_clause,
+                    doc_type_patterns=patterns or None)
+            except Exception as e:
+                logger.error("[AGENT] compound clause sub-count failed: %s", e)
+                _cdata = None
+            if _cdata and _cdata.get("with_clause"):
+                from services import clause_vocab as _cv
+                _sublabel = _cv.display(_sub_clause)
+                _sub_lines = ["", f"**Of those, {_cdata['with_clause']} carry "
+                                  f"{'an' if _sublabel[0] in 'aeiou' else 'a'} "
+                                  f"{_sublabel} clause.**"]
+            else:
+                _sub_lines = ["", "*The second part of this question — “"
+                              + _tail.rstrip("?.") + "” — could not be counted "
+                              "from the clause index and is not answered above.*"]
+        elif _sub_parties or _sub_patterns:
+            try:
+                _sub = _db.count_documents_by_party(
+                    wiki_id, session_id,
+                    (parties or []) + _sub_parties,
+                    None,
+                    doc_type_patterns=(_sub_patterns or patterns or None))
+            except Exception as e:
+                logger.error("[AGENT] compound sub-count failed: %s", e)
+                _sub = None
+            # A zero here fails the same way it does for the main count: the
+            # constraint genuinely matches nothing, or it was not resolvable to
+            # anything the index stores ("litigation documents" is a doc_family
+            # on this corpus, not a doc_type). The two are indistinguishable
+            # from here, and a confident "of those, 0" is the worse error, so a
+            # zero is reported as unanswered rather than as none.
+            if _sub is not None and _sub.get("total"):
+                _what = (" and ".join(_sub_parties) if _sub_parties
+                         else (_sub_label or "that type"))
+                _sub_lines = [
+                    "", f"**Of those, {_sub['total']} "
+                        f"{'name ' + _what if _sub_parties else 'are ' + str(_what) + '(s)'}.**",
+                ]
+            else:
+                _sub_lines = [
+                    "", "*The second part of this question — “" + _tail.rstrip("?") +
+                    "” — could not be counted from the document index and is not "
+                    "answered above.*",
+                ]
+        else:
+            _sub_lines = [
+                "", "*The second part of this question — “" + _tail.rstrip("?") +
+                "” — could not be counted from the document index and is not "
+                "answered above.*",
+            ]
 
     noun = label or "document"
     if _whole_corpus:
@@ -3407,6 +4420,7 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
         lines.append("Counted directly from the document index, so this is the "
                      "complete total for the wiki — not a count of the pages "
                      "retrieved for this question.")
+        lines += _sub_lines
         payload = _canned_payload("\n".join(lines), "Count", "document-index")
         payload["files_used"] = []
         payload["meta_answer"] = True
@@ -3438,6 +4452,7 @@ def _count_answer(question: str, session_id: str, wiki_id: str) -> dict | None:
     lines.append("")
     lines.append("Counted directly from the document index rather than from a text "
                  "search, so this is the complete total, not the closest matches.")
+    lines += _sub_lines
 
     payload = _canned_payload("\n".join(lines), "Count", "document-index")
     payload["files_used"] = [d["source_doc"] for d in shown]
@@ -3507,9 +4522,17 @@ _RX_PRED_VERB = re.compile(
 # Where a predicate ends. Everything after one of these belongs to the NEXT
 # condition, not this one.
 _PRED_CUT = {"and", "or", "as", "that", "which", "but", "while", "where"}
-# Words a phrase may contain but must not begin or end on.
+# Words a phrase may contain but must not begin or end on. The locative and
+# emphatic adverbs are here because a lawyer writes the scope of the search
+# into the question — "how many NDAs mention model training ANYWHERE in their
+# text" — and that word is not part of the phrase being searched for. Confirmed
+# live: the predicate came out as "model training anywhere", matched literally
+# against page text, found nothing, and the whole count declined on a question
+# whose true answer is 44.
 _PRED_EDGE = {"on", "in", "by", "to", "for", "of", "the", "a", "an", "with",
-              "any", "all", "its", "their", "our", "is", "are", "be"}
+              "any", "all", "its", "their", "our", "is", "are", "be",
+              "anywhere", "everywhere", "somewhere", "ever", "at", "also",
+              "even", "still", "only", "just", "text", "wording", "language"}
 
 # Two shapes, kept as separate branches because they end differently:
 # "governed by the laws of India" is terminated by the jurisdiction itself,
@@ -3531,6 +4554,33 @@ _LAW_ADJECTIVE = {"indian": "India", "english": "English",
                   "american": "America", "japanese": "Japan",
                   "german": "Germany", "french": "France",
                   "singaporean": "Singapore", "australian": "Australia"}
+# Every jurisdiction a question names, however it names it. A comparison
+# question puts them in three different constructions at once -- "governed by
+# Indian law ... choosing the laws of Singapore ... the number choosing England
+# and Wales" -- and a single-law extractor returns whichever it happens to hit
+# first, which for that question was the one in the framing clause. Counting
+# each named jurisdiction answers what was asked and cannot pick the wrong one.
+_RX_LAW_MENTIONS = re.compile(
+    r"\b(?:laws?\s+of|governed\s+by|choosing|choose|subject\s+to\s+the\s+laws?\s+of)\s+"
+    r"(?:the\s+)?([A-Z][\w'&.-]*(?:\s+(?:and\s+)?[A-Z][\w'&.-]*){0,2})"
+    r"|\b([A-Z][a-z]+)\s+law\b")
+
+
+def _laws_named(question: str) -> list:
+    """Distinct jurisdictions the question names, in the order they appear."""
+    out = []
+    for m in _RX_LAW_MENTIONS.finditer(question or ""):
+        raw = (m.group(1) or m.group(2) or "").strip().rstrip(",.;:")
+        raw = _LAW_ADJECTIVE.get(raw.lower(), raw)
+        # Trim a trailing word that belongs to the sentence, not the place.
+        raw = re.sub(r"\s+(?:law|laws|rather|instead|and)$", "", raw,
+                     flags=re.IGNORECASE).strip()
+        if len(raw) > 2 and raw.lower() not in {"this", "that", "these", "the"} \
+                and raw not in out:
+            out.append(raw)
+    return out
+
+
 _TERM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
                "seven": 7, "eight": 8, "nine": 9, "ten": 10, "twelve": 12}
 _RX_TERM_CMP = re.compile(
@@ -3795,7 +4845,16 @@ _RX_DEFINED_TERM_Q = re.compile(
     r"(?:how\s+is|what\s+is|what\s+does|where\s+is)\b[^?]{0,40}?"
     r"\bterm\s+[\"“']([^\"”']{2,48})[\"”']"
     r"|\bwhat\s+does\s+[\"“']([^\"”']{2,48})[\"”']\s+mean\b"
-    r"|\bdefinition\s+of\s+[\"“']([^\"”']{2,48})[\"”']",
+    r"|\bdefinition\s+of\s+[\"“']([^\"”']{2,48})[\"”']"
+    # The plain verb form, which is how the question is usually put: "how does
+    # the Data Processing Agreement between X and Y define "Affiliate"?" The
+    # three patterns above all require the noun ("the term", "the definition
+    # of"), so the verb form missed the index entirely and was answered by the
+    # model from whatever pages retrieval had fetched. Confirmed live: it
+    # replied that the DPA "does not define the term Affiliate" while that
+    # document's own definition sat in defined_terms, quoted verbatim — a
+    # false absence, which for a legal tool is the worst way to be wrong.
+    r"|\bdefine[sd]?\s+(?:the\s+term\s+)?[\"“']([^\"”']{2,48})[\"”']",
     re.IGNORECASE)
 
 # Beyond this the question is asking about a set of documents, and quoting one
@@ -3878,6 +4937,100 @@ def _narrow_to_named_instrument(question: str, session_id: str, wiki_id: str,
         if t and t in q:
             hits.append(sd)
     return hits
+
+
+# "Is a deadlock-resolution clause a common feature of Joint Venture Agreements
+# in this corpus?" is a question about how often a clause TYPE appears, and the
+# typed clause rows answer it exactly. Without this it was declined as needing
+# every other JVA to be read one by one, while the index knew 227 documents
+# carry the clause.
+_RX_CLAUSE_COMMONALITY = re.compile(
+    r"\b(?:is|are|how)\s+(?:an?\s+|the\s+)?[\w\s-]{0,40}?"
+    r"\b(?:common|commonplace|typical|standard|usual|widespread|prevalent)\b"
+    r"|\bhow\s+many\s+[\w\s-]{0,30}?\b(?:carry|contain|include|have)\b"
+    r"[^?]{0,40}?\bclause\b",
+    re.IGNORECASE)
+# The clause the question is asking about, as the words before "clause".
+_RX_COMMONALITY_CLAUSE = re.compile(
+    r"\b((?:[a-z][\w-]*\s+){0,3}?[a-z][\w-]*)[-\s]+(?:resolution\s+)?clauses?\b",
+    re.IGNORECASE)
+
+
+def _clause_commonality_answer(question: str, session_id: str,
+                               wiki_id: str) -> "dict | None":
+    """How many documents carry a clause TYPE, out of how many in scope.
+
+    Answered from clause_type_canon, so it counts the clause the question names
+    rather than documents whose prose happens to use the same word. Returns
+    None whenever the clause words do not map to the controlled vocabulary —
+    an unmatched label is left to retrieval rather than guessed at.
+    """
+    from services import db as _db
+    from services import clause_vocab as _vocab
+
+    if not _RX_CLAUSE_COMMONALITY.search(question or ""):
+        return None
+    # "How many contracts carry NO insurance clause at all?" is a gap question
+    # and its answer is the count that lack one. This branch answers the
+    # opposite — how many carry one — so firing on it reported 219 of 1372
+    # carry an insurance clause to a question whose answer is 724 carry none:
+    # a real number, exactly inverted. The gap branch owns these.
+    if _is_analytics_query(question) == "gap" or _RX_GAP.search(question or ""):
+        return None
+    canon, _after = None, ""
+    for m in _RX_COMMONALITY_CLAUSE.finditer(question or ""):
+        phrase = m.group(1).strip()
+        canon = _vocab.canonical(phrase) or _vocab.canonical(phrase.split()[-1])
+        if canon:
+            # The instrument type lives AFTER the clause words ("...clause a
+            # common feature of Joint Venture Agreements"). Reading the whole
+            # question instead produced doctypes like "Indemnity Clause
+            # Service", which match nothing and emptied the scope.
+            _after = (question or "")[m.end():]
+            break
+    if not canon:
+        return None
+    # "a common FEATURE OF Joint Venture Agreements" — the doctype extractor
+    # reads the whole run and returns "Feature Of Joint Venture", which matches
+    # no document at all, so the scope came back empty and the branch declined.
+    # The commonality wording is removed before the instrument type is read.
+    _q_for_type = re.sub(
+        r"\b(?:an?\s+|the\s+)?(?:common|commonplace|typical|standard|usual|"
+        r"widespread|prevalent)\s+(?:feature|element|term|provision)\s+(?:of|in)\s+",
+        " ", _after, flags=re.IGNORECASE)
+    label, patterns = _doctype_from_question(_q_for_type)
+    try:
+        data = _db.count_documents_with_clause_type(
+            wiki_id, session_id, canon, doc_type_patterns=patterns or None)
+    except Exception as e:
+        logger.error("[AGENT] clause-commonality failed: %s", e)
+        return None
+    if not data or not data.get("in_scope"):
+        return None
+    n, total = data["with_clause"], data["in_scope"]
+    pct = (n / total * 100) if total else 0
+    scope_label = f"{label}(s)" if label else "documents in the corpus"
+    # The singular for the trailing sentence. rstrip("(s)") strips any trailing
+    # s or parenthesis, which turned "documents in the corpus" into "documents
+    # in the corpu"; the suffix is removed as a suffix instead.
+    scope_singular = label if label else "document in the corpus"
+    verdict = ("a common feature" if pct >= 50 else
+               "present in a substantial minority" if pct >= 20 else
+               "uncommon")
+    lines = [
+        f"**Yes — {canon.replace('_', ' ')} clauses are {verdict}: "
+        f"{n} of {total} {scope_label} carry one ({pct:.0f}%).**" if pct >= 20 else
+        f"**{canon.replace('_', ' ')} clauses are {verdict}: {n} of {total} "
+        f"{scope_label} carry one ({pct:.0f}%).**",
+        "",
+        f"Counted from the typed clause index over every {scope_singular} "
+        f"in the wiki, not from the documents a search returned. A document is "
+        f"counted once however many such clauses it contains.",
+    ]
+    payload = _canned_payload("\n".join(lines), "Clause frequency", "document-index")
+    payload["files_used"] = data.get("examples", [])
+    payload["meta_answer"] = False
+    return payload
 
 
 def _clause_presence_answer(question: str, session_id: str, wiki_id: str,
@@ -4257,6 +5410,22 @@ def _structural_answer(kind: str, question: str, session_id: str) -> dict | None
             lines.append("")
             lines.append("Read directly from the citation index, so this is every "
                          "recorded occurrence rather than the closest matches.")
+            # This fast path answers ONLY the citation-count half of the
+            # question and returns immediately — a compound question also
+            # asking to compare or overlap that list against something else
+            # ("...and does that overlap with the agreements that restrict
+            # data to the EEA?") never reaches retrieval to answer the other
+            # half. Silently dropping it reads as a complete answer when it
+            # is not; naming the gap honestly is the safer failure. Confirmed
+            # live as the shape of this exact question on this corpus.
+            if re.search(r"\b(?:overlap|compare[sd]?|same\s+(?:as|set|documents?)|"
+                        r"also\s+(?:asks?|wants?))\b", question or "", re.IGNORECASE):
+                lines.append("")
+                lines.append("This list answers only which documents cite the "
+                             "authority named above — it does not by itself establish "
+                             "any overlap with a separately-asked population, which "
+                             "needs its own check rather than an assumption that the "
+                             "two sets are the same.")
             payload = _canned_payload("\n".join(lines), "Citations", "citation-index")
             payload["files_used"] = [h["source_doc"] for h in hits[:25]]
             payload["meta_answer"] = False
@@ -4356,8 +5525,12 @@ _RX_DOCTYPE_LEAD = re.compile(
     re.IGNORECASE)
 # The instrument nouns a set or compound question names. Wider than the
 # counting vocabulary, which deliberately excludes bare "ventures".
+# The modifier words use the same class as the count regexes, apostrophe
+# included: without it "Shareholders' Agreements" failed to parse as an
+# instrument type while the plain "Shareholder Agreements" worked, so a
+# question scoped to that family was silently answered over the whole corpus.
 _RX_DOCTYPE_NOUN = re.compile(
-    rf"\b((?:[a-z][a-z-]*\s+){{0,3}}?"
+    rf"\b((?:{_COUNT_MODIFIER}\s+){{0,3}}?"
     rf"(?:{_COUNT_NOUNS}|ventures?|jvs?|shas?))\b", re.IGNORECASE)
 
 
@@ -4573,19 +5746,60 @@ _COUNT_PREDICATE_GENERIC = {
     "agreements", "clause", "clauses", "provision", "provisions", "term",
     "terms", "it", "them", "this", "that", "these", "those", "one", "ones",
 }
+# "carry the same type label AS X" is not a phrase to search page text for —
+# it is a comparison against another document's metadata, and "carry" only
+# hit the predicate trigger list because the same word means "contains a
+# clause" in "how many documents carry a liability cap". Confirmed live: "how
+# many legal opinions exist in total, and how many carry the exact same type
+# label as the Summit Harborline Alloys opinion" extracted the predicate "exact
+# same type", searched every legal opinion's page text for that literal
+# string, found none, and the branch gave up on the whole question rather
+# than falling back to the doctype-only count sitting right there — 139 legal
+# opinions reported as 1. A "same ... as" construct right after the trigger
+# verb is the tell; when it appears, this is not a content predicate.
+_RX_COUNT_PREDICATE_COMPARISON = re.compile(
+    r"^\s*(?:the\s+)?(?:\w+\s+){0,2}same\b.{0,30}?\bas\b", re.IGNORECASE)
+# "Restrict a party FROM issuing a press release" is how a lawyer paraphrases
+# a prohibition; the clause itself reads "shall not ISSUE any press release".
+# The verb never matches between question and document, but the OBJECT after
+# it usually does — "press release or public statement" appears in both. So
+# this branch skips the verb entirely and anchors on what follows it, which
+# then feeds the same cut/edge trimming every other predicate uses. Measured
+# live: without it, "restrict...from issuing..." extracted no predicate at
+# all and fell through to the whole-corpus branch.
+_RX_COUNT_PREDICATE_RESTRICT = re.compile(
+    r"\b(?:restrict|restricts|restricted|prevent|prevents|prohibit|prohibits|"
+    r"bar|bars|forbid|forbids)\b[^?]{0,40}?\bfrom\s+\w+ing\s+(.{2,70})",
+    re.IGNORECASE)
+# A named thing a counting question is asking about: a project code name, a
+# programme, a defined term. Anchored on the words that introduce one so an
+# ordinary capitalised party name at the start of a sentence is not mistaken
+# for it — the party path already handles those, and searching page text for a
+# company name would count every document that merely mentions it in passing.
+_RX_COUNT_PROPER_NOUN = re.compile(
+    r"\b(?:codenamed|code-named|code\s+named|known\s+as|called|"
+    r"named|titled|designated|under\s+the\s+name|project)\s+"
+    r"[\"“']?((?:[A-Z][\w&.\-]*)(?:\s+[A-Z][\w&.\-]*){0,3})[\"”']?",
+)
+# Words that are capitalised because they start a sentence or label a document
+# class, not because they name anything.
+_COUNT_PROPER_NOUN_STOP = {
+    "the", "this", "that", "agreement", "agreements", "contract", "contracts",
+    "document", "documents", "party", "parties", "company", "corpus", "wiki",
+}
 
 
-def _count_predicate_phrase(question: str) -> str:
-    """The text a counting question is looking for, or "".
+def _trim_predicate_words(raw: str) -> list:
+    """Word-split, cut at a joining word, then strip leading/trailing filler.
 
-    A single word counts here where it would not in a compound question:
-    "mention arbitration" names its subject in one word, and requiring two
-    would decline the commonest form of the question.
+    Pulled out of _count_predicate_phrase so the trigger-verb match has a
+    named helper to call. Kept strict — breaks at the first "or"/"and" — for
+    a reason: "mention arbitration or litigation" is two alternatives, and
+    stopping at "arbitration" alone is what makes that search find documents
+    naming EITHER. Extending across an "or" here would instead search for the
+    literal joined phrase, which almost never appears in a document verbatim.
     """
-    m = _RX_COUNT_PREDICATE.search(question or "")
-    if not m:
-        return ""
-    words = [w for w in re.split(r"[^A-Za-z'-]+", m.group(1)) if w]
+    words = [w for w in re.split(r"[^A-Za-z'-]+", raw or "") if w]
     out = []
     for w in words[:6]:
         if w.lower() in _PRED_CUT:
@@ -4596,6 +5810,88 @@ def _count_predicate_phrase(question: str) -> str:
         out.pop(0)
     while out and out[-1].lower() in _PRED_EDGE:
         out.pop()
+    return out
+
+
+def _trim_predicate_words_compound(raw: str) -> list:
+    """Like _trim_predicate_words, but extends once across a conjunction.
+
+    Used only for the object of a "restrict/prevent/prohibit X from V-ing"
+    construction, where the noun on either side of "or" is not two
+    alternatives to search for separately but one fixed templated phrase —
+    "press release or public statement" names a single restriction, and a
+    document stating it says exactly that, conjunction included. Cutting at
+    "or" there leaves "press release" alone, which is common enough English
+    that it also matches "eXPRESS RELEASE" and "publicity which limits press
+    releases" — real text, but not the same restriction the question named,
+    and it inflated a true 179 documents to 250. This is deliberately NOT
+    the general behaviour: it fires once, capped at five words, so it cannot
+    wander past the templated phrase into the question's own trailing
+    wording ("...about the other party") which the actual clause never uses.
+    """
+    words = [w for w in re.split(r"[^A-Za-z'-]+", raw or "") if w]
+    # A leading article ("a press release...") must not count toward "we
+    # already have 3 real words, stop at this conjunction" — it isn't one.
+    while words and words[0].lower() in _PRED_EDGE:
+        words.pop(0)
+    out: list = []
+    extended = False
+    for w in words[:8]:
+        lw = w.lower()
+        if lw in _PRED_CUT:
+            if len(out) >= 3 or extended:
+                break
+            out.append(w)
+            extended = True
+            continue
+        out.append(w)
+        if len(out) >= (5 if extended else 4):
+            break
+    while out and out[0].lower() in _PRED_EDGE:
+        out.pop(0)
+    while out and out[-1].lower() in (_PRED_EDGE | _PRED_CUT):
+        out.pop()
+    return out
+
+
+def _count_predicate_phrase(question: str) -> str:
+    """The text a counting question is looking for, or "".
+
+    A single word counts here where it would not in a compound question:
+    "mention arbitration" names its subject in one word, and requiring two
+    would decline the commonest form of the question.
+    """
+    # A capitalised name is the thing being looked for, and it beats the words
+    # around it. "How many documents refer to a project codenamed Project
+    # Tamarind" cut the first four words after the trigger verb and searched
+    # for "project codenamed Project" — a phrase no document contains, because
+    # it describes the name rather than being it. The proper noun is both more
+    # precise and unambiguous, so it is preferred when the question carries one.
+    _proper = _RX_COUNT_PROPER_NOUN.search(question or "")
+    if _proper:
+        _name = _proper.group(1).strip()
+        if _name.lower() not in _COUNT_PROPER_NOUN_STOP and len(_name) >= 6:
+            return _name
+
+    # Tried before the ordinary trigger-verb match: a "restrict...from V-ing"
+    # construction also contains a word from that list often enough (none of
+    # "restrict/prevent/prohibit/bar/forbid" collide with it here, but the
+    # object it captures — skipping the mismatched verb — is the one worth
+    # keeping).
+    _rm = _RX_COUNT_PREDICATE_RESTRICT.search(question or "")
+    if _rm:
+        _out = _trim_predicate_words_compound(_rm.group(1))
+        if _out and not any(w.lower() in _COUNT_PREDICATE_GENERIC for w in _out):
+            _phrase = " ".join(_out)
+            if len(_out) > 1 or len(_phrase) >= 5:
+                return _phrase
+
+    m = _RX_COUNT_PREDICATE.search(question or "")
+    if not m:
+        return ""
+    if _RX_COUNT_PREDICATE_COMPARISON.match(m.group(1)):
+        return ""
+    out = _trim_predicate_words(m.group(1))
     if not out:
         return ""
     if any(w.lower() in _COUNT_PREDICATE_GENERIC for w in out):
@@ -4616,7 +5912,11 @@ def _enumerate_answer(question: str, session_id: str,
     """
     from services import db as _db, wiki as _wiki
 
-    parties = _question_parties(question)
+    # _count_party_names knows the forms _question_parties does not, among them
+    # the relative clause "every document to which X is a party". Without it
+    # that question declined here and retrieval listed 18 of the 131 documents
+    # with no total and nothing to say the list was partial.
+    parties = _question_parties(question) or _count_party_names(question)
 
     label, patterns = _doctype_from_question(question)
 
@@ -4790,6 +6090,21 @@ _RX_PRECEDENT = re.compile(
     r"|most\s+similar|comparable\s+(?:documents?|agreements?))\b",
     re.IGNORECASE,
 )
+# "Which other documents ... carry that same restriction?" matches
+# _RX_PRECEDENT's "which other documents" on the surface, but it is not asking
+# for document-to-document similarity — it names a specific CLAUSE (the
+# restriction/provision it just described) and wants every document that
+# carries it, the same task _RX_CLAUSE_PRECEDENT below already serves.
+# Confirmed live: "the Acme Sons DPA bars training AI models on Customer
+# Data. Which other documents in the corpus carry that same restriction?"
+# routed here, embedded the whole question, and returned unrelated
+# closest-precedent documents to an anchor it guessed wrong - never
+# attempting the clause count the question actually asked for.
+_RX_PRECEDENT_CLAUSE_VETO = re.compile(
+    r"\bcarr(?:y|ies)\s+(?:that|this|the)\s+(?:same\s+)?"
+    r"(?:restriction|clause|provision|wording|term|prohibition|obligation|requirement)\b",
+    re.IGNORECASE,
+)
 
 
 # Clause-level precedent, asked conversationally (§ Phase 3.5b). The Precedent
@@ -4800,12 +6115,34 @@ _RX_PRECEDENT = re.compile(
 # no drafting step.
 _RX_CLAUSE_PRECEDENT = re.compile(
     r"\b(?:"
-    r"have\s+we\s+(?:ever\s+)?(?:agreed|accepted|signed\s+up|conceded|given)"
+    r"have\s+we\s+(?:ever\s+)?(?:agreed|accepted|signed\s+up|conceded|given|used)"
     r"|has\s+(?:the\s+)?(?:company|firm|business)\s+(?:ever\s+)?agreed"
     r"|(?:what|which)\s+(?:did|have)\s+we\s+(?:do|done|agree[d]?)\s+(?:before|previously|in\s+the\s+past)"
     r"|do\s+we\s+have\s+precedent"
     r"|(?:any|show\s+me)\s+precedent\s+for"
     r"|where\s+else\s+have\s+we\s+(?:agreed|used|accepted)"
+    # The passive form, which is how the question is put when the subject is
+    # the TERM rather than the firm: "has a five-year records-retention period
+    # been used in more than one agreement?" None of the active patterns above
+    # match it, so it reached ordinary retrieval and was answered from the
+    # handful of documents that came back.
+    # The span between "has" and "been" is a noun phrase a lawyer writes at
+    # whatever length the clause needs. 50 characters fitted "a five-year
+    # records-retention period" and nothing longer: "has the clause excluding
+    # third-party enforcement rights been used" (51 characters) and "has the
+    # publicity restriction wording used in these agreements - barring a press
+    # release or public statement referring to the other party - been used"
+    # (110) both fell out of this pattern and were answered from whatever
+    # retrieval happened to return — 15 and 23 documents against true figures
+    # of 172 and 179.
+    r"|(?:has|have)\s+[\w\s,'–—-]{0,160}?\bbeen\s+(?:used|agreed|accepted|adopted|included)"
+    # "Which other documents ... carry that same restriction?" — third person,
+    # no "we" at all, because the subject is a clause the question just
+    # described rather than something "we" did. Same veto text as
+    # _RX_PRECEDENT_CLAUSE_VETO above, which stops the document-similarity
+    # branch from claiming this phrasing first.
+    r"|carr(?:y|ies)\s+(?:that|this|the)\s+(?:same\s+)?"
+    r"(?:restriction|clause|provision|wording|term|prohibition|obligation|requirement)"
     r")\b",
     re.IGNORECASE,
 )
@@ -5028,14 +6365,18 @@ def _is_clause_precedent_query(question: str) -> bool:
     return bool(_RX_CLAUSE_PRECEDENT.search(question or ""))
 
 
+# "five" and its neighbours were missing, so "a five-year records-retention
+# period" parsed as no period at all and the corpus count could not be narrowed
+# to five-year clauses.
 _NUM_WORDS_PERIOD = {
     "seven": 7, "ten": 10, "fourteen": 14, "fifteen": 15, "twenty": 20,
     "thirty": 30, "forty": 40, "forty-five": 45, "sixty": 60, "ninety": 90,
-    "one": 1, "two": 2, "three": 3, "six": 6, "twelve": 12,
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "eight": 8, "nine": 9, "eleven": 11, "twelve": 12,
 }
 _RX_PERIOD_IN_Q = re.compile(
-    r"\b(\d{1,4}|seven|ten|fourteen|fifteen|twenty|thirty|forty-five|forty|"
-    r"sixty|ninety|one|two|three|six|twelve)[\s-]*"
+    r"\b(\d{1,4}|seven|ten|eleven|twelve|fourteen|fifteen|twenty|thirty|"
+    r"forty-five|forty|sixty|ninety|one|two|three|four|five|six|eight|nine)[\s-]*"
     r"(day|month|year|week)s?\b", re.IGNORECASE)
 
 
@@ -5069,6 +6410,169 @@ def _clause_states_period(text_: str, count: int, unit: str) -> bool:
         text_ or "", re.IGNORECASE))
 
 
+def _anchor_slice(hit: dict) -> str:
+    """The shared, countable part of one precedent clause's wording.
+
+    A clause opens with the obligated party's name, which is unique to that one
+    document, so slicing from the start counted 1. The shared wording begins at
+    the operative verb, so the slice starts there when there is one.
+    """
+    _t = " ".join((hit.get("verbatim_text") or hit.get("text") or "").split())
+    _a = re.search(r"\b(?:shall|must|agrees?\s+to|undertakes?\s+to)\b", _t, re.IGNORECASE)
+    return (_t[_a.start():] if _a else _t)[:70]
+
+
+_PRECEDENT_POOL = 48  # clauses searched for counting; the first 8 are listed
+
+
+def _precedent_wording_groups(hits: list, period=None) -> list:
+    """One phrase group per distinct wording among the hits, at most four.
+
+    Distinct wordings, not the first four hits: a search result is often
+    several copies of one template, and four copies of it measure one variant
+    four times while the corpus's dominant wording sits at rank 5. The closest
+    hit by embedding similarity is not necessarily the template most documents
+    use either; anchoring on rank 0 alone once undercounted 50 documents as 1.
+    When the question fixes a period it is required alongside each wording,
+    since the shared boilerplate alone would count every such clause whatever
+    its term.
+    """
+    groups, seen = [], set()
+    for h in (hits or []):
+        if len(groups) == 4:
+            break
+        sl = _anchor_slice(h)
+        if len(sl) < 25 or sl.lower() in seen:
+            continue
+        seen.add(sl.lower())
+        groups.append([sl] + ([f"{period[0]} {period[1]}s"] if period else []))
+    return groups
+
+
+def precedent_wording_count(hits: list, wiki_id: str, session_id: str,
+                            period=None) -> int:
+    """How many documents carry any of the closest precedent clauses' wordings.
+
+    Returns 0 when nothing countable could be built or the count failed;
+    callers treat 0 as "no figure", never as "no documents".
+    """
+    groups = _precedent_wording_groups(hits, period)
+    if not groups:
+        return 0
+    try:
+        from services import db as _db_pc
+        return _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, groups)
+    except Exception as e:
+        logger.error("[AGENT] precedent corpus count failed: %s", e)
+        return 0
+
+
+_RX_CONTENT_WORD = re.compile(r"[a-z][a-z-]{4,}")
+
+
+def _question_overlap(question: str, sentence: str) -> int:
+    """How many of the question's content words the sentence uses."""
+    asked = set(_RX_CONTENT_WORD.findall((question or "").lower()))
+    if not asked:
+        return 0
+    said = set(_RX_CONTENT_WORD.findall((sentence or "").lower()))
+    return len(asked & said)
+
+
+def _template_breakdown(anchors: list, hits: list, wiki_id: str, session_id: str,
+                        _tpl, question: str = "") -> dict:
+    """The breakdown, counted from wording fingerprints. Same shape as the
+    literal version; {} when no clause has a fingerprint."""
+    seen, entries = set(), []
+    for is_anchor, hit in [(True, a) for a in anchors] + [(False, h) for h in hits]:
+        # Each operative sentence of the clause is its own wording, counted
+        # separately — a clause stating a restriction and its exception is two
+        # commitments, and the index fingerprints them that way, so a lookup
+        # made from the whole clause would match neither.
+        #
+        # The sentence the QUESTION is about leads, rather than whichever one
+        # the extractor happened to put first. Measured on the golden set: a
+        # clause that fixed a three-year term and then made confidentiality
+        # survive open-endedly was quoted back as the term sentence to a
+        # question asking about survival. Both wordings sat in the same 50
+        # documents, so the count was right and the quotation was not — and on
+        # a clause whose sentences do not travel together it would have been
+        # the wrong count too.
+        _found = _tpl.wordings(hit.get("verbatim_text") or hit.get("text") or "")
+        if question and len(_found) > 1:
+            _found = sorted(_found, key=lambda fs: -_question_overlap(question, fs[1]))
+        for fp, sentence in _found:
+            fam = _tpl.family_of(wiki_id, fp)
+            if fam in seen:
+                continue
+            seen.add(fam)
+            entries.append((is_anchor, _anchor_slice({"text": sentence}), fp))
+            if len(entries) == 4:
+                break
+        if len(entries) == 4:
+            break
+    if not entries:
+        return {}
+    per = [(is_a, label, _tpl.count_documents(wiki_id, session_id, fp))
+           for is_a, label, fp in entries]
+    anchored = [(w, n) for is_a, w, n in per if is_a]
+    others = sorted(((w, n) for is_a, w, n in per if not is_a), key=lambda x: -x[1])
+    return {"wordings": anchored + others, "anchored": [w for w, _ in anchored],
+            "any": _tpl.count_any(wiki_id, session_id, [fp for _, _, fp in entries]),
+            "source": "templates"}
+
+
+def precedent_wording_breakdown(hits: list, wiki_id: str, session_id: str,
+                                period=None, anchors: list | None = None,
+                                question: str = "") -> dict:
+    """{"wordings": [(wording, documents)], "any": documents, "anchored": [wording]}
+    for the closest precedent clauses, or {} if nothing countable could be built.
+
+    The union alone can mislead: the nearest clauses to a question are often
+    related but different commitments (a ban on training general-purpose
+    models, and a narrower one on shared models), and one combined figure
+    reads as the reach of a single clause.
+
+    `anchors` are clauses from the document the question itself names. Their
+    wordings are the restriction being asked about, so they come first, ahead of
+    whatever else the similarity search happened to rank higher; the rest follow
+    by document count.
+    """
+    # Preferred: count documents per wording fingerprint (services/templates.py),
+    # which does not depend on which clauses a search happened to return and
+    # covers wording that exists only in page text. Not used when the question
+    # fixes a period - the fingerprint masks numbers, and the literal path below
+    # is what requires "5 years" alongside the wording - or when the table has
+    # not been built.
+    if not period:
+        try:
+            from services import templates as _tpl
+            if _tpl.is_populated(wiki_id, session_id):
+                _t = _template_breakdown(list(anchors or []), list(hits or []),
+                                         wiki_id, session_id, _tpl, question)
+                if _t:
+                    return _t
+        except Exception as e:
+            logger.error("[AGENT] template breakdown failed, using literal counts: %s", e)
+    groups = _precedent_wording_groups(list(anchors or []) + list(hits or []), period)
+    if not groups:
+        return {}
+    anchor_keys = {_anchor_slice(a).lower() for a in (anchors or [])}
+    try:
+        from services import db as _db_pc
+        per = [(g[0], _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, [g]))
+               for g in groups]
+        anchored = [p for p in per if p[0].lower() in anchor_keys]
+        others = sorted((p for p in per if p[0].lower() not in anchor_keys),
+                        key=lambda x: -x[1])
+        return {"wordings": anchored + others,
+                "anchored": [w for w, _ in anchored],
+                "any": _db_pc.count_documents_with_any_clause_text(wiki_id, session_id, groups)}
+    except Exception as e:
+        logger.error("[AGENT] precedent corpus breakdown failed: %s", e)
+        return {}
+
+
 def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     """Rank precedent clauses matching the term the question describes.
 
@@ -5084,12 +6588,48 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
     from services import precedent as _prec, wikis as _wikis, wiki
     try:
         wiki_id = _wikis.active_wiki_id()
-        hits = _prec.search_clauses(wiki_id, session_id, question, limit=8)
+        # A wider pool than is shown, from the same single search: the eight
+        # closest clauses are often eight copies of one template, and counting
+        # from them alone measured that one wording (69 documents) while the
+        # restriction the question described sat in the pool at rank 9 (85).
+        from services import embedder as _emb
+        _vec = _emb.embed(question, is_query=True)
+        hits = _prec.search_clauses(wiki_id, session_id, question,
+                                    limit=_PRECEDENT_POOL, vec=_vec)
     except Exception as e:
         logger.error("[AGENT] clause-precedent fast-path failed: %s", e)
         return None
     if not hits:
         return None
+
+    # "The <named> agreement bars X. Which other documents carry the same
+    # restriction?" - the restriction is the one in the document the question
+    # names, and the closest clauses to the question's wording are often a
+    # different template's phrasing of it (the named agreement's own clause was
+    # not in the 48 nearest, so it was never counted). The named document, when
+    # scope resolution finds one unambiguously, supplies its own closest clauses
+    # as the anchor wording, from the same embedding. Only its single closest
+    # clause: the next-closest in that document are its neighbouring clauses
+    # (data ownership, data location), and anchoring on them counted a
+    # different commitment under the restriction's name.
+    _anchor_hits, _anchor_docs = [], []
+    try:
+        _sc = wiki.resolve_scope(question, session_id)
+        _named = list((_sc or {}).get("target_docs") or [])
+        if 1 <= len(_named) <= 2:
+            _anchor_docs = _named
+            _anchor_hits = _prec.search_clauses(
+                wiki_id, session_id, question, limit=1,
+                only_docs=tuple(_named), vec=_vec)
+    except Exception as e:
+        logger.error("[AGENT] precedent anchor lookup failed: %s", e)
+    _anchor_names = {re.sub(r"^[0-9a-f-]{36}_", "", d) for d in _anchor_docs}
+    if _anchor_names:
+        # The named document is what the others are compared against, not one of them.
+        hits = [h for h in hits
+                if re.sub(r"^[0-9a-f-]{36}_", "", h.get("source_doc") or "") not in _anchor_names]
+        if not hits:
+            hits = _anchor_hits
 
     # The same clause can be indexed more than once for a document — the
     # 30-day list showed "tailspin autocomponents amdt agreement 2022-02-02"
@@ -5104,7 +6644,8 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
             continue
         _seen.add(key)
         _uniq.append(h)
-    hits = _uniq
+    _pool = _uniq          # what the count is built from
+    hits = _uniq[:8]      # what is listed
 
     # A question naming a figure is asking about THAT figure. Similarity
     # cannot see the difference between thirty days and forty-five — asked
@@ -5153,6 +6694,38 @@ def _clause_precedent_answer(question: str, session_id: str) -> dict | None:
         lines = [f"**{len(hits)} precedent clause(s) matching that term:**", ""]
         lines += _render(hits)
 
+    # "...and in how many?" — the ranked list above is a SAMPLE, and a question
+    # asking how widely a term is used needs the corpus figure. Measured live:
+    # the sample listed a handful against 65 documents actually carrying the
+    # wording, and nothing said the list was partial. Counted by matching a
+    # distinctive slice of the closest clause's own text, so the figure is the
+    # documents carrying that wording rather than a similarity score.
+    # "Which other documents ... carry that same restriction?" carries the
+    # same intent as "...and in how many documents?" even though it never
+    # says "how many" — it is asking for the full population, not the ranked
+    # sample below. Confirmed live: without this, the ranked list of 8 stood
+    # as the whole answer to a question whose real figure was 85.
+    _how_many = re.search(r"\bin\s+how\s+many\b|\bhow\s+many\s+(?:agreements?|"
+                          r"documents?|contracts?)\b"
+                          r"|\bwhich\s+other\s+(?:documents?|agreements?)\b[^?]{0,60}?\bcarr(?:y|ies)\b",
+                          question or "", re.IGNORECASE)
+    if _how_many and hits:
+        _bd = precedent_wording_breakdown(_pool, wiki_id, session_id, period,
+                                          anchors=_anchor_hits, question=question)
+        _shown = [(w, n) for w, n in (_bd.get("wordings") or []) if n]
+        if _shown:
+            _w0, _n0 = _shown[0]
+            _src = (" as the named agreement"
+                    if _bd.get("anchored") and _w0 in _bd["anchored"] else "")
+            _head = [f"**{_n0} document(s) in the corpus carry the same wording"
+                     f"{_src}: “{_w0}…”.**" if _src else
+                     f"**{_n0} document(s) in the corpus carry the wording “{_w0}…”.**", ""]
+            if len(_shown) > 1:
+                _head += ["Related wordings, counted separately: " + "; ".join(
+                    f"{n} carry “{w}…”" for w, n in _shown[1:]) + ".", ""]
+            _head += ["The clauses below are the closest matches, not the whole list.", ""]
+            lines[0:0] = _head
+
     lines.append("Ranked from the precedent clause index by similarity to your "
                  "question, and quoted verbatim — these are clauses already agreed "
                  "in the documents named, not drafting suggestions.")
@@ -5178,7 +6751,8 @@ def _is_precedent_query(question: str) -> bool:
     answer needs a document-to-document search instead — see
     db.find_similar_documents.
     """
-    return bool(_RX_PRECEDENT.search(question or ""))
+    q = question or ""
+    return bool(_RX_PRECEDENT.search(q) and not _RX_PRECEDENT_CLAUSE_VETO.search(q))
 
 
 def _precedent_answer(question: str, session_id: str) -> dict | None:
@@ -6031,7 +7605,17 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
     # clause is a better answer to a lookup than a number.
     if not is_followup:
         from services import calculation as _calc_mod
-        if _calc_mod.is_calculation_query(question):
+        _calc_kind = _calc_mod.is_calculation_query(question)
+        # The liability-cap veto refuses to compute one document's cap in
+        # rupees from billing data the corpus does not hold, which is right.
+        # It must not also swallow a CORPUS-WIDE cap question: "has the average
+        # liability cap trended up or down year over year" is answered from the
+        # typed liability_cap_amount column by the analytics branch below, and
+        # was measured being declined by this veto instead, with a canned
+        # explanation about fee multiples that answered nothing.
+        if _calc_kind == "out_of_scope" and _is_analytics_query(question):
+            _calc_kind = ""
+        if _calc_kind:
             from services import wikis as _wikis_k
             try:
                 _wid_k = _wikis_k.active_wiki_id()
@@ -6123,6 +7707,26 @@ def run_query_stream(question: str, session_id: str, target_doc: str = "",
             logger.info("[AGENT] precedent fast-path: %r", (question or "")[:70])
             yield {"stage": "complete", "status": "done", "type": "answer",
                    "payload": _prec, "message": "Done"}
+            return
+
+    # "Is a deadlock clause a common feature of JVAs here?" — a frequency
+    # question about a clause TYPE, answered from the typed clause index.
+    # Ahead of clause precedent because that branch searches for clauses
+    # resembling a described term, which is a different question and answers
+    # this one with a sample rather than a proportion.
+    if not is_followup and not collection_id:
+        from services import wikis as _wikis_ct
+        try:
+            _ccom = _clause_commonality_answer(question, session_id,
+                                               _wikis_ct.active_wiki_id())
+        except Exception as _cc_err:
+            logger.error("[AGENT] clause-commonality fast path failed: %s", _cc_err)
+            _ccom = None
+        if _ccom:
+            logger.info("[AGENT] clause-commonality fast path (0 tokens): %r",
+                        (question or "")[:70])
+            yield {"stage": "complete", "status": "done", "type": "answer",
+                   "payload": _ccom, "message": "Done"}
             return
 
     # Clause-level precedent — "have we agreed to this before". Checked after

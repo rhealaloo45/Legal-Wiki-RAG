@@ -61,13 +61,36 @@ def _party_clause(parties: list[str] | None, params: dict) -> str:
     return " AND " + " AND ".join(frags)
 
 
+def _source_doc_clause(source_docs: list[str] | None, params: dict) -> str:
+    """SQL fragment restricting an aggregate to an explicitly resolved document set.
+
+    A question that NAMES its instruments ("of the Service Level Agreements
+    with X, Y and Z, which carries the highest cap") is asking about those
+    documents, not about every document in the corpus that happens to mention
+    one of those parties. The party filter above cannot express that: measured
+    live, it computed the answer over all 72 documents mentioning "Acme
+    Communications" - judgments, NDAs, shareholder agreements - when the
+    question named three Service Level Agreements. Scope resolution already
+    identifies the right documents; this lets the aggregate be told which.
+    """
+    if not source_docs:
+        return ""
+    keys = []
+    for i, sd in enumerate(source_docs):
+        key = f"agg_doc{i}"
+        params[key] = sd
+        keys.append(f":{key}")
+    return " AND c.source_doc IN (" + ", ".join(keys) + ")"
+
+
 # ---------------------------------------------------------------------------
 # aggregation
 # ---------------------------------------------------------------------------
 
 def aggregate_liability_caps(wiki_id: str, session_id: str,
                              parties: list[str] | None = None,
-                             doc_type: str | None = None) -> dict:
+                             doc_type: str | None = None,
+                             source_docs: list[str] | None = None) -> dict:
     """SUM/AVG/median over parsed liability caps, with full coverage reporting.
 
     Currency is reported but NOT converted — mixing INR and USD into one sum
@@ -82,6 +105,7 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
     params: dict = {"w": wiki_id, "sid": session_id}
     where = "c.wiki_id = :w AND c.session_id = :sid"
     where += _party_clause(parties, params)
+    where += _source_doc_clause(source_docs, params)
     if doc_type:
         params["dt"] = f"%{doc_type}%"
         where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
@@ -102,6 +126,26 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
             GROUP BY 1 ORDER BY 2 DESC
         """), params).fetchall()
 
+    # Per-document rows, but only for an explicitly named set. "Which of these
+    # carries the highest cap" is answered by naming a document, and a summary
+    # of min/max never names one - measured live, the answer gave a range and
+    # left the question itself unanswered. Deliberately not returned for a
+    # corpus-wide aggregate, where 112 rows would be a wall, not an answer.
+    per_doc = []
+    if source_docs:
+        with db.get_engine().connect() as conn:
+            per_doc = [{
+                "source_doc": r[0],
+                "amount": float(r[1]) if r[1] is not None else None,
+                "currency": r[2] or "unspecified",
+            } for r in conn.execute(text(f"""
+                SELECT c.source_doc, c.liability_cap_amount,
+                       COALESCE(c.liability_cap_currency, 'unspecified')
+                FROM contracts c
+                WHERE {where} AND c.liability_cap_amount IS NOT NULL
+                ORDER BY c.liability_cap_amount DESC
+            """), params).fetchall()]
+
     total = sum(coverage.values())
     by_currency = [{
         "currency": r[0], "contracts": int(r[1]),
@@ -114,6 +158,7 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
     computed = sum(c["contracts"] for c in by_currency)
     return {
         "metric": "liability_cap",
+        "per_doc": per_doc,
         "by_currency": by_currency,
         "mixed_currency": len(by_currency) > 1,
         "computed_over": computed,
@@ -121,12 +166,14 @@ def aggregate_liability_caps(wiki_id: str, session_id: str,
         "coverage": _coverage_note(coverage, computed, total, "liability cap"),
         "excluded": {k: v for k, v in coverage.items() if k != OK},
         "parties": parties or [], "doc_type": doc_type,
+        "source_docs": list(source_docs or []),
     }
 
 
 def aggregate_contract_values(wiki_id: str, session_id: str,
                               parties: list[str] | None = None,
-                              doc_type: str | None = None) -> dict:
+                              doc_type: str | None = None,
+                              source_docs: list[str] | None = None) -> dict:
     """Same shape, over clause-level contract-value figures."""
     if not _enabled():
         return {"error": "database not configured"}
@@ -137,6 +184,7 @@ def aggregate_contract_values(wiki_id: str, session_id: str,
     where = ("c.wiki_id = :w AND c.session_id = :sid "
              "AND c.clause_type_canon = 'contract_value'")
     where += _party_clause(parties, params)
+    where += _source_doc_clause(source_docs, params)
     if doc_type:
         params["dt"] = f"%{doc_type}%"
         where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
@@ -217,7 +265,75 @@ GAP_FIELDS = {
         "label": "termination provision",
         "table": "contracts", "plain_col": "termination",
     },
+    # Backed by the typed clause rows rather than a contracts column, because
+    # dispute resolution is not extracted into one. Asked "how many contracts
+    # carry no dispute resolution clause at all", the pipeline had no gap field
+    # to match, fell through to the whole-corpus count, and answered 1372 --
+    # the size of the wiki, to a question about a subset of it.
+    "dispute_resolution": {
+        "label": "dispute resolution clause",
+        "table": "contracts", "clause_type": "dispute_resolution",
+    },
+    "ip_ownership": {
+        "label": "intellectual property ownership clause",
+        "table": "contracts", "clause_type": "ip_ownership",
+    },
+    "insurance": {
+        "label": "insurance clause",
+        "table": "contracts", "clause_type": "insurance",
+    },
+    "confidentiality": {
+        "label": "confidentiality clause",
+        "table": "contracts", "clause_type": "confidentiality",
+    },
+    "indemnity": {
+        "label": "indemnity clause",
+        "table": "contracts", "clause_type": "indemnity",
+    },
+    "audit_rights": {
+        "label": "audit-rights clause",
+        "table": "contracts", "clause_type": "audit_rights",
+    },
 }
+
+# Extraction-pipeline buckets, not clause TYPES a lawyer would ask "how many
+# documents lack X" about — "definition" and "structural" are catch-all
+# categories for page content that doesn't fit a substantive clause type at
+# all (they are, by a wide margin, the two largest buckets in this corpus),
+# and "obligations" is itself a generic catch-all rather than one nameable
+# provision. Excluded from the dynamic gap-field vocabulary below so a
+# question mentioning "obligations" in passing cannot trigger a meaningless
+# "N documents have no obligations clause" analytic.
+_GAP_FIELD_VOCAB_EXCLUDE = frozenset({"definition", "structural", "obligations"})
+
+_CLAUSE_TYPE_VOCAB_CACHE: dict = {}
+
+
+def clause_type_vocabulary(wiki_id: str) -> list:
+    """Every distinct clause_type_canon actually extracted in this wiki,
+    minus the extraction-pipeline buckets above. Cached per wiki.
+
+    This is what lets find_gaps answer a clause type nobody wrote a
+    GAP_FIELDS entry for: the NOT-EXISTS-in-clauses computation those entries
+    already run is equally valid for any of the ~60 canon values this corpus
+    actually holds, not only the 9 someone happened to name in advance.
+    """
+    if wiki_id in _CLAUSE_TYPE_VOCAB_CACHE:
+        return _CLAUSE_TYPE_VOCAB_CACHE[wiki_id]
+    from sqlalchemy import text
+    from services import db as _db
+    try:
+        with _db.get_engine().connect() as conn:
+            rows = conn.execute(text(
+                "SELECT DISTINCT clause_type_canon FROM clauses "
+                "WHERE wiki_id = :w AND clause_type_canon IS NOT NULL"),
+                {"w": wiki_id}).fetchall()
+    except Exception:
+        return []
+    vocab = sorted({r[0] for r in rows
+                    if r[0] and r[0] not in _GAP_FIELD_VOCAB_EXCLUDE})
+    _CLAUSE_TYPE_VOCAB_CACHE[wiki_id] = vocab
+    return vocab
 
 
 def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
@@ -345,7 +461,7 @@ def expiring_by(wiki_id: str, session_id: str, cutoff_iso: str,
 
 def find_gaps(wiki_id: str, session_id: str, field: str,
               parties: list[str] | None = None, doc_type: str | None = None,
-              limit: int = 50) -> dict:
+              limit: int = 50, doc_type_patterns: list | None = None) -> dict:
     """Documents that genuinely LACK `field`, separated from ones we can't read.
 
     The separation is the entire point. A naive `IS NULL` gap query on this
@@ -358,21 +474,57 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
         return {"error": "database not configured"}
     spec = GAP_FIELDS.get(field)
     if not spec:
-        return {"error": f"unknown gap field {field!r}",
-                "available": sorted(GAP_FIELDS)}
+        # Not one of the hand-curated fields above, but this corpus extracts
+        # ~60 distinct clause_type_canon values and GAP_FIELDS names only 9 of
+        # them — "how many DPAs record no typed force-majeure clause" is
+        # exactly the same NOT-EXISTS-in-clauses computation as the audit-rights
+        # entry above, just for a type nobody had written a dedicated entry
+        # for yet. Built on the fly instead, but only for a canon value
+        # actually extracted somewhere in this wiki — an unrecognised or
+        # misspelled field must fail loudly here, not silently run a
+        # NOT-EXISTS against zero real rows and report every document as
+        # missing something that was never a real clause type at all.
+        if field and field in clause_type_vocabulary(wiki_id):
+            spec = {"label": f"{field.replace('_', ' ')} clause",
+                    "table": "contracts", "clause_type": field}
+        else:
+            return {"error": f"unknown gap field {field!r}",
+                    "available": sorted(GAP_FIELDS) + clause_type_vocabulary(wiki_id)}
     from sqlalchemy import text
     from services import db
 
     params: dict = {"w": wiki_id, "sid": session_id, "lim": limit}
     where = "c.wiki_id = :w AND c.session_id = :sid"
     where += _party_clause(parties, params)
-    if doc_type:
-        params["dt"] = f"%{doc_type}%"
-        where += """ AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id
-                     AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc
-                     AND d2.doc_type ILIKE :dt)"""
+    # An instrument type is one string in the question and many spellings in
+    # the corpus: an NDA is filed under "Mutual Confidentiality and
+    # Non-Disclosure Agreement", "Non-Disclosure Agreement" and both again in
+    # upper case. A single ILIKE catches one of them, so the resolved pattern
+    # list is accepted and OR-ed. Measured live: "how many NDAs record no
+    # liability cap" ran with no type filter at all and answered 511 - the
+    # corpus-wide figure - against a true 142.
+    _pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if not _pats and doc_type:
+        _pats = [doc_type]
+    if _pats:
+        _ors = []
+        for _i, _p in enumerate(_pats):
+            params[f"dt{_i}"] = f"%{_p}%"
+            _ors.append(f"{db._PRIMARY_DOC_TYPE_SQL.replace('d.', 'd2.')} ILIKE :dt{_i}")
+        where += (" AND EXISTS (SELECT 1 FROM documents d2 WHERE d2.wiki_id = c.wiki_id"
+                  " AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc"
+                  " AND (" + " OR ".join(_ors) + "))")
 
-    if spec.get("status_col"):
+    if spec.get("clause_type"):
+        # Absence of a typed clause row. There is no "recorded elsewhere"
+        # state to separate out here: the clause was either extracted for this
+        # document or it was not, so nothing is reported as indeterminate.
+        params["ct"] = spec["clause_type"]
+        missing_sql = ("NOT EXISTS (SELECT 1 FROM clauses cl "
+                       "WHERE cl.wiki_id = c.wiki_id AND cl.session_id = c.session_id "
+                       "AND cl.source_doc = c.source_doc AND cl.clause_type_canon = :ct)")
+        unknown_sql = "FALSE"
+    elif spec.get("status_col"):
         col = spec["status_col"]
         missing_sql = f"c.{col} = '{ABSENT}'"
         # Everything that is neither present nor genuinely absent: reported
@@ -402,8 +554,24 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
             LIMIT :lim
         """), params).fetchall()
 
+    # Which instrument types the gap falls on. "Among contracts that record no
+    # governing law, which types make up the largest share?" is a question
+    # about the SHAPE of the gap, and answering it from retrieval means
+    # answering it from a sample. One more grouped query over the same
+    # predicate gives it exactly.
+    with db.get_engine().connect() as conn:
+        by_type = conn.execute(text(f"""
+            SELECT COALESCE(NULLIF(d2.doc_type, ''), 'Unclassified') AS t, count(*)
+              FROM contracts c
+              LEFT JOIN documents d2 ON d2.wiki_id = c.wiki_id
+                   AND d2.session_id = c.session_id AND d2.source_doc = c.source_doc
+             WHERE {where} AND {missing_sql}
+             GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """), params).fetchall()
+
     return {
         "field": field, "label": spec["label"],
+        "by_type": [{"doc_type": r[0], "count": int(r[1])} for r in by_type],
         "in_scope": int(total),
         "missing": int(missing),
         "indeterminate": int(unknown),
@@ -426,7 +594,8 @@ def find_gaps(wiki_id: str, session_id: str, field: str,
 
 def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap",
                     parties: list[str] | None = None,
-                    doc_type: str | None = None) -> dict:
+                    doc_type: str | None = None,
+                    doc_type_patterns: list | None = None) -> dict:
     """Year-bucketed aggregate over documents.effective_date.
 
     Buckets with too few documents to mean anything are still returned, with
@@ -454,9 +623,19 @@ def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap"
     if metric == "contract_value":
         where += " AND c.clause_type_canon = 'contract_value'"
     where += _party_clause(parties, params)
-    if doc_type:
-        params["dt"] = f"%{doc_type}%"
-        where += " AND d2.doc_type ILIKE :dt"
+    # Same reason as find_gaps: one word in the question, several spellings in
+    # the corpus. "Have the liability caps recorded in Service Level Agreements
+    # risen over time" ran over all 1372 documents and labelled the whole
+    # corpus "decreasing" - a real table about a population nobody asked about.
+    _pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if not _pats and doc_type:
+        _pats = [doc_type]
+    if _pats:
+        _ors = []
+        for _i, _p in enumerate(_pats):
+            params[f"dt{_i}"] = f"%{_p}%"
+            _ors.append(f"{db._PRIMARY_DOC_TYPE_SQL.replace('d.', 'd2.')} ILIKE :dt{_i}")
+        where += " AND (" + " OR ".join(_ors) + ")"
 
     # documents.effective_date is TEXT, and 76 values on this corpus are not in
     # ISO form — a date cast throws on them and takes the whole query down.
@@ -489,13 +668,30 @@ def trend_over_time(wiki_id: str, session_id: str, metric: str = "liability_cap"
                 "median": float(r[4]) if r[4] is not None else None} for r in rows]
     usable = [b for b in buckets if b["with_value"] >= 3]
     direction = None
-    if len(usable) >= 2 and usable[0]["median"] and usable[-1]["median"]:
+    # Two endpoints are not a trend. The direction used to be read from the
+    # first and last usable bucket alone, which labelled the corpus
+    # "decreasing" over medians that ran 243 - 175 - 300 - 252 - 167 - 238 -
+    # 186 (up and down, four reversals), and labelled Service Level Agreements
+    # "increasing" from two usable buckets. So a direction is named only when
+    # there are at least three usable buckets AND most of the steps between
+    # them move the same way; otherwise the honest label is that the years do
+    # not point one way, with the table left in place to show why.
+    if len(usable) >= 3 and usable[0]["median"] and usable[-1]["median"]:
         first, last = usable[0]["median"], usable[-1]["median"]
         change = (last - first) / first if first else 0
-        if abs(change) >= 0.10:
+        _meds = [b["median"] for b in usable if b["median"]]
+        _steps = [b - a for a, b in zip(_meds, _meds[1:])]
+        _up = sum(1 for d in _steps if d > 0)
+        _down = sum(1 for d in _steps if d < 0)
+        _consistent = _steps and max(_up, _down) >= 0.67 * len(_steps)
+        if abs(change) < 0.10:
+            direction = "broadly flat"
+        elif _consistent and ((change > 0) == (_up > _down)):
             direction = "increasing" if change > 0 else "decreasing"
         else:
-            direction = "broadly flat"
+            direction = "no consistent direction"
+    elif len(usable) == 2:
+        direction = "too few years to call a direction"
     return {
         "metric": metric, "buckets": buckets,
         "years_with_enough_data": len(usable),

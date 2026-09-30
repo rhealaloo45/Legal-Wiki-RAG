@@ -607,6 +607,39 @@ def _run_schema_statements(conn, text) -> None:
             CREATE INDEX IF NOT EXISTS clauses_session_status_idx
             ON clauses (session_id, review_status)
         """))
+        # Wording fingerprints (services/templates.py): one row per clause or
+        # page quote line, holding only a hash and a document reference, so
+        # "how many documents state this clause this way" is an indexed count.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS clause_templates (
+                id             BIGSERIAL PRIMARY KEY,
+                wiki_id        TEXT NOT NULL,
+                session_id     TEXT NOT NULL,
+                source_doc     TEXT NOT NULL,
+                kind           TEXT NOT NULL,
+                unit_ref       TEXT NOT NULL,
+                template_hash  TEXT NOT NULL,
+                UNIQUE (wiki_id, kind, unit_ref)
+            )
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clause_templates_hash_idx
+            ON clause_templates (wiki_id, template_hash)
+        """))
+        conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS clause_templates_doc_idx
+            ON clause_templates (wiki_id, source_doc)
+        """))
+        # Fingerprints an operator (or the merge pass) has joined because they
+        # state one commitment in different words.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS template_families (
+                wiki_id        TEXT NOT NULL,
+                template_hash  TEXT NOT NULL,
+                family         TEXT NOT NULL,
+                PRIMARY KEY (wiki_id, template_hash)
+            )
+        """))
         # Canonical clause type (§ Phase 3.5c) — added BESIDE clause_type,
         # which keeps the raw model-chosen label. NULL means "not mapped",
         # which is a real answer here, not a missing value: see
@@ -2697,7 +2730,7 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
         "clause_map_deleted": 0, "source_positions_deleted": 0,
         "relations_deleted": 0, "contradictions_deleted": 0,
         "page_metadata_deleted": 0,
-        "clauses_deleted": 0, "clause_embeddings_deleted": 0,
+        "clauses_deleted": 0, "clause_embeddings_deleted": 0, "clause_templates_deleted": 0,
         "question_embeddings_deleted": 0,
         "contracts_deleted": 0, "obligations_deleted": 0,
         "litigation_facts_deleted": 0, "authorizations_deleted": 0,
@@ -2727,6 +2760,7 @@ def delete_document_data(wiki_id: str, session_id: str, source_doc: str) -> dict
         ("review_queue", "review_queue_deleted"),
         ("collection_documents", "collection_documents_deleted"),
         ("clauses", "clauses_deleted"),
+        ("clause_templates", "clause_templates_deleted"),
         # defined_terms is DERIVED from the clause rows above by
         # services/defined_terms.build(), but it is still per-document data
         # keyed the same way, and leaving it behind outlived the document:
@@ -3098,6 +3132,58 @@ def _cite_key(s: str) -> str:
     return _re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
+_RX_CITE_YEAR = re.compile(r"(18|19|20)\d{2}")
+# A pleading citing "section 34 of the Arbitration and Conciliation Act" is
+# citing the same Act as a judgment citing "Arbitration and Conciliation Act,
+# 1996" — a lawyer drops the year once the Act is obvious. Containment alone
+# cannot see that: one key ends "1996", the other ends "s34", so neither
+# contains the other and the citation was missed. Confirmed live: the count
+# came out one short of the citation table's own distinct-document total.
+#
+# The years are compared rather than discarded. Stripping them outright would
+# equate the Companies Act 1956 with the Companies Act 2013, which are
+# different statutes and the one case this must never get wrong. So: a
+# year-less citation matches a year-bearing authority on the name alone, and
+# two year-bearing ones must agree on the year.
+# Statutes a lawyer cites by initials as often as by name. Without these, a
+# judgment citing "Order XXXIX CPC" and one citing "Code of Civil Procedure,
+# 1908" key to strings with nothing in common ("orderxxxixcpc" against
+# "codeofcivilprocedure1908") and were counted as different statutes -- two of
+# the twenty documents citing the Code were missed for exactly this reason.
+# Kept to unambiguous, well-known abbreviations only.
+_CITE_ABBREV = {
+    "cpc": "codeofcivilprocedure",
+    "crpc": "codeofcriminalprocedure",
+    "ipc": "indianpenalcode",
+    "cra": "companiesact",
+}
+
+
+def _cite_expand(key: str) -> str:
+    """The key with a known statute abbreviation expanded to its full name."""
+    for abbrev, full in _CITE_ABBREV.items():
+        if abbrev in key and full not in key:
+            return key.replace(abbrev, full)
+    return key
+
+
+def _cite_same_act(key_a: str, key_b: str) -> bool:
+    key_a, key_b = _cite_expand(key_a), _cite_expand(key_b)
+    ya, yb = _RX_CITE_YEAR.search(key_a), _RX_CITE_YEAR.search(key_b)
+    if ya and yb and ya.group(0) != yb.group(0):
+        return False
+    if not ya and not yb:
+        return False          # containment above already covers this case
+    stem_a = _RX_CITE_YEAR.sub("", key_a)
+    stem_b = _RX_CITE_YEAR.sub("", key_b)
+    # Section suffixes ("s34", "section9") are not part of the Act's name.
+    stem_a = re.sub(r"(?:section|sec|s)\d+$", "", stem_a)
+    stem_b = re.sub(r"(?:section|sec|s)\d+$", "", stem_b)
+    if len(stem_a) < 12 or len(stem_b) < 12:
+        return False          # too short to be a distinctive statute name
+    return stem_a in stem_b or stem_b in stem_a
+
+
 def find_documents_citing(wiki_id: str, session_id: str, authority: str,
                           limit: int = 50) -> list[dict]:
     """Documents that cite a given statute/rule/authority — a SQL join, no LLM.
@@ -3126,7 +3212,7 @@ def find_documents_citing(wiki_id: str, session_id: str, authority: str,
     for r in rows:
         for cand in (r.normalized_form, r.citation_text):
             ck = _cite_key(cand)
-            if ck and (key in ck or ck in key):
+            if ck and (key in ck or ck in key or _cite_same_act(key, ck)):
                 cur = hits.setdefault(r.source_doc, {
                     "source_doc": r.source_doc,
                     "citation_text": (r.citation_text or r.normalized_form or "").strip(),
@@ -3592,6 +3678,48 @@ def find_pages_mentioning_title(wiki_id: str, session_id: str, title: str) -> li
             {"w": wiki_id, "sid": session_id, "title": title, "tokens": title},
         )
         return [row.title for row in rows]
+
+
+def source_docs_for_titles(wiki_id: str, session_id: str,
+                           titles: list[str]) -> list[str]:
+    """The documents the given wiki pages were built from."""
+    from sqlalchemy import text
+    if not titles:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc FROM pages
+            WHERE wiki_id = :w AND session_id = :s
+              AND title = ANY(:t) AND source_doc <> ''
+        """), {"w": wiki_id, "s": session_id, "t": list(titles)})
+        return [r.source_doc for r in rows]
+
+
+def stored_text_for_docs(wiki_id: str, session_id: str,
+                         source_docs: list[str]) -> str:
+    """Everything the index holds for these documents: the full text of every
+    page built from them, and every verbatim clause cut from them.
+
+    Wider than the passages any one question retrieves, which is the point —
+    a quote can be genuinely in a document and still be outside the slice the
+    answer was written from.
+    """
+    from sqlalchemy import text
+    if not source_docs:
+        return ""
+    crypto = _crypto()
+    parts = []
+    with get_engine().connect() as conn:
+        parts.append(conn.execute(text("""
+            SELECT string_agg(content, ' ') FROM pages
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+        """), {"w": wiki_id, "s": session_id, "d": list(source_docs)}).scalar() or "")
+        for (raw,) in conn.execute(text("""
+            SELECT verbatim_text FROM clauses
+            WHERE wiki_id = :w AND session_id = :s AND source_doc = ANY(:d)
+        """), {"w": wiki_id, "s": session_id, "d": list(source_docs)}):
+            parts.append(crypto.decrypt_safe(raw, default=raw) or "")
+    return " ".join(parts)
 
 
 def find_source_docs_mentioning_phrase(
@@ -4526,6 +4654,314 @@ def find_defined_term(wiki_id: str, session_id: str, source_docs: list[str],
              "page_num": r[3]} for r in rows]
 
 
+# A doc_type names the instrument first and its SUBJECT MATTER after a
+# connector: "Legal Opinion on Financing Structure - Non-Disclosure Agreement"
+# is a Legal Opinion ABOUT an NDA, not an NDA. Matching the raw doc_type with a
+# substring counts it under both types — confirmed live on this corpus, where
+# that one document inflated the NDA total by one and would equally have shown
+# up in "list every NDA". Matching the LEADING segment instead keeps a document
+# under the instrument it actually is. Documents whose type carries no
+# connector (the overwhelming majority) are unaffected, because the leading
+# segment is then the whole string.
+# The instrument this document IS, with the matter suffix cut off — a
+# "Legal Opinion on Acquisition Risk - Shareholders' Agreement" is an opinion,
+# not a shareholders' agreement, and counting it as one inflated every
+# instrument total it touched.
+#
+# Whitespace around the hyphen is then normalised, because extraction does not
+# spell the same instrument the same way twice. This corpus files 147 NDAs as
+# "Non-Disclosure Agreement" and one as "Non- Disclosure Agreement", and that
+# stray space made the 148th invisible to every count, gap and compound query
+# that named NDAs. Split first and normalise after: doing it the other way
+# round would weld "Judgment - Case No. 6/2000" into one token and defeat
+# the suffix trim above.
+_PRIMARY_DOC_TYPE_SQL = (
+    "regexp_replace("
+    "split_part(split_part(split_part(d.doc_type, ' - ', 1), ' on ', 1), ' re ', 1)"
+    ", '\\s*-\\s*', '-', 'g')"
+)
+
+
+def count_documents_with_any_clause_text(wiki_id: str, session_id: str,
+                                         phrase_groups: list) -> int:
+    """How many documents carry a clause in any one of several wordings.
+
+    A precedent search returns the closest few clauses, which answers "have we
+    agreed this before" but not "in how many agreements". Matching slices of
+    those clauses' own text gives the corpus figure.
+
+    Each element of ``phrase_groups`` is one wording variant: a list of
+    phrases that must ALL appear together, because the shared part of a
+    templated clause is not what distinguishes it (records-retention
+    boilerplate appears in most agreements whatever period each states;
+    requiring the period too is what makes the count mean "documents with a
+    five-year retention"). The groups are OR'd, because the closest hit by
+    embedding similarity is not necessarily the corpus's most common template
+    for the same commitment, and anchoring on its rarer wording alone once
+    undercounted 50 documents as 1. A document counts once whichever variant
+    it matches.
+
+    Matched against page text as well as the clauses table: neither is
+    complete alone, and clauses-only missed about a tenth of the documents
+    carrying a wording somewhere the clause extractor never cut a clause from.
+    """
+    from sqlalchemy import text
+    groups = []
+    for g in (phrase_groups or []):
+        ps = [p.strip() for p in (g or []) if p and len(p.strip()) >= 4]
+        if ps and any(len(p) >= 25 for p in ps):
+            groups.append(ps)
+    if not groups:
+        return 0
+    conds, params = [], {"w": wiki_id, "s": session_id}
+    for gi, ps in enumerate(groups):
+        phrase_conds = []
+        for pi, p in enumerate(ps):
+            key = f"p{gi}_{pi}"
+            phrase_conds.append(f"""(EXISTS (
+                SELECT 1 FROM clauses cl WHERE cl.wiki_id = :w AND cl.session_id = :s
+                 AND cl.source_doc = d.source_doc AND cl.verbatim_text ILIKE '%' || :{key} || '%')
+              OR EXISTS (
+                SELECT 1 FROM pages pg WHERE pg.wiki_id = :w AND pg.session_id = :s
+                 AND pg.source_doc = d.source_doc AND pg.content ILIKE '%' || :{key} || '%'))""")
+            params[key] = p
+        conds.append("(" + " AND ".join(phrase_conds) + ")")
+    with get_engine().connect() as conn:
+        return conn.execute(text(
+            "SELECT count(*) FROM documents d WHERE d.wiki_id = :w "
+            "AND d.session_id = :s AND (" + " OR ".join(conds) + ")"), params).scalar() or 0
+
+
+def breakdown_by_typed_field(wiki_id: str, session_id: str,
+                             column: str,
+                             doc_type_patterns: list | None = None,
+                             parties: list | None = None,
+                             limit: int = 12) -> dict:
+    """How the documents in scope split across the values of a typed column.
+
+    A consistency question - "are the Service Level Agreements consistent in
+    their choice of governing law" - is answered by the shape of the whole
+    population, not by comparing whichever five documents a search returned.
+    Measured live, that question was answered from five agreements out of 17,
+    which happened to agree, so the answer was right for the wrong reason and
+    would have been wrong had the sixteenth differed.
+
+    `parties`, when given, requires EVERY named party to appear on the
+    document — a consistency question can name the two sides of a specific
+    relationship ("the agreements between Stark Retail and Oceanic") and
+    without this filter that question was answered as a breakdown of the
+    whole corpus (148 documents, 11 governing-law values) instead of the six
+    the question actually named.
+    """
+    from sqlalchemy import text
+    if not re.fullmatch(r"[a-z_]{3,40}", column or ""):
+        raise ValueError(f"unsupported column {column!r}")
+    params = {"w": wiki_id, "s": session_id, "lim": int(limit)}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    for i, party in enumerate(p.strip() for p in (parties or []) if p and p.strip()):
+        where += f"""AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+                COALESCE(d.parties, '[]'::jsonb)) AS pp(name)
+            WHERE pp.name ILIKE :pty{i}) """
+        params[f"pty{i}"] = f"%{party}%"
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        rows = conn.execute(text(f"""
+            SELECT ct.{column} AS v, count(*) AS n
+              FROM documents d JOIN contracts ct
+                ON ct.wiki_id = d.wiki_id AND ct.session_id = d.session_id
+               AND ct.source_doc = d.source_doc
+             WHERE {where} AND ct.{column} IS NOT NULL AND ct.{column}::text <> ''
+             GROUP BY 1 ORDER BY 2 DESC LIMIT :lim"""), params).fetchall()
+    values = [{"value": r[0], "count": int(r[1])} for r in rows]
+    recorded = sum(v["count"] for v in values)
+    return {"in_scope": int(in_scope), "recorded": recorded,
+            "unrecorded": int(in_scope) - recorded, "values": values,
+            "distinct": len(values), "column": column}
+
+
+def count_documents_with_typed_field(wiki_id: str, session_id: str,
+                                    table: str, column: str,
+                                    doc_type_patterns: list | None = None) -> dict:
+    """How many documents in scope carry a readable value in a typed column.
+
+    "How many Service Level Agreements record a readable rupee liability cap"
+    is a question about extraction coverage, not about wording, and the column
+    answers it exactly: a value either parsed to a number or it did not. The
+    compound branch used to report this half of the question as uncountable.
+    """
+    from sqlalchemy import text
+    if table not in ("contracts", "documents"):
+        raise ValueError(f"unsupported table {table!r}")
+    if not re.fullmatch(r"[a-z_]{3,40}", column or ""):
+        raise ValueError(f"unsupported column {column!r}")
+    params = {"w": wiki_id, "s": session_id}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    if table == "documents":
+        has = f"d.{column} IS NOT NULL AND d.{column}::text <> ''"
+    else:
+        has = (f"EXISTS (SELECT 1 FROM contracts ct WHERE ct.wiki_id = d.wiki_id "
+               f"AND ct.session_id = d.session_id AND ct.source_doc = d.source_doc "
+               f"AND ct.{column} IS NOT NULL AND ct.{column}::text <> '')")
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        with_value = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where} AND {has}"),
+            params).scalar() or 0
+    return {"in_scope": int(in_scope), "with_value": int(with_value),
+            "table": table, "column": column}
+
+
+def count_documents_with_clause_type(wiki_id: str, session_id: str,
+                                     clause_type_canon: str,
+                                     doc_type_patterns: list | None = None) -> dict:
+    """How many documents carry a clause of this canonical type, out of how many.
+
+    Both halves matter: "227 documents have a deadlock clause" says nothing
+    without the denominator, and a commonality question is exactly a question
+    about the ratio. Counted per DOCUMENT, not per clause row, so a document
+    with three deadlock clauses counts once.
+    """
+    from sqlalchemy import text
+    params = {"w": wiki_id, "s": session_id, "ct": clause_type_canon}
+    where = "d.wiki_id = :w AND d.session_id = :s"
+    pats = [p.strip() for p in (doc_type_patterns or []) if p and p.strip()]
+    if pats:
+        ors = []
+        for i, p in enumerate(pats):
+            ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
+            params[f"dt{i}"] = f"%{p}%"
+        where += " AND (" + " OR ".join(ors) + ")"
+    has = ("EXISTS (SELECT 1 FROM clauses cl WHERE cl.wiki_id = d.wiki_id "
+           "AND cl.session_id = d.session_id AND cl.source_doc = d.source_doc "
+           "AND cl.clause_type_canon = :ct)")
+    with get_engine().connect() as conn:
+        in_scope = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where}"), params).scalar() or 0
+        with_clause = conn.execute(text(
+            f"SELECT count(*) FROM documents d WHERE {where} AND {has}"),
+            params).scalar() or 0
+        examples = [r[0] for r in conn.execute(text(
+            f"SELECT d.source_doc FROM documents d WHERE {where} AND {has} LIMIT 5"),
+            params).fetchall()]
+    return {"clause_type": clause_type_canon, "in_scope": int(in_scope),
+            "with_clause": int(with_clause), "examples": examples}
+
+
+def find_documents_by_date_span(wiki_id: str, session_id: str,
+                                date_a: str, date_b: str) -> list[str]:
+    """Documents whose recorded effective AND expiry dates are these two dates.
+
+    Two dates in a question usually mean two documents, and the date resolver
+    rightly refuses to pin one. But "effective 1 June 2025 with a recorded
+    expiry of 31 March 2026" is one document's SPAN, and the pair is a stronger
+    identifier than either date alone. Order is not assumed: the question may
+    recite them either way round.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT source_doc, effective_date, expiry_date FROM documents
+             WHERE wiki_id = :w AND session_id = :s
+               AND effective_date IS NOT NULL AND expiry_date IS NOT NULL
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+    want = {date_a, date_b}
+    out = []
+    for src, eff, exp in rows:
+        e1 = parse_effective_date(str(eff or ""))
+        e2 = parse_effective_date(str(exp or ""))
+        got = {e1.isoformat() if e1 else None, e2.isoformat() if e2 else None}
+        if want <= got:
+            out.append(src)
+    return sorted(set(out))
+
+
+# The instrument words a lawyer uses for a case-number PREFIX, alongside the
+# regex that prefix appears as on this corpus. "How many documents are
+# arbitration petitions" names a litigation instrument, not a document TYPE
+# in the sense every other count path resolves - the number sits in
+# litigation_facts.case_number, not in doc_type, and nothing counted it.
+LITIGATION_CASE_PREFIXES = {
+    "arbitration petition": r"arb\.?\s*pet",
+    "arb pet": r"arb\.?\s*pet",
+    "civil suit": r"\mCS\s*\(",
+    "commercial suit": r"\mCS\s*\(\s*COMM",
+    "writ petition": r"\mW\.?P\.?\s*\(",
+    "company petition": r"\mC\.?P\.?\s*No",
+    "original petition": r"\mO\.?P\.?\s*No",
+    "appeal": r"\mAppeal\s*No",
+}
+
+
+def count_documents_by_case_prefix(wiki_id: str, session_id: str,
+                                   prefix_regex: str) -> dict:
+    """How many documents' litigation record carries a case number of this kind.
+
+    Counted per document, not per litigation_facts row: some documents carry
+    more than one row (a petition and its reply, say), and the question asks
+    about documents, not filings.
+    """
+    from sqlalchemy import text
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc, case_number FROM litigation_facts
+             WHERE wiki_id = :w AND session_id = :s AND case_number ~* :p
+        """), {"w": wiki_id, "s": session_id, "p": prefix_regex}).fetchall()
+    return {"total": len(rows),
+            "documents": sorted({r[0] for r in rows}),
+            "case_numbers": sorted({r[1] for r in rows if r[1]})}
+
+
+def find_documents_by_case_number(wiki_id: str, session_id: str,
+                                  case_number: str) -> list[str]:
+    """Documents whose litigation record carries this case number.
+
+    litigation_facts holds a case number for 251 documents and nothing read it
+    when resolving scope. A case number is the most precise identifier a
+    litigation question can carry — more precise than a party name, which on
+    this corpus routinely spans dozens of matters — and asked about
+    "Case No. 16/2000" the pipeline retrieved an unrelated filing and reported
+    that the suit's disposition was not stated. It was, in a document the
+    number names exactly.
+
+    Compared on digits and letters only, so "Case No. 16/2000",
+    "CS (COMM) 91/2024" and "CS(COMM) No. 91/2024" are one identifier.
+    """
+    from sqlalchemy import text
+    key = re.sub(r"[^a-z0-9]", "", (case_number or "").lower())
+    key = re.sub(r"^(?:no|case|matter)+", "", key)
+    if len(key) < 5:
+        return []
+    with get_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT source_doc, case_number FROM litigation_facts
+             WHERE wiki_id = :w AND session_id = :s AND case_number IS NOT NULL
+        """), {"w": wiki_id, "s": session_id}).fetchall()
+    out = []
+    for src, num in rows:
+        k = re.sub(r"[^a-z0-9]", "", (num or "").lower())
+        k = re.sub(r"^(?:no|case|matter)+", "", k)
+        if k and (k == key or (len(k) >= 5 and (k in key or key in k))):
+            out.append(src)
+    return sorted(set(out))
+
+
 def count_documents_of_type_without_parties(wiki_id: str, session_id: str,
                                             doc_type_patterns: list) -> int:
     """How many documents of this type have NO indexed parties at all.
@@ -4590,7 +5026,7 @@ def list_documents_matching(wiki_id: str, session_id: str,
     if _patterns:
         _ors = []
         for i, pat in enumerate(_patterns):
-            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            _ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
             params[f"dt{i}"] = f"%{pat}%"
         clauses.append("(" + " OR ".join(_ors) + ")")
 
@@ -4600,13 +5036,32 @@ def list_documents_matching(wiki_id: str, session_id: str,
     _phrases = [p.strip() for p in (content_phrases or []) if p and p.strip()]
     if content_phrase and content_phrase.strip() not in _phrases:
         _phrases.append(content_phrase.strip())
+    # Matched against page text OR extracted clause text, because neither
+    # table is complete on its own. Measured on this corpus: "Project
+    # Tamarind" appears in 45 documents' page text and 17 documents' clause
+    # text, and the union is 48 — page text misses wording that only survived
+    # as an extracted clause, and clause text misses wording that sits in a
+    # part of the document no clause was cut from. Searching one table and
+    # calling the result a corpus figure understates it either way.
+    # Matched with a leading word boundary (\m), not a bare substring. Plain
+    # ILIKE '%press release%' matched inside "eXPRESS RELEASE" — the phrase
+    # sits fully inside a longer unrelated word once whitespace is ignored —
+    # and inflated a true 179 documents to 250. \m requires "press" to START
+    # a word; no trailing \M is used, so a plural or suffix on the LAST word
+    # of the phrase ("press releases", "assignable") still matches, which is
+    # the behaviour every other caller of this function already depends on.
     for i, ph in enumerate(_phrases):
-        clauses.append(f"""EXISTS (
+        clauses.append(f"""(EXISTS (
             SELECT 1 FROM pages pg
              WHERE pg.wiki_id = d.wiki_id AND pg.session_id = d.session_id
                AND pg.source_doc = d.source_doc
-               AND pg.content ILIKE :phrase{i})""")
-        params[f"phrase{i}"] = f"%{ph}%"
+               AND pg.content ~* :phrase{i})
+          OR EXISTS (
+            SELECT 1 FROM clauses cx
+             WHERE cx.wiki_id = d.wiki_id AND cx.session_id = d.session_id
+               AND cx.source_doc = d.source_doc
+               AND cx.verbatim_text ~* :phrase{i}))""")
+        params[f"phrase{i}"] = r"\m" + re.escape(ph)
 
     # Governing law and term live on the typed contracts row, not on the
     # document, and both are populated on only part of the corpus — so the
@@ -4818,7 +5273,7 @@ def count_documents_by_party(wiki_id: str, session_id: str,
     if _patterns:
         _ors = []
         for i, pat in enumerate(_patterns):
-            _ors.append(f"d.doc_type ILIKE :dt{i}")
+            _ors.append(f"{_PRIMARY_DOC_TYPE_SQL} ILIKE :dt{i}")
             params[f"dt{i}"] = f"%{pat}%"
         clauses.append("(" + " OR ".join(_ors) + ")")
 

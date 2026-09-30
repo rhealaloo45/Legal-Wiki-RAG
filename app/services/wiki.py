@@ -294,7 +294,7 @@ def _make_doc_identifier(doc_name: str) -> str:
     # Try to extract type + number: "Service Agreement 1" → "SA1"
     m = re.search(r'(Service\s+Agreement|Shareholder\s+Agreement|Joint\s+Venture(?:\s+Agreement)?|'
                   r'NDA|Legal\s+Opinion|Court\s+Case(?:\s+Document)?|Judgment|'
-                  r'Acme\s+Brand\s+Judgment)\s*(\d+)',
+                  r'Brand\s+Judgment)\s*(\d+)',
                   clean, re.IGNORECASE)
     if m:
         type_str = m.group(1).strip()
@@ -304,7 +304,7 @@ def _make_doc_identifier(doc_name: str) -> str:
             'joint venture agreement': 'JVA', 'joint venture': 'JVA',
             'nda': 'NDA', 'legal opinion': 'LO',
             'court case document': 'CCD', 'court case': 'CCD',
-            'judgment': 'J', 'acme brand judgment': 'TBJ',
+            'judgment': 'J', 'brand judgment': 'BJ',
         }
         abbr = abbrevs.get(type_str.lower(), type_str[:3].upper())
         return f"{abbr}{num}"
@@ -1700,6 +1700,14 @@ def ingest(file_path: str, session_id: str) -> dict:
     # --- Stage 04: reconcile + swap in the typed rows ----------------------
     _update_doc_step(session_id, doc_name, "persisting")
     _persist_structured(session_id, doc_name, structured, classification, anchors)
+
+    # Wording fingerprints, now that this document's clauses and pages exist.
+    # Failure never blocks ingest: the table is rebuilt by the backfill.
+    try:
+        from services import templates as _templates
+        _templates.index_document(_active_wiki_id(), session_id, doc_name)
+    except Exception as _tpl_err:
+        logger.warning("Could not fingerprint wording for %s: %s", doc_name, _tpl_err)
 
     # --- Stage 06: hypothetical-question embeddings ------------------------
     _embed_hypothetical_questions(
@@ -3239,6 +3247,13 @@ _DATED_RE = re.compile(
 # answered outright under stated assumptions. The first is right; a lawyer
 # reading the other two could reasonably come away believing the document had
 # been checked against the statute.
+# A drafting request that also asks how widely a term is used, so the draft
+# needs a corpus figure rather than an impression from the precedent sample.
+_RX_BREADTH = re.compile(
+    r"\bhow\s+(?:widely|widespread|common(?:ly)?|often|many\s+(?:of\s+)?(?:our\s+)?"
+    r"(?:agreements?|documents?|contracts?))\b|\bin\s+how\s+many\b|\bprevalen(?:ce|t)\b"
+    r"|\bhow\s+much\s+of\s+(?:our|the)\s+(?:portfolio|corpus|book)\b",
+    re.IGNORECASE)
 _RX_STATUTE_NAMED = re.compile(
     r"\b((?:[A-Z][\w'&.-]*\s+(?:(?:and|of|the|for|on)\s+)?){0,6}"
     r"(?:Act|Rules|Regulations|Code|Directive|Convention|Ordinance)"
@@ -3991,9 +4006,9 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
                 # Extract just the doc name: last meaningful segment
                 # "Legal AI Tool - Acme Group Service Agreement Service Agreement 4"
                 #   → "Service Agreement 4"
-                for prefix in ["Legal AI Tool - Acme Group ", "Legal AI Tool - "]:
-                    if clean_file.startswith(prefix):
-                        clean_file = clean_file[len(prefix):]
+                clean_file = re.sub(r"^Legal AI Tool - (?:\S+ ){0,3}?Group ", "", clean_file)
+                if clean_file.startswith("Legal AI Tool - "):
+                    clean_file = clean_file[len("Legal AI Tool - "):]
                 # Remove repeated type prefix: "Service Agreement Service Agreement 4" → "Service Agreement 4"
                 parts = clean_file.split()
                 mid = len(parts) // 2
@@ -4114,7 +4129,7 @@ JSON:"""
 
 
 _ASSESSMENT_PATTERNS = re.compile(
-    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?:we|i|acme)\s+sign|'
+    r'(?:go\s*/\s*no[- ]?go|recommend|recommendation|should\s+(?!be\b|not\b|have\b)(?:\w+\s+){1,3}?sign\b|'
     r'risk\s+assessment|risk\s+review|advise|advisory|red\s+flag|deal[- ]?breaker|'
     r'approve|approval|sign\s+off|signoff|would\s+you\s+(?:recommend|advise|sign)|'
     r'safe\s+to\s+sign|ready\s+to\s+(?:sign|execute)|negotiation\s+strategy|'
@@ -5308,6 +5323,71 @@ def _verify_answer_citations(answer: str, context: str, question: str = "") -> l
     return unverified
 
 
+_SOURCE_CHECK_MAX_DOCS = 4
+_SOURCE_CHECK_MAX_QUOTES = 6
+
+
+def _quotes_present_in_sources(quotes: list, session_id: str,
+                               titles: list) -> tuple[set, set]:
+    """Look for flagged quotes in the DOCUMENTS, not in the retrieved passage.
+
+    _verify_answer_citations can only compare a quote against the context the
+    answer was written from, so it flags two different things as one: a
+    paraphrase dressed up as a quote, and a real sentence of the document that
+    the retrieval slice did not happen to include. Only the first is a
+    fabrication. Measured on the golden set, a drafting answer had three
+    genuine clause quotes flagged this way, and each flag also bought a full
+    regeneration before the warning was printed.
+
+    Two widening steps, cheapest first. The index holds far more of each
+    document than any one answer retrieves — every page built from it and
+    every verbatim clause cut from it — so that is searched first. What is
+    still missing is looked for in the ORIGINAL FILE on disk, which is the
+    only text that can settle a quote the index never stored, and is the
+    check the retrieved-context comparison cannot make. Bounded to a few
+    documents and a few quotes, and reached only when something was flagged.
+
+    Returns (found in the index, found only in the original file). The second
+    set is worth logging separately: those quotes are real, and their absence
+    from the index is a gap in the index.
+    """
+    if not quotes or not titles:
+        return set(), set()
+    quotes = list(quotes)[:_SOURCE_CHECK_MAX_QUOTES]
+    in_index, in_file = set(), set()
+    try:
+        wiki_id = _active_wiki_id()
+        docs = _db.source_docs_for_titles(wiki_id, session_id, list(titles))[
+            :_SOURCE_CHECK_MAX_DOCS]
+        if not docs:
+            return set(), set()
+        stored = _norm_for_match(_db.stored_text_for_docs(wiki_id, session_id, docs))
+        for q in quotes:
+            if _norm_for_match(q) in stored:
+                in_index.add(q)
+        remaining = [q for q in quotes if q not in in_index]
+        if not remaining:
+            return in_index, in_file
+        for doc in docs:
+            if not remaining:
+                break
+            path = os.path.join(config.UPLOAD_PATH, doc)
+            if not os.path.exists(path):
+                continue
+            try:
+                text_norm = _norm_for_match(_read_file(path))
+            except Exception as e:
+                logger.warning("Source-text citation check could not read a document: %s", e)
+                continue
+            for q in list(remaining):
+                if _norm_for_match(q) in text_norm:
+                    in_file.add(q)
+                    remaining.remove(q)
+    except Exception as e:
+        logger.warning("Source-text citation check failed, keeping the context result: %s", e)
+    return in_index, in_file
+
+
 # Markdown emphasis the model writes INSIDE a quoted span, plus unicode
 # space/apostrophe variants that differ from the source only visually. Folded
 # ONLY for the severity classification below — never for verification itself.
@@ -5979,6 +6059,70 @@ def _truncate_to_last_complete_unit(text: str) -> str:
     return text
 
 
+# A question asking for a number over the corpus, in any of the forms a lawyer
+# writes it.
+_RX_IS_COUNTING = re.compile(
+    r"\bhow\s+many\b|\bin\s+how\s+many\b|\bnumber\s+of\b"
+    r"|\bcount\s+(?:of|the)\b",
+    re.IGNORECASE)
+# Words that turn a bare number into a claim about a whole population. A
+# sentence saying "eight of the documents retrieved" is already honest; one
+# saying "eight documents in the corpus" is not.
+_RX_STATES_TOTAL = re.compile(
+    r"\b(?:\d{1,5}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b"
+    r"[^.\n]{0,60}?\b(?:document|contract|agreement|clause|NDA|"
+    r"petition|judgment|opinion)s?\b",
+    re.IGNORECASE)
+# The deterministic paths say where their figure came from. When one of these
+# phrases is present the number was counted, not sampled, and no warning is due.
+_COUNT_TRUSTED_MARKERS = (
+    "counted directly from the document index",
+    "counted from the document index",
+    "counted over every document in the wiki",
+    "counted from the typed clause index",
+    "counted from the recorded governing law",
+    "not from the pages a search returned",
+)
+
+
+# A reference line names its document before the first comma or pipe:
+# "[1] pdfs_by_category_generated_NDA_Foo.pdf, Clause 4 | Quote: ..."
+_RX_REF_LINE = re.compile(r"^\s*\[\d{1,2}\]\s*([^,|\n]{6,160})", re.MULTILINE)
+
+
+def _sole_cited_document(answer: str) -> str | None:
+    """The one document an answer cites, or None when it cites none or several."""
+    names = set()
+    for m in _RX_REF_LINE.finditer(answer or ""):
+        raw = m.group(1).strip().rstrip(".")
+        raw = re.sub(r"\.(pdf|docx?|txt)$", "", raw, flags=re.IGNORECASE)
+        if raw:
+            names.add(_norm_doc_name(raw))
+    if len(names) != 1:
+        return None
+    only = next(iter(names))
+    return only if 3 <= len(only) <= 120 else None
+
+
+def _is_counting_question(question: str) -> bool:
+    return bool(_RX_IS_COUNTING.search(question or ""))
+
+
+def _answer_states_a_total(answer: str) -> bool:
+    """True when the answer asserts a number of documents without saying it counted."""
+    a = answer or ""
+    if any(m in a.lower() for m in _COUNT_TRUSTED_MARKERS):
+        return False
+    # Only the prose matters. A References block naturally lists numbered
+    # sources and would otherwise trip this on every cited answer.
+    head = re.split(r"\n\s*(?:References|Sources)\b", a, maxsplit=1)[0]
+    return bool(_RX_STATES_TOTAL.search(head))
+
+
+
+
 def generate_answer(question: str, wiki_content: str, selected_titles: list, session_id: str, bm25_count: int = 0, page_selection_usage: dict = None, conversation_context: str = "", intent: str = "factual", unconfirmed_doc_reference: bool = False, scope_note: str = "", scope_warning: str = "", clause_directive: str = "", ambiguity_directive: str = "") -> dict:
     """Generate an answer using the provided wiki content.
 
@@ -6206,6 +6350,33 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
                     f"documents in this corpus; cite them as precedent, never "
                     f"as terms of the document under discussion) ---\n{_block}")
                 logger.info("Drafting intent: added %d precedent clause(s)", len(_pc))
+                # A draft that has to say how widely a term is used ("a note
+                # to the board on our position and how widely we have it")
+                # was left to characterise breadth from the dozen precedent
+                # clauses above, and wrote "at least five" where the index
+                # held 85. The same count the precedent answer uses is run
+                # here and handed over as a figure, not left to inference.
+                if _RX_BREADTH.search(question or ""):
+                    from services import intent_agent as _ia_cnt
+                    _bd = _ia_cnt.precedent_wording_breakdown(
+                        _pc, _active_wiki_id(), session_id)
+                    if _bd.get("any"):
+                        _rows = "\n".join(f'- {n} documents: "{w}..."'
+                                          for w, n in _bd["wordings"] if n)
+                        wiki_content += (
+                            f"\n\n--- CORPUS COUNT (computed from the index, not "
+                            f"estimated) ---\nDocuments in this corpus carrying "
+                            f"each wording among the precedent clauses above:\n"
+                            # No combined total: offered one, the draft led
+                            # with it as the reach of "this restriction", when
+                            # it summed several different commitments.
+                            f"{_rows}"
+                            f"\nWhen the draft states how widely a term is used, "
+                            f"use the figure for the wording that term matches, "
+                            f"say it was counted across the corpus, and do not "
+                            f"substitute a number of your own.")
+                        logger.info("Drafting intent: corpus breakdown injected (%d any)",
+                                    _bd["any"])
         except Exception as _p_err:
             logger.warning("Precedent clauses unavailable for drafting intent: %s",
                            _p_err)
@@ -6715,6 +6886,23 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
             logger.info("Citation check: completed %d truncated quote(s) from context "
                         "without a retry call", _n_repaired)
 
+    # Anything still flagged is checked against the documents themselves before
+    # it is called unverified — see _quotes_present_in_sources.
+    if _unverified_quotes:
+        _in_index, _in_file = _quotes_present_in_sources(
+            _unverified_quotes, session_id, selected_titles)
+        if _in_index or _in_file:
+            _unverified_quotes = [q for q in _unverified_quotes
+                                  if q not in _in_index and q not in _in_file]
+            logger.info("Citation check: %d quote(s) absent from the retrieved passage "
+                        "were found in the documents themselves (%d elsewhere in the "
+                        "index, %d only in the original file) — not flagged, no retry",
+                        len(_in_index) + len(_in_file), len(_in_index), len(_in_file))
+        if _in_file:
+            logger.warning("Citation check: %d quote(s) are in the original file but "
+                           "nowhere in the index — the index is missing that passage",
+                           len(_in_file))
+
     if _unverified_quotes or _misattributed or _unverified_ids:
         # Why the retry fired, not just that it did. This is the single largest
         # source of cost variance in an answer - it doubles the generation - and
@@ -6962,8 +7150,45 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
         answer += f"\n\n[SCOPE WARNING: {scope_warning}]"
 
     # Scope was inferred rather than stated by the question — say so, always.
+    # Except when the finished answer converges on one document and cites it:
+    # the note's premise is that nothing was pinned, and a reader who has just
+    # been given a verbatim clause from a named judgment reads "no document was
+    # confirmed as the one you meant" as the system doubting its own answer.
+    # Measured live on four questions that resolved correctly from a case
+    # number or a party pair. The disclosure duty is real, so it is reworded
+    # rather than dropped — the document was reached by search, not by name,
+    # and that is worth saying in one line instead of five.
     if scope_note:
-        answer += f"\n\n[SCOPE NOTE: {scope_note}]"
+        _one = _sole_cited_document(answer)
+        if _one and "named no document" in scope_note and "already under discussion" not in scope_note:
+            answer += (
+                f"\n\n[SCOPE NOTE: the question named no document; this answer came "
+                f"from {_one}, which retrieval matched to it. Name a document "
+                f"explicitly if you meant a different one.]"
+            )
+        else:
+            answer += f"\n\n[SCOPE NOTE: {scope_note}]"
+
+    # A counting question answered from retrieved pages can only report what
+    # was retrieved. Every deterministic count path returns long before this
+    # point, so anything reaching here counted a sample and, left alone, states
+    # it as a corpus figure: "Fifteen documents refer to Project Tamarind"
+    # against a true 48, "sixteen carry a typed IP ownership clause" against
+    # 302, "the publicity restriction appears in 23 documents" against 179.
+    # The documents listed are real every time; only the total is invented, and
+    # nothing in the wording tells the reader which is which.
+    try:
+        if _is_counting_question(question) and _answer_states_a_total(answer):
+            answer += (
+                "\n\n[COUNT WARNING: this answer was assembled from the documents "
+                "retrieved for your question, not from a count over the corpus. Any "
+                "total above is a floor, not the figure — there may be more that "
+                "were not retrieved. The documents named are real; the number is "
+                "not reliable. Asking for the count by instrument type, party or "
+                "clause type gets one taken from the index instead.]"
+            )
+    except Exception as e:
+        logger.error("Count-sample check failed: %s", e)
 
     # Map each selected page to its real document identifier — the SOURCE_DOC
     # filename (e.g. "...Legal Opinions (1)_document-189.pdf"), not the
@@ -7487,7 +7712,7 @@ _NON_ENTITY_WORDS = {
     "your", "its", "his", "her", "some", "no", "which", "what", "does", "do",
     "is", "are", "was", "were", "review", "summarize", "summarise", "analyze",
     "analyse", "explain", "describe", "identify", "assess", "evaluate", "draft",
-    "compare", "in", "of", "for", "on", "about", "regarding", "acme", "given",
+    "compare", "in", "of", "for", "on", "about", "regarding", "given",
     "from", "with", "and", "or", "to", "by", "under", "between", "during", "at",
     "into", "onto", "over", "after", "before", "against", "across", "within",
     # Quantifiers over the whole corpus ("across all Service Agreements") name
@@ -7495,7 +7720,7 @@ _NON_ENTITY_WORDS = {
     # (and the resulting 45%-confidence cap) on a genuinely broad, correctly
     # cross-document-synthesized answer.
     "all", "both", "such", "these", "those", "various", "multiple", "several", "many",
-}
+} | set(config.COMMON_PARTY_TOKENS)
 
 # Matches a VAGUE singular reference: "this NDA", "the agreement", "this document"
 # (a determiner + a doc type/noun) NOT followed by a number. Used to disambiguate
@@ -7613,7 +7838,7 @@ def _names_numbered_document(question: str) -> bool:
 
 # Tokens that are doc types / generic vocabulary, NOT distinctive entity names.
 _ENTITY_EXCLUDE = {
-    "nda", "sha", "jva", "jv", "sa", "acme", "agreement", "agreements", "service",
+    "nda", "sha", "jva", "jv", "sa", "agreement", "agreements", "service",
     "shareholder", "shareholders", "joint", "venture", "court", "judgment",
     "judgments", "legal", "opinion", "opinions", "case", "document", "documents",
     "redacted", "test", "amendment", "summary", "final", "draft", "the", "and",
@@ -7703,7 +7928,7 @@ _ENTITY_EXCLUDE = {
     # excluding it loses only the ability to match on "data" alone, not the
     # full "Pinnacle Data Analytics" name.
     "intellectual", "property", "governing", "forum", "proper", "data",
-}
+} | set(config.COMMON_PARTY_TOKENS)
 
 
 @lru_cache(maxsize=2048)
@@ -8103,8 +8328,16 @@ _CORP_SUFFIX_RE_STR = (
     r'(?:Private\s+Limited|Pvt\.?\s*Ltd\.?|Pte\.?\s*Ltd\.?|Limited|Ltd\.?|'
     r'LLP|LLC|FZE|FZC|Inc\.?|Corp(?:oration)?|PLC|GmbH|N\.?V\.?|S\.?A\.?)'
 )
+# The "&" is allowed as a word of its own, not only inside one. Every token in
+# the sequence otherwise has to begin with a capital, so "Summit Mifflin Hotels &
+# Resorts Limited" broke at the ampersand and the name came out as "Resorts" —
+# which matches no party, so the document resolved to nothing and the question
+# was answered "not present in these documents" about an agreement the corpus
+# holds. Ampersands are common in real company names ("Hotels & Resorts",
+# "Johnson & Johnson"), and "and" is deliberately NOT accepted here: "X and Y
+# Limited" is usually two parties, while "X & Y Limited" is usually one.
 _PARTY_NAME_RE = re.compile(
-    r'\b((?:[A-Z][A-Za-z0-9&.\-]+\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
+    r'\b((?:(?:[A-Z][A-Za-z0-9&.\-]+|&)\s+){1,6}?)' + _CORP_SUFFIX_RE_STR + r'\b'
 )
 
 # A company name typed in shorthand ALL-CAPS carries no corporate suffix at all
@@ -8129,6 +8362,19 @@ _RX_DEMONSTRATIVE_DOC = re.compile(
     r"(?:agreement|contract|document|deed|lease|instrument|sla|nda|msa|dpa|spa|"
     r"sow|licence|license|arrangement)\b",
     re.IGNORECASE)
+# The same back-reference with a name between the demonstrative and the type
+# word: "under that <Company> agreement". Used only by _carryover_scope, where
+# a thread has already pinned a document; the subject-pivot check there still
+# refuses to inherit when the name is not on the carried document. Without it,
+# the type word counted as a pivot and the follow-up searched the whole corpus
+# (measured: it answered from court judgments that the agreement "is not
+# included in these documents"). Name words must be capitalised, so "that new
+# agreement" stays with the plain pattern's rules.
+_RX_DEMONSTRATIVE_NAMED_DOC = re.compile(
+    r"\b(?i:in|under|of|for|about|within)\s+(?i:this|that|the\s+said|the\s+same)\s+"
+    r"(?:[A-Z][\w&.'()-]*\s+){1,5}"
+    r"(?i:agreement|contract|document|deed|lease|instrument|sla|nda|msa|dpa|spa|"
+    r"sow|licence|license|arrangement)\b")
 
 
 _BARE_ALLCAPS_ENTITY_RE = re.compile(r'\b[A-Z]{2,}(?:\s+[A-Z]{2,}){1,4}\b')
@@ -8166,6 +8412,13 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
     # conjunctions are the same failure one turn later ("And what happens
     # if..."). None of these is ever a party name on its own.
     "tell", "give", "show", "draft", "find", "identify", "outline", "walk",
+    # Same failure, different part of speech: a sentence-initial quantifier
+    # pronoun capitalised only by position. "Anything anomalous across our
+    # data processing agreements?" offered "Anything" as the sole bare
+    # candidate, whose content search matched one coincidental Statement of
+    # Work instead of leaving the question scoped to the DPA population it
+    # names.
+    "anything", "something", "everything", "nothing",
     "and", "in", "of", "for", "as", "on", "at", "but", "so", "if",
     "client", "vendor", "party", "parties", "agreement", "agreements",
     "contract", "contracts", "document", "documents", "clause", "clauses",
@@ -8173,6 +8426,17 @@ _BARE_PROPER_NOUN_STOPWORDS = frozenset({
     "service", "services", "statement", "work", "data", "processing",
     "master", "regarding", "concerning", "according", "prepare", "provide",
     "explain", "describe", "summarize", "summarise", "compare", "list",
+    # "Customer" is a defined term in nearly every DPA on this corpus
+    # ("Customer Data"), not a party name — and a jurisdiction named in a
+    # governing-law clause ("India", "Singapore", "Maharashtra" are this
+    # corpus's actual values) is a place, never a contracting party. Left
+    # unfiltered, "Our data residency standard requires Customer Data to
+    # stay in India. Do our data processing agreements comply?" offered
+    # "Customer" and "India" as bare party candidates, whose content
+    # intersection pinned the whole question to one coincidentally-matching
+    # Non-Solicitation Agreement instead of surveying the DPA population the
+    # question actually names.
+    "customer", "india", "singapore", "maharashtra",
 })
 _BARE_PROPER_NOUN_RE = re.compile(r'\b[A-Z][a-z]{3,}\b')
 
@@ -8510,6 +8774,14 @@ def _narrow_by_question_tokens(question: str, candidate_docs: set[str],
 # An explicit calendar date typed in the question ("the SA dated 15 January
 # 2026", "signed on August 28, 2025"). Two orderings: day-month-year (the
 # convention this corpus's own documents use) and month-day-year.
+# Words that make a singular noun stand for its whole class. "Typically",
+# "generally", "usually" and the like turn "a legal opinion" into "legal
+# opinions as a rule", which is a corpus question, not a document one.
+_RX_GENERALISING = re.compile(
+    r"\b(?:typical(?:ly)?|generally|usually|commonly|normally|"
+    r"as\s+a\s+rule|in\s+general|on\s+average|most\s+often|"
+    r"tend\s+to|tends\s+to)\b",
+    re.IGNORECASE)
 _QUESTION_DATE_RE = re.compile(
     r'\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|'
     r'September|October|November|December)\s+\d{4}\b'
@@ -8517,6 +8789,44 @@ _QUESTION_DATE_RE = re.compile(
     r'October|November|December)\s+\d{1,2},?\s+\d{4}\b',
     re.IGNORECASE,
 )
+
+
+# The case-number shapes this corpus files matters under: "Case No. 16/2000",
+# "Case No. 4/2000", "Case No. 8/2000", "Case No. 5/2000",
+# "W.P.(C) 456/2023", and the internal "Case No. 17/2000" form. The number/year
+# pair is what makes it an identifier, so the pattern requires it.
+_CASE_NUMBER_RES = [
+    re.compile(r"\b([A-Z][A-Za-z.]{0,6}\s*\([A-Za-z]{1,6}\)\s*(?:No\.?\s*)?\d{1,5}\s*/\s*\d{4})"),
+    re.compile(r"\b((?:[A-Z][A-Za-z.]{0,5}\.?\s*){1,3}No\.?\s*\d{1,5}\s*/\s*\d{4})"),
+    re.compile(r"\b(COM-\d{4}-\d{2,4})\b", re.IGNORECASE),
+]
+
+
+# The words that make two dates one document's span rather than two documents.
+_RX_DATE_SPAN = re.compile(
+    r"\b(?:effective|commenc\w+|start\w*|runs?|running|term)\b[^?]{0,80}?"
+    r"\b(?:expir\w+|end\w*|until|through|to)\b"
+    r"|\bfrom\b[^?]{0,40}?\bto\b"
+    r"|\bbetween\b[^?]{0,30}?\band\b[^?]{0,20}?\b(?:inclusive|term)\b",
+    re.IGNORECASE)
+
+
+def _resolve_docs_by_case_number(question: str, session_id: str) -> set[str]:
+    """Documents a case number in the question names, via litigation_facts."""
+    if not config.USE_DATABASE:
+        return set()
+    q = question or ""
+    found: set[str] = set()
+    for rx in _CASE_NUMBER_RES:
+        for m in rx.finditer(q):
+            try:
+                hits = _db.find_documents_by_case_number(
+                    _active_wiki_id(), session_id, m.group(1))
+            except Exception as e:
+                logger.error("case-number lookup failed for %r: %s", m.group(1), e)
+                continue
+            found |= set(hits)
+    return found
 
 
 def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
@@ -8542,7 +8852,65 @@ def _resolve_docs_by_effective_date(question: str, session_id: str) -> set[str]:
     # would otherwise be pinned to whichever of them happens to have a unique
     # date, turning a two-document comparison into a one-document answer —
     # a worse failure than the one this resolver exists to fix.
-    if len({_db.parse_effective_date(m) for m in matches} - {None}) > 1:
+    _parsed_all = sorted({d for d in (_db.parse_effective_date(m) for m in matches)
+                          if d})
+    if len(_parsed_all) > 1:
+        # ...unless the two dates are one document's own span. "effective
+        # 1 June 2025 with a recorded expiry of 31 March 2026" recites a start
+        # and an end, not two instruments, and the pair identifies the document
+        # more strongly than either date alone. Measured live: the guard below
+        # was refusing to pin anything for exactly this question, scope widened
+        # to 179 documents, and the answer came back "not present in these
+        # documents" about an agreement the corpus holds with both dates
+        # recorded.
+        if len(_parsed_all) == 2 and _RX_DATE_SPAN.search(question or ""):
+            try:
+                _span = _db.find_documents_by_date_span(
+                    _active_wiki_id(), session_id,
+                    _parsed_all[0].isoformat(), _parsed_all[1].isoformat())
+            except Exception as e:
+                logger.error("resolve_scope: date-span lookup failed: %s", e)
+                _span = []
+            if len(_span) == 1:
+                return set(_span)
+        # Two dates that are not a span are two documents, and the original
+        # behaviour here was to resolve neither — which left a question naming
+        # both with nothing pinned at all. Where each date identifies exactly
+        # one document, returning BOTH is the answer to the question actually
+        # asked: "how many days separate the Board Resolution of 30 March 2023
+        # from the Legal Opinion of 13 February 2023" needs the pair. Still
+        # silent unless every date resolves uniquely, so an ambiguous date
+        # cannot drag in a document nobody asked about.
+        # A date shared by two documents is not on its own an identifier, but
+        # the question usually says which one it means. "the Legal Opinion
+        # addressed to Summit Harborline Alloys ... dated 13 February 2023" shares
+        # that date with an unrelated NDA, and the party name separates them.
+        _party_docs: set[str] | None = None
+        _each: set[str] = set()
+        for _d in _parsed_all:
+            try:
+                _hits = _db.find_documents_by_effective_date(
+                    _active_wiki_id(), session_id, _d.isoformat(), cap=5)
+            except Exception as e:
+                logger.error("resolve_scope: multi-date lookup failed: %s", e)
+                return set()
+            if len(_hits) > 1:
+                if _party_docs is None:
+                    try:
+                        _party_docs = set(_resolve_docs_by_party(question, session_id))
+                    except Exception:
+                        _party_docs = set()
+                _narrowed = [h for h in _hits if h in _party_docs] if _party_docs else []
+                if len(_narrowed) != 1:
+                    return set()
+                _hits = _narrowed
+            if len(_hits) != 1:
+                return set()
+            _each |= set(_hits)
+        if len(_each) == len(_parsed_all) >= 2:
+            logger.info("Scope pinned to %d documents, one per date recited",
+                        len(_each))
+            return _each
         return set()
     for date_str in matches:
         parsed = _db.parse_effective_date(date_str)
@@ -8767,6 +9135,103 @@ def _canonical_party_name(bb, wiki_id: str, name: str) -> str | None:
     return canon
 
 
+
+# "one with X and one with Y" — an explicit per-item enumeration marker. A
+# same-document mention of two counterparties ("the NDA with X and Y") never
+# repeats "one", so this is a safe, narrow signal that the question names two
+# SEPARATE documents rather than one document with two parties — unlike a
+# bare two-name count, which is genuinely ambiguous between those readings.
+_RX_ONE_WITH_LIST = re.compile(
+    r"\bone\b[^.?]{0,60}?\bwith\b.{0,80}?\band\s+one\b[^.?]{0,60}?\bwith\b",
+    re.IGNORECASE)
+
+
+def _resolve_docs_by_party_list(question: str, session_id: str,
+                                cap: int = 8) -> set[str]:
+    """The union of several separately-named parties' documents.
+
+    _resolve_docs_by_party answers "the agreement with X" by returning the most
+    distinctive named party's documents — right for one instrument, wrong for a
+    question that lists several: "one on Summit Dynamic (3 years), one on Summit Dunder
+    (5 years), one on Summit Mifflin (7 years) — which is longest?" needs all
+    three, and returning one of them had the comparison declined for lack of
+    the other two.
+
+    Deliberately narrow. It fires only when the question does NOT link the
+    names with "between" — "the JV between X and Y" is one document naming
+    both, and turning that into a union would be a real regression. Each name
+    must also resolve to a small set of its own, so an umbrella party cannot
+    drag the corpus in.
+
+    Requires three or more distinct names by default — but a question can
+    list its counterparties with NO corporate suffix at all ("Service Level
+    Agreements with Acme Communications, Summit Initech Commodities and Summit
+    Everfield Beverages" — the corpus's own registered names carry "Limited" /
+    "Corp." / "Private Limited", the question doesn't). _PARTY_NAME_RE alone
+    then finds nothing and this returned empty for exactly the shape it was
+    built for. Falls back to the same bare Title-Case phrase detector
+    _resolve_docs_by_party itself falls back to for a suffix-less name.
+
+    Two names is allowed only behind the explicit "one with X and one with Y"
+    marker (_RX_ONE_WITH_LIST) — confirmed live on a question naming one
+    counterparty group's two separate entities — because a bare
+    two-name count on its own is genuinely ambiguous with "the NDA with X and
+    Y" (one document, two counterparties), which this function must not catch.
+    """
+    if not config.USE_DATABASE:
+        return set()
+    q = question or ""
+    if re.search(r"\bbetween\b", q, re.IGNORECASE):
+        return set()
+    names = {m.group(1).strip() for m in _PARTY_NAME_RE.finditer(q)}
+    names = {n for n in names if len(n) >= 4}
+    min_names = 2 if _RX_ONE_WITH_LIST.search(q) else 3
+    if len(names) < min_names:
+        # No corporate suffix on any name as typed — try the bare Title-Case
+        # phrase fallback _resolve_docs_by_party itself uses. Filtered to
+        # multi-word phrases only: a lone bare word here is far too likely to
+        # be ordinary capitalised prose ("Service Level Agreements") rather
+        # than a party name.
+        bare = {p.strip() for p in _bare_proper_noun_phrase_candidates(q)
+                if len(p.split()) >= 2}
+        names |= bare
+    if len(names) < min_names:
+        return set()
+    # The instrument type the question names ("Service Level Agreements",
+    # "confidentiality agreements") — resolved once and applied to every
+    # name below via a structured party+type filter rather than
+    # _resolve_docs_by_party's full-text content scan. That scan is capped
+    # at 20 hits for performance, ranked in whatever order the database
+    # returns them; a party as common as "Acme Communications" (100+
+    # documents on this corpus, across many instrument types) can have every
+    # one of its Service Level Agreements sit OUTSIDE that first 20, so the
+    # scan finds nothing to narrow at all. Confirmed live: capped scan found
+    # 20 documents for "Acme Communications" and the one true SLA was not
+    # among them, while list_documents_matching's party-column filter (an
+    # indexed structured match, not a ranked scan) finds it directly. Local
+    # import: intent_agent imports this module, so the reverse import has to
+    # stay deferred to call time rather than sit at module scope.
+    from services import intent_agent as _ia
+    _, _type_patterns = _ia._doctype_from_question(question)
+
+    out: set[str] = set()
+    for name in sorted(names):
+        try:
+            result = _db.list_documents_matching(
+                _active_wiki_id(), session_id, parties=[name],
+                doc_type_patterns=_type_patterns or None, limit=cap + 2)
+            hits = {d.get("source_doc") for d in (result.get("documents") or [])
+                    if d.get("source_doc")}
+        except Exception as e:
+            logger.error("party-list resolution failed for %r: %s", name, e)
+            continue
+        if hits and len(hits) <= 3:
+            out |= hits
+        if len(out) > cap:
+            return set()
+    return out
+
+
 def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) -> set[str]:
     """Resolve the document(s) of a PARTY NAME typed in the question.
 
@@ -8818,8 +9283,8 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     # set available to narrow against below, not a query-truncated slice that
     # happens to omit the one sibling a filename token would have pinned.
     _PARTY_SCAN_CAP = 20
-    # Wider re-scan used only to intersect several party names against each
-    # other, where a cap-truncated set makes the intersection meaningless.
+    # Full-set re-scan for any name whose first pass came back at the cap, where
+    # a truncated set is a number that cannot be compared or intersected.
     _PARTY_INTERSECT_CAP = 200
 
     # Canonicalise each candidate through the entity registry before searching.
@@ -8854,6 +9319,35 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
     if not resolved:
         return set()
 
+    # A set that came back sitting exactly on the cap was truncated, not
+    # counted. Everything below treats the size of these sets as meaning
+    # something: the smallest set wins as the most distinctive name, the
+    # intersection narrows to the documents every name shares, and the token
+    # narrowing picks one document out of the siblings. A name that appears in
+    # 200 documents and a name that appears in 20 are indistinguishable once
+    # both have been cut to 20, so the selection can hand the rest of the
+    # function an arbitrary fifth of the real sibling set and the question's own
+    # identifier then fails to find the document it names. Re-scanned per name
+    # rather than by raising the first-pass cap for everyone: the wide query is
+    # only paid for by the names that turn out to be broad, which is usually
+    # none of them.
+    for _i, (_name, _docs) in enumerate(resolved):
+        if len(_docs) < _PARTY_SCAN_CAP:
+            continue
+        try:
+            _full: set[str] = set()
+            for variant in _variants_by_name[_name]:
+                _full |= {d for d in _db.find_source_docs_mentioning_phrase(
+                    _active_wiki_id(), session_id, variant,
+                    cap=_PARTY_INTERSECT_CAP) if d}
+        except Exception as e:
+            logger.error("resolve_scope: full party lookup failed for %r: %s", _name, e)
+            continue
+        if len(_full) > len(_docs):
+            logger.info("Party-name scan for %r was truncated at %d — %d document(s) "
+                        "actually mention it", _name, _PARTY_SCAN_CAP, len(_full))
+            resolved[_i] = (_name, _full)
+
     # A question naming TWO parties is naming the document that mentions BOTH.
     # Picking the single most distinctive name instead answered "the liability
     # cap in the Proseware-Wideworld agreement" from a Acme Capital DPA whose
@@ -8877,30 +9371,12 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
                       (all(n in suffix_candidates for n, _ in resolved)
                        or len(resolved) == 2))
     if _intersectable:
+        # Every set here is already a full one — a name whose first pass hit the
+        # cap was re-scanned above — so the intersection is over what each name
+        # really matches. It used to be computed over truncated sets and then
+        # re-run wide only when it came back empty, which left the narrowing
+        # below working from the truncated sets whenever it came back non-empty.
         inter = set.intersection(*[d for _, d in resolved])
-        if not inter and any(len(d) >= _PARTY_SCAN_CAP for _, d in resolved):
-            # A truncated scan cannot be intersected: "Proseware" alone hits 26
-            # documents, the scan stopped at 20, and the one document that also
-            # mentions "Wideworld" was in the 6 it never returned.
-            wide = []
-            for name, docs in resolved:
-                if len(docs) < _PARTY_SCAN_CAP:
-                    wide.append(docs)
-                    continue
-                try:
-                    rescanned: set[str] = set()
-                    for variant in _variants_by_name[name]:
-                        rescanned |= {d for d in _db.find_source_docs_mentioning_phrase(
-                            _active_wiki_id(), session_id, variant,
-                            cap=_PARTY_INTERSECT_CAP) if d}
-                    wide.append(rescanned)
-                except Exception as e:
-                    logger.error("resolve_scope: wide party lookup failed for %r: %s",
-                                 name, e)
-                    wide = []
-                    break
-            if wide:
-                inter = set.intersection(*wide)
         _smallest = min(len(d) for _, d in resolved)
         if inter and len(inter) < _smallest:
             logger.info("Party-name match: %d document(s) mention every party named "
@@ -9589,11 +10065,10 @@ _PARTY_GENERIC_WORDS = frozenset({
     # entirely; a real Transition Services Agreement never found at all).
     # Ingest's own short-titling already drops these ("Sagar-Trey", "TPL"),
     # this just catches the token extractor up to match.
-    'apex', 'acme',
-})
+}) | frozenset(config.COMMON_PARTY_TOKENS)
 
 
-def _distinctive_party_token(name: str) -> str:
+def _distinctive_party_token(name: str, skip: frozenset = frozenset()) -> str:
     """The one word of a party name that identifies the party.
 
     "Aether Technologies Inc." → "Aether"; "Helios Energy Corporation" →
@@ -9602,9 +10077,16 @@ def _distinctive_party_token(name: str) -> str:
     page titles. Returns "" when nothing distinctive survives (a name made
     entirely of generic words), so the caller can skip it rather than search
     for a word that would match half the corpus.
+
+    `skip` lets a caller ask for the NEXT distinctive word instead of the
+    first — used when two different companies in the same question share a
+    leading word ("Company024 Initech Corp." and "Initech Materials
+    Pte. Ltd." both lead with "Initech"), so the second party is not silently
+    dropped as if it were a repeated mention of the first.
     """
     for word in re.split(r'[^A-Za-z0-9]+', name or ''):
-        if len(word) >= 3 and word.lower() not in _PARTY_GENERIC_WORDS:
+        if (len(word) >= 3 and word.lower() not in _PARTY_GENERIC_WORDS
+                and word.lower() not in skip):
             return word
     return ""
 
@@ -9863,7 +10345,19 @@ def _content_pair_supplement(session_id: str, tokens: list[str], full_names: lis
     return set()
 
 
-_BETWEEN_RE = re.compile(r'\bbetween\b', re.I)
+# A lawyer enumerating several matters does not necessarily say "between"
+# every time — "the one WITH Acme Communications and Sterling, the one
+# between Initech Commodities and Initech Materials, and the one between..."
+# uses both in a single sentence. _BETWEEN_RE originally saw only two "between"
+# spans in that question, so the pair before the first one (Acme/Sterling)
+# was swept into the FIRST segment's head instead of getting a segment of its
+# own — the resolver then read that combined text as one pair, matched the
+# Acme/Sterling document, and silently dropped Initech. "with" is scoped to
+# right after an enumeration word (one/first/second/third/matter/agreement) so
+# it does not fire on ordinary prose use of "with" elsewhere in the question.
+_BETWEEN_RE = re.compile(
+    r'\bbetween\b|\b(?:the\s+)?(?:one|first|second|third|other|matter|'
+    r'agreement)\s+with\b', re.I)
 
 # What joins one named instrument to the NEXT one in a question that names
 # several ("... dated 25 December 2019 AND THE Key Employee Retention Agreement
@@ -10014,6 +10508,19 @@ def _resolve_one_party_pair(question: str, session_id: str,
     token_full: dict[str, str] = {}
     for n in names:
         tok = _distinctive_party_token(n)
+        if tok and tok.lower() in {t.lower() for t in tokens}:
+            # The word collides with one already taken. If it came from the
+            # SAME full name, this is a repeated mention of one party and the
+            # collision is correct — drop it. If it came from a DIFFERENT
+            # full name, two distinct parties share a leading word (affiliated
+            # entities in the same corporate family are common on this
+            # corpus — "Company024 Initech Corp." and "Initech
+            # Materials Pte. Ltd." both lead with "Initech"), and dropping the
+            # second silently loses one whole side of the pair. Retry with
+            # that party's next distinctive word instead.
+            _prior_full = token_full.get(next(t for t in tokens if t.lower() == tok.lower()))
+            if _prior_full and _prior_full.strip().lower() != n.strip().lower():
+                tok = _distinctive_party_token(n, skip=frozenset({tok.lower()}))
         if tok and tok.lower() not in {t.lower() for t in tokens}:
             tokens.append(tok)
             token_full[tok] = n
@@ -10636,7 +11143,8 @@ def _carryover_scope(question: str, session_id: str) -> list[str]:
             # pinned, searched all 1,372 documents and answered from a different
             # company's Joint Venture Agreement that merely shared the word
             # "Gringotts" - and turns 3 and 4 then inherited that wrong document.
-            and not _RX_DEMONSTRATIVE_DOC.search(question)):
+            and not _RX_DEMONSTRATIVE_DOC.search(question)
+            and not _RX_DEMONSTRATIVE_NAMED_DOC.search(question)):
         return []
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         return []
@@ -10835,8 +11343,31 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     return family, docs
 
 
+# "Have we used the same qualification language as in the Summit Meridian
+# Alloys opinion elsewhere in our legal opinions?" resolved single_doc to
+# that one opinion (a clean entity match) and _enforce_question_family saw
+# full overlap with the "Legal Opinion" family it also detected, so it left
+# scope untouched — the model then had only the one document and correctly,
+# uselessly, reported that "these documents do not include other legal
+# opinions for comparison." The named document was never wrong, it was just
+# the wrong SCOPE for a question that explicitly asks to compare it against
+# the rest of its own family. Requires both signals together so an ordinary
+# single-document question ("the same clause as before" with no comparison
+# target) is never widened on the word "other" alone.
+_RX_FAMILY_COMPARISON_SAME = re.compile(r"\bsame\b.{0,60}?\bas\b", re.IGNORECASE)
+_RX_FAMILY_COMPARISON_ELSEWHERE = re.compile(
+    r"\belsewhere\b|\banywhere\s+else\b|\bin\s+(?:any\s+)?other\b|"
+    r"\bacross\s+(?:our|the)\s+other\b", re.IGNORECASE)
+
+
+def _is_cross_family_comparison(question: str) -> bool:
+    q = question or ""
+    return bool(_RX_FAMILY_COMPARISON_SAME.search(q)
+                and _RX_FAMILY_COMPARISON_ELSEWHERE.search(q))
+
+
 def _enforce_question_family(scoped: dict, family: str | None,
-                             fam_docs: set[str]) -> dict:
+                             fam_docs: set[str], question: str = "") -> dict:
     """Reconcile a party/entity resolution with the INSTRUMENT the question names.
 
     The party, party-pair and entity resolvers match on party NAMES alone. A
@@ -10866,6 +11397,15 @@ def _enforce_question_family(scoped: dict, family: str | None,
         return scoped
     kept = [d for d in targets if d in fam_docs]
     if len(kept) == len(targets):
+        if (len(fam_docs) > len(targets)
+                and _is_cross_family_comparison(question)):
+            method = scoped.get("method", "")
+            logger.info("Scope %s asks to compare against the rest of the %s "
+                        "family it already sits inside — widening from %d to "
+                        "%d doc(s)", method, family, len(targets), len(fam_docs))
+            return {**scoped, "scope": "family", "target_docs": sorted(fam_docs),
+                    "target_family": family, "is_broad": True,
+                    "method": f"{method}-family-comparison"}
         return scoped
     method = scoped.get("method", "")
     if kept:
@@ -11313,15 +11853,30 @@ def resolve_scope(question: str, session_id: str, pages: dict | None = None,
     single branch's — that the documents resolved are actually of the
     instrument type the question asked about (see _enforce_question_doc_type).
 
-    Two exemptions. A question naming a FILE outright has said something
+    Three exemptions. A question naming a FILE outright has said something
     stronger than a type and must never be overridden by one. A carried-over
     scope names no instrument at all — the type words belong to the earlier
     turn, not this one, so applying them here would silently re-scope a
-    follow-up onto a different document.
+    follow-up onto a different document. A family widened for cross-document
+    comparison already resolved its members through _question_family_scope's
+    doc_family + folder_hint union (the same mechanism the count fast path
+    relies on to get the corpus's true family membership) — re-narrowing that
+    with _resolve_docs_by_doc_type's stricter, recorded-doc_type-string match
+    would drop real members whose ingest-time classification used unusual
+    wording. Confirmed live: it dropped 6 of 9 Legal Opinions that genuinely
+    share the exact hedge phrase a precedent-comparison question needed,
+    including the anchor document the question named outright.
     """
     scoped = _resolve_scope_uncorrected(question, session_id, pages, chat_session_id)
     method = (scoped or {}).get("method", "")
-    if not scoped or method == "file" or "carryover" in method:
+    # A case number names one matter exactly, so doc-type correction has
+    # nothing to add and everything to lose. Measured live: Case No. 15/2000
+    # resolved correctly to the judgment recording it, then doc-type
+    # enforcement replaced that with a DIFFERENT judgment of the same type, and
+    # the answer reported the disposition of the wrong case. The same applies
+    # to a scope pinned by the case-number resolver's sibling paths.
+    if (not scoped or method == "file" or "carryover" in method
+            or "family-comparison" in method or method.startswith("case-number")):
         return scoped
     scoped = _enforce_question_doc_type(scoped, question, session_id)
     # Last, so it adds the amendment back whatever narrowing ran above: the two
@@ -11381,6 +11936,22 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # Still only fires on a unique hit. A date shared by several documents is
     # not an identifier, which is precisely why the party name outranks it
     # everywhere else.
+    # A case number is the most precise identifier a litigation question can
+    # carry, so it is tried before the date and well before any party name —
+    # "Acme Sons" alone spans dozens of matters on this corpus. Measured live:
+    # asked for the disposition of Case No. 16/2000, scope resolution had
+    # nothing to pin on, retrieval returned an unrelated impersonation filing,
+    # and the answer reported the disposition as not stated. The judgment
+    # recording it was indexed the whole time under that number.
+    try:
+        _case = _resolve_docs_by_case_number(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: case-number resolution failed: %s", e)
+        _case = set()
+    if _case:
+        return {"scope": "single_doc", "target_docs": sorted(_case),
+                "target_family": None, "is_broad": len(_case) > 1,
+                "confidence": 0.9, "method": "case-number"}
     try:
         _dated = _resolve_docs_by_effective_date(question, session_id)
     except Exception as e:
@@ -11516,7 +12087,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(compound_docs),
              "target_family": None, "is_broad": False,
              "confidence": 0.8, "method": "party-pair-compound"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # Party-name → document via full-text content match. Catches the case the
     # filename/entity detectors miss: the user names the counterparty ("SteelLoop
@@ -11524,6 +12095,19 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # document under a bare type+number and masks the party in metadata. Only
     # fires on an unambiguous single-document hit, so it's safe to prefer over the
     # weaker entity heuristic below (which resolves no concrete target_docs).
+    # A question listing several parties, each with its own instrument, needs
+    # all of them. Checked before the single-party resolver below, which by
+    # design returns only the most distinctive one.
+    try:
+        _plist = _resolve_docs_by_party_list(question, session_id)
+    except Exception as e:
+        logger.error("resolve_scope: party-list resolution failed: %s", e)
+        _plist = set()
+    if len(_plist) > 1:
+        logger.info("Scope pinned to %d documents, one per party named", len(_plist))
+        return {"scope": "single_doc", "target_docs": sorted(_plist),
+                "target_family": None, "is_broad": True,
+                "confidence": 0.7, "method": "party-list"}
     try:
         party_docs = _resolve_docs_by_party(question, session_id)
     except Exception as e:
@@ -11542,7 +12126,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                  "target_family": None, "is_broad": False,
                  "confidence": 0.85 if len(party_docs) == 1 else 0.8,
                  "method": "party" if len(party_docs) == 1 else "party-multi"},
-                _fam_name, _fam_docs)
+                _fam_name, _fam_docs, question)
         # Party spans several documents. If the question ALSO names exactly one
         # instrument type ("the SOW with Emberline"), narrow to that specific
         # document within the resolved family — sharper than answering across
@@ -11555,6 +12139,24 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             fam_docs = set()
         narrowed = party_docs & fam_docs
         if len(narrowed) == 1:
+            # "Have we used the same X as in Y elsewhere in our <family>?"
+            # narrows to Y by party+type exactly as intended, but Y is the
+            # ANCHOR of an explicit request to compare it against the rest of
+            # its own family, not the whole answer. Widen to the family
+            # instead of narrowing to the one document that started it.
+            if len(fam_docs) > 1 and _is_cross_family_comparison(question):
+                # get_documents_by_family alone (unlike _question_family_scope,
+                # which unions in folder_hint) misses documents whose ingest-time
+                # content classification came out generic — same gap noted on
+                # _question_family_scope above. Widening for an explicit
+                # comparison question should use the same complete membership
+                # the count fast path relies on, not the narrower one this
+                # branch already had lying around for a plain narrow-to-1 check.
+                _fam2, _fam2_docs = _question_family_scope(question, session_id)
+                _comparison_docs = _fam2_docs if _fam2_docs else fam_docs
+                return {"scope": "family", "target_docs": sorted(_comparison_docs),
+                        "target_family": fam, "is_broad": True,
+                        "confidence": 0.75, "method": "party-family-comparison"}
             return {"scope": "single_doc", "target_docs": sorted(narrowed),
                     "target_family": None, "is_broad": False,
                     "confidence": 0.8, "method": "party"}
@@ -11577,7 +12179,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(party_docs),
              "target_family": None, "is_broad": False,
              "confidence": 0.75, "method": "party-multi"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
     # Energy Corporation"). The single-party resolver above cannot reach this:
@@ -11686,7 +12288,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
              "target_family": None, "is_broad": False,
              "confidence": 0.82 if len(pair_docs) == 1 else 0.75,
              "method": "party-pair"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # A matter/reference number the question recites ("MAT-0000-0000")
     # resolving to exactly one document. Runs after every party-name signal,
@@ -11735,7 +12337,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             {"scope": "single_doc", "target_docs": sorted(named_one),
              "target_family": None, "is_broad": False,
              "confidence": 0.78, "method": "named-instrument-single"},
-            _fam_name, _fam_docs)
+            _fam_name, _fam_docs, question)
 
     # A party pair that shares a whole document family. The title- and
     # content-intersection resolvers above both decline here, because sixteen
@@ -11778,7 +12380,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
                 {"scope": "single_doc", "target_docs": ent_targets,
                  "target_family": None, "is_broad": False,
                  "confidence": 0.72, "method": "entity"},
-                _fam_name, _fam_docs)
+                _fam_name, _fam_docs, question)
         return {"scope": "single_doc", "target_docs": [],
                 "target_family": None, "is_broad": False,
                 "confidence": 0.7, "method": "entity"}
@@ -12017,6 +12619,16 @@ def classify_query(question: str, session_id: str) -> dict:
     # gate just never let it).
     if _BROAD_SCOPE_RE.search(question) or _PLURAL_FAMILY_HINT_RE.search(question):
         logger.info("Broad/plural-family phrasing → skip disambiguation")
+        return {"needs_disambiguation": False, "documents": docs}
+
+    # A generalising question is about a CLASS even when its noun is singular:
+    # "what limitations does a legal opinion in this corpus TYPICALLY place on
+    # its own conclusions?" names no document and wants none. Neither gate above
+    # catches it — the noun is singular and there is no breadth word — so it was
+    # answered with "which agreement are you asking about?", a prompt the reader
+    # cannot usefully answer because the question was never about one agreement.
+    if _RX_GENERALISING.search(question):
+        logger.info("Generalising phrasing → skip disambiguation")
         return {"needs_disambiguation": False, "documents": docs}
 
     # A named party that resolves via full-text content search is an unambiguous

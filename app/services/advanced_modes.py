@@ -5,11 +5,12 @@ import json
 import uuid
 import logging
 import concurrent.futures
+import contextvars
 from threading import Lock
 from typing import Optional
 
 import config
-from services import reader, llm, wiki
+from services import reader, llm, wiki, tracing
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,12 @@ def _lookup_cached_metadata(session_id: str, doc_name: str, col_name: str) -> Op
             from services import db as _db, wikis as _wikis
             cached = _db.get_metadata(_wikis.active_wiki_id(), session_id, doc_name)
             if cached.get(field_key) is not None:
-                return {"value": cached[field_key], "confidence": 0.95, "quote": None}
+                from services import register as _register
+                _wid = _wikis.active_wiki_id()
+                _sd = _register.resolve_source_doc(_wid, session_id, doc_name)
+                _quote = (_register.verbatim_quote(_wid, session_id, _sd, [str(cached[field_key])], topic=field_key)
+                          if _sd else None)
+                return {"value": cached[field_key], "confidence": 0.95, "quote": _quote}
         except Exception as _e:
             logger.warning(f"Metadata cache lookup failed for {doc_name}/{col_name}: {_e}")
 
@@ -140,7 +146,10 @@ def get_raw_doc_text(session_id: str, doc_name: str) -> str:
 # config.BROAD_QUESTION_TOTAL_CAP in wiki.py), used only for open-ended/summary
 # columns or when a narrow-budget first pass comes back low-confidence/empty.
 _CELL_CONTEXT_NARROW_LIMIT = 3000
-_CELL_CONTEXT_BROAD_LIMIT = 8000
+# Sized to the median document's whole wiki text (~14k chars, measured),
+# so the escalation pass can read all of a typical
+# document rather than a second, slightly larger ranked slice of it.
+_CELL_CONTEXT_BROAD_LIMIT = 16000
 
 
 def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broad: bool = False) -> str:
@@ -172,7 +181,15 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
                 )
                 ranked = [t for t in selected_titles if t in scoped]
                 if ranked:
-                    ordered_titles = ranked
+                    # Narrow: only what ranked. Broad: what ranked first, then
+                    # the document's remaining pages. Ranking is keyword-led,
+                    # so a clause filed under different wording (a "Data
+                    # Location" page for a "data residency" column) never
+                    # ranks; re-ranking the same few pages on escalation left
+                    # it out again and the cell came back as not stated.
+                    ordered_titles = ranked + (
+                        [t for t in scoped if t not in ranked] if broad else []
+                    )
             except Exception as e:
                 logger.warning(
                     f"Scoped page selection failed for {doc_name}/{query[:40]!r}: {e} — using all scoped pages"
@@ -186,7 +203,7 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
             summary = page_data.get("summary", "") if isinstance(page_data, dict) else ""
             chunk = f"## {title}\n{summary}\n{content}"
             if total_len and total_len + len(chunk) > limit:
-                break
+                continue  # a smaller page further down may still fit
             parts.append(chunk)
             total_len += len(chunk)
         wiki_text = "\n\n".join(parts)
@@ -198,6 +215,28 @@ def _get_wiki_text_for_doc(session_id: str, doc_name: str, query: str = "", broa
     if raw:
         return f"[Source Document: {doc_name}]\n\n{raw[:limit]}"
     return ""
+
+def _fast_ask_nonempty(prompt: str, budget: int, strip_fences: bool = False) -> str:
+    """fast_ask, retried once at double the budget if the reply is empty.
+
+    The fast model is a reasoning model: it spends part of the budget on
+    hidden reasoning, and when that eats the whole budget the reply is an
+    empty string rather than an error. One retry at double the budget covers
+    the run-to-run variance in reasoning spend. Every Review/Compare call goes
+    through here so none of them can quietly return nothing.
+    """
+    raw = ""
+    for _ in range(2):
+        raw, _usage = llm.fast_ask(prompt, max_tokens=budget)
+        raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw or "", flags=re.DOTALL)
+        if strip_fences:
+            raw = re.sub(r'```json', '', raw)
+            raw = re.sub(r'```', '', raw)
+        if raw.strip():
+            break
+        budget *= 2
+    return raw.strip()
+
 
 def extract_cell(doc_text: str, column_name: str) -> dict:
     """Extract a specific piece of information from text using fast LLM path."""
@@ -224,12 +263,7 @@ Text:
 Extract: {column_name}"""
 
     try:
-        raw, _ = llm.fast_ask(prompt, max_tokens=300)
-        # remove potential reasoning block or markdown
-        raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-        raw = re.sub(r'```json', '', raw)
-        raw = re.sub(r'```', '', raw)
-        parsed = json.loads(raw.strip())
+        parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_CELL_EXTRACT, strip_fences=True))
         return {
             "value": parsed.get("value"),
             "confidence": float(parsed.get("confidence", 0.0)),
@@ -237,7 +271,31 @@ Extract: {column_name}"""
         }
     except Exception as e:
         logger.error(f"Cell extraction failed for '{column_name}': {e}")
-        return {"value": None, "confidence": 0.0, "quote": None}
+        return failed_cell()
+
+
+def failed_cell() -> dict:
+    """A cell whose extraction did not complete.
+
+    Kept distinct from a cell whose value is genuinely null: a null value
+    means the model read the text and found no such term, while this means
+    nobody knows. Rendering the two the same way tells a reviewer that an
+    agreement lacks a clause it may well contain.
+    """
+    return {"value": None, "confidence": 0.0, "quote": None, "failed": True}
+
+
+def _cell_for_summary(cell: dict):
+    """What a follow-on LLM prompt should see for one cell."""
+    if (cell or {}).get("failed"):
+        return "EXTRACTION FAILED (unknown; not evidence that the term is absent)"
+    return (cell or {}).get("value")
+
+
+def _cell_for_export(cell: dict):
+    if (cell or {}).get("failed"):
+        return "Extraction failed - not checked"
+    return (cell or {}).get("value")
 
 
 def _extract_with_retrieval(session_id: str, doc_name: str, query_text: str, broad_hint: bool = False) -> dict:
@@ -252,6 +310,10 @@ def _extract_with_retrieval(session_id: str, doc_name: str, query_text: str, bro
         if broad_text and broad_text != doc_text:
             res_broad = extract_cell(broad_text, query_text)
             if res_broad.get("value") is not None and res_broad.get("confidence", 0.0) >= res.get("confidence", 0.0):
+                res = res_broad
+            elif res.get("failed") and not res_broad.get("failed"):
+                # The broad pass completed and found nothing: that is a real
+                # answer, which beats an extraction that never finished.
                 res = res_broad
     return res
 
@@ -288,7 +350,7 @@ def _build_review_sheet(ws, store_data: dict):
         row_values = [doc_name]
         for col_name in columns:
             cell_data = col_data.get(col_name, {})
-            row_values.append(cell_data.get("value"))
+            row_values.append(_cell_for_export(cell_data))
             
         ws.append(row_values)
         
@@ -320,7 +382,7 @@ def _build_compare_sheet(ws, store_data: dict):
         for s in sources:
             doc_key = s.get("label", s.get("name"))
             cell_data = aspect_data.get(doc_key, {})
-            row_values.append(cell_data.get("value"))
+            row_values.append(_cell_for_export(cell_data))
             
         ws.append(row_values)
         
@@ -410,7 +472,164 @@ def _resolve_selected_docs(candidates: list[str], available_docs: list[str]) -> 
                 resolved.append(flat_lookup[flat])
     return list(dict.fromkeys(resolved))
 
+# ---------------------------------------------------------------------------
+# Tracing for background jobs
+# ---------------------------------------------------------------------------
+# Review and Compare run on a background thread and fan out to a thread pool,
+# and llm.ask only records a call on the trace in the *current* context. With
+# no trace started for the job, and pool workers not inheriting one anyway,
+# every model call these modes made was invisible: a 30-call compare showed up
+# as zero tokens anywhere outside an ad-hoc test harness.
+
+def _submit_traced(executor, fn, *args):
+    """executor.submit that carries the caller's trace into the worker.
+
+    Each submission gets its own copy of the context, since one Context can't
+    be entered by two threads at once.
+    """
+    return executor.submit(contextvars.copy_context().run, fn, *args)
+
+
+def _run_traced_job(kind: str, session_id: str, question: str, job_id: str,
+                    store_ref: dict, body, *body_args):
+    """Run a job body under its own trace, then record its token usage on the
+    job's store entry and persist the trace like a chat query's."""
+    trace, token = tracing.start_trace(f"[{kind}] {question}", session_id, session_id)
+    try:
+        body(*body_args)
+    finally:
+        calls = trace.llm_calls
+        usage = {
+            "llm_calls": len(calls),
+            "prompt_tokens": sum(c["prompt_tokens"] for c in calls),
+            "completion_tokens": sum(c["completion_tokens"] for c in calls),
+            "empty_replies": sum(1 for c in calls if not c["response_chars"]),
+        }
+        try:
+            store_ref[job_id]["usage"] = usage
+        except Exception:
+            pass
+        tracing.finish_and_persist(trace, token)
+
+
+# ---------------------------------------------------------------------------
+# Columns / aspects the question already names
+# ---------------------------------------------------------------------------
+# "For each agreement, extract the parties, the effective date and the
+# governing law" and "Compare these on breach notification window and data
+# residency restriction" spell out their own columns. Asking the model to
+# re-derive them produced a different set on every run: an extra
+# document-name column, renamed columns, and a two-part compare split into six
+# overlapping aspects (18 extractions instead of 6, and a clause landing under
+# the wrong heading). When the question enumerates, the enumeration is used as
+# written; the model is only asked when it doesn't.
+_RX_ITEM_LIST = re.compile(
+    r"\b(?:extract(?:ing)?|list|pull(?:\s+out)?|capture|tabulate|show(?:\s+me)?|"
+    r"compare\b[^.?;:]{0,120}?\b(?:on|for|by|in\s+terms\s+of|regarding|across)|"
+    r"(?:check|review|look\s+at)\s+(?:(?:each|every|all|these|the)\s+\w+\s+)?for)"
+    r"\s+(?P<items>[^.?:]+)",
+    re.I,
+)
+# Where the item list ends and the rest of the sentence begins.
+_RX_ITEM_LIST_TAIL = re.compile(
+    r"\s+(?:for|in|across|from|of)\s+(?:each|every|all|these|those|the\s+(?:selected|chosen))\b.*$"
+    r"|\s+(?:where|if|when|as)\s+.*$",
+    re.I,
+)
+# "Compare the payment terms across all the selected agreements": the item
+# comes before the preposition, and what follows it is the document set.
+_RX_COMPARE_X_ACROSS = re.compile(
+    r"\bcompare\s+(?P<items>[^.?:]+?)\s+(?:across|between|among|in|of)\s+"
+    r"(?:all|each|every|these|those|both|the)\b",
+    re.I,
+)
+_RX_DOCUMENT_SET = re.compile(
+    r"^(?:(?:all|each|every|these|those|both|the|of|selected|chosen|above)\s+)*"
+    r"(?:agreements?|documents?|contracts?|files?|instruments?|ndas?|dpas?|slas?)$",
+    re.I,
+)
+# Two-word legal pairs that name one thing, so "and" inside them is not a
+# list separator.
+_BINOMIALS = (
+    "terms and conditions", "representations and warranties",
+    "rights and obligations", "roles and responsibilities",
+    "fees and expenses", "costs and expenses", "losses and damages",
+    "assignment and transfer", "limitations and exclusions",
+)
+_SMALL_WORDS = {"of", "and", "or", "to", "per", "in", "for", "on", "the", "a", "an", "by", "vs"}
+_RX_IDENTITY_COLUMN = re.compile(
+    r"^(?:the\s+)?(?:agreement|document|contract|file|instrument)(?:\s+(?:name|title|id|identifier|reference))?$"
+    r"|^(?:name|title)$",
+    re.I,
+)
+
+
+def _title_item(item: str) -> str:
+    words = item.split()
+    return " ".join(
+        w if (w.isupper() and len(w) > 1) else
+        (w.lower() if i and w.lower() in _SMALL_WORDS else w[:1].upper() + w[1:])
+        for i, w in enumerate(words)
+    )
+
+
+def _explicit_items(question: str) -> list:
+    """The columns/aspects a question lists itself, or [] if it lists none.
+
+    Returns [] rather than a guess whenever the list doesn't look like a list
+    of short noun phrases, so a narrative question still goes to the model.
+    """
+    items = None
+    m = _RX_ITEM_LIST.search(question or "")
+    if m:
+        items = _RX_ITEM_LIST_TAIL.sub("", m.group("items")).strip()
+        if _RX_DOCUMENT_SET.match(items):
+            items = None
+    if items is None:
+        m = _RX_COMPARE_X_ACROSS.search(question or "")
+        if not m:
+            return []
+        items = re.sub(r"^(?:these|those|the)\s+(?:\w+\s+)?(?:agreements?|documents?|contracts?)\s+(?:on|for)\s+",
+                       "", m.group("items").strip(), flags=re.I)
+    protected = items
+    for i, b in enumerate(_BINOMIALS):
+        protected = re.sub(re.escape(b), f"\x00{i}\x00", protected, flags=re.I)
+    parts = re.split(r"\s*,\s*(?:and\s+|or\s+)?|\s+(?:and|or|&)\s+|\s*;\s*", protected)
+    out = []
+    for part in parts:
+        part = re.sub(r"\x00(\d+)\x00", lambda k: _BINOMIALS[int(k.group(1))], part)
+        part = re.sub(r"^(?:the|a|an|any|its|their|each\s+\w+'s)\s+", "", part.strip(), flags=re.I)
+        part = part.strip(" .")
+        if not part or _RX_DOCUMENT_SET.match(part):
+            continue
+        # A long or clause-like fragment means this wasn't a plain list.
+        if len(part.split()) > 6 or re.search(
+                r"\b(?:which|whether|who|how|what|why|is|are|does|do|they|it)\b", part, re.I):
+            return []
+        out.append(_title_item(part))
+    return list(dict.fromkeys(out)) if 1 <= len(out) <= 12 else []
+
+
+def _drop_identity_columns(columns: list, question: str) -> list:
+    """Remove a model-invented "Agreement"/"Document Name" column.
+
+    Every row is already labelled with its document, so the column repeats it
+    at best and, when the model fills it from the text, holds some other
+    clause at worst. Kept only when the question asks for a name or title.
+    """
+    if re.search(r"\b(?:name|title)s?\b", question or "", re.I):
+        return columns
+    kept = [c for c in columns if not _RX_IDENTITY_COLUMN.match((c or "").strip())]
+    return kept or columns
+
+
 def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
+    """Background job for review mode; see _review_job_body."""
+    _run_traced_job("review", session_id, question, job_id, store_ref, _review_job_body,
+                    job_id, session_id, doc_names, question, store_ref, locks_ref)
+
+
+def _review_job_body(job_id: str, session_id: str, doc_names: list, question: str, store_ref: dict, locks_ref: dict):
     """Background job for review mode with NLP prompt.
     
     Dynamically generates columns based on the prompt, then uses wiki-synthesized content
@@ -431,7 +650,7 @@ def _run_review_job(job_id: str, session_id: str, doc_names: list, question: str
             res = _extract_with_retrieval(session_id, doc_name, col_name, broad_hint=_is_open_ended_column(col_name))
         except Exception as e:
             logger.error(f"Worker failed for {doc_name}/{col_name}: {e}")
-            res = {"value": None, "confidence": 0.0, "quote": None}
+            res = failed_cell()
         with lock:
             store_ref[job_id]["rows"][doc_name][col_name] = res
             store_ref[job_id]["completed"] += 1
@@ -475,23 +694,21 @@ Based on the User Query, perform the following:
    If the query asks for specific items (e.g., "deliverables, fees, payment terms"), list those exact items as columns.
    If the query is open-ended (e.g., "Summarize this agreement"), list 4-6 key legal or commercial columns to extract.
    Keep column names short (1-5 words).
+   One requested item is one column: do not split it into sub-columns.
+   Do not add a column naming or identifying the document; every row is already labelled with its document.
 {task_2}
 Return JSON only, no preamble or explanation:
 {result_shape}"""
 
-        columns = []
+        columns = _explicit_items(question)
         inferred = []
-        try:
-            raw, _ = llm.fast_ask(prompt, max_tokens=450)
-            import re
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
-            parsed = json.loads(raw.strip())
-            columns = parsed.get("columns", [])
-            inferred = parsed.get("inferred_documents", [])
-        except Exception as e:
-            logger.error(f"Failed to generate columns/inferred documents: {e}")
+        if not columns or needs_doc_inference:
+            try:
+                parsed = json.loads(_fast_ask_nonempty(prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
+                columns = columns or _drop_identity_columns(parsed.get("columns", []), question)
+                inferred = parsed.get("inferred_documents", [])
+            except Exception as e:
+                logger.error(f"Failed to generate columns/inferred documents: {e}")
             
         if not columns:
             columns = ["Extracted Information"]
@@ -522,7 +739,7 @@ Return JSON only, no preamble or explanation:
         for chunk in doc_chunks:
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
-                    executor.submit(_extract_worker, doc_name, col_name)
+                    _submit_traced(executor, _extract_worker, doc_name, col_name)
                     for doc_name in chunk
                     for col_name in columns
                 ]
@@ -605,7 +822,16 @@ def _get_scoped_wiki_pages(session_id: str, doc_name: str) -> dict:
     logger.info(f"Scoped wiki lookup for '{doc_name}': found {len(scoped)} pages (out of {len(pages)} total)")
     return scoped
 
-def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str, 
+def _run_compare_job(job_id: str, session_id: str, doc_names: list, question: str,
+                     uploaded_text: Optional[str], uploaded_name: Optional[str], temp_path: Optional[str],
+                     store_ref: dict, locks_ref: dict):
+    """Background job for compare mode; see _compare_job_body."""
+    _run_traced_job("compare", session_id, question, job_id, store_ref, _compare_job_body,
+                    job_id, session_id, doc_names, question, uploaded_text, uploaded_name,
+                    temp_path, store_ref, locks_ref)
+
+
+def _compare_job_body(job_id: str, session_id: str, doc_names: list, question: str,
                      uploaded_text: Optional[str], uploaded_name: Optional[str], temp_path: Optional[str],
                      store_ref: dict, locks_ref: dict):
     """Background job for compare mode.
@@ -655,22 +881,21 @@ Based on the User Query, perform the following:
    If the query is open-ended (e.g., "Compare these documents"), list 4-6 key legal and commercial aspects to compare.
    Aspects must be concrete, extractable data points (e.g., "Liability Cap", "Termination Period"), NOT abstract concepts or full sentences.
    Keep aspect names short (1-5 words).
+   One requested point is one aspect: do not split it into sub-aspects (trigger, recipients, exceptions...) the user did not ask for.
+   Do not add an aspect naming or identifying the document; every column is already labelled with its document.
 {task_2}
 Return JSON only, no preamble or explanation:
 {result_shape}"""
 
-        aspects = []
+        aspects = _explicit_items(question)
         inferred = []
-        try:
-            raw, _ = llm.fast_ask(aspect_prompt, max_tokens=450)
-            raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-            raw = re.sub(r'```json', '', raw)
-            raw = re.sub(r'```', '', raw)
-            parsed = json.loads(raw.strip())
-            aspects = parsed.get("aspects", [])
-            inferred = parsed.get("inferred_documents", [])
-        except Exception as e:
-            logger.error(f"Failed to generate aspects and inferred documents: {e}")
+        if not aspects or needs_doc_inference:
+            try:
+                parsed = json.loads(_fast_ask_nonempty(aspect_prompt, config.MAX_TOKENS_ASPECT_INFERENCE, strip_fences=True))
+                aspects = aspects or _drop_identity_columns(parsed.get("aspects", []), question)
+                inferred = parsed.get("inferred_documents", [])
+            except Exception as e:
+                logger.error(f"Failed to generate aspects and inferred documents: {e}")
             
         if not aspects:
             aspects = ["Comparison Details"]
@@ -716,7 +941,7 @@ Return JSON only, no preamble or explanation:
                     res = extract_cell(source_dict["text"], aspect)
                 except Exception as e:
                     logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
-                    res = {"value": None, "confidence": 0.0, "quote": None}
+                    res = failed_cell()
             else:
                 # C7: try metadata cache before firing an LLM call
                 res = _lookup_cached_metadata(session_id, source_dict["name"], aspect)
@@ -728,7 +953,7 @@ Return JSON only, no preamble or explanation:
                         )
                     except Exception as e:
                         logger.error(f"Compare extract failed {source_dict['name']}/{aspect}: {e}")
-                        res = {"value": None, "confidence": 0.0, "quote": None}
+                        res = failed_cell()
             with lock:
                 store_ref[job_id]["table"][aspect][doc_key] = res
 
@@ -747,7 +972,7 @@ Return JSON only, no preamble or explanation:
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [
-                    executor.submit(_extract_compare_worker, s, a)
+                    _submit_traced(executor, _extract_compare_worker, s, a)
                     for s in chunk_sources
                     for a in aspects
                 ]
@@ -773,7 +998,7 @@ Return JSON only, no preamble or explanation:
             for s in all_sources:
                 doc_key = s.get("label", s["name"])
                 cell_data = store_ref[job_id]["table"].get(aspect, {}).get(doc_key, {})
-                val = cell_data.get("value")
+                val = _cell_for_summary(cell_data)
                 if val:
                     aspect_vals[doc_key] = val
             if aspect_vals:
@@ -793,11 +1018,7 @@ Extracted values:
 {json.dumps(all_values, indent=1)}"""
 
             try:
-                raw, _ = llm.fast_ask(outlier_prompt, max_tokens=1000)
-                raw = re.sub(r'<reasoning>.*?</reasoning>', '', raw, flags=re.DOTALL)
-                raw = re.sub(r'```json', '', raw)
-                raw = re.sub(r'```', '', raw)
-                parsed_outliers = json.loads(raw.strip())
+                parsed_outliers = json.loads(_fast_ask_nonempty(outlier_prompt, config.MAX_TOKENS_COMPARE_OUTLIERS, strip_fences=True))
                 if isinstance(parsed_outliers, list):
                     outliers = parsed_outliers
             except Exception as e:
@@ -810,9 +1031,19 @@ Extracted values:
         # already-extracted table, not doing fresh legal reasoning over raw
         # text, so the fast/cheap model is sufficient — same tier used for
         # every other Review/Compare call.
+        # The failed-cell rule is only added when a cell failed: naming the
+        # marker in a prompt with no failures gets it echoed into the text.
+        _any_failed = any((_c or {}).get("failed")
+                          for _row in store_ref[job_id]["table"].values()
+                          for _c in _row.values())
+        _failed_rule = (
+            '- A value reading "EXTRACTION FAILED" means that cell was never read. '
+            'Say it could not be checked; never describe it as absent or not specified. '
+            'Do NOT flag a failed cell as a contradiction.\n'
+        ) if _any_failed else ""
         narrative_prompt = f"""\
 Question: {question}
-Comparison table: {json.dumps(store_ref[job_id]["table"])}
+Comparison table: {json.dumps({_a: {_d: dict(_c, value=_cell_for_summary(_c)) for _d, _c in _row.items()} for _a, _row in store_ref[job_id]["table"].items()})}
 Outliers: {json.dumps(outliers)}
 
 Write a well-structured legal synthesis based ONLY on the comparison table data above.
@@ -822,13 +1053,13 @@ STRICT RULES:
 - Write fluid, cohesive summary paragraphs describing trends across the documents. DO NOT output repetitive nested lists detailing every single document's individual value. 
 - Group similar findings together into single sentences (e.g. "Most documents do not specify a notice period, except [1] which requires 30 days").
 - Do NOT redundantly enumerate "not specified" for every document. Synthesize it.
-- Cite your sources using standard IEEE format inline (e.g., [1], [2], [3]). Do NOT mention the exact document names anywhere in the paragraph text.
+{_failed_rule}- Cite your sources using standard IEEE format inline (e.g., [1], [2], [3]). Do NOT mention the exact document names anywhere in the paragraph text.
 - ONLY state facts that appear in the comparison table. DO NOT add information not present in the data.
 - Flag contradictions explicitly, citing both documents and their conflicting values verbatim.
 - DO NOT invent legal conclusions, implications, or recommendations beyond what the data shows.
 - PROPER CITATIONS (CRITICAL): You MUST create a "References" list at the very end of your answer starting with a "References" heading. Each entry must strictly follow this pattern: "[X] File_Name.pdf, Clause/Page | Quote: <exact verbatim quote from the text>" (e.g. "[1] Service Agreement 1_redacted.pdf, Clause 14.1 | Quote: The Supplier shall deliver..."). If the exact clause/page or quote is not in the table, just map it as: "[1] Service Agreement 1_redacted.pdf | Quote: <verbatim quote>" or "[1] Service Agreement 1_redacted.pdf". Do not wrap file names in formatting."""
 
-        narrative, _ = llm.fast_ask(narrative_prompt, max_tokens=1500)
+        narrative = _fast_ask_nonempty(narrative_prompt, config.MAX_TOKENS_COMPARE_NARRATIVE)
         
         # STEP 6 - STORE + COMPLETE
         with lock:
