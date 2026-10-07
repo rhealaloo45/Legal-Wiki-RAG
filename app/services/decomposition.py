@@ -3,7 +3,7 @@
 Phase 6, and last on purpose. This sits in front of questions that already
 work, including the compound party-pair questions this project spent real
 effort getting right. A decomposer that splits *"the liability cap in the
-agreement between Summit Meridian and Fourthcoffee"* hands each half to a resolver
+agreement between Summit Contoso and Fourthcoffee"* hands each half to a resolver
 that no longer has the party pair to work with, and breaks the exact capability
 it was meant to extend.
 
@@ -92,7 +92,7 @@ def looks_declined(payload: dict) -> bool:
 _RX_PARTY_PAIR = re.compile(
     r"\bbetween\s+[A-Z][\w'&.\-]*(?:\s+[\w'&.\-]+)*\s+and\s+[A-Z]", re.IGNORECASE)
 # An "and" joining two capitalised names is a name conjunction, not a clause
-# conjunction: "Acme Sons and Acme Motors", "Summit Meridian and Fourthcoffee".
+# conjunction: "Acme Sons and Acme Motors", "Summit Contoso and Fourthcoffee".
 _RX_NAME_AND = re.compile(r"[A-Z][\w'&.\-]{2,}\s+and\s+[A-Z][\w'&.\-]{2,}")
 
 # A fragment has to be a question in its own right to be worth routing.
@@ -129,7 +129,7 @@ def _scope_phrase(question: str) -> str:
     if len(phrase) <= 8:
         return ""
     # Normalised to "under X" regardless of how the first fragment phrased it:
-    # appending the original "of the Northwind MSA" to a second fragment reads
+    # appending the original "of the Northtree MSA" to a second fragment reads
     # as a possessive and changes what the fragment appears to ask.
     return "under " + _RX_LEADING_PREP.sub("", phrase, count=1)
 

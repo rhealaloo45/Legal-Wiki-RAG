@@ -247,7 +247,7 @@ START → classify_intent → disambiguation → clarification → resolve_scope
       with multiple matching candidates → ask.
    e. _question_names_a_document() match (numbered/entity+type pattern) → skip.
    f. _question_mentions_known_entity() finds a known party/entity name in
-      page titles (e.g. "Voltco", "Meridian", "Person 900") → skip.
+      page titles (e.g. "Voltco", "Contoso", "Person 900") → skip.
    g. Fast LLM triage fallback.
    Also skipped upstream if target_doc or is_followup is set.
 

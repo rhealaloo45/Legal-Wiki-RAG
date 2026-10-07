@@ -239,7 +239,7 @@ Respond with JSON only: {"intent": "slug", "confidence": 0.0-1.0}"
 - `is_followup` is true (user responded to a prior prompt)
 - `_question_names_a_document()` matches (3 layers):
   1. Numbered pattern: "service agreement 1", "NDA 3", "SA1"
-  2. Entity + doc type: "Voltco JV Agreement", "Meridian service agreement"
+  2. Entity + doc type: "Voltco JV Agreement", "Contoso service agreement"
   3. Known entity from page titles: distinctive capitalized names extracted from wiki page titles
 
 **When it runs:**

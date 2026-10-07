@@ -274,7 +274,7 @@ _SHARED_PAGE_PATTERNS = re.compile(
 # real per-document prefix — it's identical for every document of that type and
 # will silently collide across documents in the DB (each ingest overwrites the
 # previous one's source_doc + loses that document's own facts). Only a prefix
-# like "– JVA-HeliosAether" or "– SA-Meridian" actually disambiguates.
+# like "– JVA-AetherAether" or "– SA-Contoso" actually disambiguates.
 _BARE_TYPE_SUFFIX = re.compile(r'^(?:JVA|NDA|SA|SHA|LO|CCD|J|TBJ)\.?$', re.IGNORECASE)
 
 
@@ -377,7 +377,7 @@ def _normalize_doc_family(doc_type: str | None) -> str | None:
 def _auto_prefix_title(title: str, doc_id: str) -> str:
     """Add document identifier prefix to unprefixed contract/agreement pages.
 
-    Pages that already have a genuine per-document ' – ' prefix (e.g. "SA-Meridian")
+    Pages that already have a genuine per-document ' – ' prefix (e.g. "SA-Contoso")
     or that are shared legal concepts are left unchanged. Only pages whose doc-type
     parenthetical matches a contract type get prefixed. A bare doc-type abbreviation
     used as a would-be prefix ("Equity Split – JVA") does NOT count as prefixed —
@@ -394,7 +394,7 @@ def _auto_prefix_title(title: str, doc_id: str) -> str:
         if _BARE_TYPE_SUFFIX.match(suffix) and not _SHARED_PAGE_PATTERNS.match(base_title):
             rest = title[len(pre_paren):]  # preserve any trailing "(...)" untouched
             return f"{base_title} – {doc_id}{rest}"
-        # Genuine per-document prefix already present (e.g. "– JVA-HeliosAether")
+        # Genuine per-document prefix already present (e.g. "– JVA-AetherAether")
         return title
 
     # Check if this is a contract-type page
@@ -634,7 +634,7 @@ Right: "Term and Termination – SA1-Brightline (Service Agreement)". \
   For contracts/agreements: use a short identifier from filename or parties that distinguishes \
   this document from others of the same type. Derive it from the counterparty name, the \
   filename, or a unique label (e.g. "SA1-Brightline" for Service Agreement 1 with Brightline, \
-  "NDA-Acme" for an NDA with Acme Corp, "SHA3-Meridian" for Shareholder Agreement 3 with Meridian). \
+  "NDA-Acme" for an NDA with Acme Corp, "SHA3-Contoso" for Shareholder Agreement 3 with Contoso). \
   Keep identifier SHORT (2-4 words max). \
 Examples of DOCUMENT-SPECIFIC pages that MUST have the identifier in this order: \
   - Court judgments: Facts, Procedural History, Charges, Holding, Contentions, Relief, Costs \
@@ -732,7 +732,7 @@ DOCUMENT-SPECIFIC TOPICS (CRITICAL): Separate topics into two categories: \
    For court judgments: first party's last name (e.g. "Facts – Person 900", "Holding – Person 900"). \
    For contracts/agreements: a short identifier from the counterparty name or filename that \
    distinguishes this document from others of the same type (e.g. "Term – SA1-Brightline", \
-   "Indemnity – SA1-Brightline", "Payment – NDA-Acme", "Scope – SHA3-Meridian"). \
+   "Indemnity – SA1-Brightline", "Payment – NDA-Acme", "Scope – SHA3-Contoso"). \
    Keep identifier SHORT (2-4 words max). EVERY clause-level topic MUST have this prefix. \
 2. SHARED LEGAL CONCEPTS (statutes, precedents, doctrines, principles): NO prefix — \
    these merge intentionally: e.g. "Section 319 CrPC", "Indian Arbitration Act".
@@ -2042,7 +2042,7 @@ def _atomic_merge_db(session_id: str, new_data: dict, doc_name: str = "Unknown")
             # Guard against title collisions between DIFFERENT source documents.
             # The ingest LLM sometimes invents the same entity-derived identifier
             # for two unrelated documents (e.g. two JVAs both involving parties
-            # named "Aether"/"Helios" both get titled "... – JVA-HeliosAether").
+            # named "Aether"/"Aether" both get titled "... – JVA-AetherAether").
             # _auto_prefix_title can't catch this — it looks like a real per-doc
             # prefix. Only a doc-specific page (has a contract-type parenthetical)
             # needs this guard; shared concept/statute pages are meant to merge
@@ -2798,7 +2798,7 @@ def _numbered_doc_collisions(question: str, doc_names) -> list[str]:
     into context, and the answer LLM then silently answers from whichever has the
     richer content, usually the synthetic one, with no indication it switched
     documents (confirmed live: a Gridline SHA question was answered entirely from
-    Test_SHA_01's fictional Aether/Helios/Apex parties and $1,000,000 veto
+    Test_SHA_01's fictional Aether/Aether/Apex parties and $1,000,000 veto
     threshold, none of which belong to the real Gridline agreement). Mirrors the
     per-number matching loop in _numbered_docs_in so the collision is detected
     against the exact same references the user named — no behaviour change to the
@@ -3482,7 +3482,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         file_pages = _pages_from_files(pages, mentioned_files) if mentioned_files else []
 
         # Fallback: if no file-level mention, check if the question names a known
-        # entity from a document identifier (e.g. "Voltco", "Meridian", "Yuvraj
+        # entity from a document identifier (e.g. "Voltco", "Contoso", "Yuvraj
         # Kellerman") and force-include those pages so the answer is correctly scoped.
         if not file_pages:
             matched_titles = _pages_matching_question_entity(question, pages)
@@ -3512,7 +3512,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
             # A distinctive entity ("Voltco", "Person 900") should only match a
             # handful of pages. If it matches a huge slice of the wiki, the "entity"
             # is actually a common party name reused across many unrelated documents
-            # (e.g. "Aether"/"Helios" appearing in most of a synthetic test corpus) —
+            # (e.g. "Aether"/"Aether" appearing in most of a synthetic test corpus) —
             # forcing all of them in would blow the context budget. Fall through to
             # normal hybrid vector/BM25 selection instead.
             if matched_titles and len(matched_titles) <= config.ENTITY_MATCH_MAX_PAGES:
@@ -3782,7 +3782,7 @@ def get_context(question: str, session_id: str, target_doc: str = "", retrieval_
         # the question names could be cut away entirely while its siblings'
         # boilerplate survived. Confirmed live on the 500-question evaluation:
         # "Section 4 (Relationship Of Parties) of the Term Sheet between Acme
-        # Autoparts Systems Limited and Northwind EPC Pte. Ltd." resolved a
+        # Autoparts Systems Limited and Northtree EPC Pte. Ltd." resolved a
         # 5-document scope whose clause text totals ~32k characters against a 20k
         # cap; the Term Sheet sorted last, its clauses were truncated away, and
         # the answer reported the section as absent while the exact clause sat in
@@ -4388,8 +4388,8 @@ def _known_page_titles(context: str) -> set[str]:
     a content-verbatim claim and flags the title itself as unverifiable.
 
     Keyed on alphanumerics only (see _alnum_only) so a model-reformatted label
-    like "Purpose and Permitted Use – NDA-Greensteel – NDA" still matches the
-    real title "Purpose and Permitted Use – NDA-Greensteel (NDA)" — exact
+    like "Purpose and Permitted Use – NDA-Litware – NDA" still matches the
+    real title "Purpose and Permitted Use – NDA-Litware (NDA)" — exact
     punctuation match was rejecting these and flagging the title itself as a
     fabricated quote.
     """
@@ -4621,7 +4621,7 @@ def _strip_placeholder_quotes(answer: str) -> str:
 # An identifier-style LABEL, checked WITHOUT requiring immediate proximity to
 # a code — real phrasing routinely restates the whole question between label
 # and value ("The matter reference number for the NDA between Acme Steel
-# Limited and Company054 Metallurgy GmbH is TSL/GREENSTEEL/2025/219"), which a
+# Limited and Company054 Litware GmbH is ABC/REF/2025/219"), which a
 # proximity-anchored regex cannot bridge. Presence of this label ANYWHERE in
 # the answer is the trigger; _CODE_SHAPED_TOKEN_RE below then independently
 # finds candidate values.
@@ -4697,7 +4697,7 @@ def _verify_identifier_claims(answer: str, context: str) -> list[str]:
     formatted codes, not prose — case matters and normalisation would risk
     false-clearing a wrong code that only differs by case). Returns the list
     of CODE values that do not appear anywhere in the retrieved context; a
-    genuine code that IS in context (confirmed live: SA4/Redwood's real
+    genuine code that IS in context (confirmed live: SA4/Adatum's real
     "TSPL/LEGALOPS/2025/058") is correctly left alone.
     """
     if not answer or not context or not _IDENTIFIER_LABEL_RE.search(answer):
@@ -7106,7 +7106,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # "service" + a 1) matches the same type+number, IS populated, and silently
     # supplies every word of the answer. The result reads as authoritative about
     # a document the user never asked about (confirmed live: "service agreement
-    # 1" answered entirely from Test_SA_01's unrelated Helios/Zephyr Delaware
+    # 1" answered entirely from Test_SA_01's unrelated Aether/Trey Delaware
     # MSA at 92% confidence, with nothing indicating the real Service Agreement 1
     # was empty).
     #
@@ -7249,7 +7249,7 @@ def generate_answer(question: str, wiki_content: str, selected_titles: list, ses
     # like "Acme", or a case name cited by every judgment that discusses it) mapped
     # to an arbitrary document and dragged it into files_used for any answer whose
     # citation happened to contain that word. Measured on the live corpus: 63 of 466
-    # identifiers were claimed by more than one document, "aether-helios" by ten.
+    # identifiers were claimed by more than one document, "aether-aether" by ten.
     _ident_claims: dict[str, set[str]] = {}
     for title, page in pages.items():
         if not isinstance(page, dict):
@@ -7689,7 +7689,7 @@ _DOC_TYPE_CORE = {
 }
 
 # Matches when a question names a document type together with a distinctive entity
-# or party name (e.g. "Voltco JV Agreement", "Meridian service agreement"). The
+# or party name (e.g. "Voltco JV Agreement", "Contoso service agreement"). The
 # entity capture is capped at 3 words — real entity names are short ("Yuvraj
 # Kellerman", "SolarNexus"), never a full clause. Uncapped, this pattern used to
 # swallow an entire preceding sentence whenever a doc-type word appeared
@@ -7804,7 +7804,7 @@ def _question_names_a_document(question: str, docs: list[str]) -> bool:
 
     Checks:
     1. Numbered pattern ("service agreement 1", "NDA 3", "SA1")
-    2. Entity name + doc type ("Voltco JV Agreement", "Meridian service agreement"),
+    2. Entity name + doc type ("Voltco JV Agreement", "Contoso service agreement"),
        but NOT a determiner + type ("this NDA", "the agreement") — those are vague.
     """
     if _DOC_NAME_PATTERN.search(question):
@@ -7922,11 +7922,11 @@ _ENTITY_EXCLUDE = {
     # "General" above), inflating unrelated Legal Opinions to a 4-way compound
     # match that buried the real "voltmeter" (1 hit) and "joint venture
     # agreement 5" (1 hit) matches entirely. "data" is a different cause: it's
-    # a legitimate word inside a real company name ("Pinnacle Data Analytics
+    # a legitimate word inside a real company name ("Lamna Data Analytics
     # LLC"), but extracting individual constituent words from a multi-word
     # identifier leaks that word as if it were its own distinctive entity —
     # excluding it loses only the ability to match on "data" alone, not the
-    # full "Pinnacle Data Analytics" name.
+    # full "Lamna Data Analytics" name.
     "intellectual", "property", "governing", "forum", "proper", "data",
 } | set(config.COMMON_PARTY_TOKENS)
 
@@ -7956,8 +7956,8 @@ def _identifier_in_citation(ident: str, citation_text_lower: str) -> bool:
 def _doc_identifier_part(title: str) -> str:
     """Return the document-identifier portion of a page title.
 
-    Titles look like "Topic – SA-Meridian (Service Agreement)". The identifier is
-    the text AFTER ' – ' and BEFORE the trailing '(...)' — e.g. "SA-Meridian",
+    Titles look like "Topic – SA-Contoso (Service Agreement)". The identifier is
+    the text AFTER ' – ' and BEFORE the trailing '(...)' — e.g. "SA-Contoso",
     "JVVoltco", "Person 900". Topic words (before the dash) are NOT included,
     so generic legal vocabulary like "Confidential Information" is never treated
     as an entity.
@@ -8024,7 +8024,7 @@ _COMPANY_SUFFIX_RE = re.compile(
 
 def _looks_like_doc_id(s: str) -> bool:
     """True if a title segment looks like a real document identifier rather
-    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Meridian"),
+    than a descriptive topic phrase — a doc-type-prefixed token ("SHA-Contoso"),
     a single camelCase word ("JVVoltco"), or a company-style name ending in a
     corporate suffix ("Acme Holdings Private Limited") — not generic multi-word
     legal/clause prose, which essentially never ends in a corporate suffix.
@@ -8038,7 +8038,7 @@ def _looks_like_doc_id(s: str) -> bool:
     return " " not in s and bool(re.search(r'[a-z][A-Z]', s))
 
 
-# A genuine party/entity name (Meridian, Voltco) is specific to one deal, so it
+# A genuine party/entity name (Contoso, Voltco) is specific to one deal, so it
 # should appear in identifiers from only a handful of source documents. A token
 # appearing across many distinct documents is generic vocabulary that leaked in
 # via a descriptive or swapped-order title, not a distinctive entity name — cap
@@ -8053,7 +8053,7 @@ _ENTITY_DOC_FREQ_CAP = 4
 def _extract_doc_entities(pages: dict) -> set[str]:
     """Return the set of distinctive entity tokens drawn from document identifiers.
 
-    "SA-Meridian" → {"meridian"}, "JVVoltco" → {"revolt"},
+    "SA-Contoso" → {"contoso"}, "JVVoltco" → {"revolt"},
     "Person 900" → {"yuvraj kellerman", "yuvraj", "kellerman"}. Doc-type
     abbreviations, generic words, and tokens too common across distinct
     documents to be a real entity name are excluded.
@@ -8064,7 +8064,7 @@ def _extract_doc_entities(pages: dict) -> set[str]:
         if not ident:
             continue
         # Strip a leading doc-type token / number prefix. Handles three forms:
-        #   "SA-Meridian"  → "Meridian"   (separator)
+        #   "SA-Contoso"  → "Contoso"   (separator)
         #   "JV3-SteelLoop"→ "SteelLoop"  (type + number + separator)
         #   "JVVoltco"     → "Voltco"     (camelCase, no separator)
         core = re.sub(r'^(?:NDA|SHA|JVA?|SA)(?=[A-Z])', '', ident)               # camelCase
@@ -8072,7 +8072,7 @@ def _extract_doc_entities(pages: dict) -> set[str]:
         core = re.sub(r'^[\d\s-]+', '', core).strip(" -")
         # A well-formed identifier is SHORT (the ingest prompt asks for 2-4 words
         # max). Longer, sentence-like "identifiers" (e.g. a stray Questionnaire
-        # page titled "... - Acme Power Solar Imposter Domains") are descriptive
+        # page titled "... - Acme Relecloud Solar Imposter Domains") are descriptive
         # phrases, not distinctive party names — mining them for words leaks
         # ordinary vocabulary ("solar", "domains") into the global entity set,
         # which then false-matches unrelated documents via substring containment.
@@ -8109,7 +8109,7 @@ def _contains_token(token: str, text: str) -> bool:
 
 def _question_mentions_known_entity(question: str, pages: dict) -> bool:
     """True if the question mentions a distinctive entity/party name from a
-    document identifier (e.g. "Voltco", "Meridian", "Person 900") OR from a
+    document identifier (e.g. "Voltco", "Contoso", "Person 900") OR from a
     source_doc filename ("Virtucon", "Brackenfold").
 
     The two sources cover different corpora. Page titles are what ingest
@@ -8186,7 +8186,7 @@ def _appears_as_proper_noun(token: str, question: str) -> bool:
     grammatically-forced capital at a sentence start.
 
     A distinctive party/entity name the user types to identify a document
-    ("Voltco", "Meridian", "SteelLoop") is a proper noun and is written
+    ("Voltco", "Contoso", "SteelLoop") is a proper noun and is written
     capitalised; generic clause vocabulary that leaked into the entity set from a
     malformed/swapped-order title ("termination", "liability", "confidentiality")
     appears lowercase inside the question's prose ("… term, termination,
@@ -8237,11 +8237,11 @@ def _pages_matching_question_entity(question: str, pages: dict) -> list[str]:
     mentioned in the question. Used to force-scope context to the right document.
 
     Prefers identifiers matching the MOST distinct hit tokens over identifiers
-    matching just one. A question naming a party pair ("the Zephyr-Solaris NDA")
-    yields two hit tokens ("zephyr", "solaris"); each name alone is common across
+    matching just one. A question naming a party pair ("the Trey-Solaris NDA")
+    yields two hit tokens ("trey", "solaris"); each name alone is common across
     a large synthetic corpus (100+ matches), but the *pair* together identifies
     one specific document precisely. Without this, a single-name flood (e.g.
-    "zephyr" alone hitting 242 pages) buries the compound match and can push the
+    "trey" alone hitting 242 pages) buries the compound match and can push the
     total past ENTITY_MATCH_MAX_PAGES, abandoning force-include entirely.
     """
     q = question.lower()
@@ -8341,15 +8341,15 @@ _PARTY_NAME_RE = re.compile(
 )
 
 # A company name typed in shorthand ALL-CAPS carries no corporate suffix at all
-# ("ACME POWER SOLAR", "JLR EUROPE") — _PARTY_NAME_RE's suffix anchor never
+# ("ACME RELECLOUD SOLAR", "JLR EUROPE") — _PARTY_NAME_RE's suffix anchor never
 # fires on it. Without a second detector, resolve_scope's unresolved_party gate
 # (below) sees no party name, treats the question as scopeless, and carries the
 # PREVIOUS document's stale scope forward instead of searching for the company
 # actually named — guaranteeing "not covered" for a real company the corpus may
 # well have documents about, since retrieval never actually looked for it.
 # Confirmed live: three turns into a Service Agreement 2 thread, "what
-# information do we have about ACME POWER SOLAR" answered "not covered" while
-# scoped to SA2, having never searched for Acme Power Solar at all. Requires 2+
+# information do we have about ACME RELECLOUD SOLAR" answered "not covered" while
+# scoped to SA2, having never searched for Acme Relecloud Solar at all. Requires 2+
 # ALL-CAPS words specifically (not just Title Case) — ordinary capitalised legal
 # vocabulary a user copies from a document ("Confidential Information", "Force
 # Majeure") is essentially never typed in all caps, so this stays narrow.
@@ -8530,9 +8530,9 @@ _NARROW_TOKEN_STOPWORDS = frozenset({
 # narrows on whatever generic word is left — usually "agreement", which then
 # selects FOR the siblings whose filenames spell the type out and AGAINST the
 # one document that uses the acronym. Confirmed live: "the Key Employee
-# Retention Agreement between Company042 Sagar Limited and Trey Travel
+# Retention Agreement between Company042 Fabrikam Limited and Trey Travel
 # Limited" narrowed an 8-document cluster to the 5 filenames containing
-# "Agreement", dropping "MAT-0000-0000_Summit Sagar Mobility_KERA_2019-12-25.pdf"
+# "Agreement", dropping "MAT-0000-0000_Summit Fabrikam Mobility_KERA_2019-12-25.pdf"
 # — the one document the question was actually about.
 #
 # Deriving the initialism from the spelled-out name closes that gap with the
@@ -9480,7 +9480,7 @@ def _resolve_docs_by_party(question: str, session_id: str, max_docs: int = 4) ->
         # from an entirely different matter. And a narrowing that lands on
         # SEVERAL documents is the other party's own portfolio rather than a
         # named cross-reference at all: "Section 9 (Severability) of the Key
-        # Employee Retention Agreement between Company042 Sagar Limited and
+        # Employee Retention Agreement between Company042 Fabrikam Limited and
         # Trey Travel Limited" pinned the right KERA, then merged in four
         # unrelated Trey Travel instruments (an Escrow, a TSA, an SPA and a
         # Shareholder Agreement) alongside it.
@@ -9986,7 +9986,7 @@ def _narrow_by_quoted_subject(question: str, session_id: str,
 
 # Document-type words a question uses to single out ONE instrument between two
 # parties, mapped to the parenthetical ingest appends to that document's page
-# titles ("… – Aether-Helios (Verified Complaint)"). Ordered most-specific
+# titles ("… – Aether-Aether (Verified Complaint)"). Ordered most-specific
 # first: "amended complaint" and "verified complaint" must both be tested
 # before the bare "complaint" that each of them contains, or the general
 # pattern would claim the phrase and point at the wrong pleading.
@@ -10055,7 +10055,7 @@ _PARTY_GENERIC_WORDS = frozenset({
     'corporation', 'plc', 'gmbh', 'company', 'co', 'group', 'holdings',
     'technologies', 'technology', 'systems', 'solutions', 'services',
     'energy', 'industries', 'international', 'global', 'partners', 'ventures',
-    # This corpus's own conglomerate prefixes ("Summit Sagar Mobility", "Acme
+    # This corpus's own conglomerate prefixes ("Summit Fabrikam Mobility", "Acme
     # Projects", "Summit Margie Company078 Entity Company") — real-world-style umbrella
     # names that head dozens of unrelated subsidiary parties, not a single
     # party's identity. Confirmed live, twice: "Summit Margie Company078 Entity Company"
@@ -10063,7 +10063,7 @@ _PARTY_GENERIC_WORDS = frozenset({
     # corpus — and party-pair resolution over- or under-matched on it in both
     # directions (a real Tax Deed excluded from its title-search cluster
     # entirely; a real Transition Services Agreement never found at all).
-    # Ingest's own short-titling already drops these ("Sagar-Trey", "TPL"),
+    # Ingest's own short-titling already drops these ("Fabrikam-Trey", "TPL"),
     # this just catches the token extractor up to match.
 }) | frozenset(config.COMMON_PARTY_TOKENS)
 
@@ -10071,8 +10071,8 @@ _PARTY_GENERIC_WORDS = frozenset({
 def _distinctive_party_token(name: str, skip: frozenset = frozenset()) -> str:
     """The one word of a party name that identifies the party.
 
-    "Aether Technologies Inc." → "Aether"; "Helios Energy Corporation" →
-    "Helios". Ingest builds each document's matter short-name from this same
+    "Aether Technologies Inc." → "Aether"; "Aether Energy Corporation" →
+    "Aether". Ingest builds each document's matter short-name from this same
     leading distinctive word, which is what makes the token matchable against
     page titles. Returns "" when nothing distinctive survives (a name made
     entirely of generic words), so the caller can skip it rather than search
@@ -10113,7 +10113,7 @@ _QUESTION_COMMON_WORDS = frozenset({
 })
 
 # An adversarial caption names both sides with no corporate suffix on either
-# ("the Aether v. Helios litigation"). _PARTY_NAME_RE's suffix anchor cannot
+# ("the Aether v. Aether litigation"). _PARTY_NAME_RE's suffix anchor cannot
 # see them, so the pair resolver would find at most one party and give up.
 _CASE_CAPTION_RE = re.compile(
     r'\b([A-Z][A-Za-z0-9&.\-]{2,})\s+(?:v\.?|vs\.?|versus)\s+([A-Z][A-Za-z0-9&.\-]{2,})\b'
@@ -10157,7 +10157,7 @@ def _bare_party_tokens(question: str) -> list[str]:
 
     Complements ``_distinctive_party_token``, which only ever sees names
     carrying a corporate suffix. Lawyers drop the suffix once a matter is
-    under discussion ("what damages did Helios claim against Aether"), and an
+    under discussion ("what damages did Aether claim against Aether"), and an
     adversarial caption never carries one at all.
 
     Only words standing in an EXPLICIT two-party relationship count — "X v.
@@ -10189,7 +10189,7 @@ def _bare_party_tokens(question: str) -> list[str]:
     for m in _AGAINST_RE.finditer(question or ''):
         add(m.group(1))
         # The claimant is whatever party-like name last appeared before
-        # "against" — "damages did HELIOS claim in its counterclaim … against
+        # "against" — "damages did AETHER claim in its counterclaim … against
         # Aether". Taking the nearest one avoids latching onto the sentence's
         # capitalised opening word ("What", "Who"), which is grammar.
         prior = [w for w in _CAPITALISED_WORD_RE.findall(question[:m.start()])
@@ -10378,14 +10378,14 @@ def _question_pair_segments(question: str) -> list[str]:
     """Split a question naming SEVERAL party-pairs into one sub-question per pair.
 
     A comparison question names two whole matters at once — "compare the
-    governing law of the KERA between Company042 Sagar Limited and Trey
+    governing law of the KERA between Company042 Fabrikam Limited and Trey
     Travel Limited dated 25 December 2019 and the KERA between Summit Nakatomi
     Motors Limited and Relecloud Mobility Private Limited dated 28 April
     2021". Every party-name detector in this module reads the question as one
     flat list of names, so the pair resolver below sees FOUR parties, truncates
     to three, and requires all three in a single document title. Nothing has
     all three, so it either matches nothing or — confirmed live on that exact
-    question — matches two unrelated Summit Sagar/Trey Travel instruments (an
+    question — matches two unrelated Summit Fabrikam/Trey Travel instruments (an
     Escrow Agreement and an SPA) while retrieving neither KERA the question
     actually asked about.
 
@@ -10473,7 +10473,7 @@ def _resolve_one_party_pair(question: str, session_id: str,
     keeps the single most distinctive one — it never intersects them. That is
     the right call for "the JV with Cold Chain Energy Services", where one
     party is the whole signal, but it cannot resolve an adversarial pair:
-    asked about "the lawsuit filed by Aether Technologies Inc. against Helios
+    asked about "the lawsuit filed by Aether Technologies Inc. against Aether
     Energy Corporation", each name alone spans ~115 documents, both exceed the
     max_docs cap, and the function returns nothing. Scope then falls through
     to an unscoped corpus search.
@@ -10527,8 +10527,8 @@ def _resolve_one_party_pair(question: str, session_id: str,
     if len(tokens) < 2:
         # Only one side carried a corporate suffix (or neither did). Fall back
         # to bare capitalised short-names, which is how a matter gets referred
-        # to once it is under discussion ("the Aether v. Helios litigation",
-        # "what damages did Helios claim against Aether"). Suffix-derived
+        # to once it is under discussion ("the Aether v. Aether litigation",
+        # "what damages did Aether claim against Aether"). Suffix-derived
         # tokens stay first so the strongest signal still leads.
         for tok in _bare_party_tokens(question):
             if tok.lower() not in {t.lower() for t in tokens}:
@@ -10792,16 +10792,16 @@ def _resolve_original_of_amendment(question: str, session_id: str,
     by an umbrella party with no corporate suffix at all.
 
     Confirmed live: "What did the original IT Outsourcing Agreement say about
-    payment terms, and how does the Summit Meridian amendment change that?"
-    resolved to neither document. "Summit Meridian" carries no suffix
+    payment terms, and how does the Summit Contoso amendment change that?"
+    resolved to neither document. "Summit Contoso" carries no suffix
     _PARTY_NAME_RE can anchor on, and it is genuinely ambiguous alone on this
-    corpus — Summit Meridian Software, Summit Meridian Mobility, and Summit Meridian
+    corpus — Summit Contoso Software, Summit Contoso Mobility, and Summit Contoso
     Travel are three unrelated real entities sharing that prefix — so every
     resolver gated on a distinctive single name declines, correctly, rather
     than guess which one. The question's own second constraint, "amendment",
     breaks that ambiguity the same way an instrument type breaks an umbrella
     party name elsewhere in this file: intersected with content matching
-    "Summit Meridian", exactly one document survives.
+    "Summit Contoso", exactly one document survives.
 
     Once that amendment is pinned, ingest's own cross-reference resolution
     frequently cannot name what it amends either — an amendment stating "the
@@ -10947,8 +10947,8 @@ _COMPARATIVE_TYPE_REF_RE = re.compile(
 # agreement", and drafting silently borrows an unrelated real document's party
 # names instead of the parties actually under discussion. Confirmed live: "help
 # me draft a new shareholder agreement with them", asked right after a Acme
-# Power Renewable Energy / Solaris Grid Advisory service-agreement summary,
-# drafted for "SolarNexus Semiconductor Holdings LLC" and "Zephyr Systems
+# Relecloud Renewable Energy / Solaris Tailspin Advisory service-agreement summary,
+# drafted for "SolarNexus Semiconductor Holdings LLC" and "Trey Systems
 # LLC" — names that never appeared anywhere in the conversation — with no
 # disclosure that "them" hadn't actually resolved to anything.
 _BACKREF_PRONOUN_RE = re.compile(
@@ -11331,7 +11331,7 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     # ("Agreement") is invisible to the doc_family lookup above even when it
     # was filed under this family's folder — confirmed on the real corpus: a
     # Legal Opinion whose actual text reads like a bare bilateral contract
-    # (Zenith Entity / Summit Sagar Financial
+    # (Zenith Entity / Summit Fabrikam Financial
     # Services) got doc_family=None and dropped out of every "Legal Opinion"
     # family question. folder_hint already carries this signal from ingest at
     # no extra cost, so union it in rather than leave the gap.
@@ -11343,7 +11343,7 @@ def _question_family_scope(question: str, session_id: str) -> tuple[str | None, 
     return family, docs
 
 
-# "Have we used the same qualification language as in the Summit Meridian
+# "Have we used the same qualification language as in the Summit Contoso
 # Alloys opinion elsewhere in our legal opinions?" resolved single_doc to
 # that one opinion (a clean entity match) and _enforce_question_family saw
 # full overlap with the "Legal Opinion" family it also detected, so it left
@@ -11741,8 +11741,8 @@ def _expand_amendment_family(scoped: dict, question: str, session_id: str) -> di
 # is boilerplate repeated verbatim across several agreements with the same party.
 #
 # Confirmed live (Q85, scoring 6/10 through v3 and v4): "the services agreement
-# entered into by Acme Sons Private Limited having its registered office at Bombay
-# House, 24 Homi Mody Street, Mumbai" — that registered-office block is stated
+# entered into by Acme Sons Private Limited having its registered office at a
+# stated address" — that registered-office block is stated
 # IDENTICALLY in Service Agreement 2 and Service Agreement 4, so the question has
 # two equally valid answers (execution dates 18 July 2025 and 28 August 2025).
 # The system answered "28 August 2025", cited SA 4, and stopped: correct FOR SA 4,
@@ -11811,7 +11811,7 @@ _DESC_RELATIVE_PRONOUNS = frozenset({
 def _extract_descriptive_identifier(question: str) -> str:
     """The party-address descriptor a question uses to identify its document.
 
-    Returns the raw descriptor text ("Bombay House, 24 Homi Mody Street,
+    Returns the raw descriptor text ("Example House, 24 Example Street,
     Mumbai") or "" when the question carries no such phrase.
 
     The result must LOOK like an address: two or more capitalised tokens, and not
@@ -12073,7 +12073,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
             logger.error("resolve_scope: named-instrument list resolution failed: %s", e)
     # A third shape neither of the above reaches: a document named by TYPE
     # alone ("the original IT Outsourcing Agreement"), opposite an amendment
-    # named by an umbrella party with no corporate suffix ("the Summit Meridian
+    # named by an umbrella party with no corporate suffix ("the Summit Contoso
     # amendment") — genuinely ambiguous alone on this corpus, broken only by
     # intersecting with "amendment" the same way an instrument type breaks an
     # umbrella party elsewhere in this file. Same priority, same reasoning.
@@ -12181,7 +12181,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
              "confidence": 0.75, "method": "party-multi"},
             _fam_name, _fam_docs, question)
 
-    # Adversarial / two-sided matter ("Aether Technologies Inc. against Helios
+    # Adversarial / two-sided matter ("Aether Technologies Inc. against Aether
     # Energy Corporation"). The single-party resolver above cannot reach this:
     # each name on its own spans far more documents than its cap allows, so it
     # returns nothing and scope would fall through to an unscoped corpus search
@@ -12411,7 +12411,7 @@ def _resolve_scope_uncorrected(question: str, session_id: str, pages: dict | Non
     # confused with "names no document at all" and silently answered from
     # whatever document the previous, unrelated question happened to land on
     # (confirmed live: a Judgment-thread's carried scope kept answering brand-new
-    # Legal-Opinion questions about Acme Sons/Consumer Products/Motors from the
+    # Legal-Opinion questions about Acme Sons/Consumer Goods/Motors from the
     # stale Judgment 6 context, because none of those questions contained an
     # explicit document-TYPE word for _CARRYOVER_TYPE_RE to catch).
     unresolved_party = ""
@@ -12640,8 +12640,8 @@ def classify_query(question: str, session_id: str) -> dict:
     # the document BODY, not the filename or the page-title identifier tokens
     # _extract_doc_entities mines — so neither entity check above fires and the
     # question would otherwise trigger a needless "which document?" prompt even
-    # though the party pins it precisely (confirmed live: SA5/Helios and
-    # SA6/Meridian questions both disambiguated despite each party name resolving
+    # though the party pins it precisely (confirmed live: SA5/Aether and
+    # SA6/Contoso questions both disambiguated despite each party name resolving
     # to a single Service Agreement).
     #
     # ANY non-empty result skips here, not just a single document. That used to
@@ -12767,7 +12767,7 @@ def classify_query(question: str, session_id: str) -> dict:
         f"Question: {question}\n\n"
         "A question DOES NOT need disambiguation when:\n"
         "- It names or numbers a specific document (e.g. 'service agreement 1', 'NDA 3', 'the SHA')\n"
-        "- It mentions specific party names, entity names, or company names (e.g. 'the Voltco JV Agreement', 'Meridian service agreement', 'agreement between Acme Motors and Voltco')\n"
+        "- It mentions specific party names, entity names, or company names (e.g. 'the Voltco JV Agreement', 'Contoso service agreement', 'agreement between Acme Motors and Voltco')\n"
         "- It's a cross-document comparison or general legal question\n"
         "- It mentions a document type with a number, identifier, or distinctive party/entity name\n"
         "- It mentions a distinctive project/deal codename (e.g. a named initiative or "

@@ -150,7 +150,7 @@ _RX_BETWEEN_EXCLUDE = re.compile(
 )
 # A second, far more common false trigger for the _RX_BETWEEN-only rule: naming a
 # SINGLE bilateral instrument by its two parties — "the Joint Venture Agreement
-# between Acme Consumer Products and Brewline", "the NDA between X and Y". That
+# between Acme Consumer Goods and Brewline", "the NDA between X and Y". That
 # is a factual question about ONE document, not a cross-document comparison, but
 # "between … and …" matched and forced a comparison intent, which then rendered a
 # two-column "Key Differences / Which Party It Favors" table that fabricated a
@@ -200,7 +200,7 @@ _RX_BETWEEN_PARTIES = re.compile(
 # not a request to compare two documents. The verb immediately before
 # "between" signals an internal allocation, not a second document's identity
 # (confirmed live: "How is the board composition structured between Acme
-# Power Renewable Energy Limited and the founders" on a single-document SHA
+# Relecloud Renewable Energy Limited and the founders" on a single-document SHA
 # review forced a comparison template that rendered a "Not applicable — no
 # second document in corpus" table instead of just answering the question).
 _RX_BETWEEN_ALLOCATION = re.compile(
@@ -256,7 +256,7 @@ _RX_GOVERNANCE_APPROVAL = re.compile(
 
 # "advise|advisory" in _RX_RISK is meant to catch an advice-request ("please
 # advise", "your advisory on this") — but it also matches a party's own NAME
-# when the corpus contains an entity like "Solaris Grid Advisory Private
+# when the corpus contains an entity like "Solaris Tailspin Advisory Private
 # Limited" (confirmed live: a plain payment-terms/TDS/GST lookup question got
 # forced into a full risk-assessment essay purely because the counterparty's
 # name contains the word "Advisory"). "Advisory" immediately followed by a
@@ -819,7 +819,7 @@ def check_disambiguation_node(state: QueryState) -> dict:
         except Exception as e:
             logger.error("Carryover-scope check failed, falling through to classify_query: %s", e)
 
-    # A question that names BOTH sides of a matter ("damages Helios claimed in
+    # A question that names BOTH sides of a matter ("damages Aether claimed in
     # its counterclaim against Aether") is not ambiguous — it identifies one
     # matter precisely — but classify_query below sees no document NUMBER and
     # no single dominant party, and asks anyway. wiki._resolve_docs_by_party_pair
@@ -2238,7 +2238,7 @@ def _check_term_presence(question: str, context: str, answer: str,
         # (clause 12 of a document mapped 1-8): scope resolves this document
         # alongside its Test_ synthetic stand-in, retrieval pulled a page from
         # the stand-in, and the model answered from it confidently — "Clause 12
-        # — Term, Survival, and Governing Law (NDA-GreenSteel — NDA)" — with no
+        # — Term, Survival, and Governing Law (NDA-Litware — NDA)" — with no
         # absence language anywhere, so a gated check never runs at all. Since
         # the map already proves the number doesn't belong to the real
         # document, waiting for the model to agree was the bug, not a
@@ -4499,7 +4499,7 @@ _RX_ENUM_ROLE_GENERIC = re.compile(r"^(?:a\s+)?part(?:y|ies)$", re.IGNORECASE)
 # it answered that none expressly list it. Seven do, two of them the curated
 # agreements the question was really about.
 # The conjunction must join two PREDICATES, not two nouns. A bare "and" does
-# not: "the NDA between Acme Steel Limited and Company054 Metallurgy GmbH" is a
+# not: "the NDA between Acme Steel Limited and Company054 Litware GmbH" is a
 # point lookup with one party pair, and matching its "and" routed it here,
 # where it was answered with a list of NDAs instead of the term it asked for.
 # Requiring a verb (or "also") after the conjunction is what separates "A and
@@ -5317,8 +5317,8 @@ def _absent_instrument_answer(question: str, session_id: str,
     # sides of an agreement is asking about ONE instrument between them, and
     # answering "this party has no such instrument" from the first name alone
     # is a different, much weaker claim. Measured live: "the Framework Supply
-    # Agreement between Company036 Meridian Pty Ltd and Adatum Insurance
-    # Corp." was answered "Summit Meridian Travel Pty has no Framework Supply
+    # Agreement between Company036 Contoso Pty Ltd and Adatum Insurance
+    # Corp." was answered "Summit Contoso Travel Pty has no Framework Supply
     # Agreement in this corpus" - about a document holding 25 pages.
     if len(parties) != 1:
         return None

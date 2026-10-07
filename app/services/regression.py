@@ -96,7 +96,7 @@ def _doc_matches(actual_docs: list[str], expected_fragment: str) -> bool:
     Full source_doc values carry a session-id prefix and an arbitrary original
     filename, so pinning a case to one would make the whole suite break on
     re-ingest under a new session — which is a corpus change, not a regression.
-    A fragment ("Summit Meridian Software-IOA") survives that.
+    A fragment ("Summit Contoso Software-IOA") survives that.
     """
     frag = _norm(expected_fragment)
     return any(frag in _norm(d) for d in (actual_docs or []))

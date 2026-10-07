@@ -452,7 +452,7 @@ def _extract_labelled_tables(path: str, ocr: bool = False) -> list[dict]:
 
     Ingest captures 168 of the 176 documents that print such a table; this is
     for the remaining 8. Measured cost of the gap: the Facility Agreement
-    between Company046 Capital Ltd and Summit Meridian Mobility states a
+    between Company046 Capital Ltd and Summit Contoso Mobility states a
     Debt Service Coverage Ratio of ">= 1.4x" in its covenants table and "not
     less than 1.21" in the padded prose repeated five times around it. Only the
     prose reached retrieval, so 1.21 is what the answer reported.
@@ -621,7 +621,7 @@ def backfill(target_session: str | None = None, dry_run: bool = False,
             # after the first run of this script: 44 documents had an Overview
             # page and still stated their effective date nowhere the pipeline
             # could reach, which is why "what is the effective date of the
-            # Facility Agreement between Stonebridge Trust Corporation
+            # Facility Agreement between Woodgrove Trust Corporation
             # and Company066 Southridge PLC" answered that no date was given while
             # page 1 of that PDF reads "Effective Date: 21 November 2024".
             # What counts as coverage is the header TEXT, wherever it lives.

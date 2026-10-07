@@ -72,7 +72,7 @@ MUST_NOT_MATCH = [
     "What is the aggregate liability cap for Summit Gringotts Telecommunications "
     "Private Limited and Person 008, and what types of liability are "
     "excluded from that cap?",
-    "What is the highest liability cap Summit Meridian Systems Private Limited "
+    "What is the highest liability cap Summit Contoso Systems Private Limited "
     "has agreed to?",
     # asks for carve-out/exclusion TEXT, not a number — the aggregate branch
     # has no clause text to answer this from even when no party is named.

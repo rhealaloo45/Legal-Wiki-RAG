@@ -3768,12 +3768,12 @@ def find_source_docs_by_title_tokens(
     the parties merely NAMED in one — litigation documents recite the opposing
     side's officers in their procedural/discovery paragraphs, so a content
     search for two adversaries matches every document that quotes that
-    boilerplate (measured on this corpus: "Aether" AND "Helios" hit 76 of ~115
+    boilerplate (measured on this corpus: "Aether" AND "Aether" hit 76 of ~115
     documents, nearly all of them unrelated matters reusing the same recital).
 
     Page TITLES are the discriminator, because ingest synthesises the matter's
     own short-name into every title it writes for a document ("Parties –
-    Aether-Helios (Verified Complaint)", "Signature – Aether v Helios
+    Aether-Aether (Verified Complaint)", "Signature – Aether v Aether
     (Answer)"). Requiring both parties in the TITLE drops the same corpus from
     76 documents to 20 — the instruments actually BETWEEN those two parties.
 
@@ -5993,7 +5993,7 @@ def find_docs_sharing_parties(wiki_id: str, session_id: str, source_doc: str,
     to a doc_type matching ``type_hint``.
 
     Built for "the original X agreement" referenced alongside an amendment
-    the question names by party ("the Summit Meridian amendment") — the
+    the question names by party ("the Summit Contoso amendment") — the
     amendment resolves via the party detector, but the original it amends
     often carries no party name of its own in the question at all. Ingest's
     own cross-reference resolution frequently can't pin the specific document

@@ -294,8 +294,8 @@ def find_definition(wiki_id: str, session_id: str, term: str,
 
 
 # A capitalised phrase in quotes is not automatically a term of art. Contracts
-# introduce party short-names the same way — Summit Meridian Software Private
-# Limited ("Meridian") — and a person's name in a signature block looks
+# introduce party short-names the same way — Summit Contoso Software Private
+# Limited ("Contoso") — and a person's name in a signature block looks
 # identical to a regex. Both filters below were added after the first run of
 # this check reported "Person 006", "Voltas" and "Alpine" as undefined
 # terms: correct pattern match, useless finding.
